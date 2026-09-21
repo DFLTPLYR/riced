@@ -12,9 +12,11 @@ pub enum WayEvent {
 
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
-pub enum Message {
-    NewWindowLeft,
-    WindowClosed(Id),
+pub enum Plant {
+    // Create,Update, Delete
+    Grow,
+    Uproot(Id),
+    Tend,
     Wayland(WayEvent),
-    IcedEvent(Event),
+    Graft(Id, Event),
 }
