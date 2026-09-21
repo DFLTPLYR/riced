@@ -23,13 +23,15 @@ pub fn main() -> Result<(), iced_exwlshell::Error> {
     .subscription(Plots::subscription)
     .settings(Settings {
         layer_settings: LayerShellSettings {
-            anchor: Anchor::all(), // Top|Bottom|Left|Right required for FILL src/size.rs:94
-            size: LayerSize::FILL, // not fill_width(1)
-            exclusive_zone: 0,     // i32, not LayerSize (0 = no reserve, -1 = ignore)
-            start_mode: StartMode::AllScreens, // one fullscreen surface per output
+            // daemon's own surface is a tiny 1px placeholder (not used for selection)
+            // per-output fullscreen Backgrounds for selection are spawned via Plots on OutputInsert
+            anchor: Anchor::Top,
+            size: LayerSize::fill_width(1),
+            exclusive_zone: 0,
+            start_mode: StartMode::Active,
             layer: Layer::Background,
-            blur_option: BlurOption::FullRegion,
-            events_transparent: false, // false = receive click/drag, true => pass through
+            blur_option: BlurOption::None,
+            events_transparent: true,
             ..Default::default()
         },
         with_connection: Some(connection2.into()),
