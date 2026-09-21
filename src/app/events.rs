@@ -19,4 +19,5 @@ pub enum Plant {
     Tend,
     Wayland(WayEvent),
     Graft(Id, Event),
+    SelectionTick,
 }
