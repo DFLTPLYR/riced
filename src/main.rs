@@ -13,7 +13,6 @@ pub fn main() -> Result<(), iced_exwlshell::Error> {
     let connection2 = connection.clone();
 
     let (shell_broadcast, shell_events) = iced_wayland_subscriber::shell::channel();
-
     daemon(
         move || Plots::new(shell_events.clone()),
         Plots::namespace,

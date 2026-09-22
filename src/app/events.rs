@@ -20,4 +20,5 @@ pub enum Plant {
     Wayland(WayEvent),
     Graft(Id, Event),
     SelectionTick,
+    AddTop,
 }
