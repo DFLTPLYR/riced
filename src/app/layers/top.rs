@@ -1,10 +1,13 @@
 use crate::app::Plant;
+use crate::app::app::PlotInfo;
 use iced::widget::{container, text};
 use iced::window;
-use iced::{Element, Fill};
+use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
+use iced_wayland_subscriber::{OutputId, OutputInfo};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Top {
@@ -97,5 +100,185 @@ impl Top {
             .width(Fill)
             .height(Fill)
             .into()
+    }
+
+    /// Cleanup sentinel tops (OutputId::MAX) created before outputs were known.
+    /// Returns the window ids that were removed (caller should close them and clean last_cursor).
+    pub(crate) fn cleanup_sentinels(
+        tops: &mut HashMap<window::Id, Top>,
+        ids: &mut HashMap<window::Id, PlotInfo>,
+    ) -> Vec<window::Id> {
+        let sentinel = OutputId(u32::MAX);
+        let sentinel_ids: Vec<window::Id> = ids
+            .iter()
+            .filter_map(|(wid, info)| match info {
+                PlotInfo::Top(o) if *o == sentinel => Some(*wid),
+                _ => None,
+            })
+            .collect();
+        for id in &sentinel_ids {
+            tops.remove(id);
+            ids.remove(id);
+        }
+        sentinel_ids
+    }
+
+    /// Remove all tops for `output_id` (supports multiple per output).
+    /// Returns the window ids that were removed.
+    pub(crate) fn remove_for_output(
+        tops: &mut HashMap<window::Id, Top>,
+        ids: &mut HashMap<window::Id, PlotInfo>,
+        output_id: OutputId,
+    ) -> Vec<window::Id> {
+        let to_remove: Vec<window::Id> = ids
+            .iter()
+            .filter_map(|(wid, info)| match info {
+                PlotInfo::Top(o) if *o == output_id => Some(*wid),
+                _ => None,
+            })
+            .collect();
+        for wid in &to_remove {
+            tops.remove(wid);
+            ids.remove(wid);
+        }
+        to_remove
+    }
+
+    /// Handle `AddTop` – detect output and closest edge (Left/Right/Top/Bottom) where the
+    /// context menu was opened and spawn a new bar there. Returns a `NewLayerShell` command.
+    pub(crate) fn handle_add(
+        tops: &mut HashMap<window::Id, Top>,
+        ids: &mut HashMap<window::Id, PlotInfo>,
+        output_infos: &HashMap<OutputId, OutputInfo>,
+        menu_pos: Option<Point>,
+        menu_output: Option<OutputId>,
+    ) -> Option<Command<Plant>> {
+        fn output_geometry(info: &OutputInfo) -> (f32, f32, f32, f32) {
+            let (sx, sy) = info
+                .logical_position
+                .unwrap_or((info.location.0, info.location.1));
+            let (sw, sh) = info.logical_size.unwrap_or_else(|| {
+                info.modes
+                    .iter()
+                    .find(|m| m.current)
+                    .map(|m| m.dimensions)
+                    .unwrap_or((1920, 1080))
+            });
+            (sx as f32, sy as f32, sw as f32, sh as f32)
+        }
+        fn closest_anchor(mp: Point, info: &OutputInfo) -> Anchor {
+            let (sx, sy, sw, sh) = output_geometry(info);
+            let left_dist = mp.x - sx;
+            let right_dist = (sx + sw) - mp.x;
+            let top_dist = mp.y - sy;
+            let bottom_dist = (sy + sh) - mp.y;
+            let mut best = (top_dist, Anchor::Top);
+            if bottom_dist < best.0 {
+                best = (bottom_dist, Anchor::Bottom);
+            }
+            if left_dist < best.0 {
+                best = (left_dist, Anchor::Left);
+            }
+            if right_dist < best.0 {
+                best = (right_dist, Anchor::Right);
+            }
+            best.1
+        }
+        fn anchor_name(a: Anchor) -> &'static str {
+            if a == Anchor::Top {
+                "Top"
+            } else if a == Anchor::Bottom {
+                "Bottom"
+            } else if a == Anchor::Left {
+                "Left"
+            } else if a == Anchor::Right {
+                "Right"
+            } else {
+                "Unknown"
+            }
+        }
+
+        let (target_output, target_anchor): (Option<OutputId>, Anchor) = {
+            if let Some(output) = menu_output {
+                if let Some(info) = output_infos.get(&output) {
+                    let anchor = menu_pos.map_or(Anchor::Top, |mp| closest_anchor(mp, info));
+                    (Some(output), anchor)
+                } else {
+                    (Some(output), Anchor::Top)
+                }
+            } else if let Some(mp) = menu_pos {
+                let mut found = output_infos.iter().find(|(_, info)| {
+                    let (sx, sy, sw, sh) = output_geometry(info);
+                    mp.x >= sx && mp.x < sx + sw && mp.y >= sy && mp.y < sy + sh
+                });
+                if found.is_none() && !output_infos.is_empty() {
+                    let mut best: Option<(&OutputId, &OutputInfo, f32)> = None;
+                    for (oid, info) in output_infos {
+                        let (sx, sy, sw, sh) = output_geometry(info);
+                        let cx = sx + sw / 2.0;
+                        let cy = sy + sh / 2.0;
+                        let dx = mp.x - cx;
+                        let dy = mp.y - cy;
+                        let dist2 = dx * dx + dy * dy;
+                        if best.is_none() || dist2 < best.unwrap().2 {
+                            best = Some((oid, info, dist2));
+                        }
+                    }
+                    found = best.map(|(oid, info, _)| (oid, info));
+                }
+                if let Some((oid, info)) = found {
+                    (Some(*oid), closest_anchor(mp, info))
+                } else {
+                    (None, Anchor::Top)
+                }
+            } else if let Some(oid) = output_infos.keys().next().copied() {
+                (Some(oid), Anchor::Top)
+            } else {
+                (None, Anchor::Top)
+            }
+        };
+
+        if let Some(output_id) = target_output {
+            let anchor = target_anchor;
+            let duplicate = ids.iter().any(|(wid, info)| match info {
+                PlotInfo::Top(o) if *o == output_id => {
+                    tops.get(wid).is_some_and(|t| t.anchor() == anchor)
+                }
+                _ => false,
+            });
+            if duplicate {
+                println!(
+                    "Note: {} bar already exists for output {output_id:?}, spawning another at {:?}",
+                    anchor_name(anchor),
+                    anchor
+                );
+            }
+            let top = Top::with_anchor(anchor);
+            let (win_id, settings) = top.open(output_id.0);
+            tops.insert(win_id, top);
+            ids.insert(win_id, PlotInfo::Top(output_id));
+            println!(
+                "Added {} bar for output {output_id:?} window {win_id:?} (closest to {:?} @ {menu_pos:?} stored_output {menu_output:?}) — calling top.open() and spawning NewLayerShell",
+                anchor_name(anchor),
+                anchor
+            );
+            Some(Command::done(Plant::NewLayerShell {
+                settings,
+                id: win_id,
+            }))
+        } else {
+            let top = Top::new();
+            let (win_id, settings) = top.open_active();
+            let sentinel = OutputId(u32::MAX);
+            tops.insert(win_id, top);
+            ids.insert(win_id, PlotInfo::Top(sentinel));
+            println!(
+                "Added sentinel Top window {win_id:?} (no output yet) — calling top.open_active()"
+            );
+            Some(Command::done(Plant::NewLayerShell {
+                settings,
+                id: win_id,
+            }))
+        }
     }
 }

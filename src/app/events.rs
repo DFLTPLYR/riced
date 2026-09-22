@@ -25,7 +25,6 @@ pub enum LandEvent {
 #[derive(Debug, Clone)]
 pub enum Plant {
     // Create,Update, Delete
-    Grow,
     Uproot(Id),
     Tend,
     Wayland(LandEvent),
