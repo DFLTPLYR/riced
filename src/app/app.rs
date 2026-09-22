@@ -11,7 +11,7 @@ use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
 use super::layers::{Background, Top};
-use super::{Plant, WayEvent};
+use super::{LandEvent, Plant};
 use iced_exwlshell::reexport::Anchor;
 use iced_wayland_subscriber::OutputInfo;
 
@@ -192,11 +192,24 @@ impl Plots {
 
     pub fn subscription(&self) -> iced::Subscription<Plant> {
         let shell_sub = self.shell_events.listen().filter_map(|event| match event {
-            ShellEvent::OutputAdded(output) => Some(Plant::Wayland(WayEvent::OutputInsert(output))),
-            ShellEvent::OutputRemoved(output) => Some(Plant::Wayland(WayEvent::OutputRemoved(
-                OutputId::from(&output),
-            ))),
-            _ => None,
+            ShellEvent::NewShell(info) => Some(Plant::Wayland(LandEvent::NewShell(info))),
+            ShellEvent::Closed(id) => Some(Plant::Wayland(LandEvent::Closed(id))),
+            ShellEvent::WindowOutputChanged { window, output } => {
+                Some(Plant::Wayland(LandEvent::WindowOutputChanged {
+                    window,
+                    output,
+                }))
+            }
+            ShellEvent::OutputAdded(output) => Some(Plant::Wayland(LandEvent::OutputAdded(output))),
+            ShellEvent::OutputUpdated(output) => {
+                Some(Plant::Wayland(LandEvent::OutputUpdated(output)))
+            }
+            ShellEvent::OutputRemoved(output) => {
+                Some(Plant::Wayland(LandEvent::OutputRemoved(output)))
+            }
+            ShellEvent::Locked => Some(Plant::Wayland(LandEvent::Locked)),
+            ShellEvent::LockDenied => Some(Plant::Wayland(LandEvent::LockDenied)),
+            ShellEvent::LockedFinished => Some(Plant::Wayland(LandEvent::LockedFinished)),
         });
 
         let mut subs = vec![iced::event::listen_with(throttled_graft), shell_sub];
@@ -247,9 +260,18 @@ impl Plots {
         match self.id_info(id) {
             Some(PlotInfo::Background(output)) => {
                 let info = self.output_infos.get(&output);
+                // Use same geometry resolver as AddTop/hit-test (logical -> location+mode -> fallback)
                 let (screen_x, screen_y, screen_w, screen_h) = if let Some(info) = info {
-                    let (sx, sy) = info.logical_position.unwrap_or((0, 0));
-                    let (sw, sh) = info.logical_size.unwrap_or((1920, 1080));
+                    let (sx, sy) = info
+                        .logical_position
+                        .unwrap_or((info.location.0, info.location.1));
+                    let (sw, sh) = info.logical_size.unwrap_or_else(|| {
+                        info.modes
+                            .iter()
+                            .find(|m| m.current)
+                            .map(|m| m.dimensions)
+                            .unwrap_or((1920, 1080))
+                    });
                     (sx as f32, sy as f32, sw as f32, sh as f32)
                 } else {
                     (0.0, 0.0, 1920.0, 1080.0)
@@ -331,16 +353,16 @@ impl Plots {
                         // QML Menu behavior: keep menu fully visible within screen (flip/clamp)
                         // Use fixed menu size so clamping and hit-test match rendered size (like QML popup)
                         const MENU_W: f32 = 180.0;
-                        const MENU_H: f32 = 98.0;
+                        const MENU_H: f32 = 92.0;
                         let lx = cm.x - screen_x;
                         let ly = cm.y - screen_y;
                         // only show on the output that contains the click (like QML panel.screen)
                         let in_screen = lx >= 0.0 && ly >= 0.0 && lx < screen_w && ly < screen_h;
                         if in_screen {
-                            // clamp to stay fully inside screen with 2px margin (QML Menu has minimal margin)
-                            // This mirrors QML's Menu positioning which flips to stay viewable
-                            let clamped_lx = lx.clamp(2.0, (screen_w - MENU_W - 2.0).max(2.0));
-                            let clamped_ly = ly.clamp(2.0, (screen_h - MENU_H - 2.0).max(2.0));
+                            // clamp to stay fully inside screen with no extra margin (QML Menu flips to stay viewable)
+                            // Keep menu exactly viewable without the previous 4px/2px gap that caused "too much margin" on right
+                            let clamped_lx = lx.clamp(0.0, (screen_w - MENU_W).max(0.0));
+                            let clamped_ly = ly.clamp(0.0, (screen_h - MENU_H).max(0.0));
                             container(
                                 container(
                                     column![
@@ -367,6 +389,7 @@ impl Plots {
                                 )
                                 .padding(8)
                                 .width(Length::Fixed(MENU_W))
+                                .height(Length::Fixed(MENU_H))
                                 .style(|_| container::Style {
                                     background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
                                     border: iced::Border {
@@ -474,7 +497,7 @@ impl Plots {
                 Command::none()
             }
             Plant::Tend => Command::none(),
-            Plant::Wayland(WayEvent::OutputInsert(output)) => {
+            Plant::Wayland(LandEvent::OutputAdded(output)) => {
                 let output_id = OutputId::from(&output);
                 // store geometry for panel.screen clipping
                 self.output_infos.insert(output_id, output.clone());
@@ -513,10 +536,16 @@ impl Plots {
                     Command::batch(cmds)
                 }
             }
-            Plant::Wayland(WayEvent::OutputRemoved(output)) => {
+            Plant::Wayland(LandEvent::OutputUpdated(output)) => {
+                let output_id = OutputId::from(&output);
+                self.output_infos.insert(output_id, output);
+                Command::none()
+            }
+            Plant::Wayland(LandEvent::OutputRemoved(output)) => {
+                let output_id = OutputId::from(&output);
                 let mut cmds = Vec::new();
-                if let Some(id) = self.background_ids.remove(&output) {
-                    self.backgrounds.remove(&output);
+                if let Some(id) = self.background_ids.remove(&output_id) {
+                    self.backgrounds.remove(&output_id);
                     self.ids.remove(&id);
                     self.last_cursor.remove(&id);
                     cmds.push(iced_runtime::task::effect(Action::Window(
@@ -528,7 +557,7 @@ impl Plots {
                     .ids
                     .iter()
                     .filter_map(|(wid, info)| match info {
-                        PlotInfo::Top(o) if *o == output => Some(*wid),
+                        PlotInfo::Top(o) if *o == output_id => Some(*wid),
                         _ => None,
                     })
                     .collect();
@@ -540,7 +569,7 @@ impl Plots {
                         WindowAction::Close(wid),
                     )));
                 }
-                self.output_infos.remove(&output);
+                self.output_infos.remove(&output_id);
                 // clear global selection if it was on removed output (will hide via intersect check)
                 if cmds.is_empty() {
                     Command::none()
@@ -548,6 +577,12 @@ impl Plots {
                     Command::batch(cmds)
                 }
             }
+            Plant::Wayland(LandEvent::NewShell(_)) => Command::none(),
+            Plant::Wayland(LandEvent::Closed(_)) => Command::none(),
+            Plant::Wayland(LandEvent::WindowOutputChanged { .. }) => Command::none(),
+            Plant::Wayland(LandEvent::Locked) => Command::none(),
+            Plant::Wayland(LandEvent::LockDenied) => Command::none(),
+            Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
             Plant::Graft(id, event) => {
                 use iced::Event;
                 use iced::mouse::Button;
@@ -593,6 +628,10 @@ impl Plots {
                 match &event {
                     // onPressed
                     Event::Mouse(iced::mouse::Event::ButtonPressed(Button::Right)) => {
+                        // only open context menu on Background (like QML Background MouseArea) – ignore Top layer
+                        if !matches!(self.id_info(id), Some(PlotInfo::Background(_))) {
+                            return Command::none();
+                        }
                         let pos = LAST_CURSOR_GLOBAL
                             .lock()
                             .unwrap()
@@ -605,9 +644,9 @@ impl Plots {
                                     .unwrap_or(Point::new(0.0, 0.0))
                             });
                         let gp = self.to_global(id, pos);
-                        // capture output where the menu was opened for later AddTop
+                        // capture output where the menu was opened for later AddTop (Background only)
                         let output = match self.id_info(id) {
-                            Some(PlotInfo::Background(o)) | Some(PlotInfo::Top(o)) => Some(o),
+                            Some(PlotInfo::Background(o)) => Some(o),
                             _ => None,
                         };
                         // contextMenu.x = mouse.x; y = mouse.y; open()
@@ -641,11 +680,11 @@ impl Plots {
                             });
                         let gp = self.to_global(id, pos);
 
-                        // QML Menu hit-test: use clamped menu rect so edge-flipped menu still captures clicks (must match view's MENU_W/H and margin)
+                        // QML Menu hit-test: use clamped menu rect so edge-flipped menu still captures clicks (must match view's MENU_W/H and margin 0)
                         let inside_menu = if let Some(cm) = &self.context_menu {
                             if cm.open {
                                 const MENU_W: f32 = 180.0;
-                                const MENU_H: f32 = 98.0;
+                                const MENU_H: f32 = 92.0;
                                 // find the screen this menu is displayed on (stored output or containing)
                                 let menu_screen = cm
                                     .output
@@ -693,8 +732,8 @@ impl Plots {
                                     };
                                     let lx = cm.x - sx;
                                     let ly = cm.y - sy;
-                                    let clamped_lx = lx.clamp(2.0, (sw - MENU_W - 2.0).max(2.0));
-                                    let clamped_ly = ly.clamp(2.0, (sh - MENU_H - 2.0).max(2.0));
+                                    let clamped_lx = lx.clamp(0.0, (sw - MENU_W).max(0.0));
+                                    let clamped_ly = ly.clamp(0.0, (sh - MENU_H).max(0.0));
                                     (sx + clamped_lx, sy + clamped_ly)
                                 } else {
                                     // fallback: no output info, use raw cm position
