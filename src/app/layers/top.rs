@@ -1,3 +1,4 @@
+use super::background::Background;
 use crate::app::Plant;
 use crate::app::app::PlotInfo;
 use iced::widget::{container, text};
@@ -194,21 +195,11 @@ impl Top {
         menu_pos: Option<Point>,
         menu_output: Option<OutputId>,
     ) -> Option<Command<Plant>> {
-        fn output_geometry(info: &OutputInfo) -> (f32, f32, f32, f32) {
-            let (sx, sy) = info
-                .logical_position
-                .unwrap_or((info.location.0, info.location.1));
-            let (sw, sh) = info.logical_size.unwrap_or_else(|| {
-                info.modes
-                    .iter()
-                    .find(|m| m.current)
-                    .map(|m| m.dimensions)
-                    .unwrap_or((1920, 1080))
-            });
-            (sx as f32, sy as f32, sw as f32, sh as f32)
-        }
+        // Geometry helpers live on Background so Top bars and Background
+        // windows agree on output coordinates.
+        use Background as Geo;
         fn closest_anchor(mp: Point, info: &OutputInfo) -> Anchor {
-            let (sx, sy, sw, sh) = output_geometry(info);
+            let (sx, sy, sw, sh) = Geo::output_geometry(info);
             let left_dist = mp.x - sx;
             let right_dist = (sx + sw) - mp.x;
             let top_dist = mp.y - sy;
@@ -249,13 +240,13 @@ impl Top {
                 }
             } else if let Some(mp) = menu_pos {
                 let mut found = output_infos.iter().find(|(_, info)| {
-                    let (sx, sy, sw, sh) = output_geometry(info);
+                    let (sx, sy, sw, sh) = Geo::output_geometry(info);
                     mp.x >= sx && mp.x < sx + sw && mp.y >= sy && mp.y < sy + sh
                 });
                 if found.is_none() && !output_infos.is_empty() {
                     let mut best: Option<(&OutputId, &OutputInfo, f32)> = None;
                     for (oid, info) in output_infos {
-                        let (sx, sy, sw, sh) = output_geometry(info);
+                        let (sx, sy, sw, sh) = Geo::output_geometry(info);
                         let cx = sx + sw / 2.0;
                         let cy = sy + sh / 2.0;
                         let dx = mp.x - cx;

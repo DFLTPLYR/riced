@@ -136,10 +136,9 @@ impl Plots {
 
     pub fn view(&self, id: iced::window::Id) -> Element<'_, Plant> {
         // Background windows render their own selection/context overlays clipped
-        // to their available rect (`Background::open` window). See background.rs.
         // Top windows render the bar. Daemon's tiny 1x1 window: empty.
         match self.id_info(id) {
-            Some(PlotInfo::Background(output)) => Background::view_for_output(self, id, output),
+            Some(PlotInfo::Background(output)) => Background::view(self, id, output),
             Some(PlotInfo::Top(_output)) => self
                 .tops
                 .get(&id)
@@ -238,11 +237,11 @@ impl Plots {
             Plant::Graft(id, event) => Background::handle_graft(self, id, &event),
             Plant::SelectionTick => {
                 // drive fade animation (150ms InOutQuad) — clear when done
-                if let Some(start) = self.fade_start {
-                    if start.elapsed() >= Duration::from_millis(150) {
-                        self.fade_rect = None;
-                        self.fade_start = None;
-                    }
+                if let Some(start) = self.fade_start
+                    && start.elapsed() >= Duration::from_millis(150)
+                {
+                    self.fade_rect = None;
+                    self.fade_start = None;
                 }
                 Command::none()
             }

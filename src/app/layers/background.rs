@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 use super::top::Top;
 
+const MENU_W: f32 = 180.0;
+const MENU_H: f32 = 92.0;
+
 #[derive(Debug)]
 pub struct Background;
 
@@ -94,11 +97,6 @@ impl Background {
         (id, settings)
     }
 
-    pub fn view(&self) -> Element<'_, Plant> {
-        // Background itself is transparent; selectionRect is drawn by Plots view, not here
-        container(Space::new()).width(Fill).height(Fill).into()
-    }
-
     /// Full output geometry in global compositor coords (ignores bars).
     pub fn output_geometry(info: &OutputInfo) -> (f32, f32, f32, f32) {
         let (sx, sy) = info
@@ -146,8 +144,7 @@ impl Background {
         tops: &HashMap<window::Id, Top>,
         ids: &HashMap<window::Id, PlotInfo>,
     ) -> (f32, f32, f32, f32) {
-        Self::available_rect(output, output_infos, tops, ids)
-            .unwrap_or((0.0, 0.0, 1920.0, 1080.0))
+        Self::available_rect(output, output_infos, tops, ids).unwrap_or((0.0, 0.0, 1920.0, 1080.0))
     }
 
     /// mapToGlobal: local widget coords (window-relative) -> global compositor
@@ -174,7 +171,6 @@ impl Background {
     }
 
     /// Global -> local for a given Background output (for view positioning).
-    #[allow(dead_code)]
     pub fn to_local(global: Point, avail: (f32, f32, f32, f32)) -> Point {
         Point::new(global.x - avail.0, global.y - avail.1)
     }
@@ -231,10 +227,7 @@ impl Background {
     // Plots just delegates: `Background::handle_graft(plots, id, event)`.
     // ------------------------------------------------------------------
 
-    fn last_local(
-        plots: &Plots,
-        id: window::Id,
-    ) -> Point {
+    fn last_local(plots: &Plots, id: window::Id) -> Point {
         LAST_CURSOR_GLOBAL
             .lock()
             .unwrap()
@@ -260,24 +253,17 @@ impl Background {
         plots.last_cursor.insert(id, position);
         if plots.selection_rect.selecting {
             let now = Instant::now();
-            if let Some(last) = plots.last_selection_tick {
-                if now.duration_since(last) < Duration::from_millis(16) {
-                    return Command::none();
-                }
+            if let Some(last) = plots.last_selection_tick
+                && now.duration_since(last) < Duration::from_millis(16)
+            {
+                return Command::none();
             }
             plots.last_selection_tick = Some(now);
             if let Some(sp) = plots.selection_rect.start_point {
-                let gp = Self::to_global(
-                    id,
-                    position,
-                    &plots.ids,
-                    &plots.output_infos,
-                    &plots.tops,
-                );
+                let gp =
+                    Self::to_global(id, position, &plots.ids, &plots.output_infos, &plots.tops);
                 // skip tiny moves <1px to reduce choppy updates
-                if plots.selection_rect.drag_update(sp, gp) {
-                    // fall through to SelectionTick redraw
-                } else {
+                if !plots.selection_rect.drag_update(sp, gp) {
                     return Command::none();
                 }
             }
@@ -292,35 +278,34 @@ impl Background {
             Some(cm) if cm.open => cm,
             _ => return false,
         };
-        const MENU_W: f32 = 180.0;
-        const MENU_H: f32 = 92.0;
         // find the Background available rect this menu is displayed in
         // (stored output first, else containing available rect)
-        let menu_avail = cm
-            .output
-            .and_then(|o| {
-                Self::available_rect(o, &plots.output_infos, &plots.tops, &plots.ids)
-                    .map(|a| (o, a))
-            })
-            .or_else(|| {
-                plots.output_infos.keys().find_map(|o| {
-                    Self::available_rect(*o, &plots.output_infos, &plots.tops, &plots.ids)
-                        .and_then(|a| {
-                            // menu stored in global coords; check against *full* output
-                            // geometry for containment, but clamp/render in available
-                            let info = plots.output_infos.get(o)?;
-                            let (sx, sy, sw, sh) = Self::output_geometry(info);
-                            if cm.x >= sx && cm.x < sx + sw && cm.y >= sy && cm.y < sy + sh {
-                                Some((*o, a))
-                            } else {
-                                None
-                            }
-                        })
+        let menu_avail =
+            cm.output
+                .and_then(|o| {
+                    Self::available_rect(o, &plots.output_infos, &plots.tops, &plots.ids)
+                        .map(|a| (o, a))
                 })
-            });
-        let (menu_x, menu_y) = if let Some((_, (ax, ay, aw, ah))) = menu_avail {
-            let lx = cm.x - ax;
-            let ly = cm.y - ay;
+                .or_else(|| {
+                    plots.output_infos.keys().find_map(|o| {
+                        Self::available_rect(*o, &plots.output_infos, &plots.tops, &plots.ids)
+                            .and_then(|a| {
+                                // menu stored in global coords; check against *full* output
+                                // geometry for containment, but clamp/render in available
+                                let info = plots.output_infos.get(o)?;
+                                let (sx, sy, sw, sh) = Self::output_geometry(info);
+                                if cm.x >= sx && cm.x < sx + sw && cm.y >= sy && cm.y < sy + sh {
+                                    Some((*o, a))
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                });
+        let (menu_x, menu_y) = if let Some((_, avail)) = menu_avail {
+            let (ax, ay, aw, ah) = avail;
+            let menu_local = Self::to_local(Point::new(cm.x, cm.y), avail);
+            let (lx, ly) = (menu_local.x, menu_local.y);
             let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
             let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
             (ax + clamped_lx, ay + clamped_ly)
@@ -363,10 +348,10 @@ impl Background {
             // click was on context menu — suppress selection drag
             return Command::none();
         }
-        if let Some(cm) = &mut plots.context_menu {
-            if cm.open {
-                cm.open = false;
-            }
+        if let Some(cm) = &mut plots.context_menu
+            && cm.open
+        {
+            cm.open = false;
         }
 
         plots.fade_rect = None;
@@ -431,7 +416,7 @@ impl Background {
     // (which is `Background::open`'s window showing its own relevant part).
     // ------------------------------------------------------------------
 
-    pub(crate) fn view_for_output(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
+    pub(crate) fn view(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
         let (ax, ay, aw, ah) =
             Self::available_rect_or_fallback(output, &plots.output_infos, &plots.tops, &plots.ids);
 
@@ -505,87 +490,75 @@ impl Background {
             container(Space::new()).width(Fill).height(Fill).into()
         };
 
-        let context_menu_overlay: Element<'_, Plant> =
-            if let Some(cm) = &plots.context_menu {
-                if cm.open {
-                    const MENU_W: f32 = 180.0;
-                    const MENU_H: f32 = 92.0;
-                    let lx = cm.x - ax;
-                    let ly = cm.y - ay;
-                    // only show on the Background whose available rect contains the click
-                    let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
-                    if in_screen {
-                        let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
-                        let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
+        let context_menu_overlay: Element<'_, Plant> = if let Some(cm) = &plots.context_menu {
+            if cm.open {
+                let menu_local = Self::to_local(Point::new(cm.x, cm.y), (ax, ay, aw, ah));
+                let (lx, ly) = (menu_local.x, menu_local.y);
+                // only show on the Background whose available rect contains the click
+                let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
+                if in_screen {
+                    let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
+                    let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
+                    container(
                         container(
-                            container(
-                                column![
-                                    text("Context Menu\n(Right clicked)\nLeft drag to select")
-                                        .size(12)
-                                        .color(Color::WHITE),
-                                    button(text("Add Top").size(12).color(Color::WHITE))
-                                        .on_press(Plant::AddTop)
-                                        .padding(6)
-                                        .style(|_, _| button::Style {
-                                            background: Some(
-                                                Color::from_rgb(0.25, 0.25, 0.28).into()
-                                            ),
-                                            text_color: Color::WHITE,
-                                            border: iced::Border {
-                                                color: Color::from_rgb(0.5, 0.5, 0.55),
-                                                width: 1.0,
-                                                radius: 4.0.into(),
-                                            },
-                                            ..Default::default()
-                                        })
-                                ]
-                                .spacing(8),
-                            )
-                            .padding(8)
-                            .width(Length::Fixed(MENU_W))
-                            .height(Length::Fixed(MENU_H))
-                            .style(|_| container::Style {
-                                background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
-                                border: iced::Border {
-                                    color: Color::from_rgb(0.5, 0.5, 0.55),
-                                    width: 1.0,
-                                    radius: 6.0.into(),
-                                },
-                                ..Default::default()
-                            }),
+                            column![
+                                text("Context Menu\n(Right clicked)\nLeft drag to select")
+                                    .size(12)
+                                    .color(Color::WHITE),
+                                button(text("Add Top").size(12).color(Color::WHITE))
+                                    .on_press(Plant::AddTop)
+                                    .padding(6)
+                                    .style(|_, _| button::Style {
+                                        background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
+                                        text_color: Color::WHITE,
+                                        border: iced::Border {
+                                            color: Color::from_rgb(0.5, 0.5, 0.55),
+                                            width: 1.0,
+                                            radius: 4.0.into(),
+                                        },
+                                        ..Default::default()
+                                    })
+                            ]
+                            .spacing(8),
                         )
-                        .width(Fill)
-                        .height(Fill)
-                        .padding(iced::Padding {
-                            top: clamped_ly,
-                            left: clamped_lx,
-                            right: 0.0,
-                            bottom: 0.0,
-                        })
-                        .into()
-                    } else {
-                        Space::new().width(0).height(0).into()
-                    }
+                        .padding(8)
+                        .width(Length::Fixed(MENU_W))
+                        .height(Length::Fixed(MENU_H))
+                        .style(|_| container::Style {
+                            background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
+                            border: iced::Border {
+                                color: Color::from_rgb(0.5, 0.5, 0.55),
+                                width: 1.0,
+                                radius: 6.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .width(Fill)
+                    .height(Fill)
+                    .padding(iced::Padding {
+                        top: clamped_ly,
+                        left: clamped_lx,
+                        right: 0.0,
+                        bottom: 0.0,
+                    })
+                    .into()
                 } else {
                     Space::new().width(0).height(0).into()
                 }
             } else {
                 Space::new().width(0).height(0).into()
-            };
+            }
+        } else {
+            Space::new().width(0).height(0).into()
+        };
 
         let cursor = plots.last_cursor.get(&id).copied();
         let sr = &plots.selection_rect;
         let bg_label = if sr.selecting {
             format!(
                 "selecting {}x{} at {:.0},{:.0} | avail {:.0},{:.0} {}x{}",
-                sr.width as i32,
-                sr.height as i32,
-                sr.x,
-                sr.y,
-                ax,
-                ay,
-                aw as i32,
-                ah as i32
+                sr.width as i32, sr.height as i32, sr.x, sr.y, ax, ay, aw as i32, ah as i32
             )
         } else if let Some(p) = cursor {
             format!(
