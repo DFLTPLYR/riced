@@ -34,6 +34,47 @@ impl Top {
         self.anchor
     }
 
+    pub fn thickness(&self) -> u32 {
+        self.thickness
+    }
+
+    /// Total reserved insets for `output` from all Top bars on that output.
+    /// Returns (left, right, top, bottom) in logical px.
+    /// The compositor shrinks Anchor::all() Background windows by these
+    /// exclusive zones, so the Background window origin != output origin.
+    pub(crate) fn insets_for_output(
+        tops: &HashMap<window::Id, Top>,
+        ids: &HashMap<window::Id, crate::app::app::PlotInfo>,
+        output: OutputId,
+    ) -> (f32, f32, f32, f32) {
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+        let mut top = 0.0f32;
+        let mut bottom = 0.0f32;
+        for (wid, info) in ids.iter() {
+            match info {
+                crate::app::app::PlotInfo::Top(o) if *o == output => {
+                    if let Some(t) = tops.get(wid) {
+                        let th = t.thickness() as f32;
+                        if t.anchor == Anchor::Left {
+                            left += th;
+                        } else if t.anchor == Anchor::Right {
+                            right += th;
+                        } else if t.anchor == Anchor::Bottom {
+                            bottom += th;
+                        } else {
+                            // Anchor::Top and any other/combined anchor reserves top
+                            // (Top::layer_size only distinguishes Left/Right vs rest)
+                            top += th;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        (left, right, top, bottom)
+    }
+
     fn layer_size(&self) -> LayerSize {
         // Top/Bottom span width (fill_width), Left/Right span height (fill_height)
         if self.anchor == Anchor::Left || self.anchor == Anchor::Right {
