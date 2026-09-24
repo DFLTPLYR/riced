@@ -3,6 +3,7 @@ use wayland_client::Connection;
 
 mod app;
 mod composables;
+mod components;
 mod config;
 
 use app::{Plots, redraw_scope};

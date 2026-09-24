@@ -1,27 +1,26 @@
 use crate::app::Plant;
-use iced::widget::container;
+use iced::widget::{Space, container};
 use iced::{Color, Element, Fill, Length, Padding};
 
 /// QML-like `Menu { }` component. Content is passed in, each
 /// `.property()` is only applied when set:
 ///
 /// ```ignore
-/// menu(
-///     column![
+/// menu()
+///     .content(column![
 ///         button(text("Add Top").size(12).color(Color::WHITE))
 ///             .on_press(Plant::AddTop)
 ///             .width(Fill)
 ///     ]
 ///     .spacing(8)
-///     .width(Fill),
-/// )
-/// .width(plots.config.context_menu.width)
-/// .height(plots.config.menu.height)
-/// .position(lx, ly)
-/// .into()
+///     .width(Fill))
+///     .width(plots.config.context_menu.width)
+///     .height(plots.config.menu.height)
+///     .position(lx, ly)
+///     .into()
 /// ```
 pub struct Menu<'a> {
-    content: Element<'a, Plant>,
+    content: Option<Element<'a, Plant>>,
     padding: Option<Padding>,
     width: Option<Length>,
     height: Option<Length>,
@@ -29,18 +28,30 @@ pub struct Menu<'a> {
     ly: Option<f32>,
 }
 
-pub fn menu<'a>(content: impl Into<Element<'a, Plant>>) -> Menu<'a> {
+impl<'a> Default for Menu<'a> {
+    fn default() -> Self {
+        Menu {
+            content: None,
+            padding: None,
+            width: None,
+            height: None,
+            lx: None,
+            ly: None,
+        }
+    }
+}
+
+pub fn menu<'a>() -> Menu<'a> {
     Menu {
-        content: content.into(),
-        padding: None,
-        width: None,
-        height: None,
-        lx: None,
-        ly: None,
+        ..Default::default()
     }
 }
 
 impl<'a> Menu<'a> {
+    pub fn content(mut self, content: impl Into<Element<'a, Plant>>) -> Self {
+        self.content = Some(content.into());
+        self
+    }
     /// Accepts int or float: `.padding(8)`, `.padding(8.0)`, `.padding([8, 12])`.
     pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
         self.padding = Some(padding.into());
@@ -67,17 +78,18 @@ impl<'a> Menu<'a> {
     }
 
     pub fn view(self) -> Element<'a, Plant> {
-        let mut inner = container(self.content)
-            .clip(true)
-            .style(|_| container::Style {
-                background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
-                border: iced::Border {
-                    color: Color::from_rgb(0.5, 0.5, 0.55),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            });
+        let content = self
+            .content
+            .unwrap_or_else(|| Space::new().width(0).height(0).into());
+        let mut inner = container(content).clip(true).style(|_| container::Style {
+            background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
+            border: iced::Border {
+                color: Color::from_rgb(0.5, 0.5, 0.55),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        });
 
         if let Some(p) = self.padding {
             inner = inner.padding(p);
@@ -119,8 +131,9 @@ mod tests {
     #[test]
     fn int_and_float_props_compile() {
         // int literals resolve via From<u16>/From<u32>, floats via From<f32>
-        let _: Element<'_, Plant> = menu(text("hi")).padding(8).width(180).height(92).into();
-        let _: Element<'_, Plant> = menu(text("hi"))
+        let _: Element<'_, Plant> = menu().content(text("hi")).padding(8).width(180).into();
+        let _: Element<'_, Plant> = menu()
+            .content(text("hi"))
             .padding(8.0)
             .width(180.0)
             .height(92.0)
