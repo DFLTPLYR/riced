@@ -1,6 +1,6 @@
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
-use iced::widget::{Space, button, column, container, stack, text};
+use iced::widget::{Space, container, stack, text};
 use iced::window;
 use iced::{Color, Element, Fill, Length, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::top::Top;
-
-const MENU_W: f32 = 180.0;
-const MENU_H: f32 = 92.0;
+use crate::composables::{MENU_H, MENU_W, menu};
 
 #[derive(Debug)]
 pub struct Background;
@@ -171,6 +169,7 @@ impl Background {
     }
 
     /// Global -> local for a given Background output (for view positioning).
+    #[allow(dead_code)]
     pub fn to_local(global: Point, avail: (f32, f32, f32, f32)) -> Point {
         Point::new(global.x - avail.0, global.y - avail.1)
     }
@@ -253,17 +252,19 @@ impl Background {
         plots.last_cursor.insert(id, position);
         if plots.selection_rect.selecting {
             let now = Instant::now();
-            if let Some(last) = plots.last_selection_tick
-                && now.duration_since(last) < Duration::from_millis(16)
-            {
-                return Command::none();
+            if let Some(last) = plots.last_selection_tick {
+                if now.duration_since(last) < Duration::from_millis(16) {
+                    return Command::none();
+                }
             }
             plots.last_selection_tick = Some(now);
             if let Some(sp) = plots.selection_rect.start_point {
                 let gp =
                     Self::to_global(id, position, &plots.ids, &plots.output_infos, &plots.tops);
                 // skip tiny moves <1px to reduce choppy updates
-                if !plots.selection_rect.drag_update(sp, gp) {
+                if plots.selection_rect.drag_update(sp, gp) {
+                    // fall through to SelectionTick redraw
+                } else {
                     return Command::none();
                 }
             }
@@ -302,10 +303,9 @@ impl Background {
                             })
                     })
                 });
-        let (menu_x, menu_y) = if let Some((_, avail)) = menu_avail {
-            let (ax, ay, aw, ah) = avail;
-            let menu_local = Self::to_local(Point::new(cm.x, cm.y), avail);
-            let (lx, ly) = (menu_local.x, menu_local.y);
+        let (menu_x, menu_y) = if let Some((_, (ax, ay, aw, ah))) = menu_avail {
+            let lx = cm.x - ax;
+            let ly = cm.y - ay;
             let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
             let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
             (ax + clamped_lx, ay + clamped_ly)
@@ -348,10 +348,10 @@ impl Background {
             // click was on context menu — suppress selection drag
             return Command::none();
         }
-        if let Some(cm) = &mut plots.context_menu
-            && cm.open
-        {
-            cm.open = false;
+        if let Some(cm) = &mut plots.context_menu {
+            if cm.open {
+                cm.open = false;
+            }
         }
 
         plots.fade_rect = None;
@@ -492,57 +492,14 @@ impl Background {
 
         let context_menu_overlay: Element<'_, Plant> = if let Some(cm) = &plots.context_menu {
             if cm.open {
-                let menu_local = Self::to_local(Point::new(cm.x, cm.y), (ax, ay, aw, ah));
-                let (lx, ly) = (menu_local.x, menu_local.y);
+                let lx = cm.x - ax;
+                let ly = cm.y - ay;
                 // only show on the Background whose available rect contains the click
                 let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
                 if in_screen {
                     let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
                     let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
-                    container(
-                        container(
-                            column![
-                                text("Context Menu\n(Right clicked)\nLeft drag to select")
-                                    .size(12)
-                                    .color(Color::WHITE),
-                                button(text("Add Top").size(12).color(Color::WHITE))
-                                    .on_press(Plant::AddTop)
-                                    .padding(6)
-                                    .style(|_, _| button::Style {
-                                        background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
-                                        text_color: Color::WHITE,
-                                        border: iced::Border {
-                                            color: Color::from_rgb(0.5, 0.5, 0.55),
-                                            width: 1.0,
-                                            radius: 4.0.into(),
-                                        },
-                                        ..Default::default()
-                                    })
-                            ]
-                            .spacing(8),
-                        )
-                        .padding(8)
-                        .width(Length::Fixed(MENU_W))
-                        .height(Length::Fixed(MENU_H))
-                        .style(|_| container::Style {
-                            background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
-                            border: iced::Border {
-                                color: Color::from_rgb(0.5, 0.5, 0.55),
-                                width: 1.0,
-                                radius: 6.0.into(),
-                            },
-                            ..Default::default()
-                        }),
-                    )
-                    .width(Fill)
-                    .height(Fill)
-                    .padding(iced::Padding {
-                        top: clamped_ly,
-                        left: clamped_lx,
-                        right: 0.0,
-                        bottom: 0.0,
-                    })
-                    .into()
+                    menu(clamped_lx, clamped_ly)
                 } else {
                     Space::new().width(0).height(0).into()
                 }

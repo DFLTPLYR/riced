@@ -2,6 +2,7 @@ use iced_exwlshell::daemon;
 use wayland_client::Connection;
 
 mod app;
+mod composables;
 
 use app::{Plots, redraw_scope};
 use iced_exwlshell::reexport::{Anchor, BlurOption, Layer, LayerSize};

@@ -98,7 +98,7 @@ impl Plots {
     }
 
     pub fn namespace() -> String {
-        String::from("Riced Main")
+        String::from("Riced Main Runtime")
     }
 
     pub fn subscription(&self) -> iced::Subscription<Plant> {
