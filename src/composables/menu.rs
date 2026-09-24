@@ -1,12 +1,11 @@
 use crate::app::Plant;
+use crate::config::MenuConfig;
 use iced::widget::{button, column, container, text};
 use iced::{Color, Element, Fill, Length};
 
-pub const MENU_W: f32 = 180.0;
-pub const MENU_H: f32 = 92.0;
-
 /// QML `Menu { }` content — the inner styled box only.
-pub fn content<'a>() -> Element<'a, Plant> {
+/// Dimensions come from `[menu]` in `config.toml` (hot-reloaded).
+pub fn content<'a>(menu: &MenuConfig) -> Element<'a, Plant> {
     container(
         column![
             button(text("Add Top").size(12).color(Color::WHITE))
@@ -29,8 +28,8 @@ pub fn content<'a>() -> Element<'a, Plant> {
     )
     .padding(8)
     .clip(true)
-    .width(Length::Fixed(MENU_W))
-    .height(Length::Fixed(MENU_H))
+    .width(Length::Fixed(menu.width))
+    .height(Length::Fixed(menu.height))
     .style(|_| container::Style {
         background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
         border: iced::Border {
@@ -45,8 +44,8 @@ pub fn content<'a>() -> Element<'a, Plant> {
 
 /// Placement wrapper — positions the menu at `(lx, ly)` local coords
 /// via the outer `Fill + padding` trick.
-pub fn menu<'a>(clamped_lx: f32, clamped_ly: f32) -> Element<'a, Plant> {
-    container(content())
+pub fn menu<'a>(cfg: &MenuConfig, clamped_lx: f32, clamped_ly: f32) -> Element<'a, Plant> {
+    container(content(cfg))
         .width(Fill)
         .height(Fill)
         .padding(iced::Padding {

@@ -13,6 +13,7 @@ use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 use super::layers::background::{LAST_CURSOR_GLOBAL, SELECTING};
 use super::layers::{Background, ContextMenu, SelectionRect, Top};
 use super::{LandEvent, Plant};
+use crate::config::Config;
 use iced_wayland_subscriber::OutputInfo;
 
 static LAST_MOUSE_MOVE: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
@@ -67,6 +68,9 @@ pub struct Plots {
     pub(crate) context_menu: Option<ContextMenu>,
     // throttling for smooth 60fps selection updates
     pub(crate) last_selection_tick: Option<Instant>,
+    // hot-reloaded config + last seen file mtime
+    pub(crate) config: Config,
+    pub(crate) config_mtime: Option<std::time::SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,6 +81,7 @@ pub(crate) enum PlotInfo {
 
 impl Plots {
     pub fn new(shell_events: ShellReceiver) -> Self {
+        let (config, config_mtime) = Config::load();
         Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
@@ -90,6 +95,8 @@ impl Plots {
             fade_start: None,
             context_menu: None,
             last_selection_tick: None,
+            config,
+            config_mtime,
         }
     }
 
@@ -123,7 +130,12 @@ impl Plots {
             ShellEvent::LockedFinished => Some(Plant::Wayland(LandEvent::LockedFinished)),
         });
 
-        let mut subs = vec![iced::event::listen_with(throttled_graft), shell_sub];
+        let mut subs = vec![
+            iced::event::listen_with(throttled_graft),
+            shell_sub,
+            // hot-reload poll for config.toml (mtime check only, cheap)
+            iced::time::every(Duration::from_millis(500)).map(|_| Plant::ConfigTick),
+        ];
 
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
         // QML Behavior 150ms InOutQuad on opacity needs 60fps ticks only while fading
@@ -245,6 +257,18 @@ impl Plots {
                 }
                 Command::none()
             }
+            Plant::ConfigTick => {
+                // mtime check only; the reload itself redraws via ConfigReloaded
+                if let Some((cfg, mtime)) = Config::poll(&self.config_mtime) {
+                    self.config_mtime = mtime;
+                    return Command::done(Plant::ConfigReloaded(cfg));
+                }
+                Command::none()
+            }
+            Plant::ConfigReloaded(cfg) => {
+                self.config = cfg;
+                Command::none()
+            }
             Plant::AddTop => {
                 // delegate to Top layer (closest-edge detection and spawn)
                 let menu_pos = self.context_menu.as_ref().map(|cm| Point::new(cm.x, cm.y));
@@ -277,6 +301,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
         // CursorMoved is handled via throttled SelectionTick; no direct redraw to avoid flood
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
+        // ConfigTick is a cheap mtime check — redraw only on actual reload
+        Plant::ConfigTick => Scope::None,
+        Plant::ConfigReloaded(_) => Scope::All,
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,
         Plant::Graft(_, _) => Scope::None,
         Plant::Wayland(_) => Scope::All,

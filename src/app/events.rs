@@ -34,4 +34,6 @@ pub enum Plant {
     Graft(Id, Event),
     SelectionTick,
     AddTop,
+    ConfigTick,
+    ConfigReloaded(crate::config::Config),
 }

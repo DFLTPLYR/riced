@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::top::Top;
-use crate::composables::{MENU_H, MENU_W, menu};
+use crate::composables::menu::menu;
 
 #[derive(Debug)]
 pub struct Background;
@@ -306,13 +306,16 @@ impl Background {
         let (menu_x, menu_y) = if let Some((_, (ax, ay, aw, ah))) = menu_avail {
             let lx = cm.x - ax;
             let ly = cm.y - ay;
-            let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
-            let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
+            let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
+            let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
             (ax + clamped_lx, ay + clamped_ly)
         } else {
             (cm.x, cm.y)
         };
-        gp.x >= menu_x && gp.x <= menu_x + MENU_W && gp.y >= menu_y && gp.y <= menu_y + MENU_H
+        gp.x >= menu_x
+            && gp.x <= menu_x + plots.config.menu.width
+            && gp.y >= menu_y
+            && gp.y <= menu_y + plots.config.menu.height
     }
 
     fn handle_right_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
@@ -497,9 +500,9 @@ impl Background {
                 // only show on the Background whose available rect contains the click
                 let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
                 if in_screen {
-                    let clamped_lx = lx.clamp(0.0, (aw - MENU_W).max(0.0));
-                    let clamped_ly = ly.clamp(0.0, (ah - MENU_H).max(0.0));
-                    menu(clamped_lx, clamped_ly)
+                    let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
+                    let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
+                    menu(&plots.config.menu, clamped_lx, clamped_ly)
                 } else {
                     Space::new().width(0).height(0).into()
                 }
