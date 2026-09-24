@@ -7,16 +7,28 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub context_menu: ContextMenuConfig,
     pub menu: MenuConfig,
 }
 
-/// `[menu]` section — replaces the old `MENU_W` / `MENU_H` consts.
-///
-/// ```toml
-/// [menu]
-/// width = 180.0
-/// height = 92.0
-/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextMenuConfig {
+    #[serde(default = "default_context_menu_width")]
+    pub width: f32,
+}
+
+fn default_context_menu_width() -> f32 {
+    180.0
+}
+
+impl Default for ContextMenuConfig {
+    fn default() -> Self {
+        Self {
+            width: default_context_menu_width(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MenuConfig {
     #[serde(default = "default_menu_width")]
@@ -46,6 +58,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             menu: MenuConfig::default(),
+            context_menu: ContextMenuConfig::default(),
         }
     }
 }
@@ -138,5 +151,23 @@ mod tests {
         assert_eq!(cfg.menu.height, 92.0);
         let empty: Config = toml::from_str("").unwrap();
         assert_eq!(empty.menu.width, 180.0);
+    }
+
+    #[test]
+    fn parses_context_menu_section() {
+        let cfg: Config =
+            toml::from_str("[context_menu]\nwidth = 250.0\n").unwrap();
+        assert_eq!(cfg.context_menu.width, 250.0);
+        // unrelated sections keep their own values
+        assert_eq!(cfg.menu.width, 180.0);
+        assert_eq!(cfg.menu.height, 92.0);
+    }
+
+    #[test]
+    fn context_menu_falls_back_to_defaults() {
+        let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\n").unwrap();
+        assert_eq!(cfg.context_menu.width, 180.0);
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.context_menu.width, 180.0);
     }
 }

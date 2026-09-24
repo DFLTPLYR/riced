@@ -1,6 +1,6 @@
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
-use iced::widget::{Space, container, stack, text};
+use iced::widget::{Space, button, column, container, stack, text};
 use iced::window;
 use iced::{Color, Element, Fill, Length, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -502,7 +502,30 @@ impl Background {
                 if in_screen {
                     let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
                     let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
-                    menu(&plots.config.menu, clamped_lx, clamped_ly)
+                    menu(
+                        column![
+                            button(text("Add Top").size(12).color(Color::WHITE))
+                                .on_press(Plant::AddTop)
+                                .padding(2)
+                                .style(|_, _| button::Style {
+                                    background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
+                                    text_color: Color::WHITE,
+                                    border: iced::Border {
+                                        color: Color::from_rgb(0.5, 0.5, 0.55),
+                                        width: 1.0,
+                                        radius: 4.0.into(),
+                                    },
+                                    ..Default::default()
+                                })
+                                .width(Fill)
+                        ]
+                        .spacing(8)
+                        .width(Fill),
+                    )
+                    .padding(4.0)
+                    .width(plots.config.context_menu.width)
+                    .position(clamped_lx, clamped_ly)
+                    .into()
                 } else {
                     Space::new().width(0).height(0).into()
                 }
