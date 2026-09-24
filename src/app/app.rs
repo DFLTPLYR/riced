@@ -12,7 +12,7 @@ use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
 use super::layers::background::{LAST_CURSOR_GLOBAL, SELECTING};
 use super::layers::{Background, ContextMenu, SelectionRect, Top};
-use super::{LandEvent, Plant};
+use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, TopEvent};
 use crate::config::Config;
 use iced_wayland_subscriber::OutputInfo;
 
@@ -134,13 +134,16 @@ impl Plots {
             iced::event::listen_with(throttled_graft),
             shell_sub,
             // hot-reload poll for config.toml (mtime check only, cheap)
-            iced::time::every(Duration::from_millis(500)).map(|_| Plant::ConfigTick),
+            iced::time::every(Duration::from_millis(500)).map(|_| Plant::Config(ConfigEvent::ConfigTick)),
         ];
 
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
         // QML Behavior 150ms InOutQuad on opacity needs 60fps ticks only while fading
         if self.fade_start.is_some() {
-            subs.push(iced::time::every(Duration::from_millis(16)).map(|_| Plant::SelectionTick));
+            subs.push(
+                iced::time::every(Duration::from_millis(16))
+                    .map(|_| Plant::BackgroundPlot(BackgroundEvent::SelectionTick)),
+            );
         }
 
         iced::Subscription::batch(subs)
@@ -247,7 +250,7 @@ impl Plots {
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
             Plant::Graft(id, event) => Background::handle_graft(self, id, &event),
-            Plant::SelectionTick => {
+            Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => {
                 // drive fade animation (150ms InOutQuad) — clear when done
                 if let Some(start) = self.fade_start
                     && start.elapsed() >= Duration::from_millis(150)
@@ -257,19 +260,19 @@ impl Plots {
                 }
                 Command::none()
             }
-            Plant::ConfigTick => {
+            Plant::Config(ConfigEvent::ConfigTick) => {
                 // mtime check only; the reload itself redraws via ConfigReloaded
                 if let Some((cfg, mtime)) = Config::poll(&self.config_mtime) {
                     self.config_mtime = mtime;
-                    return Command::done(Plant::ConfigReloaded(cfg));
+                    return Command::done(Plant::Config(ConfigEvent::ConfigReloaded(cfg)));
                 }
                 Command::none()
             }
-            Plant::ConfigReloaded(cfg) => {
+            Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
                 self.config = cfg;
                 Command::none()
             }
-            Plant::AddTop => {
+            Plant::TopPlot(TopEvent::Sow) => {
                 // delegate to Top layer (closest-edge detection and spawn)
                 let menu_pos = self.context_menu.as_ref().map(|cm| Point::new(cm.x, cm.y));
                 let menu_output = self.context_menu.as_ref().and_then(|cm| cm.output);
@@ -294,16 +297,16 @@ impl Plots {
 
 pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
-        // SelectionTick is throttled drag update — must redraw all outputs
-        Plant::SelectionTick => Scope::All,
+        // Background selection tick is throttled drag update — must redraw all outputs
+        Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => Scope::All,
         // Button press/release changes selecting/context_menu → All
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonPressed(_)))
         | Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
-        // CursorMoved is handled via throttled SelectionTick; no direct redraw to avoid flood
+        // CursorMoved is handled via throttled background tick; no direct redraw to avoid flood
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
         // ConfigTick is a cheap mtime check — redraw only on actual reload
-        Plant::ConfigTick => Scope::None,
-        Plant::ConfigReloaded(_) => Scope::All,
+        Plant::Config(ConfigEvent::ConfigTick) => Scope::None,
+        Plant::Config(ConfigEvent::ConfigReloaded(_)) => Scope::All,
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,
         Plant::Graft(_, _) => Scope::None,
         Plant::Wayland(_) => Scope::All,

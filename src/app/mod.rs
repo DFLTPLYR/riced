@@ -4,4 +4,4 @@ pub mod events;
 pub mod layers;
 
 pub use app::{Plots, redraw_scope};
-pub use events::{LandEvent, Plant};
+pub use events::{BackgroundEvent, ConfigEvent, LandEvent, Plant, TopEvent};

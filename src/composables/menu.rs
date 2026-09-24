@@ -9,7 +9,7 @@ use iced::{Color, Element, Fill, Length, Padding};
 /// menu()
 ///     .content(column![
 ///         button(text("Add Top").size(12).color(Color::WHITE))
-///             .on_press(Plant::AddTop)
+///             .on_press(Plant::TopPlot(TopEvent::Sow))
 ///             .width(Fill)
 ///     ]
 ///     .spacing(8)

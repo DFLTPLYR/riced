@@ -1,4 +1,4 @@
-use crate::app::Plant;
+use crate::app::{Plant, TopEvent};
 use crate::composables::menu::menu;
 use iced::widget::{button, column, text};
 use iced::{Color, Element, Fill};
@@ -10,7 +10,7 @@ pub fn contextmenu<'a>(width: f32, clamped_lx: f32, clamped_ly: f32) -> Element<
         .content(
             column![
                 button(text("Add Top").size(12).color(Color::WHITE))
-                    .on_press(Plant::AddTop)
+                    .on_press(Plant::TopPlot(TopEvent::Sow))
                     .padding(2)
                     .style(|_, _| button::Style {
                         background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),

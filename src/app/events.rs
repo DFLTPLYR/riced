@@ -24,16 +24,38 @@ pub enum LandEvent {
     LockedFinished,
 }
 
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+#[allow(dead_code)]
+pub enum ConfigEvent {
+    ConfigTick,
+    ConfigReloaded(crate::config::Config),
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+#[allow(dead_code)]
+pub enum TopEvent {
+    Sow,
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+#[allow(dead_code)]
+pub enum BackgroundEvent {
+    Sow,
+    SelectionTick,
+}
+
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Plant {
     // Create,Update, Delete
-    Uproot(Id),
     Tend,
-    Wayland(LandEvent),
+    Uproot(Id),
     Graft(Id, Event),
-    SelectionTick,
-    AddTop,
-    ConfigTick,
-    ConfigReloaded(crate::config::Config),
+    Wayland(LandEvent),
+    TopPlot(TopEvent),
+    BackgroundPlot(BackgroundEvent),
+    Config(ConfigEvent),
 }

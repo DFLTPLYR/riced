@@ -1,4 +1,4 @@
-use crate::app::Plant;
+use crate::app::{BackgroundEvent, Plant};
 use crate::app::app::{PlotInfo, Plots};
 use iced::widget::{Space, container, stack, text};
 use iced::window;
@@ -263,13 +263,13 @@ impl Background {
                     Self::to_global(id, position, &plots.ids, &plots.output_infos, &plots.tops);
                 // skip tiny moves <1px to reduce choppy updates
                 if plots.selection_rect.drag_update(sp, gp) {
-                    // fall through to SelectionTick redraw
+                    // fall through to BackgroundPlot::SelectionTick redraw
                 } else {
                     return Command::none();
                 }
             }
-            // trigger All redraw via SelectionTick (Graft itself is None to avoid flood)
-            return Command::done(Plant::SelectionTick);
+            // trigger All redraw via BackgroundPlot::SelectionTick (Graft itself is None to avoid flood)
+            return Command::done(Plant::BackgroundPlot(BackgroundEvent::SelectionTick));
         }
         Command::none()
     }

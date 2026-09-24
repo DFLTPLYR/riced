@@ -186,7 +186,7 @@ impl Top {
         to_remove
     }
 
-    /// Handle `AddTop` – detect output and closest edge (Left/Right/Top/Bottom) where the
+    /// Handle `TopPlot(TopEvent::Sow)` – detect output and closest edge (Left/Right/Top/Bottom) where the
     /// context menu was opened and spawn a new bar there. Returns a `NewLayerShell` command.
     pub(crate) fn handle_add(
         tops: &mut HashMap<window::Id, Top>,
