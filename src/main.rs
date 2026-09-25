@@ -2,6 +2,7 @@ use iced_exwlshell::daemon;
 use wayland_client::Connection;
 
 mod app;
+mod cli;
 mod components;
 mod composables;
 mod config;
@@ -12,7 +13,30 @@ use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 
 pub fn main() -> Result<(), iced_exwlshell::Error> {
     tracing_subscriber::fmt().init();
-    let connection = Connection::connect_to_env().unwrap();
+    // Single-shot client: `riced open-settings` queues a request for the
+    // running daemon through the command file, no surfaces involved.
+    match cli::parse() {
+        Some(cli::Commands::OpenSettings) => {
+            if let Err(e) = cli::queue_open_settings() {
+                eprintln!("riced: cannot queue open-settings: {e}");
+                std::process::exit(1);
+            }
+            println!("riced: settings requested");
+            Ok(())
+        }
+        // No subcommand: run the shell daemon.
+        None => run_daemon(),
+    }
+}
+
+fn run_daemon() -> Result<(), iced_exwlshell::Error> {
+    let connection = Connection::connect_to_env().unwrap_or_else(|e| {
+        eprintln!(
+            "riced: cannot connect to Wayland ({e:?}); \
+             is WAYLAND_DISPLAY set and are you inside a Wayland session?"
+        );
+        std::process::exit(1);
+    });
     let connection2 = connection.clone();
 
     let (shell_broadcast, shell_events) = iced_wayland_subscriber::shell::channel();
@@ -23,6 +47,7 @@ pub fn main() -> Result<(), iced_exwlshell::Error> {
         Plots::update,
         Plots::view,
     )
+    .title(Plots::title)
     .subscription(Plots::subscription)
     .settings(Settings {
         layer_settings: LayerShellSettings {

@@ -21,3 +21,4 @@ wayland-client = "0.31.15"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
+clap = { version = "4", features = ["derive"] }

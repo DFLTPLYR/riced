@@ -4,12 +4,27 @@ use std::time::SystemTime;
 
 /// Top-level `config.toml`. Unknown keys are ignored so old files
 /// keep loading after new sections are added.
+///
+/// Layout is per-component tables, each key defaulting to `0.0`:
+/// ```toml
+/// [composable.menu]
+/// width = 180.0
+/// height = 92.0
+/// # padding = 8.0         # when omitted, defaults to 0.0
+///
+/// [composable.panel]
+/// # padding = 4.0
+///
+/// [composable.context_menu]
+/// width = 180.0
+///
+/// [composable.context_menu_item]
+/// # padding = 4.0
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub context_menu: ContextMenuConfig,
-    pub menu: MenuConfig,
-    pub default: DefaultConfig,
+    pub composable: ComposableConfig,
 }
 
 /// Generates serde default fns from a single list, e.g.
@@ -27,16 +42,46 @@ defs! {
     default_menu_height: f32 = 92.0,
 }
 
+/// Per-component tables under `[composable.*]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComposableConfig {
+    pub menu: MenuConfig,
+    pub panel: PanelConfig,
+    pub context_menu: ContextMenuConfig,
+    pub context_menu_item: ContextMenuItemConfig,
+}
+
+impl Default for ComposableConfig {
+    fn default() -> Self {
+        Self {
+            menu: MenuConfig::default(),
+            panel: PanelConfig::default(),
+            context_menu: ContextMenuConfig::default(),
+            context_menu_item: ContextMenuItemConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextMenuConfig {
     #[serde(default = "default_width")]
     pub width: f32,
+    #[serde(default)]
+    pub padding: f32,
+    #[serde(default)]
+    pub spacing: f32,
+    #[serde(default)]
+    pub rounding: f32,
 }
 
 impl Default for ContextMenuConfig {
     fn default() -> Self {
         Self {
             width: default_width(),
+            padding: 0.0,
+            spacing: 0.0,
+            rounding: 0.0,
         }
     }
 }
@@ -47,6 +92,12 @@ pub struct MenuConfig {
     pub width: f32,
     #[serde(default = "default_menu_height")]
     pub height: f32,
+    #[serde(default)]
+    pub padding: f32,
+    #[serde(default)]
+    pub spacing: f32,
+    #[serde(default)]
+    pub rounding: f32,
 }
 
 impl Default for MenuConfig {
@@ -54,28 +105,59 @@ impl Default for MenuConfig {
         Self {
             width: default_width(),
             height: default_menu_height(),
+            padding: 0.0,
+            spacing: 0.0,
+            rounding: 0.0,
         }
     }
 }
 
+/// Style keys for the `Panel` composable (selection overlay, bars).
+/// Rendered geometry there is positional, so only style keys live here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DefaultConfig {
+pub struct PanelConfig {
     #[serde(default)]
     pub padding: f32,
+    #[serde(default)]
+    pub spacing: f32,
+    #[serde(default)]
+    pub rounding: f32,
 }
 
-impl Default for DefaultConfig {
+impl Default for PanelConfig {
     fn default() -> Self {
-        Self { padding: 0.0 }
+        Self {
+            padding: 0.0,
+            spacing: 0.0,
+            rounding: 0.0,
+        }
+    }
+}
+
+/// Style keys for the buttons inside the context menu.
+/// The gap *between* items is the parent column's spacing, so it stays on
+/// `ContextMenuConfig`; buttons are `Fill`-width, so no width key lives here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextMenuItemConfig {
+    #[serde(default)]
+    pub padding: f32,
+    #[serde(default)]
+    pub rounding: f32,
+}
+
+impl Default for ContextMenuItemConfig {
+    fn default() -> Self {
+        Self {
+            padding: 0.0,
+            rounding: 0.0,
+        }
     }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default: DefaultConfig::default(),
-            menu: MenuConfig::default(),
-            context_menu: ContextMenuConfig::default(),
+            composable: ComposableConfig::default(),
         }
     }
 }
@@ -155,35 +237,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_menu_section() {
-        let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\nheight = 100.0\n").unwrap();
-        assert_eq!(cfg.menu.width, 200.0);
-        assert_eq!(cfg.menu.height, 100.0);
+    fn parses_composable_menu_section() {
+        let cfg: Config =
+            toml::from_str("[composable.menu]\nwidth = 200.0\nheight = 100.0\n").unwrap();
+        assert_eq!(cfg.composable.menu.width, 200.0);
+        assert_eq!(cfg.composable.menu.height, 100.0);
     }
 
     #[test]
-    fn missing_keys_fall_back_to_defaults() {
-        let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\n").unwrap();
-        assert_eq!(cfg.menu.width, 200.0);
-        assert_eq!(cfg.menu.height, 92.0);
+    fn composable_menu_falls_back_to_defaults() {
+        let cfg: Config = toml::from_str("[composable.menu]\nwidth = 200.0\n").unwrap();
+        assert_eq!(cfg.composable.menu.width, 200.0);
+        assert_eq!(cfg.composable.menu.height, 92.0);
+        assert_eq!(cfg.composable.menu.padding, 0.0);
         let empty: Config = toml::from_str("").unwrap();
-        assert_eq!(empty.menu.width, 180.0);
+        assert_eq!(empty.composable.menu.width, 180.0);
+        assert_eq!(empty.composable.menu.padding, 0.0);
     }
 
     #[test]
-    fn parses_context_menu_section() {
-        let cfg: Config = toml::from_str("[context_menu]\nwidth = 250.0\n").unwrap();
-        assert_eq!(cfg.context_menu.width, 250.0);
+    fn parses_composable_context_menu_section() {
+        let cfg: Config = toml::from_str("[composable.context_menu]\nwidth = 250.0\n").unwrap();
+        assert_eq!(cfg.composable.context_menu.width, 250.0);
         // unrelated sections keep their own values
-        assert_eq!(cfg.menu.width, 180.0);
-        assert_eq!(cfg.menu.height, 92.0);
+        assert_eq!(cfg.composable.menu.width, 180.0);
+        assert_eq!(cfg.composable.menu.height, 92.0);
     }
 
     #[test]
-    fn context_menu_falls_back_to_defaults() {
-        let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\n").unwrap();
-        assert_eq!(cfg.context_menu.width, 180.0);
+    fn composable_context_menu_falls_back_to_defaults() {
+        let cfg: Config = toml::from_str("[composable.menu]\nwidth = 200.0\n").unwrap();
+        assert_eq!(cfg.composable.context_menu.width, 180.0);
         let empty: Config = toml::from_str("").unwrap();
-        assert_eq!(empty.context_menu.width, 180.0);
+        assert_eq!(empty.composable.context_menu.width, 180.0);
+    }
+
+    #[test]
+    fn partial_composable_style_keeps_provided_values() {
+        // Regression: missing keys must default per-field, not reset the whole file.
+        let cfg: Config = toml::from_str("[composable.context_menu]\npadding = 8.0\n").unwrap();
+        assert_eq!(cfg.composable.context_menu.padding, 8.0);
+        assert_eq!(cfg.composable.context_menu.spacing, 0.0);
+        assert_eq!(cfg.composable.context_menu.rounding, 0.0);
+        assert_eq!(cfg.composable.context_menu.width, 180.0);
+    }
+
+    #[test]
+    fn parses_composable_context_menu_item_section() {
+        let cfg: Config =
+            toml::from_str("[composable.context_menu_item]\npadding = 4.0\nrounding = 2.0\n")
+                .unwrap();
+        assert_eq!(cfg.composable.context_menu_item.padding, 4.0);
+        assert_eq!(cfg.composable.context_menu_item.rounding, 2.0);
+    }
+
+    #[test]
+    fn context_menu_item_falls_back_to_defaults() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.composable.context_menu_item.padding, 0.0);
+        assert_eq!(empty.composable.context_menu_item.rounding, 0.0);
+        // unrelated section present, item still defaults
+        let cfg: Config = toml::from_str("[composable.menu]\nwidth = 200.0\n").unwrap();
+        assert_eq!(cfg.composable.context_menu_item.padding, 0.0);
+        assert_eq!(cfg.composable.context_menu_item.rounding, 0.0);
+    }
+
+    #[test]
+    fn legacy_flat_sections_are_ignored() {
+        // Restructure note: per-component tables moved under [composable.*].
+        // Old flat keys are unknown fields, which serde ignores.
+        let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\n").unwrap();
+        assert_eq!(cfg.composable.menu.width, 180.0);
     }
 }

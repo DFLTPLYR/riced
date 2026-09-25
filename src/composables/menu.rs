@@ -14,8 +14,8 @@ use iced::{Color, Element, Fill, Length, Padding};
 ///     ]
 ///     .spacing(8)
 ///     .width(Fill))
-///     .width(plots.config.context_menu.width)
-///     .height(plots.config.menu.height)
+///     .width(plots.config.composable.context_menu.width)
+///     .height(plots.config.composable.menu.height)
 ///     .position(lx, ly)
 ///     .into()
 /// ```

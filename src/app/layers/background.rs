@@ -304,16 +304,16 @@ impl Background {
         let (menu_x, menu_y) = if let Some((_, (ax, ay, aw, ah))) = menu_avail {
             let lx = cm.x - ax;
             let ly = cm.y - ay;
-            let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
-            let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
+            let clamped_lx = lx.clamp(0.0, (aw - plots.config.composable.menu.width).max(0.0));
+            let clamped_ly = ly.clamp(0.0, (ah - plots.config.composable.menu.height).max(0.0));
             (ax + clamped_lx, ay + clamped_ly)
         } else {
             (cm.x, cm.y)
         };
         gp.x >= menu_x
-            && gp.x <= menu_x + plots.config.menu.width
+            && gp.x <= menu_x + plots.config.composable.menu.width
             && gp.y >= menu_y
-            && gp.y <= menu_y + plots.config.menu.height
+            && gp.y <= menu_y + plots.config.composable.menu.height
     }
 
     pub(crate) fn handle_right_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
@@ -469,7 +469,7 @@ impl Background {
                             border: iced::Border {
                                 color: border_col,
                                 width: 1.0,
-                                radius: 0.0.into(),
+                                radius: plots.config.composable.panel.rounding.into(),
                             },
                             ..Default::default()
                         }),
@@ -501,28 +501,46 @@ impl Background {
         if !in_screen {
             return Space::new().width(0).height(0).into();
         }
-        let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
-        let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
-        contextmenu(plots.config.context_menu.width, clamped_lx, clamped_ly)
-            .padding(plots.config.default.padding)
+        let clamped_lx = lx.clamp(0.0, (aw - plots.config.composable.menu.width).max(0.0));
+        let clamped_ly = ly.clamp(0.0, (ah - plots.config.composable.menu.height).max(0.0));
+        contextmenu(
+            plots.config.composable.context_menu.width,
+            clamped_lx,
+            clamped_ly
+        )
+            .padding(plots.config.composable.context_menu.padding)
             .content(
                 column![
                     button(text("Add Top").size(12).color(Color::WHITE))
                         .on_press(Plant::TopPlot(TopEvent::Sow))
-                        .padding(2)
+                        .padding(plots.config.composable.context_menu_item.padding)
                         .style(|_, _| button::Style {
                             background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
                             text_color: Color::WHITE,
                             border: iced::Border {
                                 color: Color::from_rgb(0.5, 0.5, 0.55),
                                 width: 1.0,
-                                radius: 4.0.into(),
+                                radius: plots.config.composable.context_menu_item.rounding.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .width(Fill),
+                    button(text("Open Settings").size(12).color(Color::WHITE))
+                        .on_press(Plant::Sprout)
+                        .padding(plots.config.composable.context_menu_item.padding)
+                        .style(|_, _| button::Style {
+                            background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                color: Color::from_rgb(0.5, 0.5, 0.55),
+                                width: 1.0,
+                                radius: plots.config.composable.context_menu_item.rounding.into(),
                             },
                             ..Default::default()
                         })
                         .width(Fill)
                 ]
-                .spacing(8)
+                .spacing(plots.config.composable.context_menu.spacing)
                 .width(Fill),
             )
             .into()

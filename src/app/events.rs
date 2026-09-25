@@ -57,10 +57,16 @@ pub enum BackgroundEvent {
 pub enum Plant {
     // Create,Update, Delete
     Tend,
+    Sprout,
     Uproot(Id),
     Graft(Id, Event),
+    // File IPC poll tick (see `cli`): drains `riced.cmd` queued by CLI clients.
+    IpcPoll,
+    // Wayland
     Wayland(LandEvent),
+    // Layers/Plots
     TopPlot(TopEvent),
     BackgroundPlot(BackgroundEvent),
+    // Config
     Config(ConfigEvent),
 }
