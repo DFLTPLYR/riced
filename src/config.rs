@@ -73,9 +73,9 @@ impl Default for DefaultConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            default: DefaultConfig::default(),
             menu: MenuConfig::default(),
             context_menu: ContextMenuConfig::default(),
-            default: DefaultConfig::default(),
         }
     }
 }

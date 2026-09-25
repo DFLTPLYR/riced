@@ -504,6 +504,7 @@ impl Background {
         let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
         let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
         contextmenu(plots.config.context_menu.width, clamped_lx, clamped_ly)
+            .padding(plots.config.default.padding)
             .content(
                 column![
                     button(text("Add Top").size(12).color(Color::WHITE))
