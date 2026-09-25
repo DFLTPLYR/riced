@@ -1,14 +1,17 @@
 use super::background::Background;
 use crate::app::Plant;
-use crate::app::app::PlotInfo;
-use iced::widget::{container, text};
+use crate::app::app::{PlotInfo, Plots};
+use crate::composables::panel_window::top_window;
+use iced::mouse::Button;
+use iced::widget::text;
 use iced::window;
-use iced::{Element, Fill, Point, Task as Command};
+use iced::{Element, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
 use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct Top {
@@ -17,6 +20,9 @@ pub struct Top {
 }
 
 impl Top {
+    /// Hold threshold: press held >= this on release counts as hold.
+    const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+
     pub fn new() -> Self {
         Self {
             thickness: 50,
@@ -137,11 +143,62 @@ impl Top {
         (id, settings)
     }
 
-    pub fn view(&self) -> Element<'_, Plant> {
-        container(text(format!("{} BAR TEST", self.anchor_label())).size(30))
-            .width(Fill)
-            .height(Fill)
+    pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
+        top_window(id)
+            .content(text(format!("{} BAR TEST", self.anchor_label())).size(30))
             .into()
+    }
+
+    // ------------------------------------------------------------------
+    // Event handling — press/release arrive via PanelWindow (mouse_area);
+    // CursorMoved still arrives via Plant::Graft for cursor bookkeeping.
+    // Measures press duration for hold detection: press stores Instant,
+    // release compares against HOLD_THRESHOLD and clears the entry.
+    // ------------------------------------------------------------------
+
+    fn handle_cursor_moved(plots: &mut Plots, id: window::Id, position: Point) -> Command<Plant> {
+        plots.last_cursor.insert(id, position);
+        Command::none()
+    }
+
+    pub(crate) fn handle_press(plots: &mut Plots, id: window::Id, button: Button) -> Command<Plant> {
+        if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
+            return Command::none();
+        }
+        plots.press_starts.insert(id, Instant::now());
+        println!("top press {button:?} on {id:?}");
+        Command::none()
+    }
+
+    pub(crate) fn handle_release(plots: &mut Plots, id: window::Id, button: Button) -> Command<Plant> {
+        if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
+            return Command::none();
+        }
+        let start = plots.press_starts.remove(&id);
+        match start {
+            Some(t) if t.elapsed() >= Self::HOLD_THRESHOLD => {
+                println!("top hold {button:?} on {id:?} after {:?}", t.elapsed());
+            }
+            Some(t) => {
+                println!("top click {button:?} on {id:?} after {:?}", t.elapsed());
+            }
+            None => {
+                println!("top release {button:?} on {id:?} with no press start");
+            }
+        }
+        Command::none()
+    }
+
+    /// Cursor bookkeeping for Top windows — press/release come from PanelWindow.
+    pub(crate) fn handle_graft(
+        plots: &mut Plots,
+        id: window::Id,
+        event: &iced::Event,
+    ) -> Command<Plant> {
+        if let iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) = event {
+            return Self::handle_cursor_moved(plots, id, *position);
+        }
+        Command::none()
     }
 
     /// Cleanup sentinel tops (OutputId::MAX) created before outputs were known.

@@ -1,6 +1,7 @@
-use crate::app::{BackgroundEvent, Plant};
 use crate::app::app::{PlotInfo, Plots};
-use iced::widget::{Space, container, stack, text};
+use crate::app::{BackgroundEvent, Plant, TopEvent};
+use iced::mouse::Button;
+use iced::widget::{Space, button, column, container, stack, text};
 use iced::window;
 use iced::{Color, Element, Fill, Length, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -12,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use super::top::Top;
 use crate::components::contextmenu::contextmenu;
+use crate::composables::panel::panel;
+use crate::composables::panel_window::background_window;
 
 #[derive(Debug)]
 pub struct Background;
@@ -318,7 +321,7 @@ impl Background {
             && gp.y <= menu_y + plots.config.menu.height
     }
 
-    fn handle_right_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
+    pub(crate) fn handle_right_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
         // only open context menu on Background (like QML Background MouseArea) – ignore Top layer
         if !matches!(plots.id_info(id), Some(PlotInfo::Background(_))) {
             return Command::none();
@@ -339,7 +342,7 @@ impl Background {
         Command::none()
     }
 
-    fn handle_left_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
+    pub(crate) fn handle_left_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
         // only start selection on Background (like QML Background MouseArea)
         if !matches!(plots.id_info(id), Some(PlotInfo::Background(_))) {
             return Command::none();
@@ -370,7 +373,7 @@ impl Background {
         Command::none()
     }
 
-    fn handle_left_release(plots: &mut Plots) -> Command<Plant> {
+    pub(crate) fn handle_left_release(plots: &mut Plots) -> Command<Plant> {
         if plots.selection_rect.selecting {
             plots.fade_rect = Some(plots.selection_rect.clone());
             plots.fade_start = Some(Instant::now());
@@ -380,34 +383,30 @@ impl Background {
         Command::none()
     }
 
-    /// Entry point for `Plant::Graft(id, event)` — call from `Plots::update`.
-    /// Returns None-equivalent (`Command::none()`) for non-Background windows
-    /// except cursor bookkeeping done in `handle_cursor_moved`.
+    /// Cursor bookkeeping for Background windows — press/release now arrive
+    /// via PanelWindow (mouse_area) as BackgroundEvent::Pressed/Released.
     pub(crate) fn handle_graft(
         plots: &mut Plots,
         id: window::Id,
         event: &iced::Event,
     ) -> Command<Plant> {
-        use iced::Event;
-        use iced::mouse::Button;
-
-        if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = event {
+        if let iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) = event {
             return Self::handle_cursor_moved(plots, id, *position);
         }
+        Command::none()
+    }
 
-        match event {
-            Event::Mouse(iced::mouse::Event::ButtonPressed(Button::Right)) => {
-                Self::handle_right_press(plots, id)
-            }
-            Event::Mouse(iced::mouse::Event::ButtonPressed(Button::Left)) => {
-                Self::handle_left_press(plots, id)
-            }
-            Event::Mouse(iced::mouse::Event::ButtonPressed(Button::Middle)) => Command::none(),
-            Event::Mouse(iced::mouse::Event::ButtonReleased(Button::Left)) => {
-                Self::handle_left_release(plots)
-            }
-            Event::Mouse(iced::mouse::Event::ButtonReleased(Button::Right)) => Command::none(),
-            Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => Command::none(),
+    /// Dispatch a PanelWindow button event to the matching press/release handler.
+    pub(crate) fn handle_panel_button(
+        plots: &mut Plots,
+        id: window::Id,
+        button: Button,
+        pressed: bool,
+    ) -> Command<Plant> {
+        match (button, pressed) {
+            (Button::Right, true) => Self::handle_right_press(plots, id),
+            (Button::Left, true) => Self::handle_left_press(plots, id),
+            (Button::Left, false) => Self::handle_left_release(plots),
             _ => Command::none(),
         }
     }
@@ -419,10 +418,10 @@ impl Background {
     // (which is `Background::open`'s window showing its own relevant part).
     // ------------------------------------------------------------------
 
-    pub(crate) fn view(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
-        let (ax, ay, aw, ah) =
-            Self::available_rect_or_fallback(output, &plots.output_infos, &plots.tops, &plots.ids);
-
+    /// Clipped selection/fade box for *this* Background's available rect.
+    /// Owns the rect math + styling; `view` just positions it in the stack.
+    fn selection_overlay(plots: &Plots, avail: (f32, f32, f32, f32)) -> Element<'_, Plant> {
+        let (ax, ay, aw, ah) = avail;
         // active rect is either selecting rect or fading rect (150ms InOutQuad)
         let (active_rect, opacity) = if plots.selection_rect.selecting {
             (Some(&plots.selection_rect), 1.0)
@@ -446,7 +445,6 @@ impl Background {
         // intersect global rect with THIS background's available rect,
         // then express in window-local coords for padding
         let (visible, clipped_w, clipped_h, local_x, local_y) = if let Some(ar) = active_rect {
-            let avail = (ax, ay, aw, ah);
             let inter = Self::intersects(ar, avail);
             let vis = inter && opacity > 0.01;
             let cw = (ar.x + ar.width).min(ax + aw) - ar.x.max(ax);
@@ -463,56 +461,84 @@ impl Background {
         } else {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         };
-        let selection_overlay: Element<'_, Plant> = if cw > 1.0 && ch > 1.0 && op > 0.01 {
+        if cw > 1.0 && ch > 1.0 && op > 0.01 {
             let bg = Color::from_rgba(0.55, 0.65, 1.0, 0.5 * op);
             let border_col = Color::from_rgba(0.75, 0.8, 1.0, op);
-            container(
-                container(Space::new())
-                    .width(Length::Fixed(cw))
-                    .height(Length::Fixed(ch))
-                    .style(move |_| container::Style {
-                        background: Some(bg.into()),
-                        border: iced::Border {
-                            color: border_col,
-                            width: 1.0,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    }),
+            panel()
+                .content(
+                    container(Space::new())
+                        .width(Length::Fixed(cw))
+                        .height(Length::Fixed(ch))
+                        .style(move |_| container::Style {
+                            background: Some(bg.into()),
+                            border: iced::Border {
+                                color: border_col,
+                                width: 1.0,
+                                radius: 0.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .padding(iced::Padding {
+                    top: cy,
+                    left: cx,
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into()
+        } else {
+            panel().content(Space::new()).into()
+        }
+    }
+
+    /// "Add Top" menu for *this* Background's available rect.
+    /// Owns clamping + content; `view` just positions it in the stack.
+    fn context_menu_overlay(plots: &Plots, avail: (f32, f32, f32, f32)) -> Element<'_, Plant> {
+        let (ax, ay, aw, ah) = avail;
+        let cm = match &plots.context_menu {
+            Some(cm) if cm.open => cm,
+            _ => return Space::new().width(0).height(0).into(),
+        };
+        let lx = cm.x - ax;
+        let ly = cm.y - ay;
+        // only show on the Background whose available rect contains the click
+        let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
+        if !in_screen {
+            return Space::new().width(0).height(0).into();
+        }
+        let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
+        let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
+        contextmenu(plots.config.context_menu.width, clamped_lx, clamped_ly)
+            .content(
+                column![
+                    button(text("Add Top").size(12).color(Color::WHITE))
+                        .on_press(Plant::TopPlot(TopEvent::Sow))
+                        .padding(2)
+                        .style(|_, _| button::Style {
+                            background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                color: Color::from_rgb(0.5, 0.5, 0.55),
+                                width: 1.0,
+                                radius: 4.0.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .width(Fill)
+                ]
+                .spacing(8)
+                .width(Fill),
             )
-            .width(Fill)
-            .height(Fill)
-            .padding(iced::Padding {
-                top: cy,
-                left: cx,
-                right: 0.0,
-                bottom: 0.0,
-            })
             .into()
-        } else {
-            container(Space::new()).width(Fill).height(Fill).into()
-        };
+    }
 
-        let context_menu_overlay: Element<'_, Plant> = if let Some(cm) = &plots.context_menu {
-            if cm.open {
-                let lx = cm.x - ax;
-                let ly = cm.y - ay;
-                // only show on the Background whose available rect contains the click
-                let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
-                if in_screen {
-                    let clamped_lx = lx.clamp(0.0, (aw - plots.config.menu.width).max(0.0));
-                    let clamped_ly = ly.clamp(0.0, (ah - plots.config.menu.height).max(0.0));
-                    contextmenu(plots.config.context_menu.width, clamped_lx, clamped_ly)
-                } else {
-                    Space::new().width(0).height(0).into()
-                }
-            } else {
-                Space::new().width(0).height(0).into()
-            }
-        } else {
-            Space::new().width(0).height(0).into()
-        };
-
+    /// Debug label behind the overlays. Owns text + dim background styling.
+    fn bg_label_view(
+        plots: &Plots,
+        id: window::Id,
+        avail: (f32, f32, f32, f32),
+    ) -> Element<'_, Plant> {
+        let (ax, ay, aw, ah) = avail;
         let cursor = plots.last_cursor.get(&id).copied();
         let sr = &plots.selection_rect;
         let bg_label = if sr.selecting {
@@ -529,21 +555,36 @@ impl Background {
         } else {
             "BG click+drag  (move cursor)  | right click for menu".to_string()
         };
-        let bg_view = container(
-            text(bg_label)
-                .size(13)
-                .color(Color::from_rgba(1.0, 1.0, 1.0, 0.7)),
-        )
-        .width(Fill)
-        .height(Fill)
-        .center_x(Fill)
-        .center_y(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.10).into()),
-            ..Default::default()
-        })
-        .into();
+        panel()
+            .content(
+                container(
+                    text(bg_label)
+                        .size(13)
+                        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.7)),
+                )
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill)
+                .style(|_| container::Style {
+                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.10).into()),
+                    ..Default::default()
+                }),
+            )
+            .into()
+    }
 
-        stack(vec![bg_view, selection_overlay, context_menu_overlay]).into()
+    pub(crate) fn view(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
+        let avail =
+            Self::available_rect_or_fallback(output, &plots.output_infos, &plots.tops, &plots.ids);
+
+        // Content lives in the helpers above; the panel owns Fill + events.
+        background_window(id)
+            .content(stack(vec![
+                Self::bg_label_view(plots, id, avail),
+                Self::selection_overlay(plots, avail),
+                Self::context_menu_overlay(plots, avail),
+            ]))
+            .into()
     }
 }

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
-use super::layers::background::{LAST_CURSOR_GLOBAL, SELECTING};
 use super::layers::{Background, ContextMenu, SelectionRect, Top};
 use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, TopEvent};
 use crate::config::Config;
@@ -23,29 +22,20 @@ fn throttled_graft(
     _status: iced::event::Status,
     id: iced::window::Id,
 ) -> Option<Plant> {
+    // Press/release now arrive declaratively via PanelWindow (mouse_area),
+    // so the subscription only forwards CursorMoved for drag tracking.
     // Store last cursor globally for correct startPoint even when not selecting (fixes random startPoint)
-    if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = &event {
-        // always update global last cursor (throttled) so ButtonPressed has correct pos
+    if let Event::Mouse(iced::mouse::Event::CursorMoved { .. }) = &event {
+        // always update global last cursor (throttled to 60fps) so press is accurate
         let now = Instant::now();
         let mut last = LAST_MOUSE_MOVE.lock().unwrap();
-        let should_emit = SELECTING.load(std::sync::atomic::Ordering::Relaxed);
-        // throttle to 60fps
         if now.duration_since(*last) < Duration::from_millis(16) {
-            // still update global cursor even if throttled for emit, so press is accurate
-            LAST_CURSOR_GLOBAL.lock().unwrap().insert(id, *position);
             return None;
         }
         *last = now;
-        LAST_CURSOR_GLOBAL.lock().unwrap().insert(id, *position);
-        if !should_emit {
-            return None;
-        }
+        return Some(Plant::Graft(id, event));
     }
-    if let Event::Mouse(_) = event {
-        Some(Plant::Graft(id, event))
-    } else {
-        None
-    }
+    None
 }
 
 #[derive(Debug)]
@@ -68,6 +58,8 @@ pub struct Plots {
     pub(crate) context_menu: Option<ContextMenu>,
     // throttling for smooth 60fps selection updates
     pub(crate) last_selection_tick: Option<Instant>,
+    // press start per window for hold detection (Top hold, shared via PanelWindow)
+    pub(crate) press_starts: HashMap<iced::window::Id, Instant>,
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
@@ -95,6 +87,7 @@ impl Plots {
             fade_start: None,
             context_menu: None,
             last_selection_tick: None,
+            press_starts: HashMap::new(),
             config,
             config_mtime,
         }
@@ -134,7 +127,8 @@ impl Plots {
             iced::event::listen_with(throttled_graft),
             shell_sub,
             // hot-reload poll for config.toml (mtime check only, cheap)
-            iced::time::every(Duration::from_millis(500)).map(|_| Plant::Config(ConfigEvent::ConfigTick)),
+            iced::time::every(Duration::from_millis(500))
+                .map(|_| Plant::Config(ConfigEvent::ConfigTick)),
         ];
 
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
@@ -157,7 +151,7 @@ impl Plots {
             Some(PlotInfo::Top(_output)) => self
                 .tops
                 .get(&id)
-                .map(|t| t.view())
+                .map(|t| t.view(id))
                 .unwrap_or_else(|| Space::new().into()),
             None => Space::new().into(), // daemon's 1x1 tiny window
         }
@@ -167,6 +161,7 @@ impl Plots {
         match message {
             Plant::Uproot(id) => {
                 self.last_cursor.remove(&id);
+                self.press_starts.remove(&id);
                 if let Some(info) = self.ids.remove(&id) {
                     match info {
                         PlotInfo::Top(_) => {
@@ -189,6 +184,7 @@ impl Plots {
                 // sentinel Top cleanup (delegated to Top layer)
                 for sentinel_id in Top::cleanup_sentinels(&mut self.tops, &mut self.ids) {
                     self.last_cursor.remove(&sentinel_id);
+                    self.press_starts.remove(&sentinel_id);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(sentinel_id),
                     )));
@@ -231,6 +227,7 @@ impl Plots {
                 // remove all tops for this output (delegated to Top layer)
                 for wid in Top::remove_for_output(&mut self.tops, &mut self.ids, output_id) {
                     self.last_cursor.remove(&wid);
+                    self.press_starts.remove(&wid);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(wid),
                     )));
@@ -249,7 +246,10 @@ impl Plots {
             Plant::Wayland(LandEvent::Locked) => Command::none(),
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
-            Plant::Graft(id, event) => Background::handle_graft(self, id, &event),
+            Plant::Graft(id, event) => match self.id_info(id) {
+                Some(PlotInfo::Top(_)) => Top::handle_graft(self, id, &event),
+                _ => Background::handle_graft(self, id, &event),
+            },
             Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => {
                 // drive fade animation (150ms InOutQuad) — clear when done
                 if let Some(start) = self.fade_start
@@ -259,6 +259,12 @@ impl Plots {
                     self.fade_start = None;
                 }
                 Command::none()
+            }
+            Plant::BackgroundPlot(BackgroundEvent::Pressed(id, button)) => {
+                Background::handle_panel_button(self, id, button, true)
+            }
+            Plant::BackgroundPlot(BackgroundEvent::Released(id, button)) => {
+                Background::handle_panel_button(self, id, button, false)
             }
             Plant::Config(ConfigEvent::ConfigTick) => {
                 // mtime check only; the reload itself redraws via ConfigReloaded
@@ -271,6 +277,10 @@ impl Plots {
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
                 self.config = cfg;
                 Command::none()
+            }
+            Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
+            Plant::TopPlot(TopEvent::Released(id, button)) => {
+                Top::handle_release(self, id, button)
             }
             Plant::TopPlot(TopEvent::Sow) => {
                 // delegate to Top layer (closest-edge detection and spawn)
@@ -299,9 +309,11 @@ pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
         // Background selection tick is throttled drag update — must redraw all outputs
         Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => Scope::All,
-        // Button press/release changes selecting/context_menu → All
-        Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonPressed(_)))
-        | Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
+        // PanelWindow press/release changes selecting/context_menu/hold → All
+        Plant::BackgroundPlot(BackgroundEvent::Pressed(..))
+        | Plant::BackgroundPlot(BackgroundEvent::Released(..))
+        | Plant::TopPlot(TopEvent::Pressed(..))
+        | Plant::TopPlot(TopEvent::Released(..)) => Scope::All,
         // CursorMoved is handled via throttled background tick; no direct redraw to avoid flood
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
         // ConfigTick is a cheap mtime check — redraw only on actual reload

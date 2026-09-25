@@ -1,4 +1,5 @@
 use iced::Event;
+use iced::mouse::Button;
 use iced::window::Id;
 use iced_exwlshell::to_layer_message;
 use iced_wayland_subscriber::OutputInfo;
@@ -37,6 +38,8 @@ pub enum ConfigEvent {
 #[allow(dead_code)]
 pub enum TopEvent {
     Sow,
+    Pressed(Id, Button),
+    Released(Id, Button),
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,8 @@ pub enum TopEvent {
 pub enum BackgroundEvent {
     Sow,
     SelectionTick,
+    Pressed(Id, Button),
+    Released(Id, Button),
 }
 
 #[to_layer_message(multi)]

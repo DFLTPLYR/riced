@@ -9,48 +9,64 @@ use std::time::SystemTime;
 pub struct Config {
     pub context_menu: ContextMenuConfig,
     pub menu: MenuConfig,
+    pub default: DefaultConfig,
+}
+
+/// Generates serde default fns from a single list, e.g.
+/// `defs! { default_width: f32 = 180.0, ... }` expands to one
+/// `fn default_width() -> f32 { 180.0 }` per entry. Referenced by name
+/// from both `#[serde(default = "...")]` and the manual `Default` impls.
+macro_rules! defs {
+    ($($fn:ident : $ty:ty = $val:expr),* $(,)?) => {
+        $(fn $fn() -> $ty { $val })*
+    };
+}
+
+defs! {
+    default_width: f32 = 180.0,
+    default_menu_height: f32 = 92.0,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextMenuConfig {
-    #[serde(default = "default_context_menu_width")]
+    #[serde(default = "default_width")]
     pub width: f32,
-}
-
-fn default_context_menu_width() -> f32 {
-    180.0
 }
 
 impl Default for ContextMenuConfig {
     fn default() -> Self {
         Self {
-            width: default_context_menu_width(),
+            width: default_width(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MenuConfig {
-    #[serde(default = "default_menu_width")]
+    #[serde(default = "default_width")]
     pub width: f32,
     #[serde(default = "default_menu_height")]
     pub height: f32,
 }
 
-fn default_menu_width() -> f32 {
-    180.0
-}
-
-fn default_menu_height() -> f32 {
-    92.0
-}
-
 impl Default for MenuConfig {
     fn default() -> Self {
         Self {
-            width: default_menu_width(),
+            width: default_width(),
             height: default_menu_height(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefaultConfig {
+    #[serde(default)]
+    pub padding: f32,
+}
+
+impl Default for DefaultConfig {
+    fn default() -> Self {
+        Self { padding: 0.0 }
     }
 }
 
@@ -59,6 +75,7 @@ impl Default for Config {
         Self {
             menu: MenuConfig::default(),
             context_menu: ContextMenuConfig::default(),
+            default: DefaultConfig::default(),
         }
     }
 }
@@ -155,8 +172,7 @@ mod tests {
 
     #[test]
     fn parses_context_menu_section() {
-        let cfg: Config =
-            toml::from_str("[context_menu]\nwidth = 250.0\n").unwrap();
+        let cfg: Config = toml::from_str("[context_menu]\nwidth = 250.0\n").unwrap();
         assert_eq!(cfg.context_menu.width, 250.0);
         // unrelated sections keep their own values
         assert_eq!(cfg.menu.width, 180.0);
