@@ -182,9 +182,10 @@ impl Top {
             Some(t) => {
                 println!("top click {button:?} on {id:?} after {:?}", t.elapsed());
             }
-            None => {
-                println!("top release {button:?} on {id:?} with no press start");
-            }
+            // Silent: the global Graft release safety net in update can clear
+            // the press first when release lands on another window, and a
+            // same-window release fires both PanelWindow and Graft paths.
+            None => {}
         }
         Command::none()
     }

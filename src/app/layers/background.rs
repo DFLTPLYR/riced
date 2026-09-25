@@ -9,7 +9,7 @@ use iced_exwlshell::reexport::{
 };
 use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::top::Top;
 use crate::components::contextmenu::contextmenu;
@@ -255,11 +255,6 @@ impl Background {
         plots.last_cursor.insert(id, position);
         if plots.selection_rect.selecting {
             let now = Instant::now();
-            if let Some(last) = plots.last_selection_tick {
-                if now.duration_since(last) < Duration::from_millis(16) {
-                    return Command::none();
-                }
-            }
             plots.last_selection_tick = Some(now);
             if let Some(sp) = plots.selection_rect.start_point {
                 let gp =

@@ -23,7 +23,10 @@ fn throttled_graft(
     id: iced::window::Id,
 ) -> Option<Plant> {
     // Press/release now arrive declaratively via PanelWindow (mouse_area),
-    // so the subscription only forwards CursorMoved for drag tracking.
+    // so the subscription only forwards CursorMoved for drag tracking plus
+    // ButtonReleased as a safety net: a press can start on one window while
+    // the release lands on another (cross-monitor drag, Top bar), where that
+    // window's own mouse_area release never fires for our drag.
     // Store last cursor globally for correct startPoint even when not selecting (fixes random startPoint)
     if let Event::Mouse(iced::mouse::Event::CursorMoved { .. }) = &event {
         // always update global last cursor (throttled to 60fps) so press is accurate
@@ -33,6 +36,12 @@ fn throttled_graft(
             return None;
         }
         *last = now;
+        return Some(Plant::Graft(id, event));
+    }
+    if matches!(
+        event,
+        Event::Mouse(iced::mouse::Event::ButtonReleased(_))
+    ) {
         return Some(Plant::Graft(id, event));
     }
     None
@@ -246,10 +255,27 @@ impl Plots {
             Plant::Wayland(LandEvent::Locked) => Command::none(),
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
-            Plant::Graft(id, event) => match self.id_info(id) {
-                Some(PlotInfo::Top(_)) => Top::handle_graft(self, id, &event),
-                _ => Background::handle_graft(self, id, &event),
-            },
+            Plant::Graft(id, event) => {
+                // Safety net: a left-button release on ANY window ends an
+                // active selection and clears pending press state. The press
+                // can start on one monitor while the release lands on another
+                // monitor's window (or a Top bar), where neither window's own
+                // mouse_area release fires for the drag. Both this and the
+                // PanelWindow release are idempotent, so a same-window
+                // release firing twice is harmless.
+                if matches!(
+                    event,
+                    Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                ) {
+                    let _ = Background::handle_left_release(self);
+                    self.press_starts.remove(&id);
+                    return Command::none();
+                }
+                match self.id_info(id) {
+                    Some(PlotInfo::Top(_)) => Top::handle_graft(self, id, &event),
+                    _ => Background::handle_graft(self, id, &event),
+                }
+            }
             Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => {
                 // drive fade animation (150ms InOutQuad) — clear when done
                 if let Some(start) = self.fade_start
@@ -309,11 +335,13 @@ pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
         // Background selection tick is throttled drag update — must redraw all outputs
         Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => Scope::All,
-        // PanelWindow press/release changes selecting/context_menu/hold → All
+        // PanelWindow press/release changes selecting/context_menu/hold → All.
+        // A Graft release also ends selection via the safety net → All.
         Plant::BackgroundPlot(BackgroundEvent::Pressed(..))
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
         | Plant::TopPlot(TopEvent::Pressed(..))
-        | Plant::TopPlot(TopEvent::Released(..)) => Scope::All,
+        | Plant::TopPlot(TopEvent::Released(..))
+        | Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
         // CursorMoved is handled via throttled background tick; no direct redraw to avoid flood
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
         // ConfigTick is a cheap mtime check — redraw only on actual reload
