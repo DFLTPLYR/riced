@@ -3697,6 +3697,7 @@ dependencies = [
  "iced_wayland_subscriber",
  "serde",
  "toml",
+ "tracing-log",
  "tracing-subscriber",
  "wayland-client",
 ]

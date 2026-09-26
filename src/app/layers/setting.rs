@@ -1,10 +1,12 @@
 use crate::app::Plant;
-use crate::app::app::PlotInfo;
+use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
 use iced::widget::{Space, container};
 use iced::window;
 use iced::{Color, Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
+use iced_runtime::Action;
+use iced_runtime::window::Action as WindowAction;
 use std::collections::HashMap;
 
 /// Floating XDG toplevel for the Settings panel (spawned via `Plant::Sprout`).
@@ -19,22 +21,29 @@ impl Setting {
         String::from(Self::TITLE)
     }
 
-    /// Fresh id + default XDG settings for a new Settings window.
+    /// Fresh id + XDG settings for a new Settings window.
+    /// Client-side decorations: no compositor titlebar/frame (which would stay
+    /// opaque and unblurred) — the whole surface is ours to keep transparent.
+    /// Tradeoff: no X button, close via the context-menu/CLI toggle instead.
     pub fn open(&self) -> (window::Id, IcedXdgWindowSettings) {
-        (window::Id::unique(), IcedXdgWindowSettings::default())
+        (
+            window::Id::unique(),
+            IcedXdgWindowSettings {
+                client_side_decorations: true,
+                ..Default::default()
+            },
+        )
     }
 
-    /// Window translucency: `0.0` transparent, `1.0` opaque.
-    /// iced 0.14 has no opacity widget, so this is applied as a
-    /// translucent background (identical effect on an empty container).
-    pub const OPACITY: f32 = 0.5;
-
     pub fn view(&self, _id: window::Id) -> Element<'_, Plant> {
+        // Fully transparent root: with the daemon's transparent clear color
+        // (see `main.rs:.style`), Hyprland blur/opacity windowrules can see
+        // straight through this. Use `from_rgba(0,0,0,0.25)` for a frosted tint.
         container(Space::new())
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, Self::OPACITY).into()),
+                background: Some(Color::TRANSPARENT.into()),
                 ..Default::default()
             })
             .into()
@@ -71,5 +80,46 @@ impl Setting {
     ) -> bool {
         ids.remove(&id);
         settings.remove(&id).is_some()
+    }
+
+    /// Remove all tracked Settings windows. Returns the closed ids so the
+    /// caller can drop cursor/press state and emit idempotent Close effects.
+    /// (The compositor's X button path via `close_events -> Uproot` also
+    /// calls `remove`, so double-close is harmless.)
+    pub(crate) fn close_all(
+        settings: &mut HashMap<window::Id, Setting>,
+        ids: &mut HashMap<window::Id, PlotInfo>,
+    ) -> Vec<window::Id> {
+        let to_close: Vec<window::Id> = settings.keys().copied().collect();
+        for id in &to_close {
+            Self::remove(settings, ids, *id);
+        }
+        to_close
+    }
+
+    /// Toggle `Plant::Sprout` / CLI `open-settings`: spawn when none is open,
+    /// else close the current settings panel(s). Always closes the context
+    /// menu first (like `TopEvent::Sow`).
+    pub(crate) fn handle_toggle(plots: &mut Plots) -> Command<Plant> {
+        if let Some(cm) = &mut plots.context_menu {
+            cm.open = false;
+        }
+        if plots.settings.is_empty() {
+            return Self::handle_add(&mut plots.settings, &mut plots.ids, &mut plots.context_menu);
+        }
+        let to_close = Self::close_all(&mut plots.settings, &mut plots.ids);
+        let mut cmds = Vec::with_capacity(to_close.len());
+        for id in to_close {
+            plots.last_cursor.remove(&id);
+            plots.press_starts.remove(&id);
+            cmds.push(iced_runtime::task::effect(Action::Window(
+                WindowAction::Close(id),
+            )));
+        }
+        if cmds.is_empty() {
+            Command::none()
+        } else {
+            Command::batch(cmds)
+        }
     }
 }

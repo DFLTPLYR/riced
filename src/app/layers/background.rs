@@ -506,44 +506,44 @@ impl Background {
         contextmenu(
             plots.config.composable.context_menu.width,
             clamped_lx,
-            clamped_ly
+            clamped_ly,
         )
-            .padding(plots.config.composable.context_menu.padding)
-            .content(
-                column![
-                    button(text("Add Top").size(12).color(Color::WHITE))
-                        .on_press(Plant::TopPlot(TopEvent::Sow))
-                        .padding(plots.config.composable.context_menu_item.padding)
-                        .style(|_, _| button::Style {
-                            background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                color: Color::from_rgb(0.5, 0.5, 0.55),
-                                width: 1.0,
-                                radius: plots.config.composable.context_menu_item.rounding.into(),
-                            },
-                            ..Default::default()
-                        })
-                        .width(Fill),
-                    button(text("Open Settings").size(12).color(Color::WHITE))
-                        .on_press(Plant::Sprout)
-                        .padding(plots.config.composable.context_menu_item.padding)
-                        .style(|_, _| button::Style {
-                            background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                color: Color::from_rgb(0.5, 0.5, 0.55),
-                                width: 1.0,
-                                radius: plots.config.composable.context_menu_item.rounding.into(),
-                            },
-                            ..Default::default()
-                        })
-                        .width(Fill)
-                ]
-                .spacing(plots.config.composable.context_menu.spacing)
-                .width(Fill),
-            )
-            .into()
+        .padding(plots.config.composable.context_menu.padding)
+        .content(
+            column![
+                button(text("Add Top").size(12).color(Color::WHITE))
+                    .on_press(Plant::TopPlot(TopEvent::Sow))
+                    .padding(plots.config.composable.context_menu_item.padding)
+                    .style(|_, _| button::Style {
+                        background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            color: Color::from_rgb(0.5, 0.5, 0.55),
+                            width: 1.0,
+                            radius: plots.config.composable.context_menu_item.rounding.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .width(Fill),
+                button(text("Open Settings").size(12).color(Color::WHITE))
+                    .on_press(Plant::Sprout)
+                    .padding(plots.config.composable.context_menu_item.padding)
+                    .style(|_, _| button::Style {
+                        background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            color: Color::from_rgb(0.5, 0.5, 0.55),
+                            width: 1.0,
+                            radius: plots.config.composable.context_menu_item.rounding.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .width(Fill)
+            ]
+            .spacing(plots.config.composable.context_menu.spacing)
+            .width(Fill),
+        )
+        .into()
     }
 
     /// Debug label behind the overlays. Owns text + dim background styling.
@@ -581,7 +581,10 @@ impl Background {
                 .center_x(Fill)
                 .center_y(Fill)
                 .style(|_| container::Style {
-                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.10).into()),
+                    // Opaque on purpose: the daemon clears transparent (for the
+                    // Settings panel's Hyprland blur), so this layer must paint
+                    // its own backdrop or the wallpaper would show through.
+                    background: Some(Color::from_rgb(0.07, 0.07, 0.09).into()),
                     ..Default::default()
                 }),
             )

@@ -212,17 +212,13 @@ impl Plots {
             }
             Plant::Tend => Command::none(),
             Plant::Sprout => {
-                // Delegate to the Setting layer (closes context menu + spawns XDG toplevel).
-                Setting::handle_add(&mut self.settings, &mut self.ids, &mut self.context_menu)
+                // Toggle: spawn when none open, else close the current panel.
+                Setting::handle_toggle(self)
             }
             Plant::IpcPoll => {
                 // CLI client queued a request (`riced open-settings`).
                 match crate::cli::take_queued_command() {
-                    Some(crate::cli::QueuedCommand::OpenSettings) => Setting::handle_add(
-                        &mut self.settings,
-                        &mut self.ids,
-                        &mut self.context_menu,
-                    ),
+                    Some(crate::cli::QueuedCommand::OpenSettings) => Setting::handle_toggle(self),
                     None => Command::none(),
                 }
             }

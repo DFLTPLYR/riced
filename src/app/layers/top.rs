@@ -3,9 +3,9 @@ use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::composables::panel_window::top_window;
 use iced::mouse::Button;
-use iced::widget::text;
+use iced::widget::{container, text};
 use iced::window;
-use iced::{Element, Point, Task as Command};
+use iced::{Color, Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
@@ -144,8 +144,21 @@ impl Top {
     }
 
     pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
+        // Opaque bar background on purpose: the daemon clears transparent (for
+        // the Settings panel's Hyprland blur), so this layer must paint its own
+        // backdrop or the wallpaper would show through the bar.
         top_window(id)
-            .content(text(format!("{} BAR TEST", self.anchor_label())).size(30))
+            .content(
+                container(text(format!("{} BAR TEST", self.anchor_label())).size(30))
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+                    .style(|_| container::Style {
+                        background: Some(Color::from_rgb(0.10, 0.10, 0.12).into()),
+                        ..Default::default()
+                    }),
+            )
             .into()
     }
 

@@ -13,6 +13,10 @@ use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 
 pub fn main() -> Result<(), iced_exwlshell::Error> {
     tracing_subscriber::fmt().init();
+    // iced (wgpu, etc.) logs through the `log` facade, which is dropped
+    // entirely unless a backend is installed. Forward it into tracing so
+    // internals (e.g. the swapchain alpha-mode selection) are visible.
+    let _ = tracing_log::LogTracer::init();
     // Single-shot client: `riced open-settings` queues a request for the
     // running daemon through the command file, no surfaces involved.
     match cli::parse() {
@@ -49,6 +53,16 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
     )
     .title(Plots::title)
     .subscription(Plots::subscription)
+    // Transparent clear color: every frame is cleared with this before widgets
+    // blend onto it, so alpha < 1 here is what lets the compositor (Hyprland
+    // blur/opacity rules) see through the surface. The default theme base is
+    // opaque, which bakes alpha = 1.0 into every pixel no matter what translucent
+    // container colors the layers use. This is daemon-global, so Background/Top
+    // keep their opaque look via explicit root backgrounds in their own views.
+    .style(|_, _| iced::theme::Style {
+        background_color: iced::Color::TRANSPARENT,
+        text_color: iced::Color::WHITE,
+    })
     .settings(Settings {
         layer_settings: LayerShellSettings {
             // daemon's own surface is a tiny 1px placeholder (not used for selection)
