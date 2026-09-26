@@ -11,7 +11,7 @@ use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
 use super::layers::{Background, ContextMenu, SelectionRect, Setting, Top};
-use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, TopEvent};
+use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, SettingEvent, TopEvent};
 use crate::config::Config;
 use iced_wayland_subscriber::OutputInfo;
 
@@ -168,7 +168,7 @@ impl Plots {
         // Top windows render the bar. Daemon's tiny 1x1 window: empty.
         // Settings (XDG toplevel) renders its own panel (see layers/setting.rs).
         if let Some(setting) = self.settings.get(&id) {
-            return setting.view(id);
+            return setting.view(id, self);
         }
         match self.id_info(id) {
             Some(PlotInfo::Background(output)) => Background::view(self, id, output),
@@ -343,8 +343,19 @@ impl Plots {
                 self.config = cfg;
                 Command::none()
             }
+            Plant::Config(ConfigEvent::Patch(patch)) => {
+                // Single source of truth: mutate live config, persist (updating
+                // mtime so the poll tick doesn't echo it back), and redraw All
+                // so every subscribed view picks the new value up next frame.
+                self.config.apply(patch);
+                self.config_mtime = self.config.save().or(self.config_mtime);
+                Command::none()
+            }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
+            Plant::SettingPlot(SettingEvent::Select(id, page)) => {
+                Setting::handle_select(self, id, page)
+            }
             Plant::TopPlot(TopEvent::Sow) => {
                 // delegate to Top layer (closest-edge detection and spawn)
                 let menu_pos = self.context_menu.as_ref().map(|cm| Point::new(cm.x, cm.y));
@@ -384,7 +395,11 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // ConfigTick is a cheap mtime check — redraw only on actual reload.
         // IpcPoll just stats an (usually absent) file — same, no redraw.
         Plant::Config(ConfigEvent::ConfigTick) | Plant::IpcPoll => Scope::None,
-        Plant::Config(ConfigEvent::ConfigReloaded(_)) => Scope::All,
+        Plant::Config(ConfigEvent::ConfigReloaded(_)) | Plant::Config(ConfigEvent::Patch(_)) => {
+            Scope::All
+        }
+        // Settings page select only affects its own window.
+        Plant::SettingPlot(SettingEvent::Select(id, _)) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,
         Plant::Graft(_, _) => Scope::None,
         Plant::Wayland(_) => Scope::All,

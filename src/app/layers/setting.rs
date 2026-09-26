@@ -1,18 +1,48 @@
+use crate::app::ConfigEvent;
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
-use iced::widget::{Space, container};
+use crate::config::ConfigPatch;
+use iced::widget::{button, column, container, row, rule, slider, text};
 use iced::window;
 use iced::{Color, Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 /// Floating XDG toplevel for the Settings panel (spawned via `Plant::Sprout`).
 /// Mirrors `Top` / `Background`: spawn + view live here, `Plots` just delegates.
 #[derive(Debug, Default)]
-pub struct Setting;
+pub struct Setting {
+    page: SettingPage,
+}
+
+/// Master-detail pages: nav buttons on the left switch this, the right pane
+/// renders the matching controls. Stored per-window so each panel keeps its
+/// own selection (like `Top::thickness` lives on its own bar).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingPage {
+    #[default]
+    Menu,
+    Panel,
+    ContextMenu,
+}
+
+impl SettingPage {
+    fn all() -> [Self; 3] {
+        [Self::Menu, Self::Panel, Self::ContextMenu]
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Menu => "Menu",
+            Self::Panel => "Panel",
+            Self::ContextMenu => "Context Menu",
+        }
+    }
+}
 
 impl Setting {
     pub const TITLE: &'static str = "Riced Settings";
@@ -35,18 +65,182 @@ impl Setting {
         )
     }
 
-    pub fn view(&self, _id: window::Id) -> Element<'_, Plant> {
+    pub fn view(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+        // Master-detail: 30% nav buttons left, 70% page content right.
+        // (`row` is a macro — `row![a, b]` — not a function, and
+        // `keyed_column!` only keys children for diffing; it can't select.)
         // Fully transparent root: with the daemon's transparent clear color
         // (see `main.rs:.style`), Hyprland blur/opacity windowrules can see
         // straight through this. Use `from_rgba(0,0,0,0.25)` for a frosted tint.
-        container(Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(Color::TRANSPARENT.into()),
-                ..Default::default()
-            })
-            .into()
+        container(
+            row![self.nav(id), rule::vertical(2), self.content(plots)]
+                .spacing(12)
+                .padding(16),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(Color::TRANSPARENT.into()),
+            ..Default::default()
+        })
+        .into()
+    }
+
+    /// Left nav pane (30%): one button per page, highlighted when selected.
+    fn nav(&self, id: window::Id) -> Element<'_, Plant> {
+        let mut col = column![text("Settings").size(16)];
+        for page in SettingPage::all() {
+            let selected = page == self.page;
+            col = col.push(
+                button(text(page.title()).size(13).color(Color::WHITE))
+                    .width(Length::Fill)
+                    .on_press(Plant::SettingPlot(crate::app::SettingEvent::Select(
+                        id, page,
+                    )))
+                    .padding(8)
+                    .style(move |_, _| button::Style {
+                        background: Some(
+                            if selected {
+                                Color::from_rgb(0.35, 0.35, 0.40)
+                            } else {
+                                Color::from_rgb(0.25, 0.25, 0.28)
+                            }
+                            .into(),
+                        ),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            color: Color::from_rgb(0.5, 0.5, 0.55),
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+            );
+        }
+        col.spacing(8).width(Length::FillPortion(2)).into()
+    }
+
+    /// Right content pane (70%): live controls for the selected page. Each
+    /// slider reads the single `plots.config` source of truth and writes back
+    /// via `ConfigEvent::Patch`, so every layer updates on the next redraw.
+    fn content(&self, plots: &Plots) -> Element<'_, Plant> {
+        let c = &plots.config.composable;
+        match self.page {
+            SettingPage::Menu => column![
+                text("Menu").size(16),
+                slider_row(
+                    format!("Width {:.0}", c.menu.width),
+                    c.menu.width,
+                    80.0..=400.0,
+                    ConfigPatch::MenuWidth
+                ),
+                slider_row(
+                    format!("Height {:.0}", c.menu.height),
+                    c.menu.height,
+                    40.0..=200.0,
+                    ConfigPatch::MenuHeight
+                ),
+                slider_row(
+                    format!("Padding {:.0}", c.menu.padding),
+                    c.menu.padding,
+                    0.0..=32.0,
+                    ConfigPatch::MenuPadding
+                ),
+                slider_row(
+                    format!("Spacing {:.0}", c.menu.spacing),
+                    c.menu.spacing,
+                    0.0..=32.0,
+                    ConfigPatch::MenuSpacing
+                ),
+                slider_row(
+                    format!("Rounding {:.0}", c.menu.rounding),
+                    c.menu.rounding,
+                    0.0..=20.0,
+                    ConfigPatch::MenuRounding
+                ),
+            ]
+            .spacing(8)
+            .width(Length::FillPortion(8))
+            .into(),
+            SettingPage::Panel => column![
+                text("Panel").size(16),
+                slider_row(
+                    format!("Padding {:.0}", c.panel.padding),
+                    c.panel.padding,
+                    0.0..=32.0,
+                    ConfigPatch::PanelPadding
+                ),
+                slider_row(
+                    format!("Spacing {:.0}", c.panel.spacing),
+                    c.panel.spacing,
+                    0.0..=32.0,
+                    ConfigPatch::PanelSpacing
+                ),
+                slider_row(
+                    format!("Rounding {:.0}", c.panel.rounding),
+                    c.panel.rounding,
+                    0.0..=20.0,
+                    ConfigPatch::PanelRounding
+                ),
+            ]
+            .spacing(8)
+            .width(Length::FillPortion(8))
+            .into(),
+            SettingPage::ContextMenu => column![
+                text("Context Menu").size(16),
+                slider_row(
+                    format!("Width {:.0}", c.context_menu.width),
+                    c.context_menu.width,
+                    80.0..=400.0,
+                    ConfigPatch::ContextMenuWidth
+                ),
+                slider_row(
+                    format!("Padding {:.0}", c.context_menu.padding),
+                    c.context_menu.padding,
+                    0.0..=32.0,
+                    ConfigPatch::ContextMenuPadding
+                ),
+                slider_row(
+                    format!("Spacing {:.0}", c.context_menu.spacing),
+                    c.context_menu.spacing,
+                    0.0..=32.0,
+                    ConfigPatch::ContextMenuSpacing
+                ),
+                slider_row(
+                    format!("Rounding {:.0}", c.context_menu.rounding),
+                    c.context_menu.rounding,
+                    0.0..=20.0,
+                    ConfigPatch::ContextMenuRounding
+                ),
+                slider_row(
+                    format!("Item padding {:.0}", c.context_menu_item.padding),
+                    c.context_menu_item.padding,
+                    0.0..=32.0,
+                    ConfigPatch::ContextMenuItemPadding
+                ),
+                slider_row(
+                    format!("Item rounding {:.0}", c.context_menu_item.rounding),
+                    c.context_menu_item.rounding,
+                    0.0..=20.0,
+                    ConfigPatch::ContextMenuItemRounding
+                ),
+            ]
+            .spacing(8)
+            .width(Length::FillPortion(8))
+            .into(),
+        }
+    }
+
+    /// Switch the selected page on `SettingEvent::Select`.
+    pub(crate) fn handle_select(
+        plots: &mut Plots,
+        id: window::Id,
+        page: SettingPage,
+    ) -> Command<Plant> {
+        if let Some(setting) = plots.settings.get_mut(&id) {
+            setting.page = page;
+        }
+        Command::none()
     }
 
     /// Handle `Plant::Sprout`: close the context menu (like `TopEvent::Sow`),
@@ -61,7 +255,7 @@ impl Setting {
         if let Some(cm) = context_menu {
             cm.open = false;
         }
-        let setting = Setting;
+        let setting = Setting::default();
         let (id, xdg_settings) = setting.open();
         settings.insert(id, setting);
         ids.insert(id, PlotInfo::Setting);
@@ -122,4 +316,25 @@ impl Setting {
             Command::batch(cmds)
         }
     }
+}
+
+/// Label + slider bound to one config leaf: reads the live value, writes back
+/// via `ConfigEvent::Patch`. Fully owned element, so pages compose freely.
+/// The variant constructor doubles as the patch fn (`ConfigPatch::MenuWidth`
+/// is `fn(f32) -> ConfigPatch`).
+fn slider_row(
+    label: String,
+    value: f32,
+    range: RangeInclusive<f64>,
+    ctor: fn(f32) -> ConfigPatch,
+) -> Element<'static, Plant> {
+    column![
+        text(label).size(13).color(Color::WHITE),
+        slider(range, value as f64, move |v| {
+            Plant::Config(ConfigEvent::Patch(ctor(v as f32)))
+        })
+        .width(Length::Fill),
+    ]
+    .spacing(4)
+    .into()
 }

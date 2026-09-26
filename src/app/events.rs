@@ -31,6 +31,9 @@ pub enum LandEvent {
 pub enum ConfigEvent {
     ConfigTick,
     ConfigReloaded(crate::config::Config),
+    /// Runtime edit from a Settings-panel control. Applied to the single
+    /// live config, persisted, and broadcast via full redraw.
+    Patch(crate::config::ConfigPatch),
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +55,11 @@ pub enum BackgroundEvent {
     Released(Id, Button),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SettingEvent {
+    Select(Id, crate::app::layers::SettingPage),
+}
+
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Plant {
@@ -67,6 +75,7 @@ pub enum Plant {
     // Layers/Plots
     TopPlot(TopEvent),
     BackgroundPlot(BackgroundEvent),
+    SettingPlot(SettingEvent),
     // Config
     Config(ConfigEvent),
 }

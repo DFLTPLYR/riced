@@ -162,6 +162,29 @@ impl Default for Config {
     }
 }
 
+/// A single runtime edit to the live config (e.g. from a Settings-panel
+/// control). Applied to the single `Plots::config` source of truth, then
+/// broadcast via full redraw — every view re-reads `plots.config`, so all
+/// components pick the new value up on the next frame. No per-component
+/// subscription registry needed; iced views are pure functions of state.
+#[derive(Debug, Clone, Copy)]
+pub enum ConfigPatch {
+    MenuWidth(f32),
+    MenuHeight(f32),
+    MenuPadding(f32),
+    MenuSpacing(f32),
+    MenuRounding(f32),
+    PanelPadding(f32),
+    PanelSpacing(f32),
+    PanelRounding(f32),
+    ContextMenuWidth(f32),
+    ContextMenuPadding(f32),
+    ContextMenuSpacing(f32),
+    ContextMenuRounding(f32),
+    ContextMenuItemPadding(f32),
+    ContextMenuItemRounding(f32),
+}
+
 /// `~/.config/riced/config.toml` (`$XDG_CONFIG_HOME` aware).
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
@@ -229,6 +252,47 @@ impl Config {
             }
         }
         None
+    }
+
+    /// Apply a runtime [`ConfigPatch`] to the live config in place.
+    pub fn apply(&mut self, patch: ConfigPatch) {
+        let c = &mut self.composable;
+        match patch {
+            ConfigPatch::MenuWidth(v) => c.menu.width = v,
+            ConfigPatch::MenuHeight(v) => c.menu.height = v,
+            ConfigPatch::MenuPadding(v) => c.menu.padding = v,
+            ConfigPatch::MenuSpacing(v) => c.menu.spacing = v,
+            ConfigPatch::MenuRounding(v) => c.menu.rounding = v,
+            ConfigPatch::PanelPadding(v) => c.panel.padding = v,
+            ConfigPatch::PanelSpacing(v) => c.panel.spacing = v,
+            ConfigPatch::PanelRounding(v) => c.panel.rounding = v,
+            ConfigPatch::ContextMenuWidth(v) => c.context_menu.width = v,
+            ConfigPatch::ContextMenuPadding(v) => c.context_menu.padding = v,
+            ConfigPatch::ContextMenuSpacing(v) => c.context_menu.spacing = v,
+            ConfigPatch::ContextMenuRounding(v) => c.context_menu.rounding = v,
+            ConfigPatch::ContextMenuItemPadding(v) => c.context_menu_item.padding = v,
+            ConfigPatch::ContextMenuItemRounding(v) => c.context_menu_item.rounding = v,
+        }
+    }
+
+    /// Persist the live config to [`config_path`], returning the new mtime
+    /// (so the hot-reload poll doesn't immediately "reload" what we wrote).
+    /// Best-effort: failures log and keep serving memory state.
+    pub fn save(&self) -> Option<SystemTime> {
+        let path = config_path();
+        match toml::to_string_pretty(self) {
+            Ok(text) => {
+                if let Err(e) = std::fs::write(&path, text) {
+                    eprintln!("config: cannot write {}: {e}", path.display());
+                    return read_mtime(&path);
+                }
+                read_mtime(&path)
+            }
+            Err(e) => {
+                eprintln!("config: cannot serialize: {e}");
+                None
+            }
+        }
     }
 }
 
@@ -308,5 +372,18 @@ mod tests {
         // Old flat keys are unknown fields, which serde ignores.
         let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\n").unwrap();
         assert_eq!(cfg.composable.menu.width, 180.0);
+    }
+
+    #[test]
+    fn patch_updates_only_the_targeted_leaf() {
+        let mut cfg = Config::default();
+        cfg.apply(ConfigPatch::PanelRounding(6.0));
+        assert_eq!(cfg.composable.panel.rounding, 6.0);
+        // everything else untouched
+        assert_eq!(cfg.composable.menu.width, 180.0);
+        assert_eq!(cfg.composable.panel.padding, 0.0);
+        cfg.apply(ConfigPatch::MenuWidth(250.0));
+        assert_eq!(cfg.composable.menu.width, 250.0);
+        assert_eq!(cfg.composable.panel.rounding, 6.0);
     }
 }
