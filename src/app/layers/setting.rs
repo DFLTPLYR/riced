@@ -1,9 +1,11 @@
+use super::background::Background;
 use crate::app::ConfigEvent;
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
+use crate::components::display_map::{MapView, images_layer, outputs_layer};
 use crate::config::ConfigPatch;
-use iced::widget::{button, column, container, row, rule, slider, text};
+use iced::widget::{Space, button, column, container, row, rule, slider, stack, text};
 use iced::window;
 use iced::{Color, Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
@@ -17,6 +19,10 @@ use std::ops::RangeInclusive;
 #[derive(Debug, Default)]
 pub struct Setting {
     page: SettingPage,
+    /// Pan/zoom/drag view for the Background map. Single source of truth for
+    /// both stacked canvas programs (canvas `State` can't be shared across
+    /// the two widgets), updated via `SettingEvent::MapViewChanged`.
+    map_view: MapView,
 }
 
 /// Master-detail pages: nav buttons on the left switch this, the right pane
@@ -28,11 +34,12 @@ pub enum SettingPage {
     Menu,
     Panel,
     ContextMenu,
+    Background,
 }
 
 impl SettingPage {
-    fn all() -> [Self; 3] {
-        [Self::Menu, Self::Panel, Self::ContextMenu]
+    fn all() -> [Self; 4] {
+        [Self::Menu, Self::Panel, Self::ContextMenu, Self::Background]
     }
 
     fn title(self) -> &'static str {
@@ -40,6 +47,7 @@ impl SettingPage {
             Self::Menu => "Menu",
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
+            Self::Background => "Background",
         }
     }
 }
@@ -73,7 +81,7 @@ impl Setting {
         // (see `main.rs:.style`), Hyprland blur/opacity windowrules can see
         // straight through this. Use `from_rgba(0,0,0,0.25)` for a frosted tint.
         container(
-            row![self.nav(id), rule::vertical(2), self.content(plots)]
+            row![self.nav(id), rule::vertical(2), self.content(id, plots)]
                 .spacing(12)
                 .padding(16),
         )
@@ -123,7 +131,7 @@ impl Setting {
     /// Right content pane (70%): live controls for the selected page. Each
     /// slider reads the single `plots.config` source of truth and writes back
     /// via `ConfigEvent::Patch`, so every layer updates on the next redraw.
-    fn content(&self, plots: &Plots) -> Element<'_, Plant> {
+    fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         let c = &plots.config.composable;
         match self.page {
             SettingPage::Menu => column![
@@ -228,7 +236,68 @@ impl Setting {
             .spacing(8)
             .width(Length::FillPortion(8))
             .into(),
+            SettingPage::Background => self.background_content(id, plots),
         }
+    }
+
+    fn background_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+        // Snapshot output geometry (global logical coords) and wallpaper
+        // entries into the map programs, outputs sorted for stable numbering.
+        // Hot-plug / config edits arrive via the next redraw rebuilding them.
+        // Two stacked canvases: `stack!` pushes a new render layer per child,
+        // so (and only so) the output overlay paints over wallpaper pixels —
+        // `iced_wgpu` draws all quads before all images within one layer.
+        let mut outputs: Vec<(f32, f32, f32, f32)> = plots
+            .output_infos
+            .values()
+            .map(Background::output_geometry)
+            .collect();
+        outputs.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+        let images = plots.config.background.image.clone();
+        let handles: Vec<Option<iced::widget::image::Handle>> = images
+            .iter()
+            .map(|img| plots.wallpaper_handle(img))
+            .collect();
+        let view = self.map_view;
+        column![
+            container(stack![
+                images_layer(id, outputs.clone(), images.clone(), handles.clone(), view),
+                outputs_layer(id, outputs, images, handles, view),
+            ])
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
+                border: iced::Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.55),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            })
+            .height(Length::FillPortion(6))
+            .width(Length::Fill),
+            container(Space::new())
+                .style(|_| container::Style {
+                    background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
+                    border: iced::Border {
+                        color: Color::from_rgb(0.5, 0.5, 0.55),
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .height(Length::FillPortion(4))
+                .width(Length::Fill)
+        ]
+        .spacing(8)
+        .height(Length::FillPortion(6))
+        .width(Length::FillPortion(8))
+        .into()
+    }
+
+    /// Replace the map pan/zoom/drag view (`MapViewChanged`). Field stays
+    /// private; `Plots` writes through here like cursor maps elsewhere.
+    pub(crate) fn set_map_view(&mut self, view: MapView) {
+        self.map_view = view;
     }
 
     /// Switch the selected page on `SettingEvent::Select`.

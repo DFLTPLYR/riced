@@ -1,9 +1,11 @@
 use iced::widget::Space;
+use iced::widget::image::Handle;
 use iced::{Element, Event, Point, Task as Command};
 use iced_exwlshell::redraw::Scope;
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,7 +14,7 @@ use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
 use super::layers::{Background, ContextMenu, SelectionRect, Setting, Top};
 use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, SettingEvent, TopEvent};
-use crate::config::Config;
+use crate::config::{Config, ConfigPatch};
 use iced_wayland_subscriber::OutputInfo;
 
 static LAST_MOUSE_MOVE: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
@@ -70,6 +72,12 @@ pub struct Plots {
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
+    // Pre-decoded wallpaper pixels keyed by resolved path. File-backed
+    // handles decode on a worker whose completion redraw the shell drops,
+    // leaving first paint blank — serving `from_rgba` instead loads
+    // synchronously, so pixels exist on the very first frame. Synced from
+    // `config.background.image` on load/reload/patch (below).
+    pub(crate) wallpapers: HashMap<PathBuf, Handle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -82,6 +90,8 @@ pub(crate) enum PlotInfo {
 impl Plots {
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
+        let mut wallpapers = HashMap::new();
+        Self::sync_wallpapers(&config, &mut wallpapers);
         Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
@@ -99,7 +109,37 @@ impl Plots {
             press_starts: HashMap::new(),
             config,
             config_mtime,
+            wallpapers,
         }
+    }
+
+    /// Decode pass over `config.background.image`: drop entries whose paths
+    /// vanished, synchronously decode new ones into pre-warmed Handles.
+    /// Called on startup, hot-reload, and image add/remove patches — never on
+    /// move/scale/z (same pixels, new rect).
+    fn sync_wallpapers(config: &Config, wallpapers: &mut HashMap<PathBuf, Handle>) {
+        let live: Vec<PathBuf> = config
+            .background
+            .image
+            .iter()
+            .map(|img| img.local_path())
+            .collect();
+        wallpapers.retain(|path, _| live.contains(path));
+        for img in &config.background.image {
+            let path = img.local_path();
+            if path.as_os_str().is_empty() || wallpapers.contains_key(&path) {
+                continue;
+            }
+            if let Some((_w, _h, handle)) = crate::config::decode_handle(&path) {
+                wallpapers.insert(path, handle);
+            }
+        }
+    }
+
+    /// Pre-warmed [`Handle`] for an image entry, or `None` when its file
+    /// failed to decode (caller skips the entry, same as before).
+    pub(crate) fn wallpaper_handle(&self, img: &crate::config::BackgroundImage) -> Option<Handle> {
+        self.wallpapers.get(&img.local_path()).cloned()
     }
 
     pub fn id_info(&self, id: iced::window::Id) -> Option<PlotInfo> {
@@ -341,13 +381,23 @@ impl Plots {
             }
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
                 self.config = cfg;
+                Self::sync_wallpapers(&self.config, &mut self.wallpapers);
                 Command::none()
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
                 // Single source of truth: mutate live config, persist (updating
                 // mtime so the poll tick doesn't echo it back), and redraw All
                 // so every subscribed view picks the new value up next frame.
+                // Image add/remove re-syncs the pre-decoded wallpaper cache;
+                // move/scale/z reuse the same pixels.
+                let sync = matches!(
+                    patch,
+                    ConfigPatch::AddImage(_) | ConfigPatch::RemoveImage { .. }
+                );
                 self.config.apply(patch);
+                if sync {
+                    Self::sync_wallpapers(&self.config, &mut self.wallpapers);
+                }
                 self.config_mtime = self.config.save().or(self.config_mtime);
                 Command::none()
             }
@@ -355,6 +405,12 @@ impl Plots {
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
             Plant::SettingPlot(SettingEvent::Select(id, page)) => {
                 Setting::handle_select(self, id, page)
+            }
+            Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
+                if let Some(setting) = self.settings.get_mut(&id) {
+                    setting.set_map_view(view);
+                }
+                Command::none()
             }
             Plant::TopPlot(TopEvent::Sow) => {
                 // delegate to Top layer (closest-edge detection and spawn)
@@ -398,8 +454,10 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::Config(ConfigEvent::ConfigReloaded(_)) | Plant::Config(ConfigEvent::Patch(_)) => {
             Scope::All
         }
-        // Settings page select only affects its own window.
-        Plant::SettingPlot(SettingEvent::Select(id, _)) => Scope::Window(*id),
+        // Settings page select / map pan-zoom only affects its own window.
+        Plant::SettingPlot(
+            SettingEvent::Select(id, _) | SettingEvent::MapViewChanged { id, .. },
+        ) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,
         Plant::Graft(_, _) => Scope::None,
         Plant::Wayland(_) => Scope::All,

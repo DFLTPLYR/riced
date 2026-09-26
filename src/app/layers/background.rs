@@ -1,6 +1,7 @@
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::{BackgroundEvent, Plant, TopEvent};
 use iced::mouse::Button;
+use iced::widget::image::Image;
 use iced::widget::{Space, button, column, container, stack, text};
 use iced::window;
 use iced::{Color, Element, Fill, Length, Point, Task as Command};
@@ -581,10 +582,10 @@ impl Background {
                 .center_x(Fill)
                 .center_y(Fill)
                 .style(|_| container::Style {
-                    // Opaque on purpose: the daemon clears transparent (for the
-                    // Settings panel's Hyprland blur), so this layer must paint
-                    // its own backdrop or the wallpaper would show through.
-                    background: Some(Color::from_rgb(0.07, 0.07, 0.09).into()),
+                    // Transparent now that wallpapers paint below: the debug
+                    // label floats over them. (Falls back to whatever is
+                    // behind the layer when no image is configured.)
+                    background: Some(Color::TRANSPARENT.into()),
                     ..Default::default()
                 }),
             )
@@ -595,13 +596,70 @@ impl Background {
         let avail =
             Self::available_rect_or_fallback(output, &plots.output_infos, &plots.tops, &plots.ids);
 
+        // Bottom of the stack is wallpaper images (QML `Background`), then
+        // the debug label, selection, and menu overlays on top.
+        let mut layers = Self::wallpaper_views(plots, avail);
+        layers.push(Self::bg_label_view(plots, id, avail));
+        layers.push(Self::selection_overlay(plots, avail));
+        layers.push(Self::context_menu_overlay(plots, avail));
+
         // Content lives in the helpers above; the panel owns Fill + events.
-        background_window(id)
-            .content(stack(vec![
-                Self::bg_label_view(plots, id, avail),
-                Self::selection_overlay(plots, avail),
-                Self::context_menu_overlay(plots, avail),
-            ]))
-            .into()
+        background_window(id).content(stack(layers)).into()
+    }
+
+    /// Wallpaper images cropped to their overlap with THIS output's available
+    /// rect, ascending `z` (later paints on top). Each crop is positioned at
+    /// its overlap-local offset — always ≥ 0 inside this output — so no
+    /// negative-padding tricks are needed and the surface clips the rest.
+    fn wallpaper_views(plots: &Plots, avail: (f32, f32, f32, f32)) -> Vec<Element<'_, Plant>> {
+        use crate::components::display_map::MapLayer;
+
+        let (ax, ay, _, _) = avail;
+        let mut order: Vec<usize> = (0..plots.config.background.image.len()).collect();
+        order.sort_by_key(|&i| plots.config.background.image[i].z);
+        let mut views = Vec::new();
+        for i in order {
+            let img = &plots.config.background.image[i];
+            // Pre-warmed Handle: file-backed handles decode on a worker whose
+            // completion redraw the shell drops, leaving first paint blank.
+            let handle = match plots.wallpaper_handle(img) {
+                Some(handle) => handle,
+                None => continue,
+            };
+            let (ix, iy, iw, ih) = match MapLayer::resolved(img) {
+                Some(rect) => rect,
+                None => continue,
+            };
+            let native = match MapLayer::native_size(img) {
+                Some(size) => size,
+                None => continue,
+            };
+            let (ox, oy, ow, oh) = match MapLayer::overlap((ix, iy, iw, ih), avail) {
+                Some(overlap) => overlap,
+                None => continue,
+            };
+            let crop = match MapLayer::crop_for((ix, iy, iw, ih), native, (ox, oy, ow, oh)) {
+                Some(crop) => crop,
+                None => continue,
+            };
+            views.push(
+                container(
+                    Image::new(handle)
+                        .crop(crop)
+                        .width(Length::Fixed(ow))
+                        .height(Length::Fixed(oh)),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding {
+                    top: oy - ay,
+                    left: ox - ax,
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+            );
+        }
+        views
     }
 }

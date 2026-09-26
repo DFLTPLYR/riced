@@ -58,6 +58,10 @@ pub enum BackgroundEvent {
 #[derive(Debug, Clone, Copy)]
 pub enum SettingEvent {
     Select(Id, crate::app::layers::SettingPage),
+    MapViewChanged {
+        id: Id,
+        view: crate::components::display_map::MapView,
+    },
 }
 
 #[to_layer_message(multi)]

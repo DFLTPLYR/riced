@@ -87,22 +87,22 @@ mod tests {
     #[test]
     fn parses_open_settings_and_alias() {
         assert_eq!(
-            Cli::try_parse_from(["riced", "open-settings"]).unwrap().command,
+            Cli::try_parse_from(["riced", "open-settings"])
+                .unwrap()
+                .command,
             Some(Commands::OpenSettings)
         );
         assert_eq!(
             Cli::try_parse_from(["riced", "settings"]).unwrap().command,
             Some(Commands::OpenSettings)
         );
-        assert_eq!(
-            Cli::try_parse_from(["riced"]).unwrap().command,
-            None
-        );
+        assert_eq!(Cli::try_parse_from(["riced"]).unwrap().command, None);
     }
 
     #[test]
     fn queue_take_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("riced-test-{}", std::process::id()));
+        // Own subdir: tests run in parallel and each removes its dir at the end.
+        let dir = std::env::temp_dir().join(format!("riced-test-{}-roundtrip", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("roundtrip.cmd");
         let _ = std::fs::remove_file(&path);
@@ -116,7 +116,8 @@ mod tests {
 
     #[test]
     fn unknown_command_is_dropped() {
-        let dir = std::env::temp_dir().join(format!("riced-test-{}", std::process::id()));
+        // Own subdir: tests run in parallel and each removes its dir at the end.
+        let dir = std::env::temp_dir().join(format!("riced-test-{}-unknown", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("unknown.cmd");
         std::fs::write(&path, "bogus\n").unwrap();

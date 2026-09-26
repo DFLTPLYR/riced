@@ -15,6 +15,13 @@ iced = { version = "0.14.0", features = [
   "wayland",
 ] }
 iced_runtime = "0.14.0"
+# Enables Frame::draw_image in both wgpu and tiny-skia backends (used by the
+# settings display map to paint wallpaper previews on canvas).
+iced_renderer = { version = "0.14.0", features = ["image"] }
+# Header-only native-size lookup for wallpaper entries without width/height.
+image = "0.25"
+# Decoded RGBA bytes for pre-warmed wallpaper Handles.
+bytes = "1"
 iced_exwlshell = "0.20.1"
 tracing-subscriber = "0.3.23"
 tracing-log = "0.2"
