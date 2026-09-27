@@ -300,7 +300,9 @@ impl Setting {
         self.map_view = view;
     }
 
-    /// Switch the selected page on `SettingEvent::Select`.
+    /// Switch the selected page on `SettingEvent::Select`. Opening the
+    /// Wallpaper page builds the map canvases fresh, whose first frames can
+    /// go out empty like new Background surfaces — schedule the same heals.
     pub(crate) fn handle_select(
         plots: &mut Plots,
         id: window::Id,
@@ -308,6 +310,9 @@ impl Setting {
     ) -> Command<Plant> {
         if let Some(setting) = plots.settings.get_mut(&id) {
             setting.page = page;
+        }
+        if page == SettingPage::Background {
+            return Plots::repaint_after(80);
         }
         Command::none()
     }

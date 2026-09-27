@@ -230,6 +230,16 @@ impl Background {
     // Plots just delegates: `Background::handle_graft(plots, id, event)`.
     // ------------------------------------------------------------------
 
+    /// Delayed-heal tick (see `Plots::repaint_burst`): the surface, its
+    /// configure, or an image upload wasn't ready when the creation
+    /// message's redraw ran, so a timer re-requests a full redraw. Bumps
+    /// `repaint_seq` so the heal is a real state transition rather than a
+    /// silent no-op; the redraw itself comes from `redraw_scope => Scope::All`.
+    pub(crate) fn repaint(plots: &mut Plots) -> Command<Plant> {
+        plots.repaint_seq += 1;
+        Command::none()
+    }
+
     fn last_local(plots: &Plots, id: window::Id) -> Point {
         LAST_CURSOR_GLOBAL
             .lock()
@@ -466,9 +476,7 @@ impl Background {
             // as a sliced/broken corner — those go square instead.
             let gx = cx + ax;
             let gy = cy + ay;
-            let inside = |px: f32, py: f32| {
-                px >= ax && px <= ax + aw && py >= ay && py <= ay + ah
-            };
+            let inside = |px: f32, py: f32| px >= ax && px <= ax + aw && py >= ay && py <= ay + ah;
             let r = plots.config.composable.panel.rounding;
             let radius = iced::border::Radius {
                 top_left: if inside(gx, gy) { r } else { 0.0 },

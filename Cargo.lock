@@ -3699,6 +3699,7 @@ dependencies = [
  "iced_wayland_subscriber",
  "image",
  "serde",
+ "tokio",
  "toml",
  "tracing-log",
  "tracing-subscriber",

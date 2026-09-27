@@ -31,3 +31,6 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
+# Timer for post-creation repaint heals (BackgroundEvent::Repaint).
+# Already in the tree via iced; unified features, no duplicate crate.
+tokio = { version = "1", features = ["time"] }

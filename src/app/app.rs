@@ -78,6 +78,9 @@ pub struct Plots {
     // synchronously, so pixels exist on the very first frame. Synced from
     // `config.background.image` on load/reload/patch (below).
     pub(crate) wallpapers: HashMap<PathBuf, Handle>,
+    // Generation bumped by every `BackgroundEvent::Repaint` heal so the
+    // delayed redraw is a real state transition, not a silent no-op.
+    pub(crate) repaint_seq: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,6 +113,7 @@ impl Plots {
             config,
             config_mtime,
             wallpapers,
+            repaint_seq: 0,
         }
     }
 
@@ -117,6 +121,15 @@ impl Plots {
     /// vanished, synchronously decode new ones into pre-warmed Handles.
     /// Called on startup, hot-reload, and image add/remove patches — never on
     /// move/scale/z (same pixels, new rect).
+    /// Decode pass over `config.background.image`: drop entries whose paths
+    /// vanished, decode new ones into pre-warmed Handles.
+    /// Called on startup, hot-reload, and image add/remove patches — never on
+    /// move/scale/z (same pixels, new rect).
+    ///
+    /// Missing entries decode on scoped threads: each `image::open` + RGBA
+    /// conversion is independent and CPU-heavy, so a sequential loop stalls
+    /// linearly per image file. One thread per missing path, joined before
+    /// returning.
     fn sync_wallpapers(config: &Config, wallpapers: &mut HashMap<PathBuf, Handle>) {
         let live: Vec<PathBuf> = config
             .background
@@ -125,21 +138,69 @@ impl Plots {
             .map(|img| img.local_path())
             .collect();
         wallpapers.retain(|path, _| live.contains(path));
+        let mut missing: Vec<PathBuf> = Vec::new();
         for img in &config.background.image {
             let path = img.local_path();
-            if path.as_os_str().is_empty() || wallpapers.contains_key(&path) {
+            if path.as_os_str().is_empty()
+                || wallpapers.contains_key(&path)
+                || missing.contains(&path)
+            {
                 continue;
             }
-            if let Some((_w, _h, handle)) = crate::config::decode_handle(&path) {
-                wallpapers.insert(path, handle);
-            }
+            missing.push(path);
         }
+        if missing.is_empty() {
+            return;
+        }
+        std::thread::scope(|s| {
+            let jobs: Vec<_> = missing
+                .into_iter()
+                .map(|path| {
+                    s.spawn(move || {
+                        let decoded = crate::config::decode_handle(&path);
+                        (path, decoded)
+                    })
+                })
+                .collect();
+            for job in jobs {
+                match job.join() {
+                    Ok((path, Some((_w, _h, handle)))) => {
+                        wallpapers.insert(path, handle);
+                    }
+                    Ok((_, None)) => {}
+                    Err(_) => eprintln!("riced: wallpaper decode thread failed, skipping"),
+                }
+            }
+        });
     }
 
     /// Pre-warmed [`Handle`] for an image entry, or `None` when its file
     /// failed to decode (caller skips the entry, same as before).
     pub(crate) fn wallpaper_handle(&self, img: &crate::config::BackgroundImage) -> Option<Handle> {
         self.wallpapers.get(&img.local_path()).cloned()
+    }
+
+    /// Delayed full redraws after a Background surface is created (see
+    /// `BackgroundEvent::Repaint`). The new surface doesn't exist yet when
+    /// its own creation message's redraw is processed, so schedule
+    /// follow-ups covering late configures and pending uploads.
+    pub(crate) fn repaint_after(millis: u64) -> Command<Plant> {
+        Command::perform(tokio::time::sleep(Duration::from_millis(millis)), |()| {
+            Plant::BackgroundPlot(BackgroundEvent::Repaint)
+        })
+    }
+
+    /// Burst of delayed heals covering late configures, slow GPU init, and
+    /// pending image uploads on slow startups. Fixed timers are inherently
+    /// racy, so this is (re)scheduled at every signal that the surface or
+    /// its geometry may have (re)appeared: `OutputAdded`, geometry-changing
+    /// `OutputUpdated`, and `NewShell` for a Background window.
+    pub(crate) fn repaint_burst() -> Command<Plant> {
+        Command::batch(vec![
+            Self::repaint_after(80),
+            Self::repaint_after(500),
+            Self::repaint_after(1500),
+        ])
     }
 
     pub fn id_info(&self, id: iced::window::Id) -> Option<PlotInfo> {
@@ -283,6 +344,7 @@ impl Plots {
                     output_id,
                 ) {
                     cmds.push(cmd);
+                    cmds.push(Self::repaint_burst());
                 }
                 // No auto Top bar on start - user creates via Add Top context menu
                 if cmds.is_empty() {
@@ -293,8 +355,21 @@ impl Plots {
             }
             Plant::Wayland(LandEvent::OutputUpdated(output)) => {
                 let output_id = OutputId::from(&output);
+                // Real geometry (logical position/size) often arrives here,
+                // after the Added-time burst already fired against placeholder
+                // values and computed the wrong overlap rects — heal again.
+                let geom_changed = self
+                    .output_infos
+                    .get(&output_id)
+                    .map(Background::output_geometry)
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0))
+                    != Background::output_geometry(&output);
                 self.output_infos.insert(output_id, output);
-                Command::none()
+                if geom_changed {
+                    Self::repaint_burst()
+                } else {
+                    Command::none()
+                }
             }
             Plant::Wayland(LandEvent::OutputRemoved(output)) => {
                 let output_id = OutputId::from(&output);
@@ -326,7 +401,19 @@ impl Plots {
                     Command::batch(cmds)
                 }
             }
-            Plant::Wayland(LandEvent::NewShell(_)) => Command::none(),
+            Plant::Wayland(LandEvent::NewShell(info)) => {
+                // The layer surface actually exists now — the Added-time heals
+                // may have fired before its configure. Heal only for our own
+                // Background windows.
+                if matches!(
+                    self.ids.get(&info.window),
+                    Some(PlotInfo::Background(_))
+                ) {
+                    Self::repaint_burst()
+                } else {
+                    Command::none()
+                }
+            }
             Plant::Wayland(LandEvent::Closed(_)) => Command::none(),
             Plant::Wayland(LandEvent::WindowOutputChanged { .. }) => Command::none(),
             Plant::Wayland(LandEvent::Locked) => Command::none(),
@@ -365,6 +452,7 @@ impl Plots {
                 }
                 Command::none()
             }
+            Plant::BackgroundPlot(BackgroundEvent::Repaint) => Background::repaint(self),
             Plant::BackgroundPlot(BackgroundEvent::Pressed(id, button)) => {
                 Background::handle_panel_button(self, id, button, true)
             }
@@ -439,6 +527,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
         // Background selection tick is throttled drag update — must redraw all outputs
         Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => Scope::All,
+        // Post-creation heal (see `repaint_burst`): full redraw; the handler
+        // also bumps `repaint_seq` so the heal is a real state transition.
+        Plant::BackgroundPlot(BackgroundEvent::Repaint) => Scope::All,
         // PanelWindow press/release changes selecting/context_menu/hold → All.
         // A Graft release also ends selection via the safety net → All.
         Plant::BackgroundPlot(BackgroundEvent::Pressed(..))

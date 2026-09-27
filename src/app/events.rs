@@ -51,6 +51,7 @@ pub enum TopEvent {
 pub enum BackgroundEvent {
     Sow,
     SelectionTick,
+    Repaint,
     Pressed(Id, Button),
     Released(Id, Button),
 }
