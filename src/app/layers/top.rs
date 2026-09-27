@@ -174,7 +174,11 @@ impl Top {
         Command::none()
     }
 
-    pub(crate) fn handle_press(plots: &mut Plots, id: window::Id, button: Button) -> Command<Plant> {
+    pub(crate) fn handle_press(
+        plots: &mut Plots,
+        id: window::Id,
+        button: Button,
+    ) -> Command<Plant> {
         if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }
@@ -183,7 +187,11 @@ impl Top {
         Command::none()
     }
 
-    pub(crate) fn handle_release(plots: &mut Plots, id: window::Id, button: Button) -> Command<Plant> {
+    pub(crate) fn handle_release(
+        plots: &mut Plots,
+        id: window::Id,
+        button: Button,
+    ) -> Command<Plant> {
         if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }

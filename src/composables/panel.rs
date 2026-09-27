@@ -10,22 +10,12 @@ use iced::{Element, Fill, Length, Padding};
 ///     .content(text("TOP BAR"))
 ///     .into()
 /// ```
+#[derive(Default)]
 pub struct Panel<'a> {
     content: Option<Element<'a, Plant>>,
     padding: Option<Padding>,
     width: Option<Length>,
     height: Option<Length>,
-}
-
-impl<'a> Default for Panel<'a> {
-    fn default() -> Self {
-        Panel {
-            content: None,
-            padding: None,
-            width: None,
-            height: None,
-        }
-    }
 }
 
 pub fn panel<'a>() -> Panel<'a> {

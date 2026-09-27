@@ -21,7 +21,7 @@ use std::time::SystemTime;
 /// [composable.context_menu_item]
 /// # padding = 4.0
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub composable: ComposableConfig,
@@ -45,24 +45,13 @@ defs! {
 }
 
 /// Per-component tables under `[composable.*]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComposableConfig {
     pub menu: MenuConfig,
     pub panel: PanelConfig,
     pub context_menu: ContextMenuConfig,
     pub context_menu_item: ContextMenuItemConfig,
-}
-
-impl Default for ComposableConfig {
-    fn default() -> Self {
-        Self {
-            menu: MenuConfig::default(),
-            panel: PanelConfig::default(),
-            context_menu: ContextMenuConfig::default(),
-            context_menu_item: ContextMenuItemConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,17 +158,11 @@ impl Default for ContextMenuItemConfig {
 /// ```
 /// Global coords like the selection rect; `width`/`height` of `0` mean native
 /// image size at load; `z` orders overlapping images on the map.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackgroundConfig {
     #[serde(default)]
     pub image: Vec<BackgroundImage>,
-}
-
-impl Default for BackgroundConfig {
-    fn default() -> Self {
-        Self { image: Vec::new() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,14 +279,14 @@ fn expand_env(s: &str) -> String {
 /// for the config dir). Anything else passes through; `~otheruser` is
 /// intentionally unsupported.
 fn expand_tilde(s: &str) -> PathBuf {
-    if s == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home;
-        }
-    } else if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if s == "~"
+        && let Some(home) = dirs::home_dir()
+    {
+        return home;
+    } else if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(s)
 }
@@ -315,15 +298,16 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (
                 hex_val(bytes.get(i + 1).copied().unwrap_or(0)),
                 hex_val(bytes.get(i + 2).copied().unwrap_or(0)),
-            ) {
-                out.push(h << 4 | l);
-                i += 3;
-                continue;
-            }
+            )
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -359,15 +343,6 @@ pub(crate) fn decode_handle(
     }
     let handle = Handle::from_rgba(w, h, bytes::Bytes::from(rgba.into_raw()));
     Some((w, h, handle))
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            composable: ComposableConfig::default(),
-            background: BackgroundConfig::default(),
-        }
-    }
 }
 
 /// A single runtime edit to the live config (e.g. from a Settings-panel

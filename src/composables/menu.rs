@@ -19,6 +19,7 @@ use iced::{Color, Element, Fill, Length, Padding};
 ///     .position(lx, ly)
 ///     .into()
 /// ```
+#[derive(Default)]
 pub struct Menu<'a> {
     content: Option<Element<'a, Plant>>,
     padding: Option<Padding>,
@@ -26,19 +27,6 @@ pub struct Menu<'a> {
     height: Option<Length>,
     lx: Option<f32>,
     ly: Option<f32>,
-}
-
-impl<'a> Default for Menu<'a> {
-    fn default() -> Self {
-        Menu {
-            content: None,
-            padding: None,
-            width: None,
-            height: None,
-            lx: None,
-            ly: None,
-        }
-    }
 }
 
 pub fn menu<'a>() -> Menu<'a> {

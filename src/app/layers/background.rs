@@ -360,10 +360,10 @@ impl Background {
             // click was on context menu — suppress selection drag
             return Command::none();
         }
-        if let Some(cm) = &mut plots.context_menu {
-            if cm.open {
-                cm.open = false;
-            }
+        if let Some(cm) = &mut plots.context_menu
+            && cm.open
+        {
+            cm.open = false;
         }
 
         plots.fade_rect = None;

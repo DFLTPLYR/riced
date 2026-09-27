@@ -190,7 +190,7 @@ impl MapLayer {
 
     /// Concrete global rect for an image: native size × `scale` at `(x, y)`.
     /// `None` for empty/unreadable paths or degenerate sizes (skipped in draw
-    /// + hits). Shared with the Background layer so map preview and applied
+    /// and hits). Shared with the Background layer so map preview and applied
     /// wallpaper agree on placement.
     pub(crate) fn resolved(img: &BackgroundImage) -> Option<(f32, f32, f32, f32)> {
         let path = img.local_path();
@@ -300,9 +300,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 Some(Action::publish(select(view)).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if self.view.drag.is_none() {
-                    return None;
-                }
+                self.view.drag?;
                 let mut view = self.view;
                 view.drag = None;
                 Some(Action::publish(select(view)).and_capture())
@@ -310,9 +308,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
             Event::Mouse(mouse::Event::CursorLeft) => {
                 // Release outside the canvas never reaches us; don't jump on
                 // re-entry with a stale drag anchor.
-                if self.view.drag.is_none() {
-                    return None;
-                }
+                self.view.drag?;
                 let mut view = self.view;
                 view.drag = None;
                 Some(Action::publish(select(view)))

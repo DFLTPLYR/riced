@@ -405,10 +405,7 @@ impl Plots {
                 // The layer surface actually exists now — the Added-time heals
                 // may have fired before its configure. Heal only for our own
                 // Background windows.
-                if matches!(
-                    self.ids.get(&info.window),
-                    Some(PlotInfo::Background(_))
-                ) {
+                if matches!(self.ids.get(&info.window), Some(PlotInfo::Background(_))) {
                     Self::repaint_burst()
                 } else {
                     Command::none()

@@ -14,6 +14,7 @@ use iced::{Element, Fill};
 ///     .on_release(Plant::TopPlot(TopEvent::Released(id, Button::Left)))
 ///     .into()
 /// ```
+#[derive(Default)]
 pub struct PanelWindow<'a> {
     content: Option<Element<'a, Plant>>,
     on_press: Option<Plant>,
@@ -22,20 +23,6 @@ pub struct PanelWindow<'a> {
     on_right_release: Option<Plant>,
     on_middle_press: Option<Plant>,
     on_middle_release: Option<Plant>,
-}
-
-impl<'a> Default for PanelWindow<'a> {
-    fn default() -> Self {
-        PanelWindow {
-            content: None,
-            on_press: None,
-            on_release: None,
-            on_right_press: None,
-            on_right_release: None,
-            on_middle_press: None,
-            on_middle_release: None,
-        }
-    }
 }
 
 pub fn panel_window<'a>() -> PanelWindow<'a> {
