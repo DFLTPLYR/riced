@@ -47,7 +47,7 @@ impl SettingPage {
             Self::Menu => "Menu",
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
-            Self::Background => "Background",
+            Self::Background => "Wallpaper",
         }
     }
 }
