@@ -414,7 +414,8 @@ impl Background {
     // (which is `Background::open`'s window showing its own relevant part).
     // ------------------------------------------------------------------
 
-    /// Clipped selection/fade box for *this* Background's available rect.
+    /// Selection/fade box for *this* Background window, unclamped: full global
+    /// size at its window-local offset, surface-clipped by the compositor.
     /// Owns the rect math + styling; `view` just positions it in the stack.
     fn selection_overlay(plots: &Plots, avail: (f32, f32, f32, f32)) -> Element<'_, Plant> {
         let (ax, ay, aw, ah) = avail;
@@ -438,16 +439,15 @@ impl Background {
             (None, 0.0)
         };
 
-        // intersect global rect with THIS background's available rect,
-        // then express in window-local coords for padding
+        // global rect expressed in window-local coords for padding.
+        // NOTE: intentionally NOT clamped to this monitor's avail rect —
+        // each Background window draws the full rect at its local offset and
+        // the surface clips what falls outside, so a drag spanning outputs
+        // shows its true size on every monitor.
         let (visible, clipped_w, clipped_h, local_x, local_y) = if let Some(ar) = active_rect {
-            let inter = Self::intersects(ar, avail);
-            let vis = inter && opacity > 0.01;
-            let cw = (ar.x + ar.width).min(ax + aw) - ar.x.max(ax);
-            let ch = (ar.y + ar.height).min(ay + ah) - ar.y.max(ay);
-            let lx = ar.x.max(ax) - ax;
-            let ly = ar.y.max(ay) - ay;
-            (vis, cw, ch, lx, ly)
+            let vis =
+                opacity > 0.01 && ar.width > 0.0 && ar.height > 0.0 && Self::intersects(ar, avail);
+            (vis, ar.width, ar.height, ar.x - ax, ar.y - ay)
         } else {
             (false, 0.0, 0.0, 0.0, 0.0)
         };
@@ -460,6 +460,22 @@ impl Background {
         if cw > 1.0 && ch > 1.0 && op > 0.01 {
             let bg = Color::from_rgba(0.55, 0.65, 1.0, 0.5 * op);
             let border_col = Color::from_rgba(0.75, 0.8, 1.0, op);
+            // Round only the corners that land inside this output's surface.
+            // Corners past the edge would be hard-clipped mid-radius by the
+            // compositor (the window can't paint outside itself), which reads
+            // as a sliced/broken corner — those go square instead.
+            let gx = cx + ax;
+            let gy = cy + ay;
+            let inside = |px: f32, py: f32| {
+                px >= ax && px <= ax + aw && py >= ay && py <= ay + ah
+            };
+            let r = plots.config.composable.panel.rounding;
+            let radius = iced::border::Radius {
+                top_left: if inside(gx, gy) { r } else { 0.0 },
+                top_right: if inside(gx + cw, gy) { r } else { 0.0 },
+                bottom_right: if inside(gx + cw, gy + ch) { r } else { 0.0 },
+                bottom_left: if inside(gx, gy + ch) { r } else { 0.0 },
+            };
             panel()
                 .content(
                     container(Space::new())
@@ -470,7 +486,7 @@ impl Background {
                             border: iced::Border {
                                 color: border_col,
                                 width: 1.0,
-                                radius: plots.config.composable.panel.rounding.into(),
+                                radius,
                             },
                             ..Default::default()
                         }),
