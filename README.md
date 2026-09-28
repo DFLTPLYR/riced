@@ -101,6 +101,18 @@ they are editable; edits hot-reload on the 500ms `ConfigTick` (same as
 `config.toml`). A Theme page in the Settings panel lists themes + a
 Dark/Light toggle, persisted via `ConfigPatch::ThemeName/Darkmode`.
 
+## Dynamic theme (colorgen)
+
+`src/colorgen.rs` ports `sys/src/colorgen.rs` (`ColorGen.generate`):
+`riced generate-theme [--variant V] [--set] [--templates DIR]` rasterizes
+the wallpaper set with the same math as `Background::wallpaper_views`
+(per-output crops, ascending `z`, stitched side-by-side), extracts the seed
+color, and writes the M3 scheme as `dynamic.json` — same
+`{light, dark}` keys and terminal mapping as sys, so files are drop-in
+reshell themes. `dynamic` is never vendored (it depends on the wallpapers);
+`--set` selects it so the daemon hot-reloads. `--templates` renders a
+`[templates]` dir (`{{ colors.primary }}` syntax, pre/post hooks) like sys.
+
 ## Development
 
 ```bash

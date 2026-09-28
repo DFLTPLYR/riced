@@ -63,18 +63,26 @@ fn default_darkmode() -> bool {
     true
 }
 
+fn default_variant() -> String {
     "content".to_string()
 }
 
 /// Theme selection under `[theme]`, mirroring reshell's `Global.general`
 /// (`theme` + `darkmode`). `name` resolves to
 /// `~/.config/riced/theme/{name}.json` with the exact reshell theme schema
+/// (`dark`/`light` variants); unknown names fall back to the vendored copy.
+/// `variant` is the Material You scheme variant used by
+/// `riced generate-theme` (ported from `sys/src/colorgen.rs`), one of
+/// `content tonalspot monochrome neutral vibrant expressive fidelity
+/// rainbow fruitsalad`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
     #[serde(default = "default_theme_name")]
     pub name: String,
     #[serde(default = "default_darkmode")]
     pub darkmode: bool,
+    #[serde(default = "default_variant")]
+    pub variant: String,
 }
 
 impl Default for ThemeConfig {
@@ -82,6 +90,7 @@ impl Default for ThemeConfig {
         Self {
             name: default_theme_name(),
             darkmode: default_darkmode(),
+            variant: default_variant(),
         }
     }
 }
@@ -410,6 +419,7 @@ pub enum ConfigPatch {
     ContextMenuItemRounding(f32),
     ThemeName(String),
     ThemeDarkmode(bool),
+    ThemeVariant(String),
     AddImage(BackgroundImage),
     MoveImage { index: usize, x: f32, y: f32 },
     SetImageScale { index: usize, scale: f32 },
@@ -507,6 +517,7 @@ impl Config {
             ConfigPatch::ContextMenuItemRounding(v) => c.context_menu_item.rounding = v,
             ConfigPatch::ThemeName(name) => self.theme.name = name,
             ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
+            ConfigPatch::ThemeVariant(variant) => self.theme.variant = variant,
             ConfigPatch::AddImage(img) => images.push(img),
             ConfigPatch::MoveImage { index, x, y } => {
                 if let Some(img) = images.get_mut(index) {
@@ -791,6 +802,7 @@ mod tests {
         let empty: Config = toml::from_str("").unwrap();
         assert_eq!(empty.theme.name, "gruvbox");
         assert!(empty.theme.darkmode);
+        assert_eq!(empty.theme.variant, "content");
     }
 
     #[test]
@@ -808,5 +820,7 @@ mod tests {
         assert_eq!(cfg.theme.name, "tokyo-night");
         cfg.apply(ConfigPatch::ThemeDarkmode(false));
         assert!(!cfg.theme.darkmode);
+        cfg.apply(ConfigPatch::ThemeVariant("vibrant".into()));
+        assert_eq!(cfg.theme.variant, "vibrant");
     }
 }

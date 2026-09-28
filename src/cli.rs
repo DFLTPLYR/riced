@@ -17,6 +17,24 @@ pub enum Commands {
     /// Ask the running daemon to open the Settings panel
     #[command(alias = "settings")]
     OpenSettings,
+    /// Generate a Material You `dynamic` theme from the configured
+    /// wallpapers (ported from `sys/src/colorgen.rs`) and save it to
+    /// `~/.config/riced/theme/dynamic.json`
+    GenerateTheme {
+        /// Scheme variant: content, tonalspot, monochrome, neutral,
+        /// vibrant, expressive, fidelity, rainbow, fruitsalad.
+        /// Defaults to `[theme] variant` from config.toml.
+        #[arg(long)]
+        variant: Option<String>,
+        /// Also select the new theme (`[theme] name = "dynamic"`) so the
+        /// running daemon hot-reloads to it.
+        #[arg(long)]
+        set: bool,
+        /// Render a `[templates]` dir (config.toml with input/output paths
+        /// and hooks, same format as sys) against the generated scheme.
+        #[arg(long)]
+        templates: Option<PathBuf>,
+    },
 }
 
 /// Parse `std::env::args`. Returns the requested client command, if any.
@@ -97,6 +115,38 @@ mod tests {
             Some(Commands::OpenSettings)
         );
         assert_eq!(Cli::try_parse_from(["riced"]).unwrap().command, None);
+    }
+
+    #[test]
+    fn parses_generate_theme_flags() {
+        assert_eq!(
+            Cli::try_parse_from(["riced", "generate-theme"])
+                .unwrap()
+                .command,
+            Some(Commands::GenerateTheme {
+                variant: None,
+                set: false,
+                templates: None,
+            })
+        );
+        assert_eq!(
+            Cli::try_parse_from([
+                "riced",
+                "generate-theme",
+                "--variant",
+                "vibrant",
+                "--set",
+                "--templates",
+                "/tmp/tpl"
+            ])
+            .unwrap()
+            .command,
+            Some(Commands::GenerateTheme {
+                variant: Some("vibrant".to_string()),
+                set: true,
+                templates: Some(PathBuf::from("/tmp/tpl")),
+            })
+        );
     }
 
     #[test]
