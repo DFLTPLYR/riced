@@ -110,8 +110,19 @@ the wallpaper set with the same math as `Background::wallpaper_views`
 color, and writes the M3 scheme as `dynamic.json` — same
 `{light, dark}` keys and terminal mapping as sys, so files are drop-in
 reshell themes. `dynamic` is never vendored (it depends on the wallpapers);
-`--set` selects it so the daemon hot-reloads. `--templates` renders a
-`[templates]` dir (`{{ colors.primary }}` syntax, pre/post hooks) like sys.
+`--set` selects it so the daemon hot-reloads. `--templates DIR` overrides
+the templates dir, `--no-templates` skips rendering.
+
+Default templates ship in `templates/` (copied from reshell `core/theme/`:
+kitty, hypr, gtk, helix, rofi, btop, discord, nvim, … plus its `config.toml`).
+First run seeds them to `~/.config/riced/templates/` (missing files only,
+never overwrites), and that copy is what renders by default — edit it
+freely. `[theme] templates_dir` overrides the dir, `"off"` disables.
+
+Switching themes re-renders templates too (sys `change_theme`): picking a
+theme in Settings (or `riced apply-templates [--templates DIR] [--name X]`)
+passes the stored theme object through the same find-and-replace off the
+update thread, reporting per-template errors without freezing the shell.
 
 ## Development
 

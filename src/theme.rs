@@ -249,6 +249,12 @@ const BUILTINS: &[(&str, &str)] = &[
 /// Names that are generated, not vendored: skipped by seeding (below).
 const GENERATED: &[&str] = &["dynamic"];
 
+/// Raw text of a vendored builtin (`None` for generated/unknown names).
+/// Used by the `change_theme` object pass without touching disk.
+pub fn builtin_text(name: &str) -> Option<&'static str> {
+    BUILTINS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+}
+
 /// `~/.config/riced/theme` (`$XDG_CONFIG_HOME` aware).
 pub fn theme_dir() -> PathBuf {
     dirs::config_dir()
@@ -256,7 +262,7 @@ pub fn theme_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("theme"))
 }
 
-fn user_file(name: &str) -> PathBuf {
+pub(crate) fn user_file(name: &str) -> PathBuf {
     theme_dir().join(format!("{name}.json"))
 }
 

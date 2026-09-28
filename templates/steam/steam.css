@@ -1,0 +1,108 @@
+:root {
+    --theme-color: "Matugen";
+    --hue-rotate: 220deg;
+
+    --md-sys-color-background: {{colors.surface}};
+
+    --md-sys-color-error: {{colors.error}};
+
+    --md-sys-color-error-container: color-mix(in srgb, {{colors.error}} 25%, {{colors.surface}});
+
+    --md-sys-color-hover: {{colors.tertiary}};
+
+    --md-sys-color-inverse-on-surface: color-mix(in srgb, {{colors.surface}} 92%, {{colors.primary}});
+
+    --md-sys-color-inverse-primary: color-mix(in srgb, {{colors.primary}} 85%, white);
+
+    --md-sys-color-inverse-surface: color-mix(in srgb, {{colors.surface}} 30%, {{colors.on_surface}});
+
+    --md-sys-color-on-background: {{colors.on_surface}};
+
+    --md-sys-color-on-error: {{colors.on_error}};
+
+    --md-sys-color-on-error-container: color-mix(in srgb, {{colors.error}} 15%, {{colors.on_surface}});
+
+    --md-sys-color-on-hover: {{colors.on_tertiary}};
+
+    --md-sys-color-on-primary: {{colors.on_primary}};
+
+    --md-sys-color-on-primary-container: color-mix(in srgb, {{colors.primary}} 20%, {{colors.on_surface}});
+
+    --md-sys-color-on-primary-fixed: {{colors.on_primary}};
+
+    --md-sys-color-on-primary-fixed-variant: color-mix(in srgb, {{colors.primary}} 50%, {{colors.surface}});
+
+    --md-sys-color-on-secondary: {{colors.on_secondary}};
+
+    --md-sys-color-on-secondary-container: color-mix(in srgb, {{colors.secondary}} 20%, {{colors.on_surface}});
+
+    --md-sys-color-on-secondary-fixed: {{colors.on_secondary}};
+
+    --md-sys-color-on-secondary-fixed-variant: color-mix(in srgb, {{colors.secondary}} 50%, {{colors.surface}});
+
+    --md-sys-color-on-surface: {{colors.on_surface}};
+
+    --md-sys-color-on-surface-variant: {{colors.on_surface_variant}};
+
+    --md-sys-color-on-tertiary: {{colors.on_tertiary}};
+
+    --md-sys-color-on-tertiary-container: color-mix(in srgb, {{colors.tertiary}} 20%, {{colors.on_surface}});
+
+    --md-sys-color-on-tertiary-fixed: {{colors.on_tertiary}};
+
+    --md-sys-color-on-tertiary-fixed-variant: color-mix(in srgb, {{colors.tertiary}} 50%, {{colors.surface}});
+
+    --md-sys-color-outline: {{colors.outline}};
+
+    --md-sys-color-outline-variant: color-mix(in srgb, {{colors.outline}} 40%, {{colors.surface}});
+
+    --md-sys-color-primary: {{colors.primary}};
+
+    --md-sys-color-primary-container: color-mix(in srgb, {{colors.primary}} 15%, {{colors.surface}});
+
+    --md-sys-color-primary-fixed: color-mix(in srgb, {{colors.primary}} 90%, white);
+
+    --md-sys-color-primary-fixed-dim: color-mix(in srgb, {{colors.primary}} 70%, white);
+
+    --md-sys-color-scrim: #000000;
+
+    --md-sys-color-secondary: {{colors.secondary}};
+
+    --md-sys-color-secondary-container: color-mix(in srgb, {{colors.secondary}} 15%, {{colors.surface}});
+
+    --md-sys-color-secondary-fixed: color-mix(in srgb, {{colors.secondary}} 90%, white);
+
+    --md-sys-color-secondary-fixed-dim: color-mix(in srgb, {{colors.secondary}} 70%, white);
+
+    --md-sys-color-shadow: {{colors.shadow}};
+
+    --md-sys-color-source-color: {{colors.primary}};
+
+    --md-sys-color-surface: {{colors.surface}};
+
+    --md-sys-color-surface-bright: color-mix(in srgb, {{colors.surface}} 85%, {{colors.on_surface}});
+
+    --md-sys-color-surface-container: color-mix(in srgb, {{colors.primary}} 8%, {{colors.surface}});
+
+    --md-sys-color-surface-container-high: color-mix(in srgb, {{colors.primary}} 12%, {{colors.surface}});
+
+    --md-sys-color-surface-container-highest: color-mix(in srgb, {{colors.primary}} 16%, {{colors.surface}});
+
+    --md-sys-color-surface-container-low: color-mix(in srgb, {{colors.primary}} 4%, {{colors.surface}});
+
+    --md-sys-color-surface-container-lowest: {{colors.surface}};
+
+    --md-sys-color-surface-dim: color-mix(in srgb, {{colors.surface}} 95%, black);
+
+    --md-sys-color-surface-tint: {{colors.primary}};
+
+    --md-sys-color-surface-variant: {{colors.surface_variant}};
+
+    --md-sys-color-tertiary: {{colors.tertiary}};
+
+    --md-sys-color-tertiary-container: color-mix(in srgb, {{colors.tertiary}} 15%, {{colors.surface}});
+
+    --md-sys-color-tertiary-fixed: color-mix(in srgb, {{colors.tertiary}} 90%, white);
+
+    --md-sys-color-tertiary-fixed-dim: color-mix(in srgb, {{colors.tertiary}} 70%, white);
+}

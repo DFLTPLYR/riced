@@ -32,8 +32,24 @@ pub enum Commands {
         set: bool,
         /// Render a `[templates]` dir (config.toml with input/output paths
         /// and hooks, same format as sys) against the generated scheme.
+        /// Defaults to the seeded `~/.config/riced/templates/`.
         #[arg(long)]
         templates: Option<PathBuf>,
+        /// Skip template rendering entirely.
+        #[arg(long)]
+        no_templates: bool,
+    },
+    /// Re-render a `[templates]` dir with a stored theme object (sys
+    /// `change_theme` equivalent): find-and-replace `{{vars}}` without
+    /// regenerating. Defaults to the configured theme + `[theme]
+    /// templates_dir`.
+    ApplyTemplates {
+        /// Templates dir to render. Defaults to `[theme] templates_dir`.
+        #[arg(long)]
+        templates: Option<PathBuf>,
+        /// Theme object to pass. Defaults to `[theme] name`.
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -127,6 +143,7 @@ mod tests {
                 variant: None,
                 set: false,
                 templates: None,
+                no_templates: false,
             })
         );
         assert_eq!(
@@ -145,6 +162,47 @@ mod tests {
                 variant: Some("vibrant".to_string()),
                 set: true,
                 templates: Some(PathBuf::from("/tmp/tpl")),
+                no_templates: false,
+            })
+        );
+        assert_eq!(
+            Cli::try_parse_from(["riced", "generate-theme", "--no-templates"])
+                .unwrap()
+                .command,
+            Some(Commands::GenerateTheme {
+                variant: None,
+                set: false,
+                templates: None,
+                no_templates: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_apply_templates_flags() {
+        assert_eq!(
+            Cli::try_parse_from(["riced", "apply-templates"])
+                .unwrap()
+                .command,
+            Some(Commands::ApplyTemplates {
+                templates: None,
+                name: None,
+            })
+        );
+        assert_eq!(
+            Cli::try_parse_from([
+                "riced",
+                "apply-templates",
+                "--templates",
+                "/tmp/tpl",
+                "--name",
+                "dracula"
+            ])
+            .unwrap()
+            .command,
+            Some(Commands::ApplyTemplates {
+                templates: Some(PathBuf::from("/tmp/tpl")),
+                name: Some("dracula".to_string()),
             })
         );
     }

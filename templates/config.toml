@@ -1,0 +1,106 @@
+[catalog.steam]
+name = "Steam"
+category = "misc"
+
+[templates.millennium]
+input_path = 'steam/steam.css'
+output_path = '~/.steam/steam/steamui/skins/Material-Theme/css/main/colors/matugen.css'
+
+[templates.obs]
+input_path = "obs/theme.obt"
+output_path = '~/.config/obs-studio/themes/reshell.obt'
+
+[templates.office]
+input_path = "onlyoffice/onlyoffice.json.template"
+output_path = "~/.local/share/onlyoffice/desktopeditors/uithemes/matugen.json"
+
+# [templates.reshell]
+# input_path = "reshell/material.json"
+# output_path = "~/.config/quickshell/reshell/core/data/themes/dynamic.json"
+
+[templates.helix]
+input_path = "helix/helix.toml"
+output_path = "~/.config/helix/themes/themed.toml"
+
+[templates.vesktop]
+input_path = "discord/vesktop.css"
+output_path = "~/.config/vesktop/themes/vesktop.css"
+
+[templates.opencode]
+input_path = "opencode/open-code.json"
+output_path = "~/.config/opencode/themes/matugen.json"
+
+[templates.hypr]
+input_path = "hypr/colors.lua"
+output_path = "~/.config/hypr/config/colors.lua"
+
+[templates.qt5ct]
+input_path = "qt5/qt5.conf"
+output_path = "~/.config/qt5ct/colors/qt.conf"
+
+[templates.qt6ct]
+input_path = "qt6/qt6.conf"
+output_path = "~/.config/qt6ct/colors/matugen.conf"
+
+[templates.gtk3]
+input_path = "gtk/gtk3-colors.css"
+output_path = "~/.config/gtk-3.0/colors.css"
+post_hook = 'if command -v gsettings >/dev/null 2>&1; then gsettings set org.gnome.desktop.interface gtk-theme "" && gsettings set org.gnome.desktop.interface gtk-theme adw-gtk3-dark; fi'
+
+[templates.gtk4]
+input_path = "gtk/gtk-colors.css"
+output_path = "~/.config/gtk-4.0/colors.css"
+
+[templates.kitty]
+input_path = "kitty/kitty-colors.conf"
+output_path = "~/.config/kitty/current-theme.conf"
+
+[templates.neovim]
+input_path = "neovim/nvim-colors.lua"
+output_path = "~/.config/nvim/theme.lua"
+post_hook = 'echo "[$(date "+%Y-%m-%d %H:%M:%S")] matugen ran - neovim" >> ~/nvim-log.txt; pkill -SIGUSR1 nvim 2>/dev/null || true'
+
+[templates.rofi]
+input_path = "rofi/rofi-colors.rasi"
+output_path = "~/.config/rofi/colors.rasi"
+
+[templates.btop]
+input_path = "btop/btop.theme"
+output_path = "~/.config/btop/themes/matugen.theme"
+
+# [templates.niri]
+# input_path = "niri-colors.kdl"
+# output_path = "~/.config/niri/modules/colors.kdl"
+# post_hook = 'niri msg action load-config-file 2>/dev/null || true'
+
+[templates.zenChrome]
+input_path = "zen/userChrome.css"
+output_path = "~/dotfiles/.config/matugen/data/themed-userChrome.css"
+pre_hook = '''
+for dir in ~/.config/zen ~/.zen; do
+  PROFILE_DIR=$(find "$dir" -maxdepth 1 -type d -name "*.Default*" 2>/dev/null | head -n 1)
+  [ -n "$PROFILE_DIR" ] && break
+done
+if [ -n "$PROFILE_DIR" ]; then
+  mkdir -p "$PROFILE_DIR/chrome"
+  [ -L "$PROFILE_DIR/chrome/userChrome.css" ] || ln -sf ~/dotfiles/.config/matugen/data/themed-userChrome.css "$PROFILE_DIR/chrome/userChrome.css"
+fi
+'''
+
+[templates.zenContent]
+input_path = "zen/userContent.css"
+output_path = "~/dotfiles/.config/matugen/data/themed-userContent.css"
+pre_hook = '''
+for dir in ~/.config/zen ~/.zen; do
+  PROFILE_DIR=$(find "$dir" -maxdepth 1 -type d -name "*.Default*" 2>/dev/null | head -n 1)
+  [ -n "$PROFILE_DIR" ] && break
+done
+if [ -n "$PROFILE_DIR" ]; then
+  mkdir -p "$PROFILE_DIR/chrome"
+  [ -L "$PROFILE_DIR/chrome/userContent.css" ] || ln -sf ~/dotfiles/.config/matugen/data/themed-userContent.css "$PROFILE_DIR/chrome/userContent.css"
+fi
+'''
+
+[templates.rmpc]
+input_path = "rmpc/shell.ron"
+output_path = "~/.config/rmpc/layout/shell.ron"

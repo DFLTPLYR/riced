@@ -1,0 +1,50 @@
+@media (prefers-color-scheme: dark) {
+  @-moz-document url-prefix("about:") {
+    :root {
+      --in-content-page-color: {{ colors.on_surface }};
+      --color-accent-primary: {{ colors.primary }};
+      --color-accent-primary-hover: {{ colors.primary }};
+      --color-accent-primary-active: {{ colors.on_primary }};
+      background-color: {{ colors.surface }};
+      --in-content-page-background: {{ colors.surface }};
+    }
+  }
+
+  @-moz-document url("about:newtab"), url("about:home") {
+    :root {
+      --newtab-background-color: {{ colors.surface }};
+      --newtab-background-color-secondary: {{ colors.surface_variant }};
+      --newtab-element-hover-color: {{ colors.surface_variant }};
+      --newtab-text-primary-color: {{ colors.on_surface }};
+      --newtab-wordmark-color: {{ colors.on_surface }};
+      --newtab-primary-action-background: {{ colors.primary }};
+    }
+    .icon { color: {{ colors.primary }}; }
+  }
+
+  @-moz-document url-prefix("about:preferences") {
+    :root {
+      --in-content-text-color: {{ colors.on_surface }};
+      --link-color: {{ colors.primary }};
+      --link-color-hover: {{ colors.primary }};
+      --zen-colors-primary: {{ colors.surface_variant }};
+      --in-content-box-background: {{ colors.surface_variant }};
+      --zen-primary-color: {{ colors.primary }};
+      --zen-colors-tertiary: {{ colors.surface }};
+    }
+    .main-content { background-color: {{ colors.surface }}; }
+  }
+
+  @-moz-document url-prefix("about:addons") {
+    :root {
+      --background-color-box: {{ colors.surface }};
+    }
+  }
+
+  @-moz-document url-prefix("about:protections") {
+    :root {
+      --zen-primary-color: {{ colors.surface }};
+      --tracker-color: {{ colors.primary }};
+    }
+  }
+}

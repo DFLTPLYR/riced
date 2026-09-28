@@ -1,0 +1,18 @@
+return {
+    primary = "{{ colors.primary }}",
+    on_primary = "{{ colors.on_primary }}",
+    secondary = "{{ colors.secondary }}",
+    on_secondary = "{{ colors.on_secondary }}",
+    tertiary = "{{ colors.tertiary }}",
+    on_tertiary = "{{ colors.on_tertiary }}",
+    error = "{{ colors.error }}",
+    on_error = "{{ colors.on_error }}",
+    surface = "{{ colors.surface }}",
+    on_surface = "{{ colors.on_surface }}",
+    surface_variant = "{{ colors.surface_variant }}",
+    on_surface_variant = "{{ colors.on_surface_variant }}",
+    outline = "{{ colors.outline }}",
+    shadow = "{{ colors.shadow }}",
+    hover = "{{ colors.hover }}",
+    on_hover = "{{ colors.on_hover }}",
+}

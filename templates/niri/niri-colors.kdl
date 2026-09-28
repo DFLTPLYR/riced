@@ -1,0 +1,21 @@
+layout {
+    border {
+        active-color   "{{ colors.primary }}"
+        inactive-color "{{ colors.outline }}"
+        urgent-color   "{{ colors.error }}"
+    }
+
+    shadow {
+        color "{{ colors.shadow }}70"
+    }
+
+    tab-indicator {
+        active-color   "{{ colors.primary }}"
+        inactive-color "{{ colors.outline }}"
+        urgent-color   "{{ colors.error }}"
+    }
+
+    insert-hint {
+        color "{{ colors.primary }}80"
+    }
+}

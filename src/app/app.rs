@@ -90,9 +90,11 @@ pub(crate) enum PlotInfo {
 impl Plots {
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
-        // Seed ~/.config/riced/theme/ with the vendored reshell themes on
+        // Seed ~/.config/riced/theme/ with the vendored reshell themes and
+        // ~/.config/riced/templates/ with the default template set on
         // first run, then sync the global theme before first paint.
         crate::theme::ensure_user_themes();
+        crate::colorgen::ensure_user_templates();
         let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);
         crate::theme::sync(&config.theme);
         let mut wallpapers = HashMap::new();
@@ -168,6 +170,29 @@ impl Plots {
     /// failed to decode (caller skips the entry, same as before).
     pub(crate) fn wallpaper_handle(&self, img: &crate::config::BackgroundImage) -> Option<Handle> {
         self.wallpapers.get(&img.local_path()).cloned()
+    }
+
+    /// sys `change_theme` equivalent as an iced command: render the
+    /// configured templates dir with the newly selected theme object on a
+    /// blocking worker (template hooks shell out and must not stall the
+    /// update loop or freeze every output).
+    pub(crate) fn retemplate_command(dir: std::path::PathBuf, config: &Config) -> Command<Plant> {
+        let name = config.theme.name.clone();
+        let darkmode = config.theme.darkmode;
+        Command::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let text = match crate::colorgen::stored_theme_text(&name) {
+                        Ok(t) => t,
+                        Err(e) => return vec![e],
+                    };
+                    crate::colorgen::render_theme_templates(&dir, &text, darkmode)
+                })
+                .await
+                .unwrap_or_else(|e| vec![format!("template task failed: {e}")])
+            },
+            |errors| Plant::Config(ConfigEvent::TemplatesDone(errors)),
+        )
     }
 
     /// Delayed full redraws after a Background surface is created (see
@@ -472,11 +497,30 @@ impl Plots {
                     patch,
                     ConfigPatch::AddImage(_) | ConfigPatch::RemoveImage { .. }
                 );
+                // Theme switches also re-render the templates dir (sys
+                // `change_theme` equivalent) — off the update thread,
+                // since hooks can block. Empty/`"off"` dirs resolve to
+                // `None` and skip silently.
+                let retemplate_dir = matches!(
+                    patch,
+                    ConfigPatch::ThemeName(_) | ConfigPatch::ThemeDarkmode(_)
+                )
+                .then(|| crate::colorgen::effective_templates_dir(&self.config.theme))
+                .flatten();
                 self.config.apply(patch);
                 if sync {
                     Self::sync_wallpapers(&self.config, &mut self.wallpapers);
                 }
                 self.config_mtime = self.config.save().or(self.config_mtime);
+                if let Some(dir) = retemplate_dir {
+                    return Self::retemplate_command(dir, &self.config);
+                }
+                Command::none()
+            }
+            Plant::Config(ConfigEvent::TemplatesDone(errors)) => {
+                for err in &errors {
+                    eprintln!("riced: template: {err}");
+                }
                 Command::none()
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
@@ -531,7 +575,11 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
         // ConfigTick is a cheap mtime check — redraw only on actual reload.
         // IpcPoll just stats an (usually absent) file — same, no redraw.
-        Plant::Config(ConfigEvent::ConfigTick) | Plant::IpcPoll => Scope::None,
+        // TemplatesDone only logs hook/template errors; the theme itself
+        // already repainted via the Patch that triggered it.
+        Plant::Config(ConfigEvent::ConfigTick)
+        | Plant::Config(ConfigEvent::TemplatesDone(_))
+        | Plant::IpcPoll => Scope::None,
         Plant::Config(ConfigEvent::ConfigReloaded(_)) | Plant::Config(ConfigEvent::Patch(_)) => {
             Scope::All
         }

@@ -74,7 +74,9 @@ fn default_variant() -> String {
 /// `variant` is the Material You scheme variant used by
 /// `riced generate-theme` (ported from `sys/src/colorgen.rs`), one of
 /// `content tonalspot monochrome neutral vibrant expressive fidelity
-/// rainbow fruitsalad`.
+/// rainbow fruitsalad`. `templates_dir` points at a `[templates]` dir
+/// (same format as reshell `core/theme/`); empty uses the seeded
+/// `~/.config/riced/templates/` copy, `"off"` disables template rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
     #[serde(default = "default_theme_name")]
@@ -83,6 +85,8 @@ pub struct ThemeConfig {
     pub darkmode: bool,
     #[serde(default = "default_variant")]
     pub variant: String,
+    #[serde(default)]
+    pub templates_dir: String,
 }
 
 impl Default for ThemeConfig {
@@ -91,6 +95,7 @@ impl Default for ThemeConfig {
             name: default_theme_name(),
             darkmode: default_darkmode(),
             variant: default_variant(),
+            templates_dir: String::new(),
         }
     }
 }
@@ -803,6 +808,7 @@ mod tests {
         assert_eq!(empty.theme.name, "gruvbox");
         assert!(empty.theme.darkmode);
         assert_eq!(empty.theme.variant, "content");
+        assert!(empty.theme.templates_dir.is_empty());
     }
 
     #[test]

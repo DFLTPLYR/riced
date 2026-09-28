@@ -34,6 +34,9 @@ pub enum ConfigEvent {
     /// Runtime edit from a Settings-panel control. Applied to the single
     /// live config, persisted, and broadcast via full redraw.
     Patch(crate::config::ConfigPatch),
+    /// Template re-render after a theme switch finished (sys `change_theme`
+    /// equivalent). Carries per-template errors, empty when all applied.
+    TemplatesDone(Vec<String>),
 }
 
 #[derive(Debug, Clone)]

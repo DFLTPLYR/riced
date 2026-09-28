@@ -6,7 +6,7 @@ use crate::app::layers::ContextMenu;
 use crate::components::display_map::{MapView, images_layer, outputs_layer};
 use crate::config::ConfigPatch;
 use crate::theme;
-use iced::widget::{Space, button, column, container, row, rule, scrollable, slider, stack, text};
+use iced::widget::{button, column, container, row, rule, scrollable, slider, stack, text};
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;

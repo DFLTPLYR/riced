@@ -34,10 +34,52 @@ pub fn main() -> Result<(), iced_exwlshell::Error> {
             variant,
             set,
             templates,
-        }) => run_generate_theme(variant, set, templates),
+            no_templates,
+        }) => run_generate_theme(variant, set, templates, no_templates),
+        Some(cli::Commands::ApplyTemplates { templates, name }) => {
+            run_apply_templates(templates, name)
+        }
         // No subcommand: run the shell daemon.
         None => run_daemon(),
     }
+}
+
+/// `riced apply-templates`: sys `change_theme` equivalent as a single-shot
+/// client — pass a stored theme OBJECT through a `[templates]` dir's
+/// find-and-replace, without regenerating. Standalone, no Wayland needed.
+fn run_apply_templates(
+    templates: Option<std::path::PathBuf>,
+    name: Option<String>,
+) -> Result<(), iced_exwlshell::Error> {
+    let (config, _) = config::Config::load();
+    theme::ensure_user_themes();
+    colorgen::ensure_user_templates();
+
+    let dir = templates.or_else(|| colorgen::effective_templates_dir(&config.theme));
+    let Some(dir) = dir else {
+        eprintln!(
+            "riced: no templates dir (pass --templates, set [theme] templates_dir, or seed ~/.config/riced/templates/)"
+        );
+        std::process::exit(1);
+    };
+    let name = name.unwrap_or_else(|| config.theme.name.clone());
+    let text = match colorgen::stored_theme_text(&name) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("riced: {e}");
+            std::process::exit(1);
+        }
+    };
+    let errors = colorgen::render_theme_templates(&dir, &text, config.theme.darkmode);
+    if errors.is_empty() {
+        println!("riced: applied {name} to {}", dir.display());
+    } else {
+        for err in &errors {
+            eprintln!("riced: template: {err}");
+        }
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// `riced generate-theme`: Material You dynamic theme from the configured
@@ -47,11 +89,13 @@ fn run_generate_theme(
     variant: Option<String>,
     set: bool,
     templates: Option<std::path::PathBuf>,
+    no_templates: bool,
 ) -> Result<(), iced_exwlshell::Error> {
     let (mut config, _) = config::Config::load();
     // Seeded here too so `dynamic.json` lands next to the other themes
     // even when the daemon hasn't run yet.
     theme::ensure_user_themes();
+    colorgen::ensure_user_templates();
 
     let variant = variant.unwrap_or_else(|| config.theme.variant.clone());
     if !colorgen::VARIANT_NAMES.contains(&variant.as_str()) {
@@ -101,7 +145,10 @@ fn run_generate_theme(
         }
     }
 
-    if let Some(dir) = templates {
+    if no_templates {
+        println!("riced: templates skipped (--no-templates)");
+    } else if let Some(dir) = templates.or_else(|| colorgen::effective_templates_dir(&config.theme))
+    {
         let errors = colorgen::process_templates(&dir, &generated.variables);
         if errors.is_empty() {
             println!("riced: templates applied from {}", dir.display());

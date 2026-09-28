@@ -18,14 +18,17 @@
 //!
 //! Output JSON matches `scheme_json` in sys exactly (same keys, same
 //! terminal mapping), so generated files are drop-in reshell themes.
-//! (sys's `change_theme` re-application path stays with reshell: picking a
-//! theme in riced only repaints riced itself via hot-reload.)
+//! Switching themes re-renders the templates dir like sys's `change_theme`
+//! (see `render_theme_templates`); generate with
+//! `riced generate-theme`, apply a stored theme with
+//! `riced apply-templates`.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use include_dir::{Dir, include_dir};
 use material_colors::{
     color::Argb,
     dynamic_color::Variant,
@@ -36,7 +39,7 @@ use material_colors::{
 use regex::Regex;
 
 use crate::components::display_map::MapLayer;
-use crate::config::{BackgroundImage, Config};
+use crate::config::{BackgroundImage, Config, ThemeConfig};
 
 // ---------------------------------------------------------------------------
 // Variants
@@ -448,6 +451,253 @@ pub fn build_color_map(scheme: &Scheme, is_dark: bool, image: &str) -> HashMap<S
 }
 
 // ---------------------------------------------------------------------------
+// change_theme path: stored theme JSON → template variables
+// ---------------------------------------------------------------------------
+
+/// Expand a leading `~` to `$HOME` (template dirs are user paths).
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
+}
+
+/// Template variables from a stored reshell theme variant: reads both
+/// `snake_case` and unseparated (`onprimary`, as in `ayu-blue.json`) keys,
+/// plus the `terminal` block.
+pub fn build_color_map_from_json(scheme: &serde_json::Value) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+
+    let color_keys: &[(&str, &str)] = &[
+        ("primary", "primary"),
+        ("on_primary", "onprimary"),
+        ("primary_container", "primarycontainer"),
+        ("on_primary_container", "onprimarycontainer"),
+        ("inverse_primary", "inverseprimary"),
+        ("primary_fixed", "primaryfixed"),
+        ("primary_fixed_dim", "primaryfixeddim"),
+        ("on_primary_fixed", "onprimaryfixed"),
+        ("on_primary_fixed_variant", "onprimaryfixedvariant"),
+        ("secondary", "secondary"),
+        ("on_secondary", "onsecondary"),
+        ("secondary_container", "secondarycontainer"),
+        ("on_secondary_container", "onsecondarycontainer"),
+        ("secondary_fixed", "secondaryfixed"),
+        ("secondary_fixed_dim", "secondaryfixeddim"),
+        ("on_secondary_fixed", "onsecondaryfixed"),
+        ("on_secondary_fixed_variant", "onsecondaryfixedvariant"),
+        ("tertiary", "tertiary"),
+        ("on_tertiary", "ontertiary"),
+        ("tertiary_container", "tertiarycontainer"),
+        ("on_tertiary_container", "ontertiarycontainer"),
+        ("tertiary_fixed", "tertiaryfixed"),
+        ("tertiary_fixed_dim", "tertiaryfixeddim"),
+        ("on_tertiary_fixed", "ontertiaryfixed"),
+        ("on_tertiary_fixed_variant", "ontertiaryfixedvariant"),
+        ("error", "error"),
+        ("on_error", "onerror"),
+        ("error_container", "errorcontainer"),
+        ("on_error_container", "onerrorcontainer"),
+        ("surface_dim", "surfacedim"),
+        ("surface", "surface"),
+        ("surface_tint", "surfacetint"),
+        ("surface_bright", "surfacebright"),
+        ("surface_container_lowest", "surfacecontainerlowest"),
+        ("surface_container_low", "surfacecontainerlow"),
+        ("surface_container", "surfacecontainer"),
+        ("surface_container_high", "surfacecontainerhigh"),
+        ("surface_container_highest", "surfacecontainerhighest"),
+        ("on_surface", "onsurface"),
+        ("on_surface_variant", "onsurfacevariant"),
+        ("outline", "outline"),
+        ("outline_variant", "outlinevariant"),
+        ("inverse_surface", "inversesurface"),
+        ("inverse_on_surface", "inverseonsurface"),
+        ("surface_variant", "surfacevariant"),
+        ("background", "background"),
+        ("on_background", "onbackground"),
+        ("shadow", "shadow"),
+        ("scrim", "scrim"),
+        ("hover", "hover"),
+        ("on_hover", "onhover"),
+    ];
+
+    for &(snake, camel) in color_keys {
+        let val = scheme.get(snake).or_else(|| scheme.get(camel));
+        if let Some(v) = val {
+            let hex = v.as_str().unwrap_or("");
+            map.insert(format!("colors.{snake}.default.hex"), hex.to_string());
+            map.insert(format!("colors.{snake}.hex"), hex.to_string());
+            map.insert(format!("colors.{snake}"), hex.to_string());
+        }
+    }
+
+    if let Some(terminal) = scheme.get("terminal") {
+        for section in &["normal", "bright"] {
+            if let Some(obj) = terminal.get(*section) {
+                for color in &[
+                    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+                ] {
+                    if let Some(val) = obj.get(*color) {
+                        let hex = val.as_str().unwrap_or("");
+                        map.insert(format!("terminal.{section}.{color}"), hex.to_string());
+                        map.insert(
+                            format!("colors.terminal.{section}.{color}"),
+                            hex.to_string(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let terminal_keys: &[(&str, &[&str])] = &[
+            ("foreground", &["foreground"]),
+            ("background", &["background"]),
+            ("selectionFg", &["selectionFg", "selectionfg"]),
+            ("selectionBg", &["selectionBg", "selectionbg"]),
+            ("cursorText", &["cursorText", "cursortext"]),
+            ("cursor", &["cursor"]),
+        ];
+
+        for &(camel_name, aliases) in terminal_keys {
+            for alias in aliases {
+                if let Some(val) = terminal.get(*alias) {
+                    let hex = val.as_str().unwrap_or("");
+                    map.insert(format!("terminal.{camel_name}"), hex.to_string());
+                    map.insert(format!("colors.terminal.{camel_name}"), hex.to_string());
+                }
+            }
+        }
+    }
+
+    map
+}
+
+/// Template variables for a stored theme OBJECT (sys's `change_theme`
+/// `json` argument): trim/BOM-strip, parse (with a 50-char preview on
+/// error), pick the `dark`/`light` variant, and build the map. Mirrors the
+/// QML validation messages as `Err`.
+pub fn variables_for_theme(
+    json_text: &str,
+    darkmode: bool,
+) -> Result<HashMap<String, String>, String> {
+    let trimmed = json_text.trim().trim_start_matches('\u{feff}');
+    let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+        let preview: String = trimmed.chars().take(50).collect();
+        format!("invalid JSON: {e} | preview: {preview}")
+    })?;
+    let mode_key = if darkmode { "dark" } else { "light" };
+    let scheme = value.get(mode_key).ok_or_else(|| {
+        format!(
+            "missing \"{mode_key}\" key in JSON | keys: {:?}",
+            value.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        )
+    })?;
+    Ok(build_color_map_from_json(scheme))
+}
+
+/// Full `change_theme` equivalent: variables from the stored theme object,
+/// then render a `[templates]` dir. Returns per-template errors (empty =
+/// applied); a validation failure yields a single-element vec.
+pub fn render_theme_templates(dir: &Path, json_text: &str, darkmode: bool) -> Vec<String> {
+    match variables_for_theme(json_text, darkmode) {
+        Ok(vars) => process_templates(dir, &vars),
+        Err(e) => vec![e],
+    }
+}
+
+/// Raw text of a stored theme (user file wins, then vendored builtin),
+/// for the `change_theme` object pass.
+pub fn stored_theme_text(name: &str) -> Result<String, String> {
+    let path = crate::theme::user_file(name);
+    if path.exists() {
+        return std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()));
+    }
+    if let Some(content) = crate::theme::builtin_text(name) {
+        return Ok(content.to_string());
+    }
+    Err(format!(
+        "unknown theme {name:?} — run `riced generate-theme` for dynamic"
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Default templates set (vendored reshell core/theme)
+// ---------------------------------------------------------------------------
+
+/// Default `[templates]` set, copied from reshell `core/theme/` (inputs +
+/// `config.toml`), embedded at compile time.
+static DEFAULT_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
+
+/// `~/.config/riced/templates` (`$XDG_CONFIG_HOME` aware): the editable
+/// copy of [`DEFAULT_TEMPLATES`] that rendering actually reads.
+pub fn user_templates_dir() -> PathBuf {
+    dirs::config_dir()
+        .map(|d| d.join("riced").join("templates"))
+        .unwrap_or_else(|| PathBuf::from("templates"))
+}
+
+/// Seed the user templates dir with the embedded defaults: every file the
+/// user doesn't already have (never overwrites edits). `into` selects the
+/// root (used by tests to avoid touching `$HOME`).
+pub fn ensure_user_templates_into(root: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    seed_recursive(&DEFAULT_TEMPLATES, root)
+}
+
+fn seed_recursive(dir: &Dir, dest_root: &Path) -> io::Result<()> {
+    // File::path is root-relative, so every level joins against dest_root.
+    for f in dir.files() {
+        let dest = dest_root.join(f.path());
+        if dest.exists() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, f.contents())?;
+    }
+    for d in dir.dirs() {
+        seed_recursive(d, dest_root)?;
+    }
+    Ok(())
+}
+
+/// All embedded template files, recursively.
+fn default_template_files(dir: &Dir, out: &mut Vec<std::path::PathBuf>) {
+    out.extend(dir.files().map(|f| f.path().to_path_buf()));
+    for d in dir.dirs() {
+        default_template_files(d, out);
+    }
+}
+
+/// Seed [`user_templates_dir`] (best-effort: failures log and rendering
+/// reports the missing dir per template).
+pub fn ensure_user_templates() {
+    let dir = user_templates_dir();
+    if let Err(e) = ensure_user_templates_into(&dir) {
+        eprintln!("templates: cannot seed {}: {e}", dir.display());
+    }
+}
+
+/// Which templates dir a theme switch / CLI run renders, if any:
+/// `"off"` disables; an explicit `[theme] templates_dir` wins; otherwise
+/// the seeded user dir when its `config.toml` exists.
+pub fn effective_templates_dir(theme: &ThemeConfig) -> Option<PathBuf> {
+    if theme.templates_dir == "off" {
+        return None;
+    }
+    if !theme.templates_dir.is_empty() {
+        return Some(expand_tilde(&theme.templates_dir));
+    }
+    let dir = user_templates_dir();
+    dir.join("config.toml").is_file().then_some(dir)
+}
+
+// ---------------------------------------------------------------------------
 // Templates: {{var}} substitution + pre/post hooks (same as sys)
 // ---------------------------------------------------------------------------
 
@@ -661,7 +911,6 @@ mod tests {
         assert_eq!(views.len(), 1);
         let tile = &views[0];
         assert_eq!((tile.width(), tile.height()), (100, 100));
-        use image::GenericImageView;
         assert_eq!(tile.get_pixel(0, 0).0, [255, 0, 0]);
         assert_eq!(tile.get_pixel(49, 49).0, [255, 0, 0]);
         assert_eq!(tile.get_pixel(50, 50).0, [0, 0, 0]);
@@ -686,7 +935,6 @@ mod tests {
         assert_eq!(views.len(), 2);
         assert_eq!((views[0].width(), views[0].height()), (60, 60));
         assert_eq!((views[1].width(), views[1].height()), (40, 40));
-        use image::GenericImageView;
         assert_eq!(views[0].get_pixel(0, 0).0, [10, 20, 30]);
         assert_eq!(views[1].get_pixel(0, 0).0, [200, 100, 50]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -776,6 +1024,154 @@ mod tests {
         ] {
             assert!(map.contains_key(key), "has {key}");
         }
+    }
+
+    #[test]
+    fn color_map_from_json_reads_both_key_styles() {
+        let scheme = serde_json::json!({
+            "primary": "#a1b2c3",
+            "onprimary": "#010203",
+            "on_primary": "#040506",
+            "surface": "#ffffff",
+            "terminal": {"normal": {"red": "#ff0000"},
+                         "selectionFg": "#111111", "cursor": "#222222"},
+        });
+        let map = build_color_map_from_json(&scheme);
+        // snake_case wins when both spellings exist
+        assert_eq!(map["colors.on_primary"], "#040506");
+        assert_eq!(map["colors.primary"], "#a1b2c3");
+        assert_eq!(map["colors.terminal.normal.red"], "#ff0000");
+        assert_eq!(map["terminal.selectionFg"], "#111111");
+        assert_eq!(map["terminal.cursor"], "#222222");
+        assert_eq!(map["colors.terminal.cursor"], "#222222");
+        // surface passes through; missing keys are simply absent
+        assert_eq!(map["colors.surface"], "#ffffff");
+        assert!(!map.contains_key("colors.secondary"));
+    }
+
+    #[test]
+    fn variables_for_theme_validates_like_change_theme() {
+        // valid object, dark variant
+        let text = r##"{"dark": {"primary": "#a1b2c3", "surface": "#111111"},
+                       "light": {"primary": "#d4e4f4", "surface": "#ffffff"}}"##;
+        let dark = variables_for_theme(text, true).unwrap();
+        assert_eq!(dark["colors.primary"], "#a1b2c3");
+        let light = variables_for_theme(text, false).unwrap();
+        assert_eq!(light["colors.primary"], "#d4e4f4");
+        // BOM + whitespace tolerated
+        let bom = format!("\u{feff}  {text}  ");
+        assert!(variables_for_theme(&bom, true).is_ok());
+        // invalid JSON reports a preview
+        let err = variables_for_theme("{nope", true).unwrap_err();
+        assert!(err.contains("invalid JSON") && err.contains("preview"));
+        // missing mode key lists available keys
+        let err = variables_for_theme(r#"{"dark": {}}"#, false).unwrap_err();
+        assert!(err.contains("missing \"light\"") && err.contains("dark"));
+    }
+
+    #[test]
+    fn render_theme_templates_applies_stored_object() {
+        let dir = std::env::temp_dir().join(format!("riced-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[templates.a]\ninput_path = \"in.txt\"\noutput_path = \"OUT/out.txt\"\n",
+        )
+        .unwrap();
+        let out = dir.join("out").display().to_string();
+        let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        std::fs::write(dir.join("config.toml"), cfg.replace("OUT", &out)).unwrap();
+        std::fs::write(dir.join("in.txt"), "p={{colors.primary}};\n").unwrap();
+
+        let text = r##"{"dark": {"primary": "#a1b2c3"}, "light": {"primary": "#d4e4f4"}}"##;
+        let errors = render_theme_templates(&dir, text, true);
+        assert!(errors.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("out").join("out.txt")).unwrap(),
+            "p=#a1b2c3;\n"
+        );
+        // validation failure surfaces as the single error
+        let errors = render_theme_templates(&dir, "{nope", true);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("invalid JSON"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stored_theme_text_prefers_builtin_and_rejects_unknown() {
+        // vendored dracula dark primary, without touching the real home dir
+        let text = stored_theme_text("dracula").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["dark"]["primary"], "#bd93f9");
+        assert!(stored_theme_text("no-such-theme").is_err());
+    }
+
+    #[test]
+    fn expand_tilde_handles_home_paths() {
+        assert_eq!(
+            expand_tilde("~/a/b"),
+            PathBuf::from(std::env::var("HOME").unwrap()).join("a/b")
+        );
+        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn default_templates_embed_config_and_inputs() {
+        let mut files = Vec::new();
+        default_template_files(&DEFAULT_TEMPLATES, &mut files);
+        // mirrors reshell core/theme (inputs + config.toml + colors.json)
+        assert!(files.len() >= 20, "embedded {} files", files.len());
+        assert!(
+            files.iter().any(|p| p == Path::new("config.toml")),
+            "config.toml embedded"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|p| p == Path::new("kitty/kitty-colors.conf")),
+            "kitty input embedded"
+        );
+    }
+
+    #[test]
+    fn ensure_user_templates_seeds_without_overwriting() {
+        let root = std::env::temp_dir().join(format!("riced-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // pre-existing user edit survives seeding
+        std::fs::create_dir_all(root.join("kitty")).unwrap();
+        std::fs::write(root.join("kitty/kitty-colors.conf"), "user edit\n").unwrap();
+
+        ensure_user_templates_into(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("kitty/kitty-colors.conf")).unwrap(),
+            "user edit\n"
+        );
+        // missing files appear, including config.toml
+        assert!(root.join("config.toml").is_file());
+        assert!(root.join("hypr/colors.lua").is_file());
+        // second run is a no-op
+        ensure_user_templates_into(&root).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn effective_templates_dir_honors_off_and_explicit() {
+        let mut cfg = ThemeConfig::default();
+        // explicit dir wins as-is (existence is the renderer's problem)
+        cfg.templates_dir = "/tmp/riced-explicit-tpl".to_string();
+        assert_eq!(
+            effective_templates_dir(&cfg),
+            Some(PathBuf::from("/tmp/riced-explicit-tpl"))
+        );
+        cfg.templates_dir = "~/tpl".to_string();
+        assert_eq!(
+            effective_templates_dir(&cfg),
+            Some(PathBuf::from(std::env::var("HOME").unwrap()).join("tpl"))
+        );
+        // "off" disables even with a real dir behind it
+        cfg.templates_dir = "off".to_string();
+        assert_eq!(effective_templates_dir(&cfg), None);
     }
 
     #[test]

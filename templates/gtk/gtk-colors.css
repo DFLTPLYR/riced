@@ -1,0 +1,77 @@
+@define-color accent_color {{ colors.primary }};
+@define-color accent_fg_color {{ colors.on_primary }};
+@define-color accent_bg_color {{ colors.primary }};
+@define-color window_bg_color {{ colors.surface }};
+@define-color window_fg_color {{ colors.on_surface }};
+@define-color headerbar_bg_color {{ colors.surface }};
+@define-color headerbar_fg_color {{ colors.on_surface }};
+@define-color popover_bg_color {{ colors.surface }};
+@define-color popover_fg_color {{ colors.on_surface }};
+@define-color view_bg_color {{ colors.surface }};
+@define-color view_fg_color {{ colors.on_surface }};
+@define-color card_bg_color {{ colors.surface }};
+@define-color card_fg_color {{ colors.on_surface }};
+@define-color sidebar_bg_color @window_bg_color;
+@define-color sidebar_fg_color @window_fg_color;
+@define-color sidebar_border_color @window_bg_color;
+@define-color sidebar_backdrop_color @window_bg_color;
+
+@define-color theme_bg_color {{ colors.surface }};
+@define-color theme_fg_color {{ colors.on_surface }};
+@define-color theme_base_color {{ colors.surface }};
+@define-color theme_text_color {{ colors.on_surface }};
+@define-color theme_selected_bg_color {{ colors.primary }};
+@define-color theme_selected_fg_color {{ colors.on_primary }};
+@define-color theme_button_background_normal {{ colors.surface_variant }};
+@define-color theme_button_foreground_normal {{ colors.on_surface }};
+@define-color theme_button_background_hover alpha({{ colors.on_surface }}, 0.08);
+@define-color theme_button_foreground_hover {{ colors.on_surface }};
+@define-color theme_button_background_active alpha({{ colors.on_surface }}, 0.12);
+@define-color theme_button_foreground_active {{ colors.on_surface }};
+@define-color theme_button_background_disabled alpha({{ colors.on_surface }}, 0.04);
+@define-color theme_button_foreground_disabled alpha({{ colors.on_surface }}, 0.38);
+
+@define-color headerbar_backdrop_color {{ colors.surface }};
+@define-color headerbar_border_color {{ colors.outline }};
+@define-color headerbar_darker_shade_color {{ colors.surface_variant }};
+@define-color headerbar_shade_color {{ colors.surface_variant }};
+
+@define-color wm_bg_a {{ colors.surface }};
+@define-color wm_bg_b {{ colors.surface_variant }};
+@define-color wm_border_a {{ colors.outline }};
+@define-color wm_border_b {{ colors.surface_variant }};
+@define-color wm_shadow {{ colors.shadow }};
+@define-color wm_outline {{ colors.outline }};
+
+@define-color menu_bg_color {{ colors.surface }};
+@define-color menu_fg_color {{ colors.on_surface }};
+@define-color menu_selected_bg_color {{ colors.primary }};
+@define-color menu_selected_fg_color {{ colors.on_primary }};
+
+@define-color button_bg_color {{ colors.surface_variant }};
+@define-color button_fg_color {{ colors.on_surface }};
+@define-color button_border_color {{ colors.surface_variant }};
+@define-color button_active_bg_color {{ colors.primary }};
+@define-color button_active_fg_color {{ colors.on_primary }};
+
+@define-color entry_bg_color {{ colors.surface_variant }};
+@define-color entry_fg_color {{ colors.on_surface_variant }};
+@define-color entry_border_color {{ colors.outline }};
+@define-color entry_focus_border_color {{ colors.primary }};
+
+@define-color scrollbar_bg_color {{ colors.surface_variant }};
+@define-color scrollbar_fg_color {{ colors.on_surface_variant }};
+@define-color scrollbar_hover_color {{ colors.primary }};
+
+@define-color selection_bg_color {{ colors.primary }};
+@define-color selection_fg_color {{ colors.on_primary }};
+
+@define-color tooltip_bg_color {{ colors.surface }};
+@define-color tooltip_fg_color {{ colors.on_surface }};
+
+@define-color warning_color {{ colors.tertiary }};
+@define-color warning_fg_color {{ colors.on_tertiary }};
+@define-color error_color {{ colors.error }};
+@define-color error_fg_color {{ colors.on_error }};
+@define-color success_color {{ colors.secondary }};
+@define-color success_fg_color {{ colors.on_secondary }};
