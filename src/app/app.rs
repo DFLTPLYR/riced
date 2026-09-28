@@ -24,12 +24,6 @@ fn throttled_graft(
     _status: iced::event::Status,
     id: iced::window::Id,
 ) -> Option<Plant> {
-    // Press/release now arrive declaratively via PanelWindow (mouse_area),
-    // so the subscription only forwards CursorMoved for drag tracking plus
-    // ButtonReleased as a safety net: a press can start on one window while
-    // the release lands on another (cross-monitor drag, Top bar), where that
-    // window's own mouse_area release never fires for our drag.
-    // Store last cursor globally for correct startPoint even when not selecting (fixes random startPoint)
     if let Event::Mouse(iced::mouse::Event::CursorMoved { .. }) = &event {
         // always update global last cursor (throttled to 60fps) so press is accurate
         let now = Instant::now();
@@ -117,19 +111,6 @@ impl Plots {
         }
     }
 
-    /// Decode pass over `config.background.image`: drop entries whose paths
-    /// vanished, synchronously decode new ones into pre-warmed Handles.
-    /// Called on startup, hot-reload, and image add/remove patches — never on
-    /// move/scale/z (same pixels, new rect).
-    /// Decode pass over `config.background.image`: drop entries whose paths
-    /// vanished, decode new ones into pre-warmed Handles.
-    /// Called on startup, hot-reload, and image add/remove patches — never on
-    /// move/scale/z (same pixels, new rect).
-    ///
-    /// Missing entries decode on scoped threads: each `image::open` + RGBA
-    /// conversion is independent and CPU-heavy, so a sequential loop stalls
-    /// linearly per image file. One thread per missing path, joined before
-    /// returning.
     fn sync_wallpapers(config: &Config, wallpapers: &mut HashMap<PathBuf, Handle>) {
         let live: Vec<PathBuf> = config
             .background
@@ -417,13 +398,6 @@ impl Plots {
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
             Plant::Graft(id, event) => {
-                // Safety net: a left-button release on ANY window ends an
-                // active selection and clears pending press state. The press
-                // can start on one monitor while the release lands on another
-                // monitor's window (or a Top bar), where neither window's own
-                // mouse_area release fires for the drag. Both this and the
-                // PanelWindow release are idempotent, so a same-window
-                // release firing twice is harmless.
                 if matches!(
                     event,
                     Event::Mouse(iced::mouse::Event::ButtonReleased(

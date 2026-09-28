@@ -8,7 +8,7 @@ mod composables;
 mod config;
 
 use app::{Plots, redraw_scope};
-use iced_exwlshell::reexport::{Anchor, BlurOption, Layer, LayerSize};
+use iced_exwlshell::reexport::{BlurOption, Layer, LayerSize};
 use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 
 pub fn main() -> Result<(), iced_exwlshell::Error> {
@@ -53,27 +53,13 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
     )
     .title(Plots::title)
     .subscription(Plots::subscription)
-    // Transparent clear color: every frame is cleared with this before widgets
-    // blend onto it, so alpha < 1 here is what lets the compositor (Hyprland
-    // blur/opacity rules) see through the surface. The default theme base is
-    // opaque, which bakes alpha = 1.0 into every pixel no matter what translucent
-    // container colors the layers use. This is daemon-global, so Background/Top
-    // keep their opaque look via explicit root backgrounds in their own views.
     .style(|_, _| iced::theme::Style {
         background_color: iced::Color::TRANSPARENT,
         text_color: iced::Color::WHITE,
     })
     .settings(Settings {
         layer_settings: LayerShellSettings {
-            // daemon's own surface is a tiny 1px placeholder (not used for selection)
-            // per-output fullscreen Backgrounds for selection are spawned via Plots on OutputInsert
-            anchor: Anchor::Top,
-            size: LayerSize::fill_width(1),
-            exclusive_zone: 0,
-            start_mode: StartMode::Active,
-            layer: Layer::Background,
-            blur_option: BlurOption::None,
-            events_transparent: true,
+            start_mode: StartMode::Background,
             ..Default::default()
         },
         with_connection: Some(connection2.into()),
