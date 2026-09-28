@@ -308,6 +308,12 @@ impl Setting {
         self.map_view = view;
     }
 
+    /// Current map view (for drop detection: an image drag ending means
+    /// wallpapers moved, even though per-move patches never dirty the theme).
+    pub(crate) fn map_view(&self) -> MapView {
+        self.map_view
+    }
+
     /// Switch the selected page on `SettingEvent::Select`. Opening the
     /// Wallpaper page builds the map canvases fresh, whose first frames can
     /// go out empty like new Background surfaces — schedule the same heals.
@@ -391,6 +397,11 @@ impl Setting {
             cmds.push(iced_runtime::task::effect(Action::Window(
                 WindowAction::Close(id),
             )));
+        }
+        // Toggle-closed with pending wallpaper edits: the user is done —
+        // regen now instead of waiting out the countdown.
+        if plots.theme_regen_dirty {
+            cmds.push(plots.fire_regen_theme());
         }
         if cmds.is_empty() {
             Command::none()

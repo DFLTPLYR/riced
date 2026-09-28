@@ -221,7 +221,7 @@ pub struct BackgroundConfig {
     pub image: Vec<BackgroundImage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackgroundImage {
     #[serde(default)]

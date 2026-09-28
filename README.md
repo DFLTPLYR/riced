@@ -124,6 +124,14 @@ theme in Settings (or `riced apply-templates [--templates DIR] [--name X]`)
 passes the stored theme object through the same find-and-replace off the
 update thread, reporting per-template errors without freezing the shell.
 
+`dynamic.json` also regenerates itself without polling: dropping a dragged
+wallpaper, adding/removing/scaling one, or hand-editing
+`[background.image]` arms a one-shot 2s countdown (per-move patches stay
+silent, so drags never clog the events), and closing the last Settings
+panel fires immediately. Generation runs on a blocking worker from the
+live output rects and repaints all outputs when done; skipped unless the
+active theme is `dynamic` or a generated copy exists.
+
 ## Development
 
 ```bash

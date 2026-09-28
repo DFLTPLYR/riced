@@ -608,6 +608,14 @@ pub fn render_theme_templates(dir: &Path, json_text: &str, darkmode: bool) -> Ve
     }
 }
 
+/// Whether a wallpaper change should regenerate `dynamic.json`: yes when
+/// the active theme reads it, or when a generated copy exists to keep
+/// fresh (reshell regenerates on every wallpaper change the same way).
+/// Pure policy, cheap to call on every arm.
+pub fn wants_regen(theme_name: &str, dynamic_file: &Path) -> bool {
+    theme_name == "dynamic" || dynamic_file.exists()
+}
+
 /// Raw text of a stored theme (user file wins, then vendored builtin),
 /// for the `change_theme` object pass.
 pub fn stored_theme_text(name: &str) -> Result<String, String> {
@@ -667,6 +675,7 @@ fn seed_recursive(dir: &Dir, dest_root: &Path) -> io::Result<()> {
 }
 
 /// All embedded template files, recursively.
+#[cfg(test)]
 fn default_template_files(dir: &Dir, out: &mut Vec<std::path::PathBuf>) {
     out.extend(dir.files().map(|f| f.path().to_path_buf()));
     for d in dir.dirs() {
@@ -1047,6 +1056,22 @@ mod tests {
         // surface passes through; missing keys are simply absent
         assert_eq!(map["colors.surface"], "#ffffff");
         assert!(!map.contains_key("colors.secondary"));
+    }
+
+    #[test]
+    fn wants_regen_when_dynamic_matters() {
+        let missing = PathBuf::from("/no/such/dynamic.json");
+        // active theme reads it → always
+        assert!(wants_regen("dynamic", &missing));
+        // other themes: only when a generated copy exists to keep fresh
+        assert!(!wants_regen("gruvbox", &missing));
+        let dir = std::env::temp_dir().join(format!("riced-wr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("dynamic.json");
+        std::fs::write(&file, "{}").unwrap();
+        assert!(wants_regen("gruvbox", &file));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

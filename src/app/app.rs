@@ -78,6 +78,12 @@ pub struct Plots {
     // Generation bumped by every `BackgroundEvent::Repaint` heal so the
     // delayed redraw is a real state transition, not a silent no-op.
     pub(crate) repaint_seq: u64,
+    // Dynamic-theme regen: discrete touches (drops, add/remove/scale,
+    // file edits) arm a 2s one-shot timer; panel close fires immediately.
+    // `seq` invalidates superseded timers, `running` guards overlap.
+    pub(crate) theme_regen_dirty: bool,
+    pub(crate) theme_regen_running: bool,
+    pub(crate) theme_regen_seq: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,6 +125,9 @@ impl Plots {
             theme_mtime,
             wallpapers,
             repaint_seq: 0,
+            theme_regen_dirty: false,
+            theme_regen_running: false,
+            theme_regen_seq: 0,
         }
     }
 
@@ -192,6 +201,108 @@ impl Plots {
                 .unwrap_or_else(|e| vec![format!("template task failed: {e}")])
             },
             |errors| Plant::Config(ConfigEvent::TemplatesDone(errors)),
+        )
+    }
+
+    /// Quiet delay between a wallpaper touch and its regen: long enough
+    /// that a drop-then-tweak lands in one run, short enough to feel live.
+    const REGEN_DELAY: Duration = Duration::from_secs(2);
+
+    /// Arm a regen `REGEN_DELAY` out (drop / add / remove / scale / file
+    /// edit paths). Per-move patches never call this — drags stay silent
+    /// until drop or close. Supersedes pending timers via `seq`; no-ops
+    /// while a run is in flight (completion re-arms if still dirty).
+    pub(crate) fn arm_regen_theme(&mut self) -> Command<Plant> {
+        self.theme_regen_dirty = true;
+        if self.theme_regen_running {
+            return Command::none();
+        }
+        if !crate::colorgen::wants_regen(
+            &self.config.theme.name,
+            &crate::theme::user_file("dynamic"),
+        ) {
+            self.theme_regen_dirty = false;
+            return Command::none();
+        }
+        self.theme_regen_seq += 1;
+        let seq = self.theme_regen_seq;
+        Command::perform(tokio::time::sleep(Self::REGEN_DELAY), move |_| {
+            Plant::Config(ConfigEvent::RegenTimer(seq))
+        })
+    }
+
+    /// Fire a regen now (last Settings panel just closed — the user is
+    /// done editing). Batch-safe: `none` unless dirty, idle, and wanted.
+    pub(crate) fn fire_regen_theme(&mut self) -> Command<Plant> {
+        if !self.theme_regen_dirty || self.theme_regen_running {
+            return Command::none();
+        }
+        if !crate::colorgen::wants_regen(
+            &self.config.theme.name,
+            &crate::theme::user_file("dynamic"),
+        ) {
+            self.theme_regen_dirty = false;
+            return Command::none();
+        }
+        self.spawn_regen()
+    }
+
+    /// Snapshot live outputs + images and run the generation on a blocking
+    /// worker. Caller gates dirty/running/policy; this marks running and
+    /// invalidates pending timers.
+    fn spawn_regen(&mut self) -> Command<Plant> {
+        // Live output rects (same avail math wallpaper_views paints),
+        // sorted for a deterministic seed; empty headless → per-image
+        // rects, like the CLI.
+        let mut rects: Vec<(f32, f32, f32, f32)> = self
+            .backgrounds
+            .keys()
+            .filter_map(|o| {
+                Background::available_rect(*o, &self.output_infos, &self.tops, &self.ids)
+            })
+            .collect();
+        rects.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+        if rects.is_empty() {
+            rects = self
+                .config
+                .background
+                .image
+                .iter()
+                .filter_map(crate::components::display_map::MapLayer::resolved)
+                .collect();
+        }
+        let images = self.config.background.image.clone();
+        let variant = self.config.theme.variant.clone();
+        let darkmode = self.config.theme.darkmode;
+        let templates = crate::colorgen::effective_templates_dir(&self.config.theme);
+
+        self.theme_regen_dirty = false;
+        self.theme_regen_running = true;
+        self.theme_regen_seq += 1;
+        Command::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let views = crate::colorgen::render_views(&rects, &images);
+                    match crate::colorgen::generate_from_views(&views, &variant, darkmode) {
+                        Ok(g) => {
+                            let mut errors = Vec::new();
+                            if let Err(e) = crate::colorgen::write_dynamic_theme(&g.payload) {
+                                errors.push(format!("cannot write dynamic.json: {e}"));
+                                return errors;
+                            }
+                            if let Some(dir) = templates {
+                                errors
+                                    .extend(crate::colorgen::process_templates(&dir, &g.variables));
+                            }
+                            errors
+                        }
+                        Err(e) => vec![e],
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| vec![format!("theme regen failed: {e}")])
+            },
+            |errors| Plant::Config(ConfigEvent::ThemeRegenerated(errors)),
         )
     }
 
@@ -303,6 +414,7 @@ impl Plots {
             Plant::Uproot(id) => {
                 self.last_cursor.remove(&id);
                 self.press_starts.remove(&id);
+                let mut closed_last_panel = false;
                 if let Some(info) = self.ids.get(&id).copied() {
                     match info {
                         PlotInfo::Top(_) => {
@@ -316,6 +428,7 @@ impl Plots {
                         }
                         PlotInfo::Setting => {
                             Setting::remove(&mut self.settings, &mut self.ids, id);
+                            closed_last_panel = self.settings.is_empty();
                         }
                     }
                 } else {
@@ -324,7 +437,13 @@ impl Plots {
                 }
                 // Idempotent close: covers both the in-window close button
                 // and the compositor's X button (via close_events -> Uproot).
-                iced_runtime::task::effect(Action::Window(WindowAction::Close(id)))
+                let close = iced_runtime::task::effect(Action::Window(WindowAction::Close(id)));
+                // Panel edits are done when the last panel closes: regen
+                // immediately instead of waiting out the countdown.
+                if closed_last_panel && self.theme_regen_dirty {
+                    return Command::batch(vec![close, self.fire_regen_theme()]);
+                }
+                close
             }
             Plant::Tend => Command::none(),
             Plant::Sprout => {
@@ -483,8 +602,14 @@ impl Plots {
                 Command::none()
             }
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
+                let images_changed = cfg.background.image != self.config.background.image;
+                let switched_to_dynamic =
+                    cfg.theme.name == "dynamic" && self.config.theme.name != "dynamic";
                 self.config = cfg;
                 Self::sync_wallpapers(&self.config, &mut self.wallpapers);
+                if images_changed || switched_to_dynamic {
+                    return self.arm_regen_theme();
+                }
                 Command::none()
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
@@ -496,6 +621,16 @@ impl Plots {
                 let sync = matches!(
                     patch,
                     ConfigPatch::AddImage(_) | ConfigPatch::RemoveImage { .. }
+                );
+                // Discrete wallpaper edits (add/remove/scale/z) arm a regen
+                // 2s out. Per-move patches are deliberately excluded: drags
+                // stay silent until drop or panel close.
+                let wallpaper_touched = matches!(
+                    patch,
+                    ConfigPatch::AddImage(_)
+                        | ConfigPatch::RemoveImage { .. }
+                        | ConfigPatch::SetImageScale { .. }
+                        | ConfigPatch::SetImageZ { .. }
                 );
                 // Theme switches also re-render the templates dir (sys
                 // `change_theme` equivalent) — off the update thread,
@@ -515,11 +650,38 @@ impl Plots {
                 if let Some(dir) = retemplate_dir {
                     return Self::retemplate_command(dir, &self.config);
                 }
+                if wallpaper_touched {
+                    return self.arm_regen_theme();
+                }
                 Command::none()
             }
             Plant::Config(ConfigEvent::TemplatesDone(errors)) => {
                 for err in &errors {
                     eprintln!("riced: template: {err}");
+                }
+                Command::none()
+            }
+            Plant::Config(ConfigEvent::RegenTimer(seq)) => {
+                // Stale timers (superseded by a later arm, or already
+                // consumed by a fire) never run twice.
+                if seq != self.theme_regen_seq {
+                    return Command::none();
+                }
+                self.fire_regen_theme()
+            }
+            Plant::Config(ConfigEvent::ThemeRegenerated(errors)) => {
+                self.theme_regen_running = false;
+                if errors.is_empty() {
+                    println!("riced: dynamic theme regenerated");
+                } else {
+                    for err in &errors {
+                        eprintln!("riced: dynamic theme: {err}");
+                    }
+                }
+                // Edits that landed mid-flight re-dirty the flag; chain one
+                // follow-up regen instead of dropping them.
+                if self.theme_regen_dirty {
+                    return self.arm_regen_theme();
                 }
                 Command::none()
             }
@@ -529,8 +691,19 @@ impl Plots {
                 Setting::handle_select(self, id, page)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
+                // Mouse drop ends the drag: the incoming view has drag None,
+                // so an image drag in the stored view means wallpapers moved.
+                // (Per-move patches never dirty the theme — only the drop
+                // arms the 2s regen countdown.)
+                let dropped_image = self
+                    .settings
+                    .get(&id)
+                    .is_some_and(|s| s.map_view().drag.is_some_and(|d| d.image.is_some()));
                 if let Some(setting) = self.settings.get_mut(&id) {
                     setting.set_map_view(view);
+                }
+                if dropped_image {
+                    return self.arm_regen_theme();
                 }
                 Command::none()
             }
@@ -579,10 +752,14 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // already repainted via the Patch that triggered it.
         Plant::Config(ConfigEvent::ConfigTick)
         | Plant::Config(ConfigEvent::TemplatesDone(_))
+        | Plant::Config(ConfigEvent::RegenTimer(_))
         | Plant::IpcPoll => Scope::None,
         Plant::Config(ConfigEvent::ConfigReloaded(_)) | Plant::Config(ConfigEvent::Patch(_)) => {
             Scope::All
         }
+        // Fresh dynamic.json on disk: repaint so the new palette applies
+        // (theme::sync picks the new mtime up during the redraw).
+        Plant::Config(ConfigEvent::ThemeRegenerated(_)) => Scope::All,
         // Settings page select / map pan-zoom only affects its own window.
         Plant::SettingPlot(
             SettingEvent::Select(id, _) | SettingEvent::MapViewChanged { id, .. },

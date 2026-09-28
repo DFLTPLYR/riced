@@ -37,6 +37,13 @@ pub enum ConfigEvent {
     /// Template re-render after a theme switch finished (sys `change_theme`
     /// equivalent). Carries per-template errors, empty when all applied.
     TemplatesDone(Vec<String>),
+    /// Pending-regen countdown elapsed (carries the arm generation;
+    /// stale timers are ignored).
+    RegenTimer(u64),
+    /// Dynamic-theme regeneration finished: fresh `dynamic.json` on disk
+    /// (empty errors) or the failure reasons. Always repaints so new
+    /// colors apply on the next frame.
+    ThemeRegenerated(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
