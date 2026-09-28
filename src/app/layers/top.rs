@@ -2,10 +2,11 @@ use super::background::Background;
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::composables::panel_window::top_window;
+use crate::theme;
 use iced::mouse::Button;
 use iced::widget::{container, text};
 use iced::window;
-use iced::{Color, Element, Fill, Point, Task as Command};
+use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
@@ -154,10 +155,7 @@ impl Top {
                     .height(Fill)
                     .center_x(Fill)
                     .center_y(Fill)
-                    .style(|_| container::Style {
-                        background: Some(Color::from_rgb(0.10, 0.10, 0.12).into()),
-                        ..Default::default()
-                    }),
+                    .style(theme::bar),
             )
             .into()
     }

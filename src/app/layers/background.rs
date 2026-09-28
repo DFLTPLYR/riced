@@ -4,7 +4,7 @@ use iced::mouse::Button;
 use iced::widget::image::Image;
 use iced::widget::{Space, button, column, container, stack, text};
 use iced::window;
-use iced::{Color, Element, Fill, Length, Point, Task as Command};
+use iced::{Element, Fill, Length, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
@@ -16,6 +16,7 @@ use super::top::Top;
 use crate::components::contextmenu::contextmenu;
 use crate::composables::panel::panel;
 use crate::composables::panel_window::background_window;
+use crate::theme;
 
 #[derive(Debug)]
 pub struct Background;
@@ -468,8 +469,6 @@ impl Background {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         };
         if cw > 1.0 && ch > 1.0 && op > 0.01 {
-            let bg = Color::from_rgba(0.55, 0.65, 1.0, 0.5 * op);
-            let border_col = Color::from_rgba(0.75, 0.8, 1.0, op);
             // Round only the corners that land inside this output's surface.
             // Corners past the edge would be hard-clipped mid-radius by the
             // compositor (the window can't paint outside itself), which reads
@@ -489,15 +488,7 @@ impl Background {
                     container(Space::new())
                         .width(Length::Fixed(cw))
                         .height(Length::Fixed(ch))
-                        .style(move |_| container::Style {
-                            background: Some(bg.into()),
-                            border: iced::Border {
-                                color: border_col,
-                                width: 1.0,
-                                radius,
-                            },
-                            ..Default::default()
-                        }),
+                        .style(theme::selection_box(op, radius)),
                 )
                 .padding(iced::Padding {
                     top: cy,
@@ -536,33 +527,19 @@ impl Background {
         .padding(plots.config.composable.context_menu.padding)
         .content(
             column![
-                button(text("Add Top").size(12).color(Color::WHITE))
+                button(text("Add Top").size(12).color(theme::button_text()))
                     .on_press(Plant::TopPlot(TopEvent::Sow))
                     .padding(plots.config.composable.context_menu_item.padding)
-                    .style(|_, _| button::Style {
-                        background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            color: Color::from_rgb(0.5, 0.5, 0.55),
-                            width: 1.0,
-                            radius: plots.config.composable.context_menu_item.rounding.into(),
-                        },
-                        ..Default::default()
-                    })
+                    .style(theme::menu_button(
+                        plots.config.composable.context_menu_item.rounding
+                    ))
                     .width(Fill),
-                button(text("Open Settings").size(12).color(Color::WHITE))
+                button(text("Open Settings").size(12).color(theme::button_text()))
                     .on_press(Plant::Sprout)
                     .padding(plots.config.composable.context_menu_item.padding)
-                    .style(|_, _| button::Style {
-                        background: Some(Color::from_rgb(0.25, 0.25, 0.28).into()),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            color: Color::from_rgb(0.5, 0.5, 0.55),
-                            width: 1.0,
-                            radius: plots.config.composable.context_menu_item.rounding.into(),
-                        },
-                        ..Default::default()
-                    })
+                    .style(theme::menu_button(
+                        plots.config.composable.context_menu_item.rounding
+                    ))
                     .width(Fill)
             ]
             .spacing(plots.config.composable.context_menu.spacing)
@@ -596,22 +573,15 @@ impl Background {
         };
         panel()
             .content(
-                container(
-                    text(bg_label)
-                        .size(13)
-                        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.7)),
-                )
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)
-                .style(|_| container::Style {
+                container(text(bg_label).size(13).color(theme::text_dim()))
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
                     // Transparent now that wallpapers paint below: the debug
                     // label floats over them. (Falls back to whatever is
                     // behind the layer when no image is configured.)
-                    background: Some(Color::TRANSPARENT.into()),
-                    ..Default::default()
-                }),
+                    .style(theme::transparent_box),
             )
             .into()
     }

@@ -66,6 +66,9 @@ pub struct Plots {
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
+    // mtime of the active theme file (`theme::poll`); `None` tracks the
+    // vendored fallback. A change re-emits the config so every view repaints.
+    pub(crate) theme_mtime: Option<std::time::SystemTime>,
     // Pre-decoded wallpaper pixels keyed by resolved path. File-backed
     // handles decode on a worker whose completion redraw the shell drops,
     // leaving first paint blank — serving `from_rgba` instead loads
@@ -87,6 +90,11 @@ pub(crate) enum PlotInfo {
 impl Plots {
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
+        // Seed ~/.config/riced/theme/ with the vendored reshell themes on
+        // first run, then sync the global theme before first paint.
+        crate::theme::ensure_user_themes();
+        let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);
+        crate::theme::sync(&config.theme);
         let mut wallpapers = HashMap::new();
         Self::sync_wallpapers(&config, &mut wallpapers);
         Self {
@@ -106,6 +114,7 @@ impl Plots {
             press_starts: HashMap::new(),
             config,
             config_mtime,
+            theme_mtime,
             wallpapers,
             repaint_seq: 0,
         }
@@ -434,7 +443,17 @@ impl Plots {
                 // mtime check only; the reload itself redraws via ConfigReloaded
                 if let Some((cfg, mtime)) = Config::poll(&self.config_mtime) {
                     self.config_mtime = mtime;
+                    self.theme_mtime = crate::theme::poll(&cfg.theme, &None).unwrap_or(None);
                     return Command::done(Plant::Config(ConfigEvent::ConfigReloaded(cfg)));
+                }
+                // Theme files hot-reload on the same tick: re-emit the live
+                // config so every view repaints with the new palette. The
+                // actual re-parse happens in `theme::sync` on next view.
+                if let Some(mtime) = crate::theme::poll(&self.config.theme, &self.theme_mtime) {
+                    self.theme_mtime = mtime;
+                    return Command::done(Plant::Config(ConfigEvent::ConfigReloaded(
+                        self.config.clone(),
+                    )));
                 }
                 Command::none()
             }

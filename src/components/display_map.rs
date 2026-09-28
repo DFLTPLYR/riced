@@ -1,10 +1,11 @@
 use crate::app::ConfigEvent;
 use crate::app::Plant;
 use crate::config::{BackgroundImage, ConfigPatch};
+use crate::theme;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Stroke};
 use iced::widget::image::Handle;
 use iced::window;
-use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use iced::{Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 /// Interactive map of the monitor layout on a grid (ports the Quickshell
 /// Displays `Canvas` + per-screen `Display` delegate + `Flickable` pan/zoom
@@ -385,7 +386,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 while step * zoom < GRID_MIN_PX {
                     step *= 10.0;
                 }
-                let grid = Color::from_rgba(1.0, 1.0, 1.0, 0.35);
+                let grid = theme::grid();
                 let k_min_x = ((0.0 - off_x) / zoom / step).floor() as i32;
                 let k_max_x = ((bounds.width - off_x) / zoom / step).ceil() as i32;
                 for k in k_min_x..=k_max_x {
@@ -418,7 +419,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                         size,
                         Stroke::default()
                             .with_width(1.0)
-                            .with_color(Color::from_rgb(0.5, 0.5, 0.55)),
+                            .with_color(theme::border_color()),
                     );
                 }
             }
@@ -428,7 +429,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 for (x, y, w, h) in &self.outputs {
                     let top_left = local(*x, *y);
                     let size = Size::new((*w * zoom).max(2.0), (*h * zoom).max(2.0));
-                    frame.fill_rectangle(top_left, size, Color::from_rgba(0.55, 0.65, 1.0, 0.06));
+                    frame.fill_rectangle(top_left, size, theme::output_wash());
                     for img in &self.images {
                         if let Some((ix, iy, iw, ih)) = Self::resolved(img) {
                             for output in &self.outputs {
@@ -437,11 +438,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                                 {
                                     let otl = local(ox, oy);
                                     let osize = Size::new(ow * zoom, oh * zoom);
-                                    frame.fill_rectangle(
-                                        otl,
-                                        osize,
-                                        Color::from_rgba(1.0, 1.0, 1.0, 0.15),
-                                    );
+                                    frame.fill_rectangle(otl, osize, theme::overlap_wash());
                                 }
                             }
                         }
@@ -451,12 +448,12 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                         size,
                         Stroke::default()
                             .with_width(1.5)
-                            .with_color(Color::from_rgb(0.75, 0.8, 1.0)),
+                            .with_color(theme::output_border()),
                     );
                     frame.fill_text(canvas::Text {
                         content: format!("{}x{}", *w as i32, *h as i32),
                         position: Point::new(top_left.x + 6.0, top_left.y + 4.0),
-                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                        color: theme::map_label(),
                         size: 12.0.into(),
                         max_width: (size.width - 12.0).max(0.0),
                         ..Default::default()

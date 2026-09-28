@@ -6,6 +6,7 @@ mod cli;
 mod components;
 mod composables;
 mod config;
+mod theme;
 
 use app::{Plots, redraw_scope};
 use iced_exwlshell::reexport::{BlurOption, Layer, LayerSize};
@@ -53,10 +54,8 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
     )
     .title(Plots::title)
     .subscription(Plots::subscription)
-    .style(|_, _| iced::theme::Style {
-        background_color: iced::Color::TRANSPARENT,
-        text_color: iced::Color::WHITE,
-    })
+    .theme(|plots: &Plots, _| theme::theme_for(&plots.config.theme))
+    .style(theme::app_style)
     .settings(Settings {
         layer_settings: LayerShellSettings {
             start_mode: StartMode::Background,

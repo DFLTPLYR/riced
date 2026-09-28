@@ -1,6 +1,7 @@
 use crate::app::Plant;
+use crate::theme;
 use iced::widget::{Space, container};
-use iced::{Color, Element, Fill, Length, Padding};
+use iced::{Element, Fill, Length, Padding};
 
 /// QML-like `Menu { }` component. Content is passed in, each
 /// `.property()` is only applied when set:
@@ -8,7 +9,7 @@ use iced::{Color, Element, Fill, Length, Padding};
 /// ```ignore
 /// menu()
 ///     .content(column![
-///         button(text("Add Top").size(12).color(Color::WHITE))
+///         button(text("Add Top").size(12).color(theme::button_text()))
 ///             .on_press(Plant::TopPlot(TopEvent::Sow))
 ///             .width(Fill)
 ///     ]
@@ -69,15 +70,7 @@ impl<'a> Menu<'a> {
         let content = self
             .content
             .unwrap_or_else(|| Space::new().width(0).height(0).into());
-        let mut inner = container(content).clip(true).style(|_| container::Style {
-            background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
-            border: iced::Border {
-                color: Color::from_rgb(0.5, 0.5, 0.55),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..Default::default()
-        });
+        let mut inner = container(content).clip(true).style(theme::menu_box);
 
         if let Some(p) = self.padding {
             inner = inner.padding(p);

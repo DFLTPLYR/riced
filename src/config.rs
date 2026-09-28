@@ -21,11 +21,22 @@ use std::time::SystemTime;
 /// [composable.context_menu_item]
 /// # padding = 4.0
 /// ```
+///
+/// Theme selection mirrors reshell's `Global` (`general.theme` +
+/// `general.darkmode`): `name` picks `~/.config/riced/theme/{name}.json`
+/// (same schema as `reshell/core/data/themes/*.json`), `darkmode` picks
+/// its `dark` vs `light` variant:
+/// ```toml
+/// [theme]
+/// name = "gruvbox"
+/// darkmode = true
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub composable: ComposableConfig,
     pub background: BackgroundConfig,
+    pub theme: ThemeConfig,
 }
 
 /// Generates serde default fns from a single list, e.g.
@@ -42,6 +53,37 @@ defs! {
     default_width: f32 = 180.0,
     default_menu_height: f32 = 92.0,
     default_scale: f32 = 1.0,
+}
+
+fn default_theme_name() -> String {
+    "gruvbox".to_string()
+}
+
+fn default_darkmode() -> bool {
+    true
+}
+
+    "content".to_string()
+}
+
+/// Theme selection under `[theme]`, mirroring reshell's `Global.general`
+/// (`theme` + `darkmode`). `name` resolves to
+/// `~/.config/riced/theme/{name}.json` with the exact reshell theme schema
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemeConfig {
+    #[serde(default = "default_theme_name")]
+    pub name: String,
+    #[serde(default = "default_darkmode")]
+    pub darkmode: bool,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            name: default_theme_name(),
+            darkmode: default_darkmode(),
+        }
+    }
 }
 
 /// Per-component tables under `[composable.*]`.
@@ -366,6 +408,8 @@ pub enum ConfigPatch {
     ContextMenuRounding(f32),
     ContextMenuItemPadding(f32),
     ContextMenuItemRounding(f32),
+    ThemeName(String),
+    ThemeDarkmode(bool),
     AddImage(BackgroundImage),
     MoveImage { index: usize, x: f32, y: f32 },
     SetImageScale { index: usize, scale: f32 },
@@ -461,6 +505,8 @@ impl Config {
             ConfigPatch::ContextMenuRounding(v) => c.context_menu.rounding = v,
             ConfigPatch::ContextMenuItemPadding(v) => c.context_menu_item.padding = v,
             ConfigPatch::ContextMenuItemRounding(v) => c.context_menu_item.rounding = v,
+            ConfigPatch::ThemeName(name) => self.theme.name = name,
+            ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
             ConfigPatch::AddImage(img) => images.push(img),
             ConfigPatch::MoveImage { index, x, y } => {
                 if let Some(img) = images.get_mut(index) {
@@ -738,5 +784,29 @@ mod tests {
         cfg.apply(ConfigPatch::MenuWidth(250.0));
         assert_eq!(cfg.composable.menu.width, 250.0);
         assert_eq!(cfg.composable.panel.rounding, 6.0);
+    }
+
+    #[test]
+    fn theme_section_defaults_to_gruvbox_dark() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.theme.name, "gruvbox");
+        assert!(empty.theme.darkmode);
+    }
+
+    #[test]
+    fn theme_section_parses_name_and_darkmode() {
+        let cfg: Config =
+            toml::from_str("[theme]\nname = \"dracula\"\ndarkmode = false\n").unwrap();
+        assert_eq!(cfg.theme.name, "dracula");
+        assert!(!cfg.theme.darkmode);
+    }
+
+    #[test]
+    fn theme_patches_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.apply(ConfigPatch::ThemeName("tokyo-night".into()));
+        assert_eq!(cfg.theme.name, "tokyo-night");
+        cfg.apply(ConfigPatch::ThemeDarkmode(false));
+        assert!(!cfg.theme.darkmode);
     }
 }

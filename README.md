@@ -78,6 +78,29 @@ anchor: Anchor::Top, size: LayerSize::fill_width(1), exclusive_zone: 0, start_mo
 
 `exclusive_zone: i32` not `LayerSize` `src/settings.rs:92`.
 
+## Theme
+
+Global theme lives in `src/theme.rs` — every color/style helper reads one
+`ActiveTheme`, so a palette tweak repaints everywhere on the next frame.
+
+Theme files use the exact reshell schema
+(`dotfiles/.config/quickshell/reshell/core/data/themes/*.json`, vendored
+under `themes/`): `{ "dark": {...16 colors...}, "light": {...} }` plus an
+ignored `terminal` block. Selected in `config.toml` (mirrors reshell
+`general.theme` + `general.darkmode`):
+
+```toml
+[theme]
+name = "gruvbox" # ~/.config/riced/theme/{name}.json (user file wins, else vendored copy)
+darkmode = true  # picks the dark vs light variant
+variant = "content" # Material You scheme variant for generate-theme
+```
+
+First run seeds `~/.config/riced/theme/` with all 11 vendored themes so
+they are editable; edits hot-reload on the 500ms `ConfigTick` (same as
+`config.toml`). A Theme page in the Settings panel lists themes + a
+Dark/Light toggle, persisted via `ConfigPatch::ThemeName/Darkmode`.
+
 ## Development
 
 ```bash

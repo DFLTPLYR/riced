@@ -5,9 +5,10 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
 use crate::components::display_map::{MapView, images_layer, outputs_layer};
 use crate::config::ConfigPatch;
-use iced::widget::{Space, button, column, container, row, rule, slider, stack, text};
+use crate::theme;
+use iced::widget::{Space, button, column, container, row, rule, scrollable, slider, stack, text};
 use iced::window;
-use iced::{Color, Element, Length, Task as Command};
+use iced::{Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
@@ -35,11 +36,18 @@ pub enum SettingPage {
     Panel,
     ContextMenu,
     Background,
+    Theme,
 }
 
 impl SettingPage {
-    fn all() -> [Self; 4] {
-        [Self::Menu, Self::Panel, Self::ContextMenu, Self::Background]
+    fn all() -> [Self; 5] {
+        [
+            Self::Menu,
+            Self::Panel,
+            Self::ContextMenu,
+            Self::Background,
+            Self::Theme,
+        ]
     }
 
     fn title(self) -> &'static str {
@@ -48,6 +56,7 @@ impl SettingPage {
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
             Self::Background => "Wallpaper",
+            Self::Theme => "Theme",
         }
     }
 }
@@ -74,23 +83,22 @@ impl Setting {
     }
 
     pub fn view(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        // Master-detail: 30% nav buttons left, 70% page content right.
-        // (`row` is a macro — `row![a, b]` — not a function, and
-        // `keyed_column!` only keys children for diffing; it can't select.)
-        // Fully transparent root: with the daemon's transparent clear color
-        // (see `main.rs:.style`), Hyprland blur/opacity windowrules can see
-        // straight through this. Use `from_rgba(0,0,0,0.25)` for a frosted tint.
         container(
-            row![self.nav(id), rule::vertical(2), self.content(id, plots)]
-                .spacing(12)
-                .padding(16),
+            row![
+                scrollable(self.nav(id))
+                    .width(Length::FillPortion(2))
+                    .height(Length::Fill),
+                rule::vertical(2),
+                scrollable(self.content(id, plots))
+                    .width(Length::FillPortion(8))
+                    .height(Length::Fill),
+            ]
+            .spacing(12)
+            .padding(16),
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(Color::TRANSPARENT.into()),
-            ..Default::default()
-        })
+        .style(theme::bar)
         .into()
     }
 
@@ -100,32 +108,16 @@ impl Setting {
         for page in SettingPage::all() {
             let selected = page == self.page;
             col = col.push(
-                button(text(page.title()).size(13).color(Color::WHITE))
+                button(text(page.title()).size(13).color(theme::text()))
                     .width(Length::Fill)
                     .on_press(Plant::SettingPlot(crate::app::SettingEvent::Select(
                         id, page,
                     )))
                     .padding(8)
-                    .style(move |_, _| button::Style {
-                        background: Some(
-                            if selected {
-                                Color::from_rgb(0.35, 0.35, 0.40)
-                            } else {
-                                Color::from_rgb(0.25, 0.25, 0.28)
-                            }
-                            .into(),
-                        ),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            color: Color::from_rgb(0.5, 0.5, 0.55),
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        ..Default::default()
-                    }),
+                    .style(theme::nav_button(selected)),
             );
         }
-        col.spacing(8).width(Length::FillPortion(2)).into()
+        col.spacing(8).width(Length::Fill).into()
     }
 
     /// Right content pane (70%): live controls for the selected page. Each
@@ -168,7 +160,7 @@ impl Setting {
                 ),
             ]
             .spacing(8)
-            .width(Length::FillPortion(8))
+            .width(Length::Fill)
             .into(),
             SettingPage::Panel => column![
                 text("Panel").size(16),
@@ -192,7 +184,7 @@ impl Setting {
                 ),
             ]
             .spacing(8)
-            .width(Length::FillPortion(8))
+            .width(Length::Fill)
             .into(),
             SettingPage::ContextMenu => column![
                 text("Context Menu").size(16),
@@ -234,19 +226,56 @@ impl Setting {
                 ),
             ]
             .spacing(8)
-            .width(Length::FillPortion(8))
+            .width(Length::Fill)
             .into(),
             SettingPage::Background => self.background_content(id, plots),
+            SettingPage::Theme => self.theme_content(plots),
         }
     }
 
+    /// Theme picker: dark/light toggle plus one button per
+    /// `~/.config/riced/theme/*.json` (same files as reshell). Writes back
+    /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
+    /// and persists the choice to `config.toml`.
+    fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
+        let current = &plots.config.theme;
+        let mut list = column![
+            text("Theme").size(16),
+            row![
+                button(text("Dark").size(13).color(theme::text()))
+                    .width(Length::Fill)
+                    .on_press(Plant::Config(ConfigEvent::Patch(
+                        ConfigPatch::ThemeDarkmode(true)
+                    )))
+                    .padding(8)
+                    .style(theme::nav_button(current.darkmode)),
+                button(text("Light").size(13).color(theme::text()))
+                    .width(Length::Fill)
+                    .on_press(Plant::Config(ConfigEvent::Patch(
+                        ConfigPatch::ThemeDarkmode(false)
+                    )))
+                    .padding(8)
+                    .style(theme::nav_button(!current.darkmode)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8);
+        for name in theme::available_themes() {
+            let selected = name == current.name;
+            list = list.push(
+                button(text(name.clone()).size(13).color(theme::text()))
+                    .width(Length::Fill)
+                    .on_press(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
+                        name,
+                    ))))
+                    .padding(8)
+                    .style(theme::nav_button(selected)),
+            );
+        }
+        list.width(Length::Fill).into()
+    }
+
     fn background_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        // Snapshot output geometry (global logical coords) and wallpaper
-        // entries into the map programs, outputs sorted for stable numbering.
-        // Hot-plug / config edits arrive via the next redraw rebuilding them.
-        // Two stacked canvases: `stack!` pushes a new render layer per child,
-        // so (and only so) the output overlay paints over wallpaper pixels —
-        // `iced_wgpu` draws all quads before all images within one layer.
         let mut outputs: Vec<(f32, f32, f32, f32)> = plots
             .output_infos
             .values()
@@ -264,33 +293,12 @@ impl Setting {
                 images_layer(id, outputs.clone(), images.clone(), handles.clone(), view),
                 outputs_layer(id, outputs, images, handles, view),
             ])
-            .style(|_| container::Style {
-                background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
-                border: iced::Border {
-                    color: Color::from_rgb(0.5, 0.5, 0.55),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            })
-            .height(Length::FillPortion(6))
+            .style(theme::menu_box)
+            .height(Length::Fixed(400.0))
             .width(Length::Fill),
-            container(Space::new())
-                .style(|_| container::Style {
-                    background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
-                    border: iced::Border {
-                        color: Color::from_rgb(0.5, 0.5, 0.55),
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
-                    ..Default::default()
-                })
-                .height(Length::FillPortion(4))
-                .width(Length::Fill)
         ]
         .spacing(8)
-        .height(Length::FillPortion(6))
-        .width(Length::FillPortion(8))
+        .width(Length::Fill)
         .into()
     }
 
@@ -403,7 +411,7 @@ fn slider_row(
     ctor: fn(f32) -> ConfigPatch,
 ) -> Element<'static, Plant> {
     column![
-        text(label).size(13).color(Color::WHITE),
+        text(label).size(13).color(theme::text()),
         slider(range, value as f64, move |v| {
             Plant::Config(ConfigEvent::Patch(ctor(v as f32)))
         })
