@@ -268,71 +268,91 @@ impl Setting {
                 move |v| Plant::TopPlot(TopEvent::SetHeight(wid, v as f32)),
                 None,
             ));
+            col = col.push(rule::horizontal(2));
             col = col.push(
                 Checkbox::new(top.local.floating)
                     .label("Floating (no reserved space, margins apply)")
                     .on_toggle(move |v| Plant::TopPlot(TopEvent::SetFloating(wid, v))),
             );
+
             if top.local.floating {
-                col = col.push(plant_slider_row(
-                    format!("Margin top {}px", top.local.margins.top),
-                    top.local.margins.top as f64,
-                    0.0..=256.0,
-                    move |v| Plant::TopPlot(TopEvent::SetMarginTop(wid, v as i32)),
-                    None,
-                ));
-                col = col.push(plant_slider_row(
-                    format!("Margin right {}px", top.local.margins.right),
-                    top.local.margins.right as f64,
-                    0.0..=256.0,
-                    move |v| Plant::TopPlot(TopEvent::SetMarginRight(wid, v as i32)),
-                    None,
-                ));
-                col = col.push(plant_slider_row(
-                    format!("Margin bottom {}px", top.local.margins.bottom),
-                    top.local.margins.bottom as f64,
-                    0.0..=256.0,
-                    move |v| Plant::TopPlot(TopEvent::SetMarginBottom(wid, v as i32)),
-                    None,
-                ));
-                col = col.push(plant_slider_row(
-                    format!("Margin left {}px", top.local.margins.left),
-                    top.local.margins.left as f64,
-                    0.0..=256.0,
-                    move |v| Plant::TopPlot(TopEvent::SetMarginLeft(wid, v as i32)),
-                    None,
-                ));
+                let top_margins_group = row![
+                    plant_slider_row(
+                        format!("Margin top {}px", top.local.margins.top),
+                        top.local.margins.top as f64,
+                        0.0..=256.0,
+                        move |v| Plant::TopPlot(TopEvent::SetMarginTop(wid, v as i32)),
+                        None,
+                    ),
+                    plant_slider_row(
+                        format!("Margin right {}px", top.local.margins.right),
+                        top.local.margins.right as f64,
+                        0.0..=256.0,
+                        move |v| Plant::TopPlot(TopEvent::SetMarginRight(wid, v as i32)),
+                        None,
+                    )
+                ]
+                .spacing(8);
+                let bottom_margins_group = row![
+                    plant_slider_row(
+                        format!("Margin bottom {}px", top.local.margins.bottom),
+                        top.local.margins.bottom as f64,
+                        0.0..=256.0,
+                        move |v| Plant::TopPlot(TopEvent::SetMarginBottom(wid, v as i32)),
+                        None,
+                    ),
+                    plant_slider_row(
+                        format!("Margin left {}px", top.local.margins.left),
+                        top.local.margins.left as f64,
+                        0.0..=256.0,
+                        move |v| Plant::TopPlot(TopEvent::SetMarginLeft(wid, v as i32)),
+                        None,
+                    )
+                ]
+                .spacing(8);
+                col = col.push(top_margins_group);
+                col = col.push(bottom_margins_group);
             } else {
                 col = col.push(text("Enable Floating to adjust margins.").size(11));
             }
-            col = col.push(plant_slider_row(
-                format!("Round top-left {:.0}", top.local.radius.top_left),
-                top.local.radius.top_left as f64,
-                0.0..=32.0,
-                move |v| Plant::TopPlot(TopEvent::SetRadiusTl(wid, v as f32)),
-                None,
-            ));
-            col = col.push(plant_slider_row(
-                format!("Round top-right {:.0}", top.local.radius.top_right),
-                top.local.radius.top_right as f64,
-                0.0..=32.0,
-                move |v| Plant::TopPlot(TopEvent::SetRadiusTr(wid, v as f32)),
-                None,
-            ));
-            col = col.push(plant_slider_row(
-                format!("Round bottom-left {:.0}", top.local.radius.bottom_left),
-                top.local.radius.bottom_left as f64,
-                0.0..=32.0,
-                move |v| Plant::TopPlot(TopEvent::SetRadiusBl(wid, v as f32)),
-                None,
-            ));
-            col = col.push(plant_slider_row(
-                format!("Round bottom-right {:.0}", top.local.radius.bottom_right),
-                top.local.radius.bottom_right as f64,
-                0.0..=32.0,
-                move |v| Plant::TopPlot(TopEvent::SetRadiusBr(wid, v as f32)),
-                None,
-            ));
+            col = col.push(rule::horizontal(2));
+
+            let top_radius_group = row![
+                plant_slider_row(
+                    format!("Round top-left {:.0}", top.local.radius.top_left),
+                    top.local.radius.top_left as f64,
+                    0.0..=32.0,
+                    move |v| Plant::TopPlot(TopEvent::SetRadiusTl(wid, v as f32)),
+                    None,
+                ),
+                plant_slider_row(
+                    format!("Round top-right {:.0}", top.local.radius.top_right),
+                    top.local.radius.top_right as f64,
+                    0.0..=32.0,
+                    move |v| Plant::TopPlot(TopEvent::SetRadiusTr(wid, v as f32)),
+                    None,
+                )
+            ]
+            .spacing(8);
+            let bottom_radius_group = row![
+                plant_slider_row(
+                    format!("Round bottom-left {:.0}", top.local.radius.bottom_left),
+                    top.local.radius.bottom_left as f64,
+                    0.0..=32.0,
+                    move |v| Plant::TopPlot(TopEvent::SetRadiusBl(wid, v as f32)),
+                    None,
+                ),
+                plant_slider_row(
+                    format!("Round bottom-right {:.0}", top.local.radius.bottom_right),
+                    top.local.radius.bottom_right as f64,
+                    0.0..=32.0,
+                    move |v| Plant::TopPlot(TopEvent::SetRadiusBr(wid, v as f32)),
+                    None,
+                )
+            ]
+            .spacing(8);
+            col = col.push(top_radius_group);
+            col = col.push(bottom_radius_group);
         }
         col.spacing(8).width(Length::Fill).into()
     }
