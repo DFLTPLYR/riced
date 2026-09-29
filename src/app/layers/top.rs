@@ -4,7 +4,7 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::composables::panel_window::top_window;
 use crate::theme;
 use iced::mouse::Button;
-use iced::widget::{container, text};
+use iced::widget::{column, container, row};
 use iced::window;
 use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -14,10 +14,70 @@ use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-#[derive(Debug)]
+/// Layer margins (px). Only applied when the bar floats; a docked bar is
+/// edge-pinned by the compositor and margins would fight the exclusive zone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Margins {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
+}
+
+/// Per-corner rounding (px) painted on the bar backdrop.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CornerRadius {
+    pub top_left: f32,
+    pub top_right: f32,
+    pub bottom_left: f32,
+    pub bottom_right: f32,
+}
+
+#[derive(Debug, Clone)]
 pub struct Top {
-    thickness: u32,
     anchor: Anchor,
+    /// Local per-bar runtime data. Owned by the bar itself, never bound to
+    /// the global `Config` (config.toml only holds theme/panel/menu/wallpaper
+    /// settings). Lost on restart — tweaks are session-local.
+    pub local: TopLocal,
+}
+
+/// Local data for one bar: size %, floating + margins, rounding.
+/// Plain runtime state on `Top`, deliberately outside `Config` so bars stay
+/// independent of the global config file and its hot-reload.
+#[derive(Debug, Clone)]
+pub struct TopLocal {
+    /// Bar width as % of the output width (1–100, portrait caps at 20).
+    pub width_pct: f32,
+    /// Bar height as % of the output height (1–100, landscape caps at 20).
+    pub height_pct: f32,
+    /// Floating bars reserve no exclusive zone (they overlay the wallpaper)
+    /// and honor `margins`. Docked bars are edge-pinned and reserve space.
+    pub floating: bool,
+    pub margins: Margins,
+    pub radius: CornerRadius,
+}
+
+impl Default for TopLocal {
+    fn default() -> Self {
+        Self {
+            // ~50px at 1080p, the old fixed thickness.
+            width_pct: 100.0,
+            height_pct: 5.0,
+            floating: false,
+            margins: Margins::default(),
+            radius: CornerRadius::default(),
+        }
+    }
+}
+
+impl TopLocal {
+    /// `%` fields resolved against an output size, in px (min 1px).
+    pub(crate) fn px_size(&self, sw: f32, sh: f32) -> (u32, u32) {
+        let w = ((sw * self.width_pct / 100.0).round() as u32).max(1);
+        let h = ((sh * self.height_pct / 100.0).round() as u32).max(1);
+        (w, h)
+    }
 }
 
 impl Top {
@@ -26,73 +86,49 @@ impl Top {
 
     pub fn new() -> Self {
         Self {
-            thickness: 50,
             anchor: Anchor::Top,
+            local: TopLocal::default(),
         }
     }
 
     pub fn with_anchor(anchor: Anchor) -> Self {
-        Self {
-            thickness: 50,
-            anchor,
+        // Side bars default to full height + narrow width (≈50px at 1080p);
+        // Top/Bottom bars default to full width + short height.
+        let mut local = TopLocal::default();
+        if anchor == Anchor::Left || anchor == Anchor::Right {
+            local.width_pct = 3.0;
+            local.height_pct = 100.0;
         }
+        Self { anchor, local }
     }
 
     pub fn anchor(&self) -> Anchor {
         self.anchor
     }
 
-    pub fn thickness(&self) -> u32 {
-        self.thickness
+    pub(crate) fn is_horizontal(&self) -> bool {
+        !(self.anchor == Anchor::Left || self.anchor == Anchor::Right)
     }
 
-    /// Total reserved insets for `output` from all Top bars on that output.
-    /// Returns (left, right, top, bottom) in logical px.
-    /// The compositor shrinks Anchor::all() Background windows by these
-    /// exclusive zones, so the Background window origin != output origin.
-    pub(crate) fn insets_for_output(
-        tops: &HashMap<window::Id, Top>,
-        ids: &HashMap<window::Id, crate::app::app::PlotInfo>,
-        output: OutputId,
-    ) -> (f32, f32, f32, f32) {
-        let mut left = 0.0f32;
-        let mut right = 0.0f32;
-        let mut top = 0.0f32;
-        let mut bottom = 0.0f32;
-        for (wid, info) in ids.iter() {
-            match info {
-                crate::app::app::PlotInfo::Top(o) if *o == output => {
-                    if let Some(t) = tops.get(wid) {
-                        let th = t.thickness() as f32;
-                        if t.anchor == Anchor::Left {
-                            left += th;
-                        } else if t.anchor == Anchor::Right {
-                            right += th;
-                        } else if t.anchor == Anchor::Bottom {
-                            bottom += th;
-                        } else {
-                            // Anchor::Top and any other/combined anchor reserves top
-                            // (Top::layer_size only distinguishes Left/Right vs rest)
-                            top += th;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        (left, right, top, bottom)
+    fn output_size(output_infos: &HashMap<OutputId, OutputInfo>, output: OutputId) -> (f32, f32) {
+        output_infos
+            .get(&output)
+            .map(|info| {
+                let (_, _, sw, sh) = Background::output_geometry(info);
+                (sw, sh)
+            })
+            .unwrap_or((1920.0, 1080.0))
     }
 
-    fn layer_size(&self) -> LayerSize {
-        // Top/Bottom span width (fill_width), Left/Right span height (fill_height)
-        if self.anchor == Anchor::Left || self.anchor == Anchor::Right {
-            LayerSize::fill_height(self.thickness)
+    fn exclusive_px(top: &Top, w: u32, h: u32) -> i32 {
+        if top.is_horizontal() {
+            h as i32
         } else {
-            LayerSize::fill_width(self.thickness)
+            w as i32
         }
     }
 
-    fn anchor_label(&self) -> &'static str {
+    pub(crate) fn anchor_label(&self) -> &'static str {
         if self.anchor == Anchor::Top {
             "TOP"
         } else if self.anchor == Anchor::Bottom {
@@ -106,35 +142,43 @@ impl Top {
         }
     }
 
-    /// Open a Top bar for a specific output (GlobalName).
+    /// Open a Top bar for a specific output (GlobalName) at `w`x`h` px
+    /// (resolved from the `%` fields against the output size by the caller).
     /// Called on `WayEvent::OutputInsert` which fires at startup for each
     /// active output when `StartMode::AllScreens`.
-    pub fn open(&self, output: u32) -> (window::Id, NewLayerShellSettings) {
+    pub fn open(&self, output: u32, w: u32, h: u32) -> (window::Id, NewLayerShellSettings) {
         let id = window::Id::unique();
+        let edge = Self::exclusive_px(self, w, h);
 
         let settings = NewLayerShellSettings {
             anchor: self.anchor,
             layer: Layer::Top,
-            exclusive_zone: Some(self.thickness as i32),
-            size: self.layer_size(),
+            exclusive_zone: Some(edge),
+            size: LayerSize::px(w, h),
             output_option: OutputOption::GlobalName(output),
+            margin: self.local.floating.then_some((
+                self.local.margins.top,
+                self.local.margins.right,
+                self.local.margins.bottom,
+                self.local.margins.left,
+            )),
             namespace: Some(format!("Riced - {} {}", self.anchor_label(), output)),
-            blur_option: BlurOption::FullRegion,
             ..Default::default()
         };
 
         (id, settings)
     }
 
-    /// Fallback for startup when no OutputId is known yet (uses Active output)
+    /// Fallback for startup when no OutputId is known yet (uses Active output).
+    /// Fixed 50px strip like the old default; replaced once outputs arrive.
     pub fn open_active(&self) -> (window::Id, NewLayerShellSettings) {
         let id = window::Id::unique();
 
         let settings = NewLayerShellSettings {
             anchor: self.anchor,
             layer: Layer::Top,
-            exclusive_zone: Some(self.thickness as i32),
-            size: self.layer_size(),
+            exclusive_zone: Some(50),
+            size: LayerSize::fill_width(50),
             output_option: OutputOption::Active,
             namespace: Some(format!("Riced - {} Active", self.anchor_label())),
             blur_option: BlurOption::FullRegion,
@@ -148,14 +192,31 @@ impl Top {
         // Opaque bar background on purpose: the daemon clears transparent (for
         // the Settings panel's Hyprland blur), so this layer must paint its own
         // backdrop or the wallpaper would show through the bar.
+        // Landscape (Top/Bottom) lays out horizontally, portrait
+        // (Left/Right) lays out vertically.
+        let content: Element<'_, Plant> = if self.is_horizontal() {
+            row![].width(Fill).height(Fill).into()
+        } else {
+            column![].width(Fill).height(Fill).into()
+        };
+        let radius = self.local.radius;
         top_window(id)
             .content(
-                container(text(format!("{} BAR TEST", self.anchor_label())).size(30))
+                container(content)
                     .width(Fill)
                     .height(Fill)
                     .center_x(Fill)
                     .center_y(Fill)
-                    .style(theme::bar),
+                    .style(move |theme: &iced::Theme| {
+                        let mut s = theme::bar(theme);
+                        s.border.radius = iced::border::Radius {
+                            top_left: radius.top_left,
+                            top_right: radius.top_right,
+                            bottom_right: radius.bottom_right,
+                            bottom_left: radius.bottom_left,
+                        };
+                        s
+                    }),
             )
             .into()
     }
@@ -183,6 +244,198 @@ impl Top {
         plots.press_starts.insert(id, Instant::now());
         println!("top press {button:?} on {id:?}");
         Command::none()
+    }
+
+    /// Size/float/margin edits apply live to the layer window every tick, so
+    /// sliders stay smooth (radius is view-live and needs nothing).
+    /// Release does no layout work — persisting is the config's business.
+    pub(crate) fn handle_set_width(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            // Portrait bars (Left/Right) are thin: cap width at 20%.
+            let max = if top.is_horizontal() { 100.0 } else { 20.0 };
+            top.local.width_pct = value.clamp(1.0, max);
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_height(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            // Landscape bars (Top/Bottom) are thin: cap height at 20%.
+            let max = if top.is_horizontal() { 20.0 } else { 100.0 };
+            top.local.height_pct = value.clamp(1.0, max);
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_floating(
+        plots: &mut Plots,
+        id: window::Id,
+        value: bool,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.floating = value;
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_margin_top(
+        plots: &mut Plots,
+        id: window::Id,
+        value: i32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.margins.top = value.max(0);
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_margin_right(
+        plots: &mut Plots,
+        id: window::Id,
+        value: i32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.margins.right = value.max(0);
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_margin_bottom(
+        plots: &mut Plots,
+        id: window::Id,
+        value: i32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.margins.bottom = value.max(0);
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_margin_left(
+        plots: &mut Plots,
+        id: window::Id,
+        value: i32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.margins.left = value.max(0);
+        }
+        Self::apply_layout(plots, id)
+    }
+
+    pub(crate) fn handle_set_radius_tl(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.radius.top_left = value.max(0.0);
+        }
+        Command::none()
+    }
+
+    pub(crate) fn handle_set_radius_tr(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.radius.top_right = value.max(0.0);
+        }
+        Command::none()
+    }
+
+    pub(crate) fn handle_set_radius_bl(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.radius.bottom_left = value.max(0.0);
+        }
+        Command::none()
+    }
+
+    pub(crate) fn handle_set_radius_br(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.radius.bottom_right = value.max(0.0);
+        }
+        Command::none()
+    }
+
+    /// Push the bar's current size/exclusive/margins to its live window.
+    /// Same window id throughout — no close/reopen flicker. Skips sentinel
+    /// windows (fixed fallback until outputs arrive and replace them).
+    pub(crate) fn apply_layout(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
+        // Safety net for bars sized before the 20% thin-dimension cap:
+        // clamp stale values so the live window never renders oversized.
+        if let Some(top) = plots.tops.get_mut(&bar_id) {
+            let horizontal = top.is_horizontal();
+            let max_w = if horizontal { 100.0 } else { 20.0 };
+            let max_h = if horizontal { 20.0 } else { 100.0 };
+            top.local.width_pct = top.local.width_pct.clamp(1.0, max_w);
+            top.local.height_pct = top.local.height_pct.clamp(1.0, max_h);
+        }
+        let (output, top) = match plots.ids.get(&bar_id).copied() {
+            Some(PlotInfo::Top(o)) => match plots.tops.get(&bar_id).cloned() {
+                Some(t) => (o, t),
+                None => return Command::none(),
+            },
+            _ => return Command::none(),
+        };
+        if output == OutputId(u32::MAX) {
+            return Command::none();
+        }
+        let (sw, sh) = Self::output_size(&plots.output_infos, output);
+        let (w, h) = top.local.px_size(sw, sh);
+        let mut cmds = vec![
+            Command::done(Plant::LayoutChange {
+                id: bar_id,
+                anchor: top.anchor,
+                size: LayerSize::px(w, h),
+            }),
+            Command::done(Plant::ExclusiveZoneChange {
+                id: bar_id,
+                zone_size: Self::exclusive_px(&top, w, h),
+            }),
+        ];
+        if top.local.floating {
+            let m = top.local.margins;
+            cmds.push(Command::done(Plant::MarginChange {
+                id: bar_id,
+                margin: (m.top, m.right, m.bottom, m.left),
+            }));
+        }
+        Command::batch(cmds)
+    }
+
+    /// Re-apply every bar on `output` (resolution/scale changed geometry:
+    /// `%` sizes now resolve to different px). Called on `OutputUpdated`.
+    pub(crate) fn reapply_for_output(plots: &mut Plots, output: OutputId) -> Command<Plant> {
+        let bars: Vec<window::Id> = plots
+            .ids
+            .iter()
+            .filter_map(|(wid, info)| match info {
+                PlotInfo::Top(o) if *o == output => Some(*wid),
+                _ => None,
+            })
+            .collect();
+        Command::batch(
+            bars.into_iter()
+                .map(|wid| Self::apply_layout(plots, wid))
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub(crate) fn handle_release(
@@ -363,7 +616,9 @@ impl Top {
                 );
             }
             let top = Top::with_anchor(anchor);
-            let (win_id, settings) = top.open(output_id.0);
+            let (sw, sh) = Self::output_size(output_infos, output_id);
+            let (w, h) = top.local.px_size(sw, sh);
+            let (win_id, settings) = top.open(output_id.0, w, h);
             tops.insert(win_id, top);
             ids.insert(win_id, PlotInfo::Top(output_id));
             println!(

@@ -66,6 +66,11 @@ pub struct Plots {
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
+    // Local-first staging: `Patch` mutates live memory every tick (smooth
+    // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
+    // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
+    pub(crate) config_dirty: bool,
+    pub(crate) config_save_seq: u64,
     // mtime of the active theme file (`theme::poll`); `None` tracks the
     // vendored fallback. A change re-emits the config so every view repaints.
     pub(crate) theme_mtime: Option<std::time::SystemTime>,
@@ -122,6 +127,8 @@ impl Plots {
             press_starts: HashMap::new(),
             config,
             config_mtime,
+            config_dirty: false,
+            config_save_seq: 0,
             theme_mtime,
             wallpapers,
             repaint_seq: 0,
@@ -208,6 +215,23 @@ impl Plots {
     /// that a drop-then-tweak lands in one run, short enough to feel live.
     const REGEN_DELAY: Duration = Duration::from_secs(2);
 
+    /// Idle delay before staged config edits hit the disk: long enough that
+    /// a slider drag coalesces into one write, short enough that a pause
+    /// persists without waiting for panel close.
+    const CONFIG_SAVE_DELAY: Duration = Duration::from_millis(800);
+
+    /// Persist staged config edits, if any. Idempotent no-op when clean.
+    /// Called by the coalescing save timer and synchronously on panel close.
+    pub(crate) fn flush_config_save(&mut self) {
+        if !self.config_dirty {
+            return;
+        }
+        self.config_dirty = false;
+        self.config_save_seq += 1;
+        // Update mtime so the poll tick doesn't echo our own write back.
+        self.config_mtime = self.config.save().or(self.config_mtime);
+    }
+
     /// Arm a regen `REGEN_DELAY` out (drop / add / remove / scale / file
     /// edit paths). Per-move patches never call this — drags stay silent
     /// until drop or close. Supersedes pending timers via `seq`; no-ops
@@ -217,10 +241,7 @@ impl Plots {
         if self.theme_regen_running {
             return Command::none();
         }
-        if !crate::colorgen::wants_regen(
-            &self.config.theme.name,
-            &crate::theme::user_file("dynamic"),
-        ) {
+        if !crate::colorgen::wants_regen(&self.config.theme.name) {
             self.theme_regen_dirty = false;
             return Command::none();
         }
@@ -237,10 +258,7 @@ impl Plots {
         if !self.theme_regen_dirty || self.theme_regen_running {
             return Command::none();
         }
-        if !crate::colorgen::wants_regen(
-            &self.config.theme.name,
-            &crate::theme::user_file("dynamic"),
-        ) {
+        if !crate::colorgen::wants_regen(&self.config.theme.name) {
             self.theme_regen_dirty = false;
             return Command::none();
         }
@@ -257,9 +275,7 @@ impl Plots {
         let mut rects: Vec<(f32, f32, f32, f32)> = self
             .backgrounds
             .keys()
-            .filter_map(|o| {
-                Background::available_rect(*o, &self.output_infos, &self.tops, &self.ids)
-            })
+            .filter_map(|o| Background::available_rect(*o, &self.output_infos))
             .collect();
         rects.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
         if rects.is_empty() {
@@ -437,6 +453,9 @@ impl Plots {
                 }
                 // Idempotent close: covers both the in-window close button
                 // and the compositor's X button (via close_events -> Uproot).
+                // Any window close also flushes staged config edits, so a
+                // drag-then-close without an idle gap still persists.
+                self.flush_config_save();
                 let close = iced_runtime::task::effect(Action::Window(WindowAction::Close(id)));
                 // Panel edits are done when the last panel closes: regen
                 // immediately instead of waiting out the countdown.
@@ -500,7 +519,12 @@ impl Plots {
                     != Background::output_geometry(&output);
                 self.output_infos.insert(output_id, output);
                 if geom_changed {
-                    Self::repaint_burst()
+                    // `%` bar sizes resolve against this geometry: re-push
+                    // every bar's px size so nothing goes stale, plus heals.
+                    Command::batch(vec![
+                        Self::repaint_burst(),
+                        Top::reapply_for_output(self, output_id),
+                    ])
                 } else {
                     Command::none()
                 }
@@ -602,6 +626,14 @@ impl Plots {
                 Command::none()
             }
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
+                // The file changed under us (external edit, or a theme file
+                // hot-reload re-emit): the on-disk config wins and replaces
+                // any staged local edits. Pending save timers are cancelled.
+                if self.config_dirty {
+                    println!("riced: config changed on disk — replacing staged local edits");
+                }
+                self.config_dirty = false;
+                self.config_save_seq += 1;
                 let images_changed = cfg.background.image != self.config.background.image;
                 let switched_to_dynamic =
                     cfg.theme.name == "dynamic" && self.config.theme.name != "dynamic";
@@ -613,9 +645,12 @@ impl Plots {
                 Command::none()
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
-                // Single source of truth: mutate live config, persist (updating
-                // mtime so the poll tick doesn't echo it back), and redraw All
-                // so every subscribed view picks the new value up next frame.
+                // Local-first single source of truth: mutate the live
+                // (in-memory) config and redraw All so every subscribed view
+                // previews the value next frame. The disk write is staged,
+                // not per-tick: slider drags fire dozens of patches a second
+                // and must not rewrite config.toml each time. `SaveTimer`
+                // persists once idle; panel close flushes synchronously.
                 // Image add/remove re-syncs the pre-decoded wallpaper cache;
                 // move/scale/z reuse the same pixels.
                 let sync = matches!(
@@ -646,13 +681,33 @@ impl Plots {
                 if sync {
                     Self::sync_wallpapers(&self.config, &mut self.wallpapers);
                 }
-                self.config_mtime = self.config.save().or(self.config_mtime);
+                self.config_dirty = true;
+                self.config_save_seq += 1;
+                let save_seq = self.config_save_seq;
+                let save =
+                    Command::perform(tokio::time::sleep(Self::CONFIG_SAVE_DELAY), move |_| {
+                        Plant::Config(ConfigEvent::SaveTimer(save_seq))
+                    });
                 if let Some(dir) = retemplate_dir {
-                    return Self::retemplate_command(dir, &self.config);
+                    return Command::batch(vec![save, Self::retemplate_command(dir, &self.config)]);
                 }
                 if wallpaper_touched {
-                    return self.arm_regen_theme();
+                    return Command::batch(vec![save, self.arm_regen_theme()]);
                 }
+                save
+            }
+            Plant::Config(ConfigEvent::SaveTimer(seq)) => {
+                // Stale timers (superseded by a later patch) or a clean
+                // state (flushed on panel close) never write twice.
+                if seq != self.config_save_seq || !self.config_dirty {
+                    return Command::none();
+                }
+                self.flush_config_save();
+                Command::none()
+            }
+            Plant::Config(ConfigEvent::SaveNow) => {
+                // Slider released: drags preview in memory, release persists.
+                self.flush_config_save();
                 Command::none()
             }
             Plant::Config(ConfigEvent::TemplatesDone(errors)) => {
@@ -687,6 +742,37 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
+            Plant::TopPlot(TopEvent::SetWidth(id, value)) => Top::handle_set_width(self, id, value),
+            Plant::TopPlot(TopEvent::SetHeight(id, value)) => {
+                Top::handle_set_height(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetFloating(id, value)) => {
+                Top::handle_set_floating(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetMarginTop(id, value)) => {
+                Top::handle_set_margin_top(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetMarginRight(id, value)) => {
+                Top::handle_set_margin_right(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetMarginBottom(id, value)) => {
+                Top::handle_set_margin_bottom(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetMarginLeft(id, value)) => {
+                Top::handle_set_margin_left(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetRadiusTl(id, value)) => {
+                Top::handle_set_radius_tl(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetRadiusTr(id, value)) => {
+                Top::handle_set_radius_tr(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetRadiusBl(id, value)) => {
+                Top::handle_set_radius_bl(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetRadiusBr(id, value)) => {
+                Top::handle_set_radius_br(self, id, value)
+            }
             Plant::SettingPlot(SettingEvent::Select(id, page)) => {
                 Setting::handle_select(self, id, page)
             }
@@ -743,6 +829,17 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
+        | Plant::TopPlot(TopEvent::SetWidth(..))
+        | Plant::TopPlot(TopEvent::SetHeight(..))
+        | Plant::TopPlot(TopEvent::SetFloating(..))
+        | Plant::TopPlot(TopEvent::SetMarginTop(..))
+        | Plant::TopPlot(TopEvent::SetMarginRight(..))
+        | Plant::TopPlot(TopEvent::SetMarginBottom(..))
+        | Plant::TopPlot(TopEvent::SetMarginLeft(..))
+        | Plant::TopPlot(TopEvent::SetRadiusTl(..))
+        | Plant::TopPlot(TopEvent::SetRadiusTr(..))
+        | Plant::TopPlot(TopEvent::SetRadiusBl(..))
+        | Plant::TopPlot(TopEvent::SetRadiusBr(..))
         | Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
         // CursorMoved is handled via throttled background tick; no direct redraw to avoid flood
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
@@ -753,6 +850,8 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::Config(ConfigEvent::ConfigTick)
         | Plant::Config(ConfigEvent::TemplatesDone(_))
         | Plant::Config(ConfigEvent::RegenTimer(_))
+        | Plant::Config(ConfigEvent::SaveTimer(_))
+        | Plant::Config(ConfigEvent::SaveNow)
         | Plant::IpcPoll => Scope::None,
         Plant::Config(ConfigEvent::ConfigReloaded(_)) | Plant::Config(ConfigEvent::Patch(_)) => {
             Scope::All

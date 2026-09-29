@@ -34,6 +34,13 @@ pub enum ConfigEvent {
     /// Runtime edit from a Settings-panel control. Applied to the single
     /// live config, persisted, and broadcast via full redraw.
     Patch(crate::config::ConfigPatch),
+    /// Coalesced disk write for staged `Patch` edits (carries the arm
+    /// generation; stale timers are ignored). Slider drags fire dozens of
+    /// patches a second — memory updates every tick, the file once idle.
+    SaveTimer(u64),
+    /// Slider released: persist staged edits to the config file right now
+    /// instead of waiting out the coalescing timer. No-op when clean.
+    SaveNow,
     /// Template re-render after a theme switch finished (sys `change_theme`
     /// equivalent). Carries per-template errors, empty when all applied.
     TemplatesDone(Vec<String>),
@@ -53,6 +60,22 @@ pub enum TopEvent {
     Sow,
     Pressed(Id, Button),
     Released(Id, Button),
+    /// Bar width % (1–100): applied live to the layer every tick.
+    SetWidth(Id, f32),
+    /// Bar height % (1–100, landscape caps at 20): applied live.
+    SetHeight(Id, f32),
+    /// Floating bars reserve no space and honor margins: applied live.
+    SetFloating(Id, bool),
+    /// Layer margins in px (floating only): applied live every tick.
+    SetMarginTop(Id, i32),
+    SetMarginRight(Id, i32),
+    SetMarginBottom(Id, i32),
+    SetMarginLeft(Id, i32),
+    /// Per-corner rounding in px (view-live).
+    SetRadiusTl(Id, f32),
+    SetRadiusTr(Id, f32),
+    SetRadiusBl(Id, f32),
+    SetRadiusBr(Id, f32),
 }
 
 #[derive(Debug, Clone)]

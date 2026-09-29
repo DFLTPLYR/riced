@@ -10,7 +10,6 @@ mod config;
 mod theme;
 
 use app::{Plots, redraw_scope};
-use iced_exwlshell::reexport::{BlurOption, Layer, LayerSize};
 use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 
 pub fn main() -> Result<(), iced_exwlshell::Error> {

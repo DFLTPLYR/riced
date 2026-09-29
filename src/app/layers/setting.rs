@@ -1,12 +1,14 @@
 use super::background::Background;
 use crate::app::ConfigEvent;
-use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
+use crate::app::{Plant, TopEvent};
 use crate::components::display_map::{MapView, images_layer, outputs_layer};
 use crate::config::ConfigPatch;
 use crate::theme;
-use iced::widget::{button, column, container, row, rule, scrollable, slider, stack, text};
+use iced::widget::{
+    Checkbox, Space, button, column, container, row, rule, scrollable, slider, stack, text,
+};
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
@@ -28,7 +30,7 @@ pub struct Setting {
 
 /// Master-detail pages: nav buttons on the left switch this, the right pane
 /// renders the matching controls. Stored per-window so each panel keeps its
-/// own selection (like `Top::thickness` lives on its own bar).
+/// own selection (like `Top` config lives on its own bar).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingPage {
     #[default]
@@ -162,30 +164,7 @@ impl Setting {
             .spacing(8)
             .width(Length::Fill)
             .into(),
-            SettingPage::Panel => column![
-                text("Panel").size(16),
-                slider_row(
-                    format!("Padding {:.0}", c.panel.padding),
-                    c.panel.padding,
-                    0.0..=32.0,
-                    ConfigPatch::PanelPadding
-                ),
-                slider_row(
-                    format!("Spacing {:.0}", c.panel.spacing),
-                    c.panel.spacing,
-                    0.0..=32.0,
-                    ConfigPatch::PanelSpacing
-                ),
-                slider_row(
-                    format!("Rounding {:.0}", c.panel.rounding),
-                    c.panel.rounding,
-                    0.0..=20.0,
-                    ConfigPatch::PanelRounding
-                ),
-            ]
-            .spacing(8)
-            .width(Length::Fill)
-            .into(),
+            SettingPage::Panel => self.panel_content(plots),
             SettingPage::ContextMenu => column![
                 text("Context Menu").size(16),
                 slider_row(
@@ -233,6 +212,147 @@ impl Setting {
         }
     }
 
+    /// Panel page: bar chrome sliders plus per-bar config for each Top bar:
+    /// width/height %, floating (+ margins when floating) and
+    /// per-corner rounding.
+    fn panel_content(&self, plots: &Plots) -> Element<'_, Plant> {
+        let c = &plots.config.composable;
+        let mut col = column![
+            text("Panel").size(16),
+            slider_row(
+                format!("Padding {:.0}", c.panel.padding),
+                c.panel.padding,
+                0.0..=32.0,
+                ConfigPatch::PanelPadding
+            ),
+            slider_row(
+                format!("Spacing {:.0}", c.panel.spacing),
+                c.panel.spacing,
+                0.0..=32.0,
+                ConfigPatch::PanelSpacing
+            ),
+            slider_row(
+                format!("Rounding {:.0}", c.panel.rounding),
+                c.panel.rounding,
+                0.0..=20.0,
+                ConfigPatch::PanelRounding
+            ),
+            text("Bars").size(16),
+            text("Size, floating and margins apply live to the bar.").size(11),
+        ]
+        .spacing(8);
+        let mut bars: Vec<_> = plots
+            .ids
+            .iter()
+            .filter_map(|(wid, info)| match info {
+                PlotInfo::Top(o) => Some((*wid, *o)),
+                _ => None,
+            })
+            .collect();
+        bars.sort_by_key(|(wid, o)| (o.0, format!("{wid:?}")));
+        if bars.is_empty() {
+            col = col.push(text("No bars yet — right-click the wallpaper, then Add Top.").size(12));
+        }
+        for (wid, output) in bars {
+            let Some(top) = plots.tops.get(&wid) else {
+                continue;
+            };
+            col = col.push(
+                column![
+                    text(format!("{} bar", top.anchor_label())).size(13),
+                    text(format!("{output:?}")).size(11),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+            );
+            // Thin dimension caps at 20%: landscape bars limit height,
+            // portrait bars limit width.
+            let horizontal = top.is_horizontal();
+            let width_max: f64 = if horizontal { 100.0 } else { 20.0 };
+            let height_max: f64 = if horizontal { 20.0 } else { 100.0 };
+            col = col.push(plant_slider_row(
+                format!("Width {:.0}%", top.local.width_pct.min(width_max as f32)),
+                top.local.width_pct.min(width_max as f32) as f64,
+                1.0..=width_max,
+                move |v| Plant::TopPlot(TopEvent::SetWidth(wid, v as f32)),
+                None,
+            ));
+            col = col.push(plant_slider_row(
+                format!("Height {:.0}%", top.local.height_pct.min(height_max as f32)),
+                top.local.height_pct.min(height_max as f32) as f64,
+                1.0..=height_max,
+                move |v| Plant::TopPlot(TopEvent::SetHeight(wid, v as f32)),
+                None,
+            ));
+            col = col.push(
+                Checkbox::new(top.local.floating)
+                    .label("Floating (no reserved space, margins apply)")
+                    .on_toggle(move |v| Plant::TopPlot(TopEvent::SetFloating(wid, v))),
+            );
+            if top.local.floating {
+                col = col.push(plant_slider_row(
+                    format!("Margin top {}px", top.local.margins.top),
+                    top.local.margins.top as f64,
+                    0.0..=256.0,
+                    move |v| Plant::TopPlot(TopEvent::SetMarginTop(wid, v as i32)),
+                    None,
+                ));
+                col = col.push(plant_slider_row(
+                    format!("Margin right {}px", top.local.margins.right),
+                    top.local.margins.right as f64,
+                    0.0..=256.0,
+                    move |v| Plant::TopPlot(TopEvent::SetMarginRight(wid, v as i32)),
+                    None,
+                ));
+                col = col.push(plant_slider_row(
+                    format!("Margin bottom {}px", top.local.margins.bottom),
+                    top.local.margins.bottom as f64,
+                    0.0..=256.0,
+                    move |v| Plant::TopPlot(TopEvent::SetMarginBottom(wid, v as i32)),
+                    None,
+                ));
+                col = col.push(plant_slider_row(
+                    format!("Margin left {}px", top.local.margins.left),
+                    top.local.margins.left as f64,
+                    0.0..=256.0,
+                    move |v| Plant::TopPlot(TopEvent::SetMarginLeft(wid, v as i32)),
+                    None,
+                ));
+            } else {
+                col = col.push(text("Enable Floating to adjust margins.").size(11));
+            }
+            col = col.push(plant_slider_row(
+                format!("Round top-left {:.0}", top.local.radius.top_left),
+                top.local.radius.top_left as f64,
+                0.0..=32.0,
+                move |v| Plant::TopPlot(TopEvent::SetRadiusTl(wid, v as f32)),
+                None,
+            ));
+            col = col.push(plant_slider_row(
+                format!("Round top-right {:.0}", top.local.radius.top_right),
+                top.local.radius.top_right as f64,
+                0.0..=32.0,
+                move |v| Plant::TopPlot(TopEvent::SetRadiusTr(wid, v as f32)),
+                None,
+            ));
+            col = col.push(plant_slider_row(
+                format!("Round bottom-left {:.0}", top.local.radius.bottom_left),
+                top.local.radius.bottom_left as f64,
+                0.0..=32.0,
+                move |v| Plant::TopPlot(TopEvent::SetRadiusBl(wid, v as f32)),
+                None,
+            ));
+            col = col.push(plant_slider_row(
+                format!("Round bottom-right {:.0}", top.local.radius.bottom_right),
+                top.local.radius.bottom_right as f64,
+                0.0..=32.0,
+                move |v| Plant::TopPlot(TopEvent::SetRadiusBr(wid, v as f32)),
+                None,
+            ));
+        }
+        col.spacing(8).width(Length::Fill).into()
+    }
+
     /// Theme picker: dark/light toggle plus one button per
     /// `~/.config/riced/theme/*.json` (same files as reshell). Writes back
     /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
@@ -262,14 +382,29 @@ impl Setting {
         .spacing(8);
         for name in theme::available_themes() {
             let selected = name == current.name;
+            let preview = theme::preview(&name, current.darkmode);
             list = list.push(
-                button(text(name.clone()).size(13).color(theme::text()))
-                    .width(Length::Fill)
-                    .on_press(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
-                        name,
-                    ))))
-                    .padding(8)
-                    .style(theme::nav_button(selected)),
+                button(
+                    row![
+                        text(name.clone()).size(13).color(preview.on_surface),
+                        Space::new().width(Length::Fill),
+                        row![
+                            swatch(preview.primary, preview.outline),
+                            swatch(preview.secondary, preview.outline),
+                            swatch(preview.tertiary, preview.outline),
+                        ]
+                        .spacing(4),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center)
+                    .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .on_press(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
+                    name,
+                ))))
+                .padding(8)
+                .style(theme::preview_button(preview, selected)),
             );
         }
         list.width(Length::Fill).into()
@@ -390,6 +525,9 @@ impl Setting {
             return Self::handle_add(&mut plots.settings, &mut plots.ids, &mut plots.context_menu);
         }
         let to_close = Self::close_all(&mut plots.settings, &mut plots.ids);
+        // Panel edits are done: persist staged config now instead of waiting
+        // out the coalescing save timer (Uproot flushes again, harmless).
+        plots.flush_config_save();
         let mut cmds = Vec::with_capacity(to_close.len());
         for id in to_close {
             plots.last_cursor.remove(&id);
@@ -411,6 +549,18 @@ impl Setting {
     }
 }
 
+/// Single palette swatch box for theme preview rows: fixed-size tile
+/// painted with the previewed theme's own color.
+fn swatch(color: iced::Color, border: iced::Color) -> Element<'static, Plant> {
+    container(
+        Space::new()
+            .width(Length::Fixed(18.0))
+            .height(Length::Fixed(18.0)),
+    )
+    .style(theme::swatch(color, border))
+    .into()
+}
+
 /// Label + slider bound to one config leaf: reads the live value, writes back
 /// via `ConfigEvent::Patch`. Fully owned element, so pages compose freely.
 /// The variant constructor doubles as the patch fn (`ConfigPatch::MenuWidth`
@@ -426,8 +576,30 @@ fn slider_row(
         slider(range, value as f64, move |v| {
             Plant::Config(ConfigEvent::Patch(ctor(v as f32)))
         })
+        // Drags preview in live memory; release persists to the config file.
+        .on_release(Plant::Config(ConfigEvent::SaveNow))
         .width(Length::Fill),
     ]
     .spacing(4)
     .into()
+}
+
+/// Label + slider emitting a [`Plant`] directly (per-bar Top controls).
+/// Unlike [`slider_row`], the message is built by closure so any event fits.
+/// `release` fires once when the drag ends (currently unused by bars,
+/// which apply live — kept for future release-gated controls).
+fn plant_slider_row(
+    label: String,
+    value: f64,
+    range: RangeInclusive<f64>,
+    msg: impl Fn(f64) -> Plant + 'static,
+    release: Option<Plant>,
+) -> Element<'static, Plant> {
+    let mut sl = slider(range, value, msg).width(Length::Fill);
+    if let Some(on_release) = release {
+        sl = sl.on_release(on_release);
+    }
+    column![text(label).size(13).color(theme::text()), sl,]
+        .spacing(4)
+        .into()
 }
