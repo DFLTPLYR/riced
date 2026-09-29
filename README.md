@@ -129,8 +129,8 @@ wallpaper, adding/removing/scaling one, or hand-editing
 `[background.image]` arms a one-shot 2s countdown (per-move patches stay
 silent, so drags never clog the events), and closing the last Settings
 panel fires immediately. Generation runs on a blocking worker from the
-live output rects and repaints all outputs when done; skipped unless the
-active theme is `dynamic` or a generated copy exists.
+live output rects and repaints all outputs when done; runs only while
+the selected theme is `dynamic`.
 
 ## Development
 
