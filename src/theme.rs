@@ -106,11 +106,7 @@ pub struct ActiveTheme {
 }
 
 impl ActiveTheme {
-    /// Vendored `gruvbox` dark (reshell's default theme + mode): the
-    /// last-resort fallback when no theme file parses.
     pub fn fallback() -> Self {
-        // #b8bb26 / #282828 / #fabd2f / #83a598 / #fb4934 / #282828 /
-        // #fbf1c7 / #3c3836 / #ebdbb2 / #57514e / #282828 / #83a598
         Self {
             primary: Color::from_rgb(
                 0xB8 as f32 / 255.0,
@@ -246,16 +242,12 @@ const BUILTINS: &[(&str, &str)] = &[
     ("tokyo-night", include_str!("../themes/tokyo-night.json")),
 ];
 
-/// Names that are generated, not vendored: skipped by seeding (below).
 const GENERATED: &[&str] = &["dynamic"];
 
-/// Raw text of a vendored builtin (`None` for generated/unknown names).
-/// Used by the `change_theme` object pass without touching disk.
 pub fn builtin_text(name: &str) -> Option<&'static str> {
     BUILTINS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
 }
 
-/// `~/.config/riced/theme` (`$XDG_CONFIG_HOME` aware).
 pub fn theme_dir() -> PathBuf {
     dirs::config_dir()
         .map(|d| d.join("riced").join("theme"))
@@ -266,9 +258,6 @@ pub(crate) fn user_file(name: &str) -> PathBuf {
     theme_dir().join(format!("{name}.json"))
 }
 
-/// All known theme names: vendored builtins plus any extra `*.json` in the
-/// user dir (including a generated `dynamic.json`), deduplicated and sorted.
-/// Drives the Settings Theme page.
 pub fn available_themes() -> Vec<String> {
     let mut names: Vec<String> = BUILTINS.iter().map(|(n, _)| n.to_string()).collect();
     if let Ok(entries) = std::fs::read_dir(theme_dir()) {
@@ -285,9 +274,6 @@ pub fn available_themes() -> Vec<String> {
     names
 }
 
-/// Seed the user theme dir on first run: copy every vendored theme that the
-/// user doesn't already have (never overwrites edits). Generated names
-/// (`dynamic`) are skipped — they only ever come from `riced generate-theme`.
 pub fn ensure_user_themes() {
     let dir = theme_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -325,9 +311,6 @@ fn load_file(name: &str) -> Option<ThemeFile> {
         .and_then(|(_, content)| serde_json::from_str(content).ok())
 }
 
-/// Resolve `name` + `darkmode` to paintable colors. Unknown names fall back
-/// to vendored `gruvbox` (same variant); a fully broken setup falls back to
-/// hardcoded gruvbox-dark so the shell never goes unstyled.
 pub fn resolve(cfg: &ThemeConfig) -> ActiveTheme {
     let file = load_file(&cfg.name).or_else(|| {
         if cfg.name != "gruvbox" {
@@ -351,9 +334,6 @@ pub fn resolve(cfg: &ThemeConfig) -> ActiveTheme {
     }
 }
 
-/// `iced::Palette` projection of an [`ActiveTheme`]: background/text carry
-/// the surface pair, primary/tertiary/secondary/error fill the accent slots
-/// so built-in widget styles (sliders, radios, …) follow the theme file too.
 pub fn to_palette(a: &ActiveTheme) -> Palette {
     Palette {
         background: a.surface,
@@ -454,44 +434,139 @@ pub fn app_style<State>(_: &State, _: &Theme) -> iced::theme::Style {
 }
 
 // ---------------------------------------------------------------------------
-// Roles — named colors, following reshell component conventions
+// Classes — Tailwind-style composable tokens (enum, not strings, so a
+// typo fails at compile time). One token language, three interpreters:
+// `color` for single colors, `container_style` for containers, and the
+// button factories below for status-dependent styles (hover/pressed
+// can't be static tokens without variant machinery — that's where this
+// stops and factories take over). Later tokens win, Tailwind-cascade
+// style. Import as `use crate::theme::{self, Class as C};` for
+// `theme::container_style(&[C::BgSurface, C::BorderOutline, C::Rounded])`.
+// ---------------------------------------------------------------------------
+
+/// Atomic style token. `Bg*` paints backgrounds, `Text*` paints text,
+/// `BorderOutline` paints a hairline, `Rounded` rounds corners.
+/// Resolvers ignore tokens outside their domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    BgSurface,
+    BgSurfaceVariant,
+    BgPrimary,
+    BgTransparent,
+    Text,
+    TextPrimary,
+    TextDim,
+    TextFaint,
+    TextOnPrimary,
+    TextDisabled,
+    BorderOutline,
+    Rounded,
+}
+
+/// The single mapping table: what each token means for one theme.
+/// Public resolvers (`color`, `container_style`) and the button factories
+/// below all read through here, so a palette tweak propagates everywhere.
+fn shade(a: &ActiveTheme, class: Class) -> Color {
+    match class {
+        Class::BgSurface => a.surface,
+        Class::BgSurfaceVariant => a.surface_variant,
+        Class::BgPrimary => a.primary,
+        Class::BgTransparent => Color::TRANSPARENT,
+        Class::Text => a.on_surface,
+        Class::TextPrimary => a.primary,
+        Class::TextDim => a.on_surface.scale_alpha(0.7),
+        Class::TextFaint => a.on_surface.scale_alpha(0.8),
+        Class::TextOnPrimary => a.on_primary,
+        Class::TextDisabled => a.on_surface.scale_alpha(0.5),
+        Class::BorderOutline => a.outline,
+        // No color: resolve transparent (prefer `container_style`, which
+        // applies it as a radius instead).
+        Class::Rounded => Color::TRANSPARENT,
+    }
+}
+
+/// Resolve one token to a color against the active theme.
+pub fn color(class: Class) -> Color {
+    shade(&active(), class)
+}
+
+/// Fold tokens into one container style: `Bg*` sets the background,
+/// `Text*` the text color, `BorderOutline` the hairline, `Rounded` the
+/// radius. Later tokens override earlier ones.
+pub fn container_style(classes: &[Class]) -> impl Fn(&Theme) -> container::Style {
+    let classes = classes.to_vec();
+    move |_| resolve_container(&classes)
+}
+
+fn resolve_container(classes: &[Class]) -> container::Style {
+    let a = active();
+    let mut style = container::Style::default();
+    for class in classes {
+        match class {
+            Class::BgSurface
+            | Class::BgSurfaceVariant
+            | Class::BgPrimary
+            | Class::BgTransparent => {
+                style.background = Some(shade(&a, *class).into());
+            }
+            Class::Text
+            | Class::TextPrimary
+            | Class::TextDim
+            | Class::TextFaint
+            | Class::TextOnPrimary
+            | Class::TextDisabled => {
+                style.text_color = Some(shade(&a, *class).into());
+            }
+            Class::BorderOutline => {
+                style.border.color = shade(&a, *class);
+                style.border.width = BORDER_WIDTH;
+            }
+            Class::Rounded => style.border.radius = RADIUS.into(),
+        }
+    }
+    style
+}
+
+// ---------------------------------------------------------------------------
+// Roles — named colors, following reshell component conventions.
+// Thin aliases over [`Class`] so existing call sites stay one word.
 // ---------------------------------------------------------------------------
 
 /// Default text on surfaces.
 pub fn text() -> Color {
-    active().on_surface
+    color(Class::Text)
 }
 
 /// Dim label text (debug label over wallpapers).
 pub fn text_dim() -> Color {
-    active().on_surface.scale_alpha(0.7)
+    color(Class::TextDim)
 }
 
 /// Map overlay label text.
 pub fn map_label() -> Color {
-    active().on_surface.scale_alpha(0.8)
+    color(Class::TextFaint)
 }
 
 /// Card background (context menus, settings map boxes): reshell `Menu`
 /// paints `surface` with an `outline` border.
 pub fn card() -> Color {
-    active().surface
+    color(Class::BgSurface)
 }
 
 /// Button / menu-item label text: reshell `Menu` items paint `primary`.
 pub fn button_text() -> Color {
-    active().primary
+    color(Class::TextPrimary)
 }
 
 /// Hairline border for every bordered surface/button.
 pub fn border_color() -> Color {
-    active().outline
+    color(Class::BorderOutline)
 }
 
 /// Top bar backdrop (opaque on purpose: the daemon clears transparent, so the
 /// bar must paint its own backdrop or wallpaper shows through).
 pub fn bar_bg() -> Color {
-    active().surface
+    color(Class::BgSurface)
 }
 
 /// Default corner radius for cards and buttons.
@@ -499,7 +574,7 @@ pub const RADIUS: f32 = 6.0;
 /// Hairline width shared by all bordered styles.
 pub const BORDER_WIDTH: f32 = 1.0;
 
-// Canvas (display-map) colors.
+// Canvas (display-map) colors: bespoke alpha blends, kept as plain fns.
 pub fn grid() -> Color {
     active().on_surface.scale_alpha(0.35)
 }
@@ -514,42 +589,28 @@ pub fn output_border() -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// Containers — `container(x).style(theme::menu_box)` etc.
+// Containers — `container(x).style(theme::menu_box)` etc., each one token
+// list (see `container_style` for ad-hoc combinations).
 // ---------------------------------------------------------------------------
 
-fn bordered(background: Color, radius: f32) -> container::Style {
-    container::Style {
-        background: Some(background.into()),
-        text_color: Some(active().on_surface),
-        border: Border {
-            color: border_color(),
-            width: BORDER_WIDTH,
-            radius: radius.into(),
-        },
-        ..Default::default()
-    }
-}
-
 /// Card surface: context menus, settings map boxes.
-pub fn menu_box(_: &Theme) -> container::Style {
-    bordered(card(), RADIUS)
+pub fn menu_box(theme: &Theme) -> container::Style {
+    container_style(&[
+        Class::BgSurface,
+        Class::Text,
+        Class::BorderOutline,
+        Class::Rounded,
+    ])(theme)
 }
 
 /// Opaque top-bar backdrop.
-pub fn bar(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(bar_bg().into()),
-        text_color: Some(active().on_surface),
-        ..Default::default()
-    }
+pub fn bar(theme: &Theme) -> container::Style {
+    container_style(&[Class::BgSurface, Class::Text])(theme)
 }
 
 /// Fully transparent container (background label, settings root).
-pub fn transparent_box(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Color::TRANSPARENT.into()),
-        ..Default::default()
-    }
+pub fn transparent_box(theme: &Theme) -> container::Style {
+    container_style(&[Class::BgTransparent])(theme)
 }
 
 /// Drag-selection rectangle. `opacity` is the 150ms fade value (`1.0` while
@@ -599,13 +660,21 @@ pub fn menu_button(rounding: f32) -> impl Fn(&Theme, button::Status) -> button::
     move |_, status| {
         let a = active();
         match status {
-            button::Status::Hovered | button::Status::Pressed => {
-                button_base(a.surface_variant, a.on_surface, rounding)
-            }
-            button::Status::Disabled => {
-                button_base(a.surface, a.on_surface.scale_alpha(0.5), rounding)
-            }
-            button::Status::Active => button_base(a.surface, a.primary, rounding),
+            button::Status::Hovered | button::Status::Pressed => button_base(
+                shade(&a, Class::BgSurfaceVariant),
+                shade(&a, Class::Text),
+                rounding,
+            ),
+            button::Status::Disabled => button_base(
+                shade(&a, Class::BgSurface),
+                shade(&a, Class::TextDisabled),
+                rounding,
+            ),
+            button::Status::Active => button_base(
+                shade(&a, Class::BgSurface),
+                shade(&a, Class::TextPrimary),
+                rounding,
+            ),
         }
     }
 }
@@ -615,10 +684,78 @@ pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::
     move |_, _| {
         let a = active();
         if selected {
-            button_base(a.primary, a.on_primary, RADIUS)
+            button_base(
+                shade(&a, Class::BgPrimary),
+                shade(&a, Class::TextOnPrimary),
+                RADIUS,
+            )
         } else {
-            button_base(a.surface_variant, a.on_surface, RADIUS)
+            button_base(
+                shade(&a, Class::BgSurfaceVariant),
+                shade(&a, Class::Text),
+                RADIUS,
+            )
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Theme previews — Settings Theme page rows
+// ---------------------------------------------------------------------------
+
+/// Resolve one variant for preview rows: the listed theme's own colors
+/// under the current dark/light mode, independent of the active theme.
+pub fn preview(name: &str, darkmode: bool) -> ActiveTheme {
+    resolve(&ThemeConfig {
+        name: name.to_string(),
+        darkmode,
+        ..Default::default()
+    })
+}
+
+/// Preview card button: `surface` background, `on_surface` text, selected
+/// rows ringed in `primary` (2px, else a hairline `outline`). Captures the
+/// previewed theme so every row shows its own palette, not the active one.
+pub fn preview_button(
+    previewed: ActiveTheme,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(
+                if hovered {
+                    previewed.surface_variant
+                } else {
+                    previewed.surface
+                }
+                .into(),
+            ),
+            text_color: previewed.on_surface,
+            border: Border {
+                color: if selected {
+                    previewed.primary
+                } else {
+                    previewed.outline
+                },
+                width: if selected { 2.0 } else { BORDER_WIDTH },
+                radius: RADIUS.into(),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Single palette swatch box for preview rows.
+pub fn swatch(color: Color, border: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            color: border,
+            width: BORDER_WIDTH,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
     }
 }
 
@@ -749,6 +886,51 @@ mod tests {
         let style = app_style::<()>(&(), &theme_for(&ThemeConfig::default()));
         assert_eq!(style.background_color, Color::TRANSPARENT);
         assert_eq!(style.text_color, active().on_surface);
+    }
+
+    #[test]
+    fn preview_resolves_the_listed_theme_not_the_active_one() {
+        let _guard = SERIAL.lock().unwrap();
+        sync(&ThemeConfig::default());
+        let dracula = preview("dracula", true);
+        assert_eq!(dracula.primary, parse_hex("#bd93f9").unwrap());
+        assert_eq!(dracula.surface, parse_hex("#282a36").unwrap());
+        // light variant follows the mode flag
+        let light = preview("dracula", false);
+        assert_eq!(light.surface, parse_hex("#f8f8f2").unwrap());
+    }
+
+    #[test]
+    fn preview_button_paints_surface_with_primary_ring_when_selected() {
+        let _guard = SERIAL.lock().unwrap();
+        let theme = theme_for(&ThemeConfig::default());
+        let dracula = preview("dracula", true);
+        let selected = preview_button(dracula, true)(&theme, button::Status::Active);
+        assert_eq!(selected.background, Some(dracula.surface.into()));
+        assert_eq!(selected.text_color, dracula.on_surface);
+        assert_eq!(selected.border.color, dracula.primary);
+        let plain = preview_button(dracula, false)(&theme, button::Status::Active);
+        assert_eq!(plain.border.color, dracula.outline);
+        let hovered = preview_button(dracula, false)(&theme, button::Status::Hovered);
+        assert_eq!(hovered.background, Some(dracula.surface_variant.into()));
+    }
+
+    #[test]
+    fn classes_resolve_and_cascade_later_wins() {
+        let _guard = SERIAL.lock().unwrap();
+        sync(&ThemeConfig::default());
+        let theme = theme_for(&ThemeConfig::default());
+        // single tokens
+        assert_eq!(color(Class::TextPrimary), active().primary);
+        assert_eq!(color(Class::BorderOutline), active().outline);
+        // later tokens override earlier ones
+        let style = container_style(&[Class::BgPrimary, Class::BgSurface])(&theme);
+        assert_eq!(style.background, Some(active().surface.into()));
+        // Rounded only touches the radius, BorderOutline only color+width
+        let style = container_style(&[Class::BorderOutline, Class::Rounded])(&theme);
+        assert_eq!(style.border.color, active().outline);
+        assert_eq!(style.border.width, BORDER_WIDTH);
+        assert!(style.background.is_none());
     }
 
     #[test]
