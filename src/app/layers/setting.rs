@@ -37,7 +37,7 @@ pub enum SettingPage {
     Menu,
     Panel,
     ContextMenu,
-    Background,
+    Wallpaper,
     Theme,
     Animation,
 }
@@ -48,7 +48,7 @@ impl SettingPage {
             Self::Menu,
             Self::Panel,
             Self::ContextMenu,
-            Self::Background,
+            Self::Wallpaper,
             Self::Theme,
             Self::Animation,
         ]
@@ -59,7 +59,7 @@ impl SettingPage {
             Self::Menu => "Menu",
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
-            Self::Background => "Wallpaper",
+            Self::Wallpaper => "Wallpaper",
             Self::Theme => "Theme",
             Self::Animation => "Animation",
         }
@@ -133,7 +133,7 @@ impl Setting {
             SettingPage::Menu => self.menu_content(plots),
             SettingPage::Panel => self.panel_content(plots),
             SettingPage::ContextMenu => self.context_menu_content(plots),
-            SettingPage::Background => self.background_content(id, plots),
+            SettingPage::Wallpaper => self.wallpaper_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
             SettingPage::Animation => self.animation_content(plots),
         }
@@ -461,7 +461,15 @@ impl Setting {
         .into()
     }
 
-    fn background_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+    fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+        column![
+            self.wallpaper_grid(id, plots),
+            container(Space::new().height(Length::Fill).width(Length::Fill)),
+        ]
+        .into()
+    }
+
+    fn wallpaper_grid(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         let mut outputs: Vec<(f32, f32, f32, f32)> = plots
             .output_infos
             .values()
@@ -474,16 +482,13 @@ impl Setting {
             .map(|img| plots.wallpaper_handle(img))
             .collect();
         let view = self.map_view;
-        column![
-            container(stack![
-                images_layer(id, outputs.clone(), images.clone(), handles.clone(), view),
-                outputs_layer(id, outputs, images, handles, view),
-            ])
-            .style(theme::menu_box)
-            .height(Length::Fixed(400.0))
-            .width(Length::Fill),
-        ]
-        .spacing(8)
+        container(stack![
+            images_layer(id, outputs.clone(), images.clone(), handles.clone(), view),
+            outputs_layer(id, outputs, images, handles, view),
+        ])
+        .style(theme::menu_box)
+        .height(Length::Fixed(600.0))
+        .clip(true)
         .width(Length::Fill)
         .into()
     }
@@ -511,7 +516,7 @@ impl Setting {
         if let Some(setting) = plots.settings.get_mut(&id) {
             setting.page = page;
         }
-        if page == SettingPage::Background {
+        if page == SettingPage::Wallpaper {
             return Plots::repaint_after(80);
         }
         Command::none()
