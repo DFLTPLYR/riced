@@ -129,91 +129,101 @@ impl Setting {
     /// slider reads the single `plots.config` source of truth and writes back
     /// via `ConfigEvent::Patch`, so every layer updates on the next redraw.
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        let c = &plots.config.composable;
         match self.page {
-            SettingPage::Menu => column![
-                text("Menu").size(16),
-                slider_row(
-                    format!("Width {:.0}", c.menu.width),
-                    c.menu.width,
-                    80.0..=400.0,
-                    ConfigPatch::MenuWidth
-                ),
-                slider_row(
-                    format!("Height {:.0}", c.menu.height),
-                    c.menu.height,
-                    40.0..=200.0,
-                    ConfigPatch::MenuHeight
-                ),
-                slider_row(
-                    format!("Padding {:.0}", c.menu.padding),
-                    c.menu.padding,
-                    0.0..=32.0,
-                    ConfigPatch::MenuPadding
-                ),
-                slider_row(
-                    format!("Spacing {:.0}", c.menu.spacing),
-                    c.menu.spacing,
-                    0.0..=32.0,
-                    ConfigPatch::MenuSpacing
-                ),
-                slider_row(
-                    format!("Rounding {:.0}", c.menu.rounding),
-                    c.menu.rounding,
-                    0.0..=20.0,
-                    ConfigPatch::MenuRounding
-                ),
-            ]
-            .spacing(8)
-            .width(Length::Fill)
-            .into(),
+            SettingPage::Menu => self.menu_content(plots),
             SettingPage::Panel => self.panel_content(plots),
-            SettingPage::ContextMenu => column![
-                text("Context Menu").size(16),
-                slider_row(
-                    format!("Width {:.0}", c.context_menu.width),
-                    c.context_menu.width,
-                    80.0..=400.0,
-                    ConfigPatch::ContextMenuWidth
-                ),
-                slider_row(
-                    format!("Padding {:.0}", c.context_menu.padding),
-                    c.context_menu.padding,
-                    0.0..=32.0,
-                    ConfigPatch::ContextMenuPadding
-                ),
-                slider_row(
-                    format!("Spacing {:.0}", c.context_menu.spacing),
-                    c.context_menu.spacing,
-                    0.0..=32.0,
-                    ConfigPatch::ContextMenuSpacing
-                ),
-                slider_row(
-                    format!("Rounding {:.0}", c.context_menu.rounding),
-                    c.context_menu.rounding,
-                    0.0..=20.0,
-                    ConfigPatch::ContextMenuRounding
-                ),
-                slider_row(
-                    format!("Item padding {:.0}", c.context_menu_item.padding),
-                    c.context_menu_item.padding,
-                    0.0..=32.0,
-                    ConfigPatch::ContextMenuItemPadding
-                ),
-                slider_row(
-                    format!("Item rounding {:.0}", c.context_menu_item.rounding),
-                    c.context_menu_item.rounding,
-                    0.0..=20.0,
-                    ConfigPatch::ContextMenuItemRounding
-                ),
-            ]
-            .spacing(8)
-            .width(Length::Fill)
-            .into(),
+            SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Background => self.background_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
             SettingPage::Animation => self.animation_content(plots),
         }
+    }
+
+    fn menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
+        let c = &plots.config.composable;
+        column![
+            text("Menu").size(16),
+            slider_row(
+                format!("Width {:.0}", c.menu.width),
+                c.menu.width,
+                80.0..=400.0,
+                ConfigPatch::MenuWidth
+            ),
+            slider_row(
+                format!("Height {:.0}", c.menu.height),
+                c.menu.height,
+                40.0..=200.0,
+                ConfigPatch::MenuHeight
+            ),
+            slider_row(
+                format!("Padding {:.0}", c.menu.padding),
+                c.menu.padding,
+                0.0..=32.0,
+                ConfigPatch::MenuPadding
+            ),
+            slider_row(
+                format!("Spacing {:.0}", c.menu.spacing),
+                c.menu.spacing,
+                0.0..=32.0,
+                ConfigPatch::MenuSpacing
+            ),
+            slider_row(
+                format!("Rounding {:.0}", c.menu.rounding),
+                c.menu.rounding,
+                0.0..=20.0,
+                ConfigPatch::MenuRounding
+            ),
+        ]
+        .spacing(8)
+        .width(Length::Fill)
+        .into()
+    }
+
+    fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
+        let c = &plots.config.composable;
+        column![
+            text("Context Menu").size(16),
+            slider_row(
+                format!("Width {:.0}", c.context_menu.width),
+                c.context_menu.width,
+                80.0..=400.0,
+                ConfigPatch::ContextMenuWidth
+            ),
+            slider_row(
+                format!("Padding {:.0}", c.context_menu.padding),
+                c.context_menu.padding,
+                0.0..=32.0,
+                ConfigPatch::ContextMenuPadding
+            ),
+            slider_row(
+                format!("Spacing {:.0}", c.context_menu.spacing),
+                c.context_menu.spacing,
+                0.0..=32.0,
+                ConfigPatch::ContextMenuSpacing
+            ),
+            slider_row(
+                format!("Rounding {:.0}", c.context_menu.rounding),
+                c.context_menu.rounding,
+                0.0..=20.0,
+                ConfigPatch::ContextMenuRounding
+            ),
+            rule::horizontal(2),
+            slider_row(
+                format!("Item padding {:.0}", c.context_menu_item.padding),
+                c.context_menu_item.padding,
+                0.0..=32.0,
+                ConfigPatch::ContextMenuItemPadding
+            ),
+            slider_row(
+                format!("Item rounding {:.0}", c.context_menu_item.rounding),
+                c.context_menu_item.rounding,
+                0.0..=20.0,
+                ConfigPatch::ContextMenuItemRounding
+            ),
+        ]
+        .spacing(8)
+        .width(Length::Fill)
+        .into()
     }
 
     /// Panel page: per-bar config for each Top bar: width/height %,

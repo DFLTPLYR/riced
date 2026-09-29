@@ -102,9 +102,6 @@ pub(crate) enum PlotInfo {
 impl Plots {
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
-        // Seed ~/.config/riced/theme/ with the vendored reshell themes and
-        // ~/.config/riced/templates/ with the default template set on
-        // first run, then sync the global theme before first paint.
         crate::theme::ensure_user_themes();
         crate::colorgen::ensure_user_templates();
         let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);

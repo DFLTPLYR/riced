@@ -14,12 +14,8 @@ use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 
 pub fn main() -> Result<(), iced_exwlshell::Error> {
     tracing_subscriber::fmt().init();
-    // iced (wgpu, etc.) logs through the `log` facade, which is dropped
-    // entirely unless a backend is installed. Forward it into tracing so
-    // internals (e.g. the swapchain alpha-mode selection) are visible.
     let _ = tracing_log::LogTracer::init();
-    // Single-shot clients queue requests for the running daemon through
-    // the command file, or run fully standalone — no surfaces involved.
+
     match cli::parse() {
         Some(cli::Commands::OpenSettings) => {
             if let Err(e) = cli::queue_open_settings() {
