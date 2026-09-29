@@ -12,7 +12,6 @@ use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::top::Top;
 use crate::components::contextmenu::contextmenu;
 use crate::composables::panel::panel;
 use crate::composables::panel_window::background_window;
@@ -23,9 +22,8 @@ pub struct Background;
 
 /// Mirrors Quickshell QtObject selectionRect.
 /// Stored in **global compositor coords** so a single drag can span outputs.
-/// All translation goes through [`Background::available_rect`] (the Background
-/// window's actual origin/size after Top exclusive zones), never the full
-/// output geometry.
+/// All translation goes through [`Background::available_rect`] (always the
+/// full output — the window ignores exclusive zones), never ad-hoc math.
 #[derive(Debug, Clone, Default)]
 pub struct SelectionRect {
     pub start_point: Option<Point>, // global
@@ -90,7 +88,7 @@ impl Background {
         let settings = NewLayerShellSettings {
             anchor: Anchor::all(),
             layer: Layer::Background,
-            exclusive_zone: Some(0),
+            exclusive_zone: Some(-1),
             size: LayerSize::FILL,
             output_option: OutputOption::GlobalName(output),
             namespace: Some("Riced - Background".to_string()),
@@ -115,52 +113,39 @@ impl Background {
         (sx as f32, sy as f32, sw as f32, sh as f32)
     }
 
-    /// Background window geometry in global coords: full output minus Top
-    /// exclusive zones on that output.
+    /// Background window geometry in global coords: always the full output.
     ///
-    /// This is the piece the old global code got wrong: it assumed the
-    /// Background window origin == output origin with full height. With a Top
-    /// bar on monitor one (exclusive 50), that window is actually at
-    /// `(sx, sy + 50)` with height `sh - 50`, so local (0,0) maps to global
-    /// `(sx, sy+50)`. Using full geometry shifts x/y and available height.
-    /// All `to_global` / `intersects` / view math must use this rect.
+    /// The window ignores exclusive zones (`-1`, Quickshell
+    /// `ExclusionMode.Ignore`), so Top bars never move or shrink it: local
+    /// (0,0) is always the output origin and no bar math is needed here.
+    /// All `to_global` / `intersects` / view math uses this rect.
     pub fn available_rect(
         output: OutputId,
         output_infos: &HashMap<OutputId, OutputInfo>,
-        tops: &HashMap<window::Id, Top>,
-        ids: &HashMap<window::Id, PlotInfo>,
     ) -> Option<(f32, f32, f32, f32)> {
         let info = output_infos.get(&output)?;
-        let (sx, sy, sw, sh) = Self::output_geometry(info);
-        let (left, right, top, bottom) = Top::insets_for_output(tops, ids, output);
-        let ax = sx + left;
-        let ay = sy + top;
-        let aw = (sw - left - right).max(0.0);
-        let ah = (sh - top - bottom).max(0.0);
-        Some((ax, ay, aw, ah))
+        Some(Self::output_geometry(info))
     }
 
     /// Fallback when output info is missing: full-HD at origin.
     fn available_rect_or_fallback(
         output: OutputId,
         output_infos: &HashMap<OutputId, OutputInfo>,
-        tops: &HashMap<window::Id, Top>,
-        ids: &HashMap<window::Id, PlotInfo>,
     ) -> (f32, f32, f32, f32) {
-        Self::available_rect(output, output_infos, tops, ids).unwrap_or((0.0, 0.0, 1920.0, 1080.0))
+        Self::available_rect(output, output_infos).unwrap_or((0.0, 0.0, 1920.0, 1080.0))
     }
 
     /// mapToGlobal: local widget coords (window-relative) -> global compositor
-    /// coords, using this Background window's actual origin.
+    /// coords. The window is fullscreen at the output origin, so this is a
+    /// plain output-offset translation.
     pub fn to_global(
         id: window::Id,
         local: Point,
         ids: &HashMap<window::Id, PlotInfo>,
         output_infos: &HashMap<OutputId, OutputInfo>,
-        tops: &HashMap<window::Id, Top>,
     ) -> Point {
         if let Some(PlotInfo::Background(o)) = ids.get(&id).copied() {
-            if let Some((ax, ay, _, _)) = Self::available_rect(o, output_infos, tops, ids) {
+            if let Some((ax, ay, _, _)) = Self::available_rect(o, output_infos) {
                 return Point::new(local.x + ax, local.y + ay);
             }
             // output known but no avail (missing info) -> fall back to full geometry
@@ -269,8 +254,7 @@ impl Background {
             let now = Instant::now();
             plots.last_selection_tick = Some(now);
             if let Some(sp) = plots.selection_rect.start_point {
-                let gp =
-                    Self::to_global(id, position, &plots.ids, &plots.output_infos, &plots.tops);
+                let gp = Self::to_global(id, position, &plots.ids, &plots.output_infos);
                 // skip tiny moves <1px to reduce choppy updates
                 if plots.selection_rect.drag_update(sp, gp) {
                     // fall through to BackgroundPlot::SelectionTick redraw
@@ -291,28 +275,24 @@ impl Background {
         };
         // find the Background available rect this menu is displayed in
         // (stored output first, else containing available rect)
-        let menu_avail =
-            cm.output
-                .and_then(|o| {
-                    Self::available_rect(o, &plots.output_infos, &plots.tops, &plots.ids)
-                        .map(|a| (o, a))
-                })
-                .or_else(|| {
-                    plots.output_infos.keys().find_map(|o| {
-                        Self::available_rect(*o, &plots.output_infos, &plots.tops, &plots.ids)
-                            .and_then(|a| {
-                                // menu stored in global coords; check against *full* output
-                                // geometry for containment, but clamp/render in available
-                                let info = plots.output_infos.get(o)?;
-                                let (sx, sy, sw, sh) = Self::output_geometry(info);
-                                if cm.x >= sx && cm.x < sx + sw && cm.y >= sy && cm.y < sy + sh {
-                                    Some((*o, a))
-                                } else {
-                                    None
-                                }
-                            })
+        let menu_avail = cm
+            .output
+            .and_then(|o| Self::available_rect(o, &plots.output_infos).map(|a| (o, a)))
+            .or_else(|| {
+                plots.output_infos.keys().find_map(|o| {
+                    Self::available_rect(*o, &plots.output_infos).and_then(|a| {
+                        // menu stored in global coords; check against *full* output
+                        // geometry for containment, but clamp/render in available
+                        let info = plots.output_infos.get(o)?;
+                        let (sx, sy, sw, sh) = Self::output_geometry(info);
+                        if cm.x >= sx && cm.x < sx + sw && cm.y >= sy && cm.y < sy + sh {
+                            Some((*o, a))
+                        } else {
+                            None
+                        }
                     })
-                });
+                })
+            });
         let (menu_x, menu_y) = if let Some((_, (ax, ay, aw, ah))) = menu_avail {
             let lx = cm.x - ax;
             let ly = cm.y - ay;
@@ -334,7 +314,7 @@ impl Background {
             return Command::none();
         }
         let pos = Self::last_local(plots, id);
-        let gp = Self::to_global(id, pos, &plots.ids, &plots.output_infos, &plots.tops);
+        let gp = Self::to_global(id, pos, &plots.ids, &plots.output_infos);
         let output = match plots.id_info(id) {
             Some(PlotInfo::Background(o)) => Some(o),
             _ => None,
@@ -355,7 +335,7 @@ impl Background {
             return Command::none();
         }
         let pos = Self::last_local(plots, id);
-        let gp = Self::to_global(id, pos, &plots.ids, &plots.output_infos, &plots.tops);
+        let gp = Self::to_global(id, pos, &plots.ids, &plots.output_infos);
 
         if Self::menu_hit_test(plots, gp) {
             // click was on context menu — suppress selection drag
@@ -548,52 +528,12 @@ impl Background {
         .into()
     }
 
-    /// Debug label behind the overlays. Owns text + dim background styling.
-    fn bg_label_view(
-        plots: &Plots,
-        id: window::Id,
-        avail: (f32, f32, f32, f32),
-    ) -> Element<'_, Plant> {
-        let (ax, ay, aw, ah) = avail;
-        let cursor = plots.last_cursor.get(&id).copied();
-        let sr = &plots.selection_rect;
-        let bg_label = if sr.selecting {
-            format!(
-                "selecting {}x{} at {:.0},{:.0} | avail {:.0},{:.0} {}x{}",
-                sr.width as i32, sr.height as i32, sr.x, sr.y, ax, ay, aw as i32, ah as i32
-            )
-        } else if let Some(p) = cursor {
-            format!(
-                "BG click+drag  cursor local {p:?} global {:.0},{:.0}",
-                ax + p.x,
-                ay + p.y
-            )
-        } else {
-            "BG click+drag  (move cursor)  | right click for menu".to_string()
-        };
-        panel()
-            .content(
-                container(text(bg_label).size(13).color(theme::text_dim()))
-                    .width(Fill)
-                    .height(Fill)
-                    .center_x(Fill)
-                    .center_y(Fill)
-                    // Transparent now that wallpapers paint below: the debug
-                    // label floats over them. (Falls back to whatever is
-                    // behind the layer when no image is configured.)
-                    .style(theme::transparent_box),
-            )
-            .into()
-    }
-
     pub(crate) fn view(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
-        let avail =
-            Self::available_rect_or_fallback(output, &plots.output_infos, &plots.tops, &plots.ids);
+        let avail = Self::available_rect_or_fallback(output, &plots.output_infos);
 
         // Bottom of the stack is wallpaper images (QML `Background`), then
         // the debug label, selection, and menu overlays on top.
         let mut layers = Self::wallpaper_views(plots, avail);
-        layers.push(Self::bg_label_view(plots, id, avail));
         layers.push(Self::selection_overlay(plots, avail));
         layers.push(Self::context_menu_overlay(plots, avail));
 
