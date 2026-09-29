@@ -664,6 +664,7 @@ impl Plots {
                     ConfigPatch::AddImage(_)
                         | ConfigPatch::RemoveImage { .. }
                         | ConfigPatch::SetImageScale { .. }
+                        | ConfigPatch::ScaleImage { .. }
                         | ConfigPatch::SetImageZ { .. }
                 );
                 // Theme switches also re-render the templates dir (sys

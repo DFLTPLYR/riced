@@ -467,6 +467,14 @@ pub enum ConfigPatch {
     MoveImage { index: usize, x: f32, y: f32 },
     SetImageScale { index: usize, scale: f32 },
     SetImageZ { index: usize, z: i32 },
+    /// Cursor-anchored scale step (Ctrl+wheel on the map): placement and
+    /// scale travel in one patch so the point under the cursor stays put.
+    ScaleImage {
+        index: usize,
+        x: f32,
+        y: f32,
+        scale: f32,
+    },
     RemoveImage { index: usize },
 }
 
@@ -568,6 +576,18 @@ impl Config {
             }
             ConfigPatch::SetImageScale { index, scale } => {
                 if let Some(img) = images.get_mut(index) {
+                    img.scale = scale.max(0.01);
+                }
+            }
+            ConfigPatch::ScaleImage {
+                index,
+                x,
+                y,
+                scale,
+            } => {
+                if let Some(img) = images.get_mut(index) {
+                    img.x = x;
+                    img.y = y;
                     img.scale = scale.max(0.01);
                 }
             }
@@ -727,6 +747,20 @@ mod tests {
         assert_eq!(cfg.background.image[0].scale, 2.0);
         cfg.apply(ConfigPatch::SetImageZ { index: 0, z: 3 });
         assert_eq!(cfg.background.image[0].z, 3);
+        cfg.apply(ConfigPatch::ScaleImage {
+            index: 0,
+            x: 11.0,
+            y: 12.0,
+            scale: 1.5,
+        });
+        assert_eq!(
+            (
+                cfg.background.image[0].x,
+                cfg.background.image[0].y,
+                cfg.background.image[0].scale
+            ),
+            (11.0, 12.0, 1.5)
+        );
         // out-of-range patches are no-ops, never panics
         cfg.apply(ConfigPatch::MoveImage {
             index: 9,

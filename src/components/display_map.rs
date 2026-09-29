@@ -5,7 +5,7 @@ use crate::theme;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Stroke};
 use iced::widget::image::Handle;
 use iced::window;
-use iced::{Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use iced::{Element, Length, Point, Rectangle, Renderer, Size, Theme, keyboard, mouse};
 
 /// Interactive map of the monitor layout on a grid (ports the Quickshell
 /// Displays `Canvas` + per-screen `Display` delegate + `Flickable` pan/zoom
@@ -32,10 +32,6 @@ pub struct MapLayer {
     kind: LayerKind,
     outputs: Vec<(f32, f32, f32, f32)>,
     images: Vec<BackgroundImage>,
-    /// Pre-warmed [`Handle`]s parallel to `images` (`None` = undecodable,
-    /// skipped). Served from `Plots::wallpapers` so first paint already has
-    /// pixels — file-backed handles would decode on a worker whose completion
-    /// redraw the shell drops, leaving first paint blank until interaction.
     handles: Vec<Option<Handle>>,
     view: MapView,
     id: window::Id,
@@ -43,22 +39,22 @@ pub struct MapLayer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerKind {
-    /// Grid + wallpaper pixels + image borders (bottom layer).
     Images,
-    /// Output wash + overlap highlights + borders + labels (top layer).
-    /// Owns all interaction; the images canvas is inert.
     Outputs,
 }
 
-/// Pan/zoom/drag view state, stored on `Setting` and snapshotted into both
-/// canvas programs every redraw. `zoom: None` means auto-fit (initial view
-/// and after hot-plug); the first interaction pins the fit as manual values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MapView {
     pub zoom: Option<f32>,
     pub off_x: f32,
     pub off_y: f32,
     pub drag: Option<MapDrag>,
+    /// Click/drag-selected wallpaper (config index). Survives pans and
+    /// zooms; cleared by pressing empty space. Ctrl+wheel scales it.
+    pub selected: Option<usize>,
+    /// Whether Ctrl is currently held (tracked via ModifiersChanged).
+    /// Ctrl+wheel scales instead of zooming while true.
+    pub ctrl: bool,
 }
 
 /// Ephemeral drag in progress. `image: None` means panning the map.
@@ -171,6 +167,8 @@ impl MapLayer {
             off_x,
             off_y,
             drag: view.drag,
+            selected: view.selected,
+            ctrl: view.ctrl,
         }
     }
 
@@ -281,7 +279,10 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 let mut view = self.pinned(bounds.size(), self.view);
                 let zoom = view.zoom.unwrap_or(1.0);
                 let g = ((pos.x - view.off_x) / zoom, (pos.y - view.off_y) / zoom);
-                view.drag = Some(if let Some(i) = self.hit(g) {
+                let hit = self.hit(g);
+                // Click/drag selects the image; empty space deselects.
+                view.selected = hit;
+                view.drag = Some(if let Some(i) = hit {
                     // Grab the image with its offset so the drag doesn't snap.
                     let (x, y, _, _) = Self::resolved(&self.images[i])?;
                     MapDrag {
@@ -342,6 +343,45 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 let pos = cursor.position_in(bounds)?;
                 let mut view = self.pinned(bounds.size(), self.view);
                 let zoom = view.zoom.unwrap_or(1.0);
+                // Ctrl+wheel scales a wallpaper (cursor-anchored) instead of
+                // zooming: the hovered image wins, otherwise the selected
+                // one. First tick over a new image just selects it so the
+                // highlight lands before anything grows.
+                if view.ctrl {
+                    let g = ((pos.x - view.off_x) / zoom, (pos.y - view.off_y) / zoom);
+                    if let Some(i) = self.hit(g).or(view.selected) {
+                        if view.selected != Some(i) {
+                            view.selected = Some(i);
+                            return Some(Action::publish(select(view)).and_capture());
+                        }
+                        let (ix, iy, iw, ih) = Self::resolved(&self.images[i])?;
+                        let (nw, nh) = Self::native_size(&self.images[i])?;
+                        let lines = match *delta {
+                            mouse::ScrollDelta::Lines { y, .. } => y * 24.0,
+                            mouse::ScrollDelta::Pixels { y, .. } => y,
+                        };
+                        let factor = (1.0 + lines * 0.002).clamp(0.2, 5.0);
+                        let new_s = (self.images[i].scale.max(0.01) * factor).clamp(0.05, 10.0);
+                        // Keep the global point under the cursor fixed.
+                        let gx = (pos.x - view.off_x) / zoom;
+                        let gy = (pos.y - view.off_y) / zoom;
+                        let fx = if iw > 0.0 { (gx - ix) / iw } else { 0.5 };
+                        let fy = if ih > 0.0 { (gy - iy) / ih } else { 0.5 };
+                        let nx = gx - fx * nw * new_s;
+                        let ny = gy - fy * nh * new_s;
+                        return Some(
+                            Action::publish(Plant::Config(ConfigEvent::Patch(
+                                ConfigPatch::ScaleImage {
+                                    index: i,
+                                    x: nx,
+                                    y: ny,
+                                    scale: new_s,
+                                },
+                            )))
+                            .and_capture(),
+                        );
+                    }
+                }
                 let lines = match *delta {
                     mouse::ScrollDelta::Lines { y, .. } => y * 24.0,
                     mouse::ScrollDelta::Pixels { y, .. } => y,
@@ -355,6 +395,17 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 view.off_y = pos.y - global_y * next;
                 view.zoom = Some(next);
                 Some(Action::publish(select(view)).and_capture())
+            }
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                // Track Ctrl so wheel can scale instead of zoom. Published
+                // without capture; drag state rides along untouched.
+                let mut view = self.view;
+                let ctrl = modifiers.control();
+                if view.ctrl == ctrl {
+                    return None;
+                }
+                view.ctrl = ctrl;
+                Some(Action::publish(select(view)))
             }
             _ => None,
         }
@@ -378,10 +429,6 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
 
         match self.kind {
             LayerKind::Images => {
-                // Full-span gridlines in content space (like the QML grid):
-                // every line crossing the canvas is drawn edge to edge, so
-                // they read as a real grid at any pan/zoom. Step grows until
-                // lines are ≥8px apart.
                 let mut step = GRID_BASE;
                 while step * zoom < GRID_MIN_PX {
                     step *= 10.0;
@@ -421,11 +468,20 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                             .with_width(1.0)
                             .with_color(theme::border_color()),
                     );
+                    // Selected wallpaper: primary ring so the Ctrl+wheel
+                    // target reads at a glance.
+                    if self.view.selected == Some(i) {
+                        frame.stroke_rectangle(
+                            top_left,
+                            size,
+                            Stroke::default()
+                                .with_width(2.0)
+                                .with_color(theme::output_border()),
+                        );
+                    }
                 }
             }
             LayerKind::Outputs => {
-                // Output overlay: faint wash, then each image's intersection
-                // with every output highlighted, then crisp borders + labels.
                 for (x, y, w, h) in &self.outputs {
                     let top_left = local(*x, *y);
                     let size = Size::new((*w * zoom).max(2.0), (*h * zoom).max(2.0));
@@ -560,6 +616,8 @@ mod tests {
             off_x: 10.0,
             off_y: 20.0,
             drag: None,
+            selected: None,
+            ctrl: false,
         };
         assert_eq!(
             MapLayer::effective(size, map.bbox(), &view),
