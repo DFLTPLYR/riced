@@ -52,7 +52,8 @@ pub struct Plots {
     pub(crate) last_cursor: HashMap<iced::window::Id, Point>,
     // global selection rect (single, like Background.selectionRect)
     pub(crate) selection_rect: SelectionRect,
-    // fade animation after select end (QML Behavior on opacity 150ms InOutQuad)
+    // fade animation after select end (QML Behavior on opacity, InOutQuad
+    // over the global animation speed)
     pub(crate) fade_rect: Option<SelectionRect>,
     pub(crate) fade_start: Option<Instant>,
     // per-output geometry for clipping (panel.screen)
@@ -388,7 +389,8 @@ impl Plots {
         ];
 
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
-        // QML Behavior 150ms InOutQuad on opacity needs 60fps ticks only while fading
+        // QML Behavior InOutQuad on opacity (over the animation speed) needs
+        // 60fps ticks only while fading
         if self.fade_start.is_some() {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
@@ -591,9 +593,9 @@ impl Plots {
                 }
             }
             Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => {
-                // drive fade animation (150ms InOutQuad) — clear when done
+                // drive fade animation (speed-scaled InOutQuad) — clear when done
                 if let Some(start) = self.fade_start
-                    && start.elapsed() >= Duration::from_millis(150)
+                    && start.elapsed() >= self.config.animation.speed.duration()
                 {
                     self.fade_rect = None;
                     self.fade_start = None;

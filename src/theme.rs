@@ -613,9 +613,9 @@ pub fn transparent_box(theme: &Theme) -> container::Style {
     container_style(&[Class::BgTransparent])(theme)
 }
 
-/// Drag-selection rectangle. `opacity` is the 150ms fade value (`1.0` while
-/// selecting); `radius` is the per-corner radius so corners clipped by the
-/// output edge render square instead of sliced.
+/// Drag-selection rectangle. `opacity` is the speed-scaled fade value (`1.0`
+/// while selecting); `radius` is the per-corner radius so corners clipped by
+/// the output edge render square instead of sliced.
 pub fn selection_box(
     opacity: f32,
     radius: iced::border::Radius,

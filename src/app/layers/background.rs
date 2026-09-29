@@ -42,7 +42,7 @@ impl SelectionRect {
             self.width = 0.0;
             self.height = 0.0;
             self.start_point = None;
-            println!("select end -> reset rect (fade 150ms)");
+            println!("select end -> reset rect (fade starts)");
         }
     }
 
@@ -410,15 +410,16 @@ impl Background {
     /// Owns the rect math + styling; `view` just positions it in the stack.
     fn selection_overlay(plots: &Plots, avail: (f32, f32, f32, f32)) -> Element<'_, Plant> {
         let (ax, ay, aw, ah) = avail;
-        // active rect is either selecting rect or fading rect (150ms InOutQuad)
+        let fade_ms = plots.config.animation.speed.duration().as_millis() as f32;
+        // active rect is either selecting rect or fading rect (speed-scaled InOutQuad)
         let (active_rect, opacity) = if plots.selection_rect.selecting {
             (Some(&plots.selection_rect), 1.0)
         } else if let (Some(fr), Some(start)) = (&plots.fade_rect, &plots.fade_start) {
             let elapsed = start.elapsed().as_millis() as f32;
-            if elapsed >= 150.0 {
+            if elapsed >= fade_ms {
                 (None, 0.0)
             } else {
-                let p = elapsed / 150.0;
+                let p = elapsed / fade_ms;
                 let eased = if p < 0.5 {
                     2.0 * p * p
                 } else {
@@ -456,7 +457,7 @@ impl Background {
             let gx = cx + ax;
             let gy = cy + ay;
             let inside = |px: f32, py: f32| px >= ax && px <= ax + aw && py >= ay && py <= ay + ah;
-            let r = plots.config.composable.panel.rounding;
+            let r = 0.0;
             let radius = iced::border::Radius {
                 top_left: if inside(gx, gy) { r } else { 0.0 },
                 top_right: if inside(gx + cw, gy) { r } else { 0.0 },

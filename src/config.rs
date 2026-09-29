@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Top-level `config.toml`. Unknown keys are ignored so old files
 /// keep loading after new sections are added.
@@ -11,9 +11,6 @@ use std::time::SystemTime;
 /// width = 180.0
 /// height = 92.0
 /// # padding = 8.0         # when omitted, defaults to 0.0
-///
-/// [composable.panel]
-/// # padding = 4.0
 ///
 /// [composable.context_menu]
 /// width = 180.0
@@ -31,12 +28,20 @@ use std::time::SystemTime;
 /// name = "gruvbox"
 /// darkmode = true
 /// ```
+///
+/// Global animation speed for every animated transition (selection fade,
+/// and any color/property change that interpolates):
+/// ```toml
+/// [animation]
+/// speed = "medium"   # fast | medium | slow
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub composable: ComposableConfig,
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
+    pub animation: AnimationConfig,
 }
 
 /// Generates serde default fns from a single list, e.g.
@@ -65,6 +70,64 @@ fn default_darkmode() -> bool {
 
 fn default_variant() -> String {
     "content".to_string()
+}
+
+/// Global animation speed, applied to every animated transition
+/// (selection fade and any interpolated color/property change).
+/// ```toml
+/// [animation]
+/// speed = "medium"
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimationSpeed {
+    Fast,
+    Medium,
+    Slow,
+}
+
+impl AnimationSpeed {
+    pub fn all() -> [Self; 3] {
+        [Self::Fast, Self::Medium, Self::Slow]
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Medium => "Medium",
+            Self::Slow => "Slow",
+        }
+    }
+
+    /// Transition duration for the speed (medium preserves the original
+    /// 150ms QML Behavior feel).
+    pub fn duration(self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_millis(80),
+            Self::Medium => Duration::from_millis(150),
+            Self::Slow => Duration::from_millis(300),
+        }
+    }
+}
+
+impl Default for AnimationSpeed {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnimationConfig {
+    pub speed: AnimationSpeed,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        Self {
+            speed: AnimationSpeed::default(),
+        }
+    }
 }
 
 /// Theme selection under `[theme]`, mirroring reshell's `Global.general`
@@ -105,7 +168,6 @@ impl Default for ThemeConfig {
 #[serde(default)]
 pub struct ComposableConfig {
     pub menu: MenuConfig,
-    pub panel: PanelConfig,
     pub context_menu: ContextMenuConfig,
     pub context_menu_item: ContextMenuItemConfig,
 }
@@ -152,28 +214,6 @@ impl Default for MenuConfig {
         Self {
             width: default_width(),
             height: default_menu_height(),
-            padding: 0.0,
-            spacing: 0.0,
-            rounding: 0.0,
-        }
-    }
-}
-
-/// Style keys for the `Panel` composable (selection overlay, bars).
-/// Rendered geometry there is positional, so only style keys live here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PanelConfig {
-    #[serde(default)]
-    pub padding: f32,
-    #[serde(default)]
-    pub spacing: f32,
-    #[serde(default)]
-    pub rounding: f32,
-}
-
-impl Default for PanelConfig {
-    fn default() -> Self {
-        Self {
             padding: 0.0,
             spacing: 0.0,
             rounding: 0.0,
@@ -413,9 +453,6 @@ pub enum ConfigPatch {
     MenuPadding(f32),
     MenuSpacing(f32),
     MenuRounding(f32),
-    PanelPadding(f32),
-    PanelSpacing(f32),
-    PanelRounding(f32),
     ContextMenuWidth(f32),
     ContextMenuPadding(f32),
     ContextMenuSpacing(f32),
@@ -425,6 +462,7 @@ pub enum ConfigPatch {
     ThemeName(String),
     ThemeDarkmode(bool),
     ThemeVariant(String),
+    AnimationSpeed(AnimationSpeed),
     AddImage(BackgroundImage),
     MoveImage { index: usize, x: f32, y: f32 },
     SetImageScale { index: usize, scale: f32 },
@@ -511,9 +549,6 @@ impl Config {
             ConfigPatch::MenuPadding(v) => c.menu.padding = v,
             ConfigPatch::MenuSpacing(v) => c.menu.spacing = v,
             ConfigPatch::MenuRounding(v) => c.menu.rounding = v,
-            ConfigPatch::PanelPadding(v) => c.panel.padding = v,
-            ConfigPatch::PanelSpacing(v) => c.panel.spacing = v,
-            ConfigPatch::PanelRounding(v) => c.panel.rounding = v,
             ConfigPatch::ContextMenuWidth(v) => c.context_menu.width = v,
             ConfigPatch::ContextMenuPadding(v) => c.context_menu.padding = v,
             ConfigPatch::ContextMenuSpacing(v) => c.context_menu.spacing = v,
@@ -523,6 +558,7 @@ impl Config {
             ConfigPatch::ThemeName(name) => self.theme.name = name,
             ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
             ConfigPatch::ThemeVariant(variant) => self.theme.variant = variant,
+            ConfigPatch::AnimationSpeed(speed) => self.animation.speed = speed,
             ConfigPatch::AddImage(img) => images.push(img),
             ConfigPatch::MoveImage { index, x, y } => {
                 if let Some(img) = images.get_mut(index) {
@@ -792,14 +828,14 @@ mod tests {
     #[test]
     fn patch_updates_only_the_targeted_leaf() {
         let mut cfg = Config::default();
-        cfg.apply(ConfigPatch::PanelRounding(6.0));
-        assert_eq!(cfg.composable.panel.rounding, 6.0);
+        cfg.apply(ConfigPatch::ContextMenuRounding(6.0));
+        assert_eq!(cfg.composable.context_menu.rounding, 6.0);
         // everything else untouched
         assert_eq!(cfg.composable.menu.width, 180.0);
-        assert_eq!(cfg.composable.panel.padding, 0.0);
+        assert_eq!(cfg.composable.context_menu.padding, 0.0);
         cfg.apply(ConfigPatch::MenuWidth(250.0));
         assert_eq!(cfg.composable.menu.width, 250.0);
-        assert_eq!(cfg.composable.panel.rounding, 6.0);
+        assert_eq!(cfg.composable.context_menu.rounding, 6.0);
     }
 
     #[test]
@@ -828,5 +864,26 @@ mod tests {
         assert!(!cfg.theme.darkmode);
         cfg.apply(ConfigPatch::ThemeVariant("vibrant".into()));
         assert_eq!(cfg.theme.variant, "vibrant");
+    }
+
+    #[test]
+    fn animation_section_defaults_to_medium() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.animation.speed, AnimationSpeed::Medium);
+        assert_eq!(
+            AnimationSpeed::Medium.duration(),
+            Duration::from_millis(150)
+        );
+    }
+
+    #[test]
+    fn animation_speed_parses_and_patches() {
+        let cfg: Config = toml::from_str("[animation]\nspeed = \"fast\"\n").unwrap();
+        assert_eq!(cfg.animation.speed, AnimationSpeed::Fast);
+        assert_eq!(AnimationSpeed::Fast.duration(), Duration::from_millis(80));
+        assert_eq!(AnimationSpeed::Slow.duration(), Duration::from_millis(300));
+        let mut cfg = Config::default();
+        cfg.apply(ConfigPatch::AnimationSpeed(AnimationSpeed::Slow));
+        assert_eq!(cfg.animation.speed, AnimationSpeed::Slow);
     }
 }

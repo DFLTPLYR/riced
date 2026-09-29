@@ -4,7 +4,7 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
 use crate::app::{Plant, TopEvent};
 use crate::components::display_map::{MapView, images_layer, outputs_layer};
-use crate::config::ConfigPatch;
+use crate::config::{AnimationSpeed, ConfigPatch};
 use crate::theme;
 use iced::widget::{
     Checkbox, Space, button, column, container, row, rule, scrollable, slider, stack, text,
@@ -39,16 +39,18 @@ pub enum SettingPage {
     ContextMenu,
     Background,
     Theme,
+    Animation,
 }
 
 impl SettingPage {
-    fn all() -> [Self; 5] {
+    fn all() -> [Self; 6] {
         [
             Self::Menu,
             Self::Panel,
             Self::ContextMenu,
             Self::Background,
             Self::Theme,
+            Self::Animation,
         ]
     }
 
@@ -59,6 +61,7 @@ impl SettingPage {
             Self::ContextMenu => "Context Menu",
             Self::Background => "Wallpaper",
             Self::Theme => "Theme",
+            Self::Animation => "Animation",
         }
     }
 }
@@ -209,34 +212,15 @@ impl Setting {
             .into(),
             SettingPage::Background => self.background_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
+            SettingPage::Animation => self.animation_content(plots),
         }
     }
 
-    /// Panel page: bar chrome sliders plus per-bar config for each Top bar:
-    /// width/height %, floating (+ margins when floating) and
-    /// per-corner rounding.
+    /// Panel page: per-bar config for each Top bar: width/height %,
+    /// floating (+ margins when floating) and per-corner rounding.
     fn panel_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        let c = &plots.config.composable;
         let mut col = column![
             text("Panel").size(16),
-            slider_row(
-                format!("Padding {:.0}", c.panel.padding),
-                c.panel.padding,
-                0.0..=32.0,
-                ConfigPatch::PanelPadding
-            ),
-            slider_row(
-                format!("Spacing {:.0}", c.panel.spacing),
-                c.panel.spacing,
-                0.0..=32.0,
-                ConfigPatch::PanelSpacing
-            ),
-            slider_row(
-                format!("Rounding {:.0}", c.panel.rounding),
-                c.panel.rounding,
-                0.0..=20.0,
-                ConfigPatch::PanelRounding
-            ),
             text("Bars").size(16),
             text("Size, floating and margins apply live to the bar.").size(11),
         ]
@@ -408,6 +392,43 @@ impl Setting {
             );
         }
         list.width(Length::Fill).into()
+    }
+
+    /// Animation speed picker: one global speed for every animated
+    /// transition (selection fade and any interpolated color/property
+    /// change). Writes back via `ConfigEvent::Patch`, so the daemon
+    /// re-times on the next redraw and persists the choice to `config.toml`.
+    fn animation_content(&self, plots: &Plots) -> Element<'_, Plant> {
+        let current = plots.config.animation.speed;
+        let mut speeds = row![].spacing(8);
+        for speed in AnimationSpeed::all() {
+            let selected = speed == current;
+            speeds = speeds.push(
+                button(
+                    text(format!(
+                        "{} ({}ms)",
+                        speed.title(),
+                        speed.duration().as_millis()
+                    ))
+                    .size(13)
+                    .color(theme::text()),
+                )
+                .width(Length::Fill)
+                .on_press(Plant::Config(ConfigEvent::Patch(
+                    ConfigPatch::AnimationSpeed(speed),
+                )))
+                .padding(8)
+                .style(theme::nav_button(selected)),
+            );
+        }
+        column![
+            text("Animation").size(16),
+            text("Global speed for animated color and property changes.").size(11),
+            speeds.width(Length::Fill),
+        ]
+        .spacing(8)
+        .width(Length::Fill)
+        .into()
     }
 
     fn background_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
