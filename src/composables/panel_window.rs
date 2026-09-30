@@ -2,7 +2,7 @@ use crate::app::{BackgroundEvent, Plant, TopEvent};
 use iced::mouse::Button;
 use iced::widget::{Space, container, mouse_area};
 use iced::window;
-use iced::{Element, Fill};
+use iced::{Element, Fill, Padding};
 
 /// QML-like `PanelWindow { }` — Fill-sized `mouse_area` every layer builds its
 /// view on, so press/release stop living in per-layer `handle_graft`.
@@ -17,6 +17,10 @@ use iced::{Element, Fill};
 #[derive(Default)]
 pub struct PanelWindow<'a> {
     content: Option<Element<'a, Plant>>,
+    /// Inner inset (px) around the content, painted transparent — the
+    /// QML `PanelWindow.margins` equivalent. The layer surface itself stays
+    /// edge-pinned (exclusive zone untouched); only the content shrinks.
+    padding: Padding,
     on_press: Option<Plant>,
     on_release: Option<Plant>,
     on_right_press: Option<Plant>,
@@ -87,6 +91,13 @@ impl<'a> PanelWindow<'a> {
         self
     }
 
+    /// Inset the content from the surface edges (transparent gap).
+    /// Backs bar `margins`: `top_window(id).padding(...).content(...)`.
+    pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
+        self.padding = padding.into();
+        self
+    }
+
     pub fn on_press(mut self, message: Plant) -> Self {
         self.on_press = Some(message);
         self
@@ -121,7 +132,12 @@ impl<'a> PanelWindow<'a> {
         let content = self
             .content
             .unwrap_or_else(|| Space::new().width(0).height(0).into());
-        let mut area = mouse_area(container(content).width(Fill).height(Fill));
+        let mut area = mouse_area(
+            container(content)
+                .width(Fill)
+                .height(Fill)
+                .padding(self.padding),
+        );
         if let Some(m) = self.on_press {
             area = area.on_press(m);
         }

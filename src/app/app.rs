@@ -742,9 +742,11 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
-            Plant::TopPlot(TopEvent::SetWidth(id, value)) => Top::handle_set_width(self, id, value),
-            Plant::TopPlot(TopEvent::SetHeight(id, value)) => {
-                Top::handle_set_height(self, id, value)
+            Plant::TopPlot(TopEvent::SetLength(id, value)) => {
+                Top::handle_set_length(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetThickness(id, value)) => {
+                Top::handle_set_thickness(self, id, value)
             }
             Plant::TopPlot(TopEvent::SetFloating(id, value)) => {
                 Top::handle_set_floating(self, id, value)
@@ -775,6 +777,9 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::Select(id, page)) => {
                 Setting::handle_select(self, id, page)
+            }
+            Plant::SettingPlot(SettingEvent::SelectBar(id, bar)) => {
+                Setting::handle_select_bar(self, id, bar)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
                 // Mouse drop ends the drag: the incoming view has drag None,
@@ -829,8 +834,8 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
-        | Plant::TopPlot(TopEvent::SetWidth(..))
-        | Plant::TopPlot(TopEvent::SetHeight(..))
+        | Plant::TopPlot(TopEvent::SetLength(..))
+        | Plant::TopPlot(TopEvent::SetThickness(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))
         | Plant::TopPlot(TopEvent::SetMarginRight(..))
@@ -859,9 +864,11 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // Fresh dynamic.json on disk: repaint so the new palette applies
         // (theme::sync picks the new mtime up during the redraw).
         Plant::Config(ConfigEvent::ThemeRegenerated(_)) => Scope::All,
-        // Settings page select / map pan-zoom only affects its own window.
+        // Settings page/bar select / map pan-zoom only affects its own window.
         Plant::SettingPlot(
-            SettingEvent::Select(id, _) | SettingEvent::MapViewChanged { id, .. },
+            SettingEvent::Select(id, _)
+            | SettingEvent::SelectBar(id, _)
+            | SettingEvent::MapViewChanged { id, .. },
         ) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,
         Plant::Graft(_, _) => Scope::None,

@@ -14,8 +14,9 @@ use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Layer margins (px). Only applied when the bar floats; a docked bar is
-/// edge-pinned by the compositor and margins would fight the exclusive zone.
+/// Content inset (px) painted as a transparent gap inside the bar surface.
+/// Implemented as widget padding (see `PanelWindow::padding`), so the bar
+/// stays edge-pinned and keeps its exclusive zone while the backdrop shrinks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Margins {
     pub top: i32,
@@ -36,24 +37,18 @@ pub struct CornerRadius {
 #[derive(Debug, Clone)]
 pub struct Top {
     anchor: Anchor,
-    /// Local per-bar runtime data. Owned by the bar itself, never bound to
-    /// the global `Config` (config.toml only holds theme/panel/menu/wallpaper
-    /// settings). Lost on restart — tweaks are session-local.
     pub local: TopLocal,
 }
 
-/// Local data for one bar: size %, floating + margins, rounding.
+/// Local data for one bar: length %, thickness px, floating + margins, rounding.
 /// Plain runtime state on `Top`, deliberately outside `Config` so bars stay
 /// independent of the global config file and its hot-reload.
 #[derive(Debug, Clone)]
 pub struct TopLocal {
-    /// Bar width as % of the output width (1–100, portrait caps at 20).
-    pub width_pct: f32,
-    /// Bar height as % of the output height (1–100, landscape caps at 20).
-    pub height_pct: f32,
-    /// Floating bars reserve no exclusive zone (they overlay the wallpaper)
-    /// and honor `margins`. Docked bars are edge-pinned and reserve space.
+    pub length_pct: f32,
+    pub thickness_px: f32,
     pub floating: bool,
+    /// Inset of the bar backdrop inside its surface (view-live padding).
     pub margins: Margins,
     pub radius: CornerRadius,
 }
@@ -61,9 +56,9 @@ pub struct TopLocal {
 impl Default for TopLocal {
     fn default() -> Self {
         Self {
-            // ~50px at 1080p, the old fixed thickness.
-            width_pct: 100.0,
-            height_pct: 5.0,
+            length_pct: 100.0,
+            // ~50px, the old fixed thickness.
+            thickness_px: 50.0,
             floating: false,
             margins: Margins::default(),
             radius: CornerRadius::default(),
@@ -72,11 +67,22 @@ impl Default for TopLocal {
 }
 
 impl TopLocal {
-    /// `%` fields resolved against an output size, in px (min 1px).
-    pub(crate) fn px_size(&self, sw: f32, sh: f32) -> (u32, u32) {
-        let w = ((sw * self.width_pct / 100.0).round() as u32).max(1);
-        let h = ((sh * self.height_pct / 100.0).round() as u32).max(1);
-        (w, h)
+    pub(crate) fn px_size(&self, sw: f32, sh: f32, horizontal: bool) -> (u32, u32) {
+        let length = self.length_pct.clamp(1.0, 100.0);
+        let max_t = Self::max_thickness(sw, sh, horizontal).max(1.0);
+        let thick = (self.thickness_px.clamp(1.0, max_t).round() as u32).max(1);
+        if horizontal {
+            let w = ((sw * length / 100.0).round() as u32).max(1);
+            (w, thick)
+        } else {
+            let h = ((sh * length / 100.0).round() as u32).max(1);
+            (thick, h)
+        }
+    }
+
+    /// Max thickness in px for the given output size + orientation.
+    pub(crate) fn max_thickness(sw: f32, sh: f32, horizontal: bool) -> f32 {
+        if horizontal { sh } else { sw }
     }
 }
 
@@ -92,13 +98,8 @@ impl Top {
     }
 
     pub fn with_anchor(anchor: Anchor) -> Self {
-        // Side bars default to full height + narrow width (≈50px at 1080p);
-        // Top/Bottom bars default to full width + short height.
-        let mut local = TopLocal::default();
-        if anchor == Anchor::Left || anchor == Anchor::Right {
-            local.width_pct = 3.0;
-            local.height_pct = 100.0;
-        }
+        // Length defaults to full, thickness to ~50px, for any edge.
+        let local = TopLocal::default();
         Self { anchor, local }
     }
 
@@ -156,13 +157,11 @@ impl Top {
             exclusive_zone: Some(edge),
             size: LayerSize::px(w, h),
             output_option: OutputOption::GlobalName(output),
-            margin: self.local.floating.then_some((
-                self.local.margins.top,
-                self.local.margins.right,
-                self.local.margins.bottom,
-                self.local.margins.left,
-            )),
+            // Visual margins are widget padding (see `view`); the compositor
+            // surface stays edge-pinned with no layer offset.
+            margin: None,
             namespace: Some(format!("Riced - {} {}", self.anchor_label(), output)),
+            blur_option: BlurOption::FullRegion,
             ..Default::default()
         };
 
@@ -181,6 +180,8 @@ impl Top {
             size: LayerSize::fill_width(50),
             output_option: OutputOption::Active,
             namespace: Some(format!("Riced - {} Active", self.anchor_label())),
+            // Visual margins are widget padding (see `view`); no layer offset.
+            margin: None,
             blur_option: BlurOption::FullRegion,
             ..Default::default()
         };
@@ -189,18 +190,28 @@ impl Top {
     }
 
     pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
-        // Opaque bar background on purpose: the daemon clears transparent (for
-        // the Settings panel's Hyprland blur), so this layer must paint its own
-        // backdrop or the wallpaper would show through the bar.
-        // Landscape (Top/Bottom) lays out horizontally, portrait
-        // (Left/Right) lays out vertically.
         let content: Element<'_, Plant> = if self.is_horizontal() {
             row![].width(Fill).height(Fill).into()
         } else {
             column![].width(Fill).height(Fill).into()
         };
         let radius = self.local.radius;
+        // Margins inset the backdrop inside the edge-pinned surface
+        // (transparent gap, exclusive zone untouched). Gated on floating so
+        // an un-floating bar goes back to a full-bleed strip.
+        let m = self.local.margins;
+        let padding = if self.local.floating {
+            iced::Padding {
+                top: m.top.max(0) as f32,
+                right: m.right.max(0) as f32,
+                bottom: m.bottom.max(0) as f32,
+                left: m.left.max(0) as f32,
+            }
+        } else {
+            iced::Padding::ZERO
+        };
         top_window(id)
+            .padding(padding)
             .content(
                 container(content)
                     .width(Fill)
@@ -249,28 +260,39 @@ impl Top {
     /// Size/float/margin edits apply live to the layer window every tick, so
     /// sliders stay smooth (radius is view-live and needs nothing).
     /// Release does no layout work — persisting is the config's business.
-    pub(crate) fn handle_set_width(
+    pub(crate) fn handle_set_length(
         plots: &mut Plots,
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
         if let Some(top) = plots.tops.get_mut(&id) {
-            // Portrait bars (Left/Right) are thin: cap width at 20%.
-            let max = if top.is_horizontal() { 100.0 } else { 20.0 };
-            top.local.width_pct = value.clamp(1.0, max);
+            top.local.length_pct = value.clamp(1.0, 100.0);
         }
         Self::apply_layout(plots, id)
     }
 
-    pub(crate) fn handle_set_height(
+    pub(crate) fn handle_set_thickness(
         plots: &mut Plots,
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
+        // Thickness is px, bound to 1..=thin output axis.
+        let max = plots
+            .ids
+            .get(&id)
+            .copied()
+            .and_then(|info| match info {
+                PlotInfo::Top(o) => plots.output_infos.get(&o),
+                _ => None,
+            })
+            .map(|info| {
+                let (_, _, sw, sh) = Background::output_geometry(info);
+                let horizontal = plots.tops.get(&id).map_or(true, |t| t.is_horizontal());
+                TopLocal::max_thickness(sw, sh, horizontal).max(1.0)
+            })
+            .unwrap_or(1080.0);
         if let Some(top) = plots.tops.get_mut(&id) {
-            // Landscape bars (Top/Bottom) are thin: cap height at 20%.
-            let max = if top.is_horizontal() { 20.0 } else { 100.0 };
-            top.local.height_pct = value.clamp(1.0, max);
+            top.local.thickness_px = value.clamp(1.0, max);
         }
         Self::apply_layout(plots, id)
     }
@@ -378,14 +400,9 @@ impl Top {
     /// Same window id throughout — no close/reopen flicker. Skips sentinel
     /// windows (fixed fallback until outputs arrive and replace them).
     pub(crate) fn apply_layout(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        // Safety net for bars sized before the 20% thin-dimension cap:
-        // clamp stale values so the live window never renders oversized.
+        // Clamp stale values: length 1–100%, thickness 1..=thin output axis.
         if let Some(top) = plots.tops.get_mut(&bar_id) {
-            let horizontal = top.is_horizontal();
-            let max_w = if horizontal { 100.0 } else { 20.0 };
-            let max_h = if horizontal { 20.0 } else { 100.0 };
-            top.local.width_pct = top.local.width_pct.clamp(1.0, max_w);
-            top.local.height_pct = top.local.height_pct.clamp(1.0, max_h);
+            top.local.length_pct = top.local.length_pct.clamp(1.0, 100.0);
         }
         let (output, top) = match plots.ids.get(&bar_id).copied() {
             Some(PlotInfo::Top(o)) => match plots.tops.get(&bar_id).cloned() {
@@ -398,8 +415,19 @@ impl Top {
             return Command::none();
         }
         let (sw, sh) = Self::output_size(&plots.output_infos, output);
-        let (w, h) = top.local.px_size(sw, sh);
-        let mut cmds = vec![
+        let mut top = top;
+        let max = TopLocal::max_thickness(sw, sh, top.is_horizontal()).max(1.0);
+        top.local.thickness_px = top.local.thickness_px.clamp(1.0, max);
+        if let Some(stored) = plots.tops.get_mut(&bar_id) {
+            stored.local.thickness_px = top.local.thickness_px;
+            stored.local.length_pct = top.local.length_pct;
+        }
+        let horizontal = top.is_horizontal();
+        let (w, h) = top.local.px_size(sw, sh, horizontal);
+        // Margins are widget padding (see `view`): the surface stays
+        // edge-pinned with its full exclusive zone. Always clear the
+        // compositor-side margins so no stale layer offset lingers.
+        let cmds = vec![
             Command::done(Plant::LayoutChange {
                 id: bar_id,
                 anchor: top.anchor,
@@ -409,14 +437,11 @@ impl Top {
                 id: bar_id,
                 zone_size: Self::exclusive_px(&top, w, h),
             }),
-        ];
-        if top.local.floating {
-            let m = top.local.margins;
-            cmds.push(Command::done(Plant::MarginChange {
+            Command::done(Plant::MarginChange {
                 id: bar_id,
-                margin: (m.top, m.right, m.bottom, m.left),
-            }));
-        }
+                margin: (0, 0, 0, 0),
+            }),
+        ];
         Command::batch(cmds)
     }
 
@@ -617,7 +642,7 @@ impl Top {
             }
             let top = Top::with_anchor(anchor);
             let (sw, sh) = Self::output_size(output_infos, output_id);
-            let (w, h) = top.local.px_size(sw, sh);
+            let (w, h) = top.local.px_size(sw, sh, top.is_horizontal());
             let (win_id, settings) = top.open(output_id.0, w, h);
             tops.insert(win_id, top);
             ids.insert(win_id, PlotInfo::Top(output_id));

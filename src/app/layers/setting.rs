@@ -4,6 +4,7 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
 use crate::app::{Plant, TopEvent};
 use crate::components::display_map::{MapView, images_layer, outputs_layer};
+use crate::composables::spin_box::spin_box;
 use crate::config::{AnimationSpeed, ConfigPatch};
 use crate::theme;
 use iced::widget::{
@@ -26,6 +27,9 @@ pub struct Setting {
     /// both stacked canvas programs (canvas `State` can't be shared across
     /// the two widgets), updated via `SettingEvent::MapViewChanged`.
     map_view: MapView,
+    /// Bar picked in the Panel page picker row (`None` = first bar).
+    /// Stored per-window like `page`, so each panel keeps its own pick.
+    selected_bar: Option<window::Id>,
 }
 
 /// Master-detail pages: nav buttons on the left switch this, the right pane
@@ -131,7 +135,7 @@ impl Setting {
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
             SettingPage::Menu => self.menu_content(plots),
-            SettingPage::Panel => self.panel_content(plots),
+            SettingPage::Panel => self.panel_content(id, plots),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
@@ -226,9 +230,10 @@ impl Setting {
         .into()
     }
 
-    /// Panel page: per-bar config for each Top bar: width/height %,
-    /// floating (+ margins when floating) and per-corner rounding.
-    fn panel_content(&self, plots: &Plots) -> Element<'_, Plant> {
+    /// Panel page: picker row of bars on top, controls for the picked bar
+    /// below (defaults to the first). Length % + thickness px, floating
+    /// (+ margins when floating) and per-corner rounding.
+    fn panel_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         let mut col = column![
             text("Panel").size(16),
             text("Bars").size(16),
@@ -245,83 +250,152 @@ impl Setting {
             .collect();
         bars.sort_by_key(|(wid, o)| (o.0, format!("{wid:?}")));
         if bars.is_empty() {
-            col = col.push(text("No bars yet — right-click the wallpaper, then Add Top.").size(12));
+            return col
+                .push(
+                    column![
+                        text("No Bar Available").size(13).color(theme::text()),
+                        text("Right-click the wallpaper, then Add Top.").size(11),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::Center),
+                )
+                .spacing(8)
+                .width(Length::Fill)
+                .into();
         }
-        for (wid, output) in bars {
-            let Some(top) = plots.tops.get(&wid) else {
-                continue;
-            };
-            col = col.push(
-                column![
-                    text(format!("{} bar", top.anchor_label())).size(13),
-                    text(format!("{output:?}")).size(11),
-                ]
-                .spacing(2)
-                .width(Length::Fill),
+        // Picked bar, falling back to the first when unset or stale
+        // (e.g. its output was unplugged).
+        let selected = match self.selected_bar {
+            Some(s) if bars.iter().any(|(wid, _)| *wid == s) => s,
+            _ => bars[0].0,
+        };
+        let mut picker = row![].spacing(8);
+        for (wid, output) in &bars {
+            let label = plots
+                .tops
+                .get(wid)
+                .map(|t| format!("{} {output:?}", t.anchor_label()))
+                .unwrap_or_else(|| format!("BAR {output:?}"));
+            picker = picker.push(
+                button(text(label).size(13).color(theme::text()))
+                    .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectBar(
+                        id, *wid,
+                    )))
+                    .padding(8)
+                    .style(theme::nav_button(*wid == selected)),
             );
-            // Thin dimension caps at 20%: landscape bars limit height,
-            // portrait bars limit width.
+        }
+        col = col.push(picker);
+        let output = bars
+            .iter()
+            .find_map(|(wid, o)| (*wid == selected).then_some(*o));
+        let top = plots.tops.get(&selected);
+        let (Some(output), Some(top)) = (output, top) else {
+            return col
+                .push(
+                    column![text("No Bar Available").size(13).color(theme::text()),]
+                        .width(Length::Fill)
+                        .align_x(iced::Alignment::Center),
+                )
+                .spacing(8)
+                .width(Length::Fill)
+                .into();
+        };
+        {
+            let wid = selected;
+            // Length is % of the long axis (1–100); thickness is px bound to
+            // 1..=thin output axis (horizontal: sh, vertical: sw).
             let horizontal = top.is_horizontal();
-            let width_max: f64 = if horizontal { 100.0 } else { 20.0 };
-            let height_max: f64 = if horizontal { 20.0 } else { 100.0 };
+            let thick_max: f64 = plots
+                .output_infos
+                .get(&output)
+                .map(Background::output_geometry)
+                .map(
+                    |(_, _, sw, sh)| {
+                        if horizontal { sh as f64 } else { sw as f64 }
+                    },
+                )
+                .unwrap_or(if horizontal { 1080.0 } else { 1920.0 })
+                .max(1.0);
+            let length = top.local.length_pct.clamp(1.0, 100.0);
+            let thickness = top.local.thickness_px.clamp(1.0, thick_max as f32);
             col = col.push(plant_slider_row(
-                format!("Width {:.0}%", top.local.width_pct.min(width_max as f32)),
-                top.local.width_pct.min(width_max as f32) as f64,
-                1.0..=width_max,
-                move |v| Plant::TopPlot(TopEvent::SetWidth(wid, v as f32)),
+                format!("Length {:.0}%", length),
+                length as f64,
+                1.0..=100.0,
+                1.0,
+                move |v| Plant::TopPlot(TopEvent::SetLength(wid, v as f32)),
                 None,
             ));
             col = col.push(plant_slider_row(
-                format!("Height {:.0}%", top.local.height_pct.min(height_max as f32)),
-                top.local.height_pct.min(height_max as f32) as f64,
-                1.0..=height_max,
-                move |v| Plant::TopPlot(TopEvent::SetHeight(wid, v as f32)),
+                format!("Thickness {:.0}px", thickness),
+                thickness as f64,
+                1.0..=thick_max,
+                1.0,
+                move |v| Plant::TopPlot(TopEvent::SetThickness(wid, v as f32)),
                 None,
             ));
             col = col.push(rule::horizontal(2));
             col = col.push(
                 Checkbox::new(top.local.floating)
-                    .label("Floating (no reserved space, margins apply)")
+                    .label("Floating look (inset content, reserved space kept)")
                     .on_toggle(move |v| Plant::TopPlot(TopEvent::SetFloating(wid, v))),
             );
 
             if top.local.floating {
-                let top_margins_group = row![
-                    plant_slider_row(
-                        format!("Margin top {}px", top.local.margins.top),
+                let top_margin = row![
+                    text("Margin top (px)").width(Length::FillPortion(7)),
+                    spin_box(
                         top.local.margins.top as f64,
                         0.0..=256.0,
+                        1.0,
+                        0,
                         move |v| Plant::TopPlot(TopEvent::SetMarginTop(wid, v as i32)),
-                        None,
-                    ),
-                    plant_slider_row(
-                        format!("Margin right {}px", top.local.margins.right),
+                    )
+                    .width(Length::Fixed(120.0)),
+                ]
+                .spacing(8);
+                let right_margin = row![
+                    text("Margin right (px)").width(Length::FillPortion(7)),
+                    spin_box(
                         top.local.margins.right as f64,
                         0.0..=256.0,
+                        1.0,
+                        0,
                         move |v| Plant::TopPlot(TopEvent::SetMarginRight(wid, v as i32)),
-                        None,
                     )
+                    .width(Length::Fixed(120.0)),
                 ]
                 .spacing(8);
-                let bottom_margins_group = row![
-                    plant_slider_row(
-                        format!("Margin bottom {}px", top.local.margins.bottom),
-                        top.local.margins.bottom as f64,
-                        0.0..=256.0,
-                        move |v| Plant::TopPlot(TopEvent::SetMarginBottom(wid, v as i32)),
-                        None,
-                    ),
-                    plant_slider_row(
-                        format!("Margin left {}px", top.local.margins.left),
+                let left_margin = row![
+                    text("Margin left (px)").width(Length::FillPortion(7)),
+                    spin_box(
                         top.local.margins.left as f64,
                         0.0..=256.0,
+                        1.0,
+                        0,
                         move |v| Plant::TopPlot(TopEvent::SetMarginLeft(wid, v as i32)),
-                        None,
                     )
+                    .width(Length::Fixed(120.0)),
                 ]
                 .spacing(8);
-                col = col.push(top_margins_group);
-                col = col.push(bottom_margins_group);
+                let bottom_margin = row![
+                    text("Margin bottom (px)").width(Length::FillPortion(7)),
+                    spin_box(
+                        top.local.margins.bottom as f64,
+                        0.0..=256.0,
+                        1.0,
+                        0,
+                        move |v| Plant::TopPlot(TopEvent::SetMarginBottom(wid, v as i32)),
+                    )
+                    .width(Length::Fixed(120.0)),
+                ]
+                .spacing(8);
+                col = col.push(top_margin);
+                col = col.push(bottom_margin);
+                col = col.push(right_margin);
+                col = col.push(left_margin);
             } else {
                 col = col.push(text("Enable Floating to adjust margins.").size(11));
             }
@@ -332,6 +406,7 @@ impl Setting {
                     format!("Round top-left {:.0}", top.local.radius.top_left),
                     top.local.radius.top_left as f64,
                     0.0..=32.0,
+                    1.0,
                     move |v| Plant::TopPlot(TopEvent::SetRadiusTl(wid, v as f32)),
                     None,
                 ),
@@ -339,6 +414,7 @@ impl Setting {
                     format!("Round top-right {:.0}", top.local.radius.top_right),
                     top.local.radius.top_right as f64,
                     0.0..=32.0,
+                    1.0,
                     move |v| Plant::TopPlot(TopEvent::SetRadiusTr(wid, v as f32)),
                     None,
                 )
@@ -349,6 +425,7 @@ impl Setting {
                     format!("Round bottom-left {:.0}", top.local.radius.bottom_left),
                     top.local.radius.bottom_left as f64,
                     0.0..=32.0,
+                    1.0,
                     move |v| Plant::TopPlot(TopEvent::SetRadiusBl(wid, v as f32)),
                     None,
                 ),
@@ -356,6 +433,7 @@ impl Setting {
                     format!("Round bottom-right {:.0}", top.local.radius.bottom_right),
                     top.local.radius.bottom_right as f64,
                     0.0..=32.0,
+                    1.0,
                     move |v| Plant::TopPlot(TopEvent::SetRadiusBr(wid, v as f32)),
                     None,
                 )
@@ -522,6 +600,18 @@ impl Setting {
         Command::none()
     }
 
+    /// Pick the bar the Panel page edits (`SettingEvent::SelectBar`).
+    pub(crate) fn handle_select_bar(
+        plots: &mut Plots,
+        id: window::Id,
+        bar: window::Id,
+    ) -> Command<Plant> {
+        if let Some(setting) = plots.settings.get_mut(&id) {
+            setting.selected_bar = Some(bar);
+        }
+        Command::none()
+    }
+
     /// Handle `Plant::Sprout`: close the context menu (like `TopEvent::Sow`),
     /// track the new window, and return the `NewBaseWindow` command.
     /// Equivalent to `Plant::base_window_open(IcedXdgWindowSettings::default())`
@@ -648,10 +738,11 @@ fn plant_slider_row(
     label: String,
     value: f64,
     range: RangeInclusive<f64>,
+    step: f64,
     msg: impl Fn(f64) -> Plant + 'static,
     release: Option<Plant>,
 ) -> Element<'static, Plant> {
-    let mut sl = slider(range, value, msg).width(Length::Fill);
+    let mut sl = slider(range, value, msg).step(step).width(Length::Fill);
     if let Some(on_release) = release {
         sl = sl.on_release(on_release);
     }

@@ -60,13 +60,14 @@ pub enum TopEvent {
     Sow,
     Pressed(Id, Button),
     Released(Id, Button),
-    /// Bar width % (1–100): applied live to the layer every tick.
-    SetWidth(Id, f32),
-    /// Bar height % (1–100, landscape caps at 20): applied live.
-    SetHeight(Id, f32),
-    /// Floating bars reserve no space and honor margins: applied live.
+    /// Bar length as % of the output long axis (1–100): applied live.
+    SetLength(Id, f32),
+    /// Bar thickness in px (1–thin output axis): applied live.
+    SetThickness(Id, f32),
+    /// Floating look: inset the backdrop with margins (view-live padding,
+    /// exclusive zone kept): applied live.
     SetFloating(Id, bool),
-    /// Layer margins in px (floating only): applied live every tick.
+    /// Content inset in px, floating look only (view-live padding).
     SetMarginTop(Id, i32),
     SetMarginRight(Id, i32),
     SetMarginBottom(Id, i32),
@@ -92,6 +93,8 @@ pub enum BackgroundEvent {
 #[derive(Debug, Clone, Copy)]
 pub enum SettingEvent {
     Select(Id, crate::app::layers::SettingPage),
+    /// Pick the bar edited by the Panel page (`id` = settings window).
+    SelectBar(Id, Id),
     MapViewChanged {
         id: Id,
         view: crate::components::display_map::MapView,
