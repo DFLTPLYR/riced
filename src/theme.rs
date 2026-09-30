@@ -452,7 +452,6 @@ pub enum Class {
     BgSurface,
     BgSurfaceVariant,
     BgPrimary,
-    BgTransparent,
     Text,
     TextPrimary,
     TextDim,
@@ -471,7 +470,6 @@ fn shade(a: &ActiveTheme, class: Class) -> Color {
         Class::BgSurface => a.surface,
         Class::BgSurfaceVariant => a.surface_variant,
         Class::BgPrimary => a.primary,
-        Class::BgTransparent => Color::TRANSPARENT,
         Class::Text => a.on_surface,
         Class::TextPrimary => a.primary,
         Class::TextDim => a.on_surface.scale_alpha(0.7),
@@ -503,10 +501,7 @@ fn resolve_container(classes: &[Class]) -> container::Style {
     let mut style = container::Style::default();
     for class in classes {
         match class {
-            Class::BgSurface
-            | Class::BgSurfaceVariant
-            | Class::BgPrimary
-            | Class::BgTransparent => {
+            Class::BgSurface | Class::BgSurfaceVariant | Class::BgPrimary => {
                 style.background = Some(shade(&a, *class).into());
             }
             Class::Text
@@ -563,12 +558,6 @@ pub fn border_color() -> Color {
     color(Class::BorderOutline)
 }
 
-/// Top bar backdrop (opaque on purpose: the daemon clears transparent, so the
-/// bar must paint its own backdrop or wallpaper shows through).
-pub fn bar_bg() -> Color {
-    color(Class::BgSurface)
-}
-
 /// Default corner radius for cards and buttons.
 pub const RADIUS: f32 = 6.0;
 /// Hairline width shared by all bordered styles.
@@ -606,11 +595,6 @@ pub fn menu_box(theme: &Theme) -> container::Style {
 /// Opaque top-bar backdrop.
 pub fn bar(theme: &Theme) -> container::Style {
     container_style(&[Class::BgSurface, Class::Text])(theme)
-}
-
-/// Fully transparent container (background label, settings root).
-pub fn transparent_box(theme: &Theme) -> container::Style {
-    container_style(&[Class::BgTransparent])(theme)
 }
 
 /// Drag-selection rectangle. `opacity` is the speed-scaled fade value (`1.0`
