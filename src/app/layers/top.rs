@@ -10,6 +10,8 @@ use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
+use iced_runtime::Action;
+use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -518,6 +520,25 @@ impl Top {
         plots.arm_config_save()
     }
 
+    /// Remove a bar (`TopEvent::Remove`): drop tracking + cursor state,
+    /// close its window, and delete its `[top.<name>]` entry (persisted
+    /// immediately) so it stays gone after restart.
+    pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
+        plots.last_cursor.remove(&bar_id);
+        plots.press_starts.remove(&bar_id);
+        if let Some(top) = plots.tops.remove(&bar_id) {
+            plots.ids.remove(&bar_id);
+            plots.config.top.remove(&top.name);
+            // flush_config_save only writes when dirty — mark it first
+            // (same for persist_new below).
+            plots.config_dirty = true;
+            plots.flush_config_save();
+        } else {
+            plots.ids.remove(&bar_id);
+        }
+        iced_runtime::task::effect(Action::Window(WindowAction::Close(bar_id)))
+    }
+
     /// Push the bar's current size/exclusive/margins to its live window.
     /// Same window id throughout — no close/reopen flicker. Skips sentinel
     /// windows (fixed fallback until outputs arrive and replace them).
@@ -757,6 +778,7 @@ impl Top {
                     radius_bottom_right: l.radius.bottom_right,
                 },
             );
+            plots.config_dirty = true;
             plots.flush_config_save();
         }
 

@@ -804,6 +804,7 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
+            Plant::TopPlot(TopEvent::Remove(id)) => Top::handle_remove(self, id),
             Plant::TopPlot(TopEvent::SetLength(id, value)) => {
                 Top::handle_set_length(self, id, value)
             }
@@ -890,6 +891,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
+        | Plant::TopPlot(TopEvent::Remove(..))
         | Plant::TopPlot(TopEvent::SetLength(..))
         | Plant::TopPlot(TopEvent::SetThickness(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))

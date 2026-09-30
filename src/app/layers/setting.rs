@@ -287,6 +287,18 @@ impl Setting {
             );
         }
         col = col.push(picker);
+        let remove_label = plots
+            .tops
+            .get(&selected)
+            .map(|t| format!("Remove {} bar", t.name))
+            .unwrap_or_else(|| String::from("Remove bar"));
+        col = col.push(
+            button(text(remove_label).size(13).color(theme::button_text()))
+                .on_press(Plant::TopPlot(TopEvent::Remove(selected)))
+                .padding(8)
+                .style(theme::menu_button(theme::RADIUS))
+                .width(Length::Fill),
+        );
         let output = bars
             .iter()
             .find_map(|(wid, o)| (*wid == selected).then_some(*o));
