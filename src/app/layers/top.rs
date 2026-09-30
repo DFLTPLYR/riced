@@ -37,6 +37,9 @@ pub struct CornerRadius {
 #[derive(Debug, Clone)]
 pub struct Top {
     anchor: Anchor,
+    /// Display name: `[top.<name>]` table for config-spawned bars,
+    /// anchor label for bars added via the context menu.
+    pub name: String,
     pub local: TopLocal,
 }
 
@@ -86,6 +89,28 @@ impl TopLocal {
     }
 }
 
+impl From<&crate::config::TopConfig> for TopLocal {
+    fn from(c: &crate::config::TopConfig) -> Self {
+        Self {
+            length_pct: c.length,
+            thickness_px: c.thickness,
+            floating: c.floating,
+            margins: Margins {
+                top: c.margin_top.max(0),
+                right: c.margin_right.max(0),
+                bottom: c.margin_bottom.max(0),
+                left: c.margin_left.max(0),
+            },
+            radius: CornerRadius {
+                top_left: c.radius_top_left.max(0.0),
+                top_right: c.radius_top_right.max(0.0),
+                bottom_left: c.radius_bottom_left.max(0.0),
+                bottom_right: c.radius_bottom_right.max(0.0),
+            },
+        }
+    }
+}
+
 impl Top {
     /// Hold threshold: press held >= this on release counts as hold.
     const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
@@ -93,14 +118,41 @@ impl Top {
     pub fn new() -> Self {
         Self {
             anchor: Anchor::Top,
+            name: String::from("TOP"),
             local: TopLocal::default(),
         }
     }
 
     pub fn with_anchor(anchor: Anchor) -> Self {
         // Length defaults to full, thickness to ~50px, for any edge.
-        let local = TopLocal::default();
-        Self { anchor, local }
+        let top = Self {
+            anchor,
+            name: String::new(),
+            local: TopLocal::default(),
+        };
+        let name = top.anchor_label().to_string();
+        Self { name, ..top }
+    }
+
+    /// Bar seeded from a `[top.<name>]` config entry.
+    pub fn with_config(name: String, anchor: Anchor, local: TopLocal) -> Self {
+        Self {
+            anchor,
+            name,
+            local,
+        }
+    }
+
+    /// Parse a config `anchor` value (`top`/`bottom`/`left`/`right`,
+    /// case-insensitive). `None` logs nothing — the caller warns.
+    pub fn parse_anchor(s: &str) -> Option<Anchor> {
+        match s.trim().to_lowercase().as_str() {
+            "top" => Some(Anchor::Top),
+            "bottom" => Some(Anchor::Bottom),
+            "left" => Some(Anchor::Left),
+            "right" => Some(Anchor::Right),
+            _ => None,
+        }
     }
 
     pub fn anchor(&self) -> Anchor {
@@ -258,8 +310,9 @@ impl Top {
     }
 
     /// Size/float/margin edits apply live to the layer window every tick, so
-    /// sliders stay smooth (radius is view-live and needs nothing).
-    /// Release does no layout work — persisting is the config's business.
+    /// sliders stay smooth (radius is view-live and needs nothing). Every
+    /// edit also stages a coalesced write to the bar's `[top.<name>]`
+    /// entry, so bars survive restarts.
     pub(crate) fn handle_set_length(
         plots: &mut Plots,
         id: window::Id,
@@ -268,7 +321,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.length_pct = value.clamp(1.0, 100.0);
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_thickness(
@@ -294,7 +350,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.thickness_px = value.clamp(1.0, max);
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_floating(
@@ -305,7 +364,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.floating = value;
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_margin_top(
@@ -316,7 +378,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.margins.top = value.max(0);
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_margin_right(
@@ -327,7 +392,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.margins.right = value.max(0);
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_margin_bottom(
@@ -338,7 +406,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.margins.bottom = value.max(0);
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_margin_left(
@@ -349,7 +420,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.margins.left = value.max(0);
         }
-        Self::apply_layout(plots, id)
+        Command::batch(vec![
+            Self::apply_layout(plots, id),
+            Self::persist_bar(plots, id),
+        ])
     }
 
     pub(crate) fn handle_set_radius_tl(
@@ -360,7 +434,7 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.radius.top_left = value.max(0.0);
         }
-        Command::none()
+        Self::persist_bar(plots, id)
     }
 
     pub(crate) fn handle_set_radius_tr(
@@ -371,7 +445,7 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.radius.top_right = value.max(0.0);
         }
-        Command::none()
+        Self::persist_bar(plots, id)
     }
 
     pub(crate) fn handle_set_radius_bl(
@@ -382,7 +456,7 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.radius.bottom_left = value.max(0.0);
         }
-        Command::none()
+        Self::persist_bar(plots, id)
     }
 
     pub(crate) fn handle_set_radius_br(
@@ -393,7 +467,55 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.radius.bottom_right = value.max(0.0);
         }
-        Command::none()
+        Self::persist_bar(plots, id)
+    }
+
+    /// Connector name for a bar's output (`""` when unknown/sentinel).
+    pub(crate) fn output_name(plots: &Plots, bar_id: window::Id) -> String {
+        plots
+            .ids
+            .get(&bar_id)
+            .copied()
+            .and_then(|info| match info {
+                PlotInfo::Top(o) => plots.output_infos.get(&o),
+                _ => None,
+            })
+            .and_then(|info| info.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Write the bar's current state back to its `[top.<name>]` entry and
+    /// arm a coalesced config save (same idle-write as `ConfigPatch`
+    /// drags). Same-named bars on several outputs share one entry.
+    pub(crate) fn persist_bar(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
+        let (name, anchor, local) = match plots.tops.get(&bar_id) {
+            Some(t) => (
+                t.name.clone(),
+                t.anchor_label().to_lowercase(),
+                t.local.clone(),
+            ),
+            None => return Command::none(),
+        };
+        let output = Self::output_name(plots, bar_id);
+        plots.config.top.insert(
+            name,
+            crate::config::TopConfig {
+                anchor,
+                output,
+                length: local.length_pct,
+                thickness: local.thickness_px,
+                floating: local.floating,
+                margin_top: local.margins.top,
+                margin_right: local.margins.right,
+                margin_bottom: local.margins.bottom,
+                margin_left: local.margins.left,
+                radius_top_left: local.radius.top_left,
+                radius_top_right: local.radius.top_right,
+                radius_bottom_left: local.radius.bottom_left,
+                radius_bottom_right: local.radius.bottom_right,
+            },
+        );
+        plots.arm_config_save()
     }
 
     /// Push the bar's current size/exclusive/margins to its live window.
@@ -544,9 +666,7 @@ impl Top {
     /// Handle `TopPlot(TopEvent::Sow)` – detect output and closest edge (Left/Right/Top/Bottom) where the
     /// context menu was opened and spawn a new bar there. Returns a `NewLayerShell` command.
     pub(crate) fn handle_add(
-        tops: &mut HashMap<window::Id, Top>,
-        ids: &mut HashMap<window::Id, PlotInfo>,
-        output_infos: &HashMap<OutputId, OutputInfo>,
+        plots: &mut Plots,
         menu_pos: Option<Point>,
         menu_output: Option<OutputId>,
     ) -> Option<Command<Plant>> {
@@ -584,23 +704,78 @@ impl Top {
                 "Unknown"
             }
         }
+        /// Config-table slug: lowercase ascii, runs collapsed (`"DP-1"`
+        /// becomes `"dp-1"`).
+        fn slug(s: &str) -> String {
+            let mut out: String = s
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            while out.contains("--") {
+                out = out.replace("--", "-");
+            }
+            let trimmed = out.trim_matches('-').to_string();
+            if trimmed.is_empty() {
+                String::from("bar")
+            } else {
+                trimmed
+            }
+        }
+        /// Persist a fresh bar as a `[top.<name>]` entry right away (a
+        /// click, not a drag — no coalescing needed) and name the bar
+        /// after its entry. Entry names stay unique across outputs.
+        fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
+            let base = if output.is_empty() {
+                format!("{}-all", slug(anchor_name(anchor)))
+            } else {
+                format!("{}-{}", slug(anchor_name(anchor)), slug(&output))
+            };
+            let mut key = base.clone();
+            let mut n = 2;
+            while plots.config.top.contains_key(&key) {
+                key = format!("{base}-{n}");
+                n += 1;
+            }
+            top.name = key.clone();
+            let l = &top.local;
+            plots.config.top.insert(
+                key,
+                crate::config::TopConfig {
+                    anchor: anchor_name(anchor).to_lowercase(),
+                    output,
+                    length: l.length_pct,
+                    thickness: l.thickness_px,
+                    floating: l.floating,
+                    margin_top: l.margins.top,
+                    margin_right: l.margins.right,
+                    margin_bottom: l.margins.bottom,
+                    margin_left: l.margins.left,
+                    radius_top_left: l.radius.top_left,
+                    radius_top_right: l.radius.top_right,
+                    radius_bottom_left: l.radius.bottom_left,
+                    radius_bottom_right: l.radius.bottom_right,
+                },
+            );
+            plots.flush_config_save();
+        }
 
         let (target_output, target_anchor): (Option<OutputId>, Anchor) = {
             if let Some(output) = menu_output {
-                if let Some(info) = output_infos.get(&output) {
+                if let Some(info) = plots.output_infos.get(&output) {
                     let anchor = menu_pos.map_or(Anchor::Top, |mp| closest_anchor(mp, info));
                     (Some(output), anchor)
                 } else {
                     (Some(output), Anchor::Top)
                 }
             } else if let Some(mp) = menu_pos {
-                let mut found = output_infos.iter().find(|(_, info)| {
+                let mut found = plots.output_infos.iter().find(|(_, info)| {
                     let (sx, sy, sw, sh) = Geo::output_geometry(info);
                     mp.x >= sx && mp.x < sx + sw && mp.y >= sy && mp.y < sy + sh
                 });
-                if found.is_none() && !output_infos.is_empty() {
+                if found.is_none() && !plots.output_infos.is_empty() {
                     let mut best: Option<(&OutputId, &OutputInfo, f32)> = None;
-                    for (oid, info) in output_infos {
+                    for (oid, info) in &plots.output_infos {
                         let (sx, sy, sw, sh) = Geo::output_geometry(info);
                         let cx = sx + sw / 2.0;
                         let cy = sy + sh / 2.0;
@@ -618,7 +793,7 @@ impl Top {
                 } else {
                     (None, Anchor::Top)
                 }
-            } else if let Some(oid) = output_infos.keys().next().copied() {
+            } else if let Some(oid) = plots.output_infos.keys().next().copied() {
                 (Some(oid), Anchor::Top)
             } else {
                 (None, Anchor::Top)
@@ -627,25 +802,31 @@ impl Top {
 
         if let Some(output_id) = target_output {
             let anchor = target_anchor;
-            let duplicate = ids.iter().any(|(wid, info)| match info {
+            let duplicate = plots.ids.iter().any(|(wid, info)| match info {
                 PlotInfo::Top(o) if *o == output_id => {
-                    tops.get(wid).is_some_and(|t| t.anchor() == anchor)
+                    plots.tops.get(wid).is_some_and(|t| t.anchor() == anchor)
                 }
                 _ => false,
             });
             if duplicate {
                 println!(
-                    "Note: {} bar already exists for output {output_id:?}, spawning another at {:?}",
+                    "Note: {} bar already exists for output {output_id:?}, not spawning another",
                     anchor_name(anchor),
-                    anchor
                 );
+                return None;
             }
-            let top = Top::with_anchor(anchor);
-            let (sw, sh) = Self::output_size(output_infos, output_id);
+            let mut top = Top::with_anchor(anchor);
+            let (sw, sh) = Self::output_size(&plots.output_infos, output_id);
             let (w, h) = top.local.px_size(sw, sh, top.is_horizontal());
             let (win_id, settings) = top.open(output_id.0, w, h);
-            tops.insert(win_id, top);
-            ids.insert(win_id, PlotInfo::Top(output_id));
+            let output = plots
+                .output_infos
+                .get(&output_id)
+                .and_then(|info| info.name.clone())
+                .unwrap_or_default();
+            persist_new(plots, &mut top, anchor, output);
+            plots.tops.insert(win_id, top);
+            plots.ids.insert(win_id, PlotInfo::Top(output_id));
             println!(
                 "Added {} bar for output {output_id:?} window {win_id:?} (closest to {:?} @ {menu_pos:?} stored_output {menu_output:?}) — calling top.open() and spawning NewLayerShell",
                 anchor_name(anchor),
@@ -656,11 +837,20 @@ impl Top {
                 id: win_id,
             }))
         } else {
-            let top = Top::new();
-            let (win_id, settings) = top.open_active();
             let sentinel = OutputId(u32::MAX);
-            tops.insert(win_id, top);
-            ids.insert(win_id, PlotInfo::Top(sentinel));
+            let duplicate = plots
+                .ids
+                .iter()
+                .any(|(_, info)| matches!(info, PlotInfo::Top(o) if *o == sentinel));
+            if duplicate {
+                println!("Note: sentinel bar already exists (no output yet), not spawning another");
+                return None;
+            }
+            let mut top = Top::new();
+            let (win_id, settings) = top.open_active();
+            persist_new(plots, &mut top, Anchor::Top, String::new());
+            plots.tops.insert(win_id, top);
+            plots.ids.insert(win_id, PlotInfo::Top(sentinel));
             println!(
                 "Added sentinel Top window {win_id:?} (no output yet) — calling top.open_active()"
             );

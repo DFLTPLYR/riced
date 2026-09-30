@@ -216,7 +216,19 @@ impl Plots {
     /// Idle delay before staged config edits hit the disk: long enough that
     /// a slider drag coalesces into one write, short enough that a pause
     /// persists without waiting for panel close.
-    const CONFIG_SAVE_DELAY: Duration = Duration::from_millis(800);
+    pub(crate) const CONFIG_SAVE_DELAY: Duration = Duration::from_millis(800);
+
+    /// Arm a coalesced config-file write for staged edits (bar panel
+    /// drags): memory updates every tick, the file once idle. Panel close
+    /// flushes synchronously via `flush_config_save`.
+    pub(crate) fn arm_config_save(&mut self) -> Command<Plant> {
+        self.config_dirty = true;
+        self.config_save_seq += 1;
+        let save_seq = self.config_save_seq;
+        Command::perform(tokio::time::sleep(Self::CONFIG_SAVE_DELAY), move |_| {
+            Plant::Config(ConfigEvent::SaveTimer(save_seq))
+        })
+    }
 
     /// Persist staged config edits, if any. Idempotent no-op when clean.
     /// Called by the coalescing save timer and synchronously on panel close.
@@ -498,7 +510,57 @@ impl Plots {
                     cmds.push(cmd);
                     cmds.push(Self::repaint_burst());
                 }
-                // No auto Top bar on start - user creates via Add Top context menu
+                // Declarative bars: one per `[top.<name>]` entry on this
+                // output, skipped when that edge already has a bar (user
+                // additions and re-added outputs never duplicate).
+                // Sorted by name so spawn order is deterministic.
+                let mut entries: Vec<_> = self.config.top.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                for (name, cfg) in entries {
+                    let Some(anchor) = Top::parse_anchor(&cfg.anchor) else {
+                        eprintln!(
+                            "riced: [top.{name}]: unknown anchor {:?}, skipping",
+                            cfg.anchor
+                        );
+                        continue;
+                    };
+                    // Named output only (`""` = every output): compare
+                    // against the connector name (`DP-1`, …).
+                    if !cfg.output.trim().is_empty() {
+                        let here = self
+                            .output_infos
+                            .get(&output_id)
+                            .and_then(|info| info.name.clone())
+                            .unwrap_or_default();
+                        if !here.eq_ignore_ascii_case(cfg.output.trim()) {
+                            continue;
+                        }
+                    }
+                    let taken = self.ids.iter().any(|(wid, info)| match info {
+                        PlotInfo::Top(o) if *o == output_id => {
+                            self.tops.get(wid).is_some_and(|t| t.anchor() == anchor)
+                        }
+                        _ => false,
+                    });
+                    if taken {
+                        continue;
+                    }
+                    let top = Top::with_config(name.clone(), anchor, cfg.into());
+                    let (sw, sh) = self
+                        .output_infos
+                        .get(&output_id)
+                        .map(Background::output_geometry)
+                        .map(|(_, _, w, h)| (w, h))
+                        .unwrap_or((1920.0, 1080.0));
+                    let (w, h) = top.local.px_size(sw, sh, top.is_horizontal());
+                    let (win_id, settings) = top.open(output_id.0, w, h);
+                    self.tops.insert(win_id, top);
+                    self.ids.insert(win_id, PlotInfo::Top(output_id));
+                    cmds.push(Command::done(Plant::NewLayerShell {
+                        settings,
+                        id: win_id,
+                    }));
+                }
                 if cmds.is_empty() {
                     Command::none()
                 } else {
@@ -805,13 +867,7 @@ impl Plots {
                 if let Some(cm) = &mut self.context_menu {
                     cm.open = false;
                 }
-                if let Some(cmd) = Top::handle_add(
-                    &mut self.tops,
-                    &mut self.ids,
-                    &self.output_infos,
-                    menu_pos,
-                    menu_output,
-                ) {
+                if let Some(cmd) = Top::handle_add(self, menu_pos, menu_output) {
                     return cmd;
                 }
                 Command::none()

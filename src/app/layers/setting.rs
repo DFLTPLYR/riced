@@ -275,7 +275,7 @@ impl Setting {
             let label = plots
                 .tops
                 .get(wid)
-                .map(|t| format!("{} {output:?}", t.anchor_label()))
+                .map(|t| format!("{} {output:?}", t.name))
                 .unwrap_or_else(|| format!("BAR {output:?}"));
             picker = picker.push(
                 button(text(label).size(13).color(theme::text()))

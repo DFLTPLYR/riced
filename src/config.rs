@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -35,6 +36,29 @@ use std::time::{Duration, SystemTime};
 /// [animation]
 /// speed = "medium"   # fast | medium | slow
 /// ```
+///
+/// Named bars under `[top.<name>]`. Each entry spawns one bar per
+/// matching output (on the entry's `anchor`, skipped when that edge
+/// already has a bar):
+/// ```toml
+/// [top.main]
+/// anchor = "top"     # top | bottom | left | right
+/// output = ""        # connector name (e.g. "DP-1"), "" = every output
+/// length = 100.0     # % of the output long axis (1-100)
+/// thickness = 50.0   # px (1-thin output axis)
+/// floating = false
+/// margin_top = 8
+/// margin_right = 8
+/// margin_bottom = 8
+/// margin_left = 8
+/// radius_top_left = 12.0
+/// radius_top_right = 12.0
+/// radius_bottom_left = 12.0
+/// radius_bottom_right = 12.0
+/// ```
+/// Bars added via the context menu are written here on creation and
+/// panel edits update the entry (coalesced save), so bars survive
+/// restarts. Same-named bars on several outputs share one entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -42,6 +66,9 @@ pub struct Config {
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
     pub animation: AnimationConfig,
+    /// Named bar presets, keyed by the `[top.<name>]` table name.
+    #[serde(default)]
+    pub top: HashMap<String, TopConfig>,
 }
 
 /// Generates serde default fns from a single list, e.g.
@@ -58,6 +85,12 @@ defs! {
     default_width: f32 = 180.0,
     default_menu_height: f32 = 92.0,
     default_scale: f32 = 1.0,
+    default_bar_length: f32 = 100.0,
+    default_bar_thickness: f32 = 50.0,
+}
+
+fn default_bar_anchor() -> String {
+    "top".to_string()
 }
 
 fn default_theme_name() -> String {
@@ -237,6 +270,61 @@ impl Default for ContextMenuItemConfig {
         Self {
             padding: 0.0,
             rounding: 0.0,
+        }
+    }
+}
+
+/// One named bar preset from `[top.<name>]`: edge, size, floating look
+/// (content inset) and per-corner rounding. Applied when the bar spawns;
+/// panel edits write back here (coalesced save), so bars survive restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TopConfig {
+    #[serde(default = "default_bar_anchor")]
+    pub anchor: String,
+    /// Connector name to spawn on (`""` = every output).
+    #[serde(default)]
+    pub output: String,
+    #[serde(default = "default_bar_length")]
+    pub length: f32,
+    #[serde(default = "default_bar_thickness")]
+    pub thickness: f32,
+    #[serde(default)]
+    pub floating: bool,
+    #[serde(default)]
+    pub margin_top: i32,
+    #[serde(default)]
+    pub margin_right: i32,
+    #[serde(default)]
+    pub margin_bottom: i32,
+    #[serde(default)]
+    pub margin_left: i32,
+    #[serde(default)]
+    pub radius_top_left: f32,
+    #[serde(default)]
+    pub radius_top_right: f32,
+    #[serde(default)]
+    pub radius_bottom_left: f32,
+    #[serde(default)]
+    pub radius_bottom_right: f32,
+}
+
+impl Default for TopConfig {
+    fn default() -> Self {
+        Self {
+            anchor: default_bar_anchor(),
+            output: String::new(),
+            length: default_bar_length(),
+            thickness: default_bar_thickness(),
+            floating: false,
+            margin_top: 0,
+            margin_right: 0,
+            margin_bottom: 0,
+            margin_left: 0,
+            radius_top_left: 0.0,
+            radius_top_right: 0.0,
+            radius_bottom_left: 0.0,
+            radius_bottom_right: 0.0,
         }
     }
 }
@@ -464,9 +552,19 @@ pub enum ConfigPatch {
     ThemeVariant(String),
     AnimationSpeed(AnimationSpeed),
     AddImage(BackgroundImage),
-    MoveImage { index: usize, x: f32, y: f32 },
-    SetImageScale { index: usize, scale: f32 },
-    SetImageZ { index: usize, z: i32 },
+    MoveImage {
+        index: usize,
+        x: f32,
+        y: f32,
+    },
+    SetImageScale {
+        index: usize,
+        scale: f32,
+    },
+    SetImageZ {
+        index: usize,
+        z: i32,
+    },
     /// Cursor-anchored scale step (Ctrl+wheel on the map): placement and
     /// scale travel in one patch so the point under the cursor stays put.
     ScaleImage {
@@ -475,7 +573,9 @@ pub enum ConfigPatch {
         y: f32,
         scale: f32,
     },
-    RemoveImage { index: usize },
+    RemoveImage {
+        index: usize,
+    },
 }
 
 /// `~/.config/riced/config.toml` (`$XDG_CONFIG_HOME` aware).
@@ -579,12 +679,7 @@ impl Config {
                     img.scale = scale.max(0.01);
                 }
             }
-            ConfigPatch::ScaleImage {
-                index,
-                x,
-                y,
-                scale,
-            } => {
+            ConfigPatch::ScaleImage { index, x, y, scale } => {
                 if let Some(img) = images.get_mut(index) {
                     img.x = x;
                     img.y = y;
@@ -887,6 +982,27 @@ mod tests {
             toml::from_str("[theme]\nname = \"dracula\"\ndarkmode = false\n").unwrap();
         assert_eq!(cfg.theme.name, "dracula");
         assert!(!cfg.theme.darkmode);
+    }
+
+    #[test]
+    fn top_section_parses_named_bars_with_defaults() {
+        let cfg: Config = toml::from_str(
+            "[top.main]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\nfloating = true\nmargin_top = 8\n",
+        )
+        .unwrap();
+        let main = &cfg.top["main"];
+        assert_eq!(main.anchor, "bottom");
+        assert_eq!(main.output, "DP-1");
+        assert_eq!(main.length, 80.0);
+        assert!(main.floating);
+        assert_eq!(main.margin_top, 8);
+        // Omitted keys fall back to bar defaults.
+        assert_eq!(main.thickness, 50.0);
+        assert_eq!(main.margin_right, 0);
+        assert_eq!(main.radius_top_left, 0.0);
+        // No section at all means no bars.
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.top.is_empty());
     }
 
     #[test]
