@@ -39,9 +39,9 @@ pub struct CornerRadius {
 #[derive(Debug, Clone)]
 pub struct Top {
     anchor: Anchor,
-    /// Display name: `[top.<name>]` table for config-spawned bars,
-    /// anchor label for bars added via the context menu.
-    pub name: String,
+    /// Index into `Config::bar` (`[[bar]]`) for config-spawned bars,
+    /// `usize::MAX` for unpersisted temporaries (set on persist).
+    pub bar_index: usize,
     pub local: TopLocal,
 }
 
@@ -120,27 +120,25 @@ impl Top {
     pub fn new() -> Self {
         Self {
             anchor: Anchor::Top,
-            name: String::from("TOP"),
+            bar_index: usize::MAX,
             local: TopLocal::default(),
         }
     }
 
     pub fn with_anchor(anchor: Anchor) -> Self {
         // Length defaults to full, thickness to ~50px, for any edge.
-        let top = Self {
-            anchor,
-            name: String::new(),
-            local: TopLocal::default(),
-        };
-        let name = top.anchor_label().to_string();
-        Self { name, ..top }
-    }
-
-    /// Bar seeded from a `[top.<name>]` config entry.
-    pub fn with_config(name: String, anchor: Anchor, local: TopLocal) -> Self {
         Self {
             anchor,
-            name,
+            bar_index: usize::MAX,
+            local: TopLocal::default(),
+        }
+    }
+
+    /// Bar seeded from a `[[bar]]` config entry.
+    pub fn with_config(bar_index: usize, anchor: Anchor, local: TopLocal) -> Self {
+        Self {
+            anchor,
+            bar_index,
             local,
         }
     }
@@ -313,7 +311,7 @@ impl Top {
 
     /// Size/float/margin edits apply live to the layer window every tick, so
     /// sliders stay smooth (radius is view-live and needs nothing). Every
-    /// edit also stages a coalesced write to the bar's `[top.<name>]`
+    /// edit also stages a coalesced write to the bar's `[[bar]]`
     /// entry, so bars survive restarts.
     pub(crate) fn handle_set_length(
         plots: &mut Plots,
@@ -486,49 +484,62 @@ impl Top {
             .unwrap_or_default()
     }
 
-    /// Write the bar's current state back to its `[top.<name>]` entry and
+    /// Write the bar's current state back to its `[[bar]]` entry and
     /// arm a coalesced config save (same idle-write as `ConfigPatch`
-    /// drags). Same-named bars on several outputs share one entry.
+    /// drags). Entries are matched by index; out-of-range indices push.
     pub(crate) fn persist_bar(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        let (name, anchor, local) = match plots.tops.get(&bar_id) {
+        let (index, anchor, local) = match plots.tops.get(&bar_id) {
             Some(t) => (
-                t.name.clone(),
+                t.bar_index,
                 t.anchor_label().to_lowercase(),
                 t.local.clone(),
             ),
             None => return Command::none(),
         };
         let output = Self::output_name(plots, bar_id);
-        plots.config.top.insert(
-            name,
-            crate::config::TopConfig {
-                anchor,
-                output,
-                length: local.length_pct,
-                thickness: local.thickness_px,
-                floating: local.floating,
-                margin_top: local.margins.top,
-                margin_right: local.margins.right,
-                margin_bottom: local.margins.bottom,
-                margin_left: local.margins.left,
-                radius_top_left: local.radius.top_left,
-                radius_top_right: local.radius.top_right,
-                radius_bottom_left: local.radius.bottom_left,
-                radius_bottom_right: local.radius.bottom_right,
-            },
-        );
+        let entry = crate::config::TopConfig {
+            anchor,
+            output,
+            length: local.length_pct,
+            thickness: local.thickness_px,
+            floating: local.floating,
+            margin_top: local.margins.top,
+            margin_right: local.margins.right,
+            margin_bottom: local.margins.bottom,
+            margin_left: local.margins.left,
+            radius_top_left: local.radius.top_left,
+            radius_top_right: local.radius.top_right,
+            radius_bottom_left: local.radius.bottom_left,
+            radius_bottom_right: local.radius.bottom_right,
+        };
+        if index == usize::MAX || index >= plots.config.bar.len() {
+            plots.config.bar.push(entry);
+            if let Some(top) = plots.tops.get_mut(&bar_id) {
+                top.bar_index = plots.config.bar.len() - 1;
+            }
+        } else {
+            plots.config.bar[index] = entry;
+        }
         plots.arm_config_save()
     }
 
     /// Remove a bar (`TopEvent::Remove`): drop tracking + cursor state,
-    /// close its window, and delete its `[top.<name>]` entry (persisted
+    /// close its window, and delete its `[[bar]]` entry (persisted
     /// immediately) so it stays gone after restart.
     pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
         plots.last_cursor.remove(&bar_id);
         plots.press_starts.remove(&bar_id);
         if let Some(top) = plots.tops.remove(&bar_id) {
             plots.ids.remove(&bar_id);
-            plots.config.top.remove(&top.name);
+            if top.bar_index < plots.config.bar.len() {
+                plots.config.bar.remove(top.bar_index);
+                // Indices after the hole shift down by one.
+                for other in plots.tops.values_mut() {
+                    if other.bar_index > top.bar_index {
+                        other.bar_index -= 1;
+                    }
+                }
+            }
             // flush_config_save only writes when dirty — mark it first
             // (same for persist_new below).
             plots.config_dirty = true;
@@ -725,59 +736,26 @@ impl Top {
                 "Unknown"
             }
         }
-        /// Config-table slug: lowercase ascii, runs collapsed (`"DP-1"`
-        /// becomes `"dp-1"`).
-        fn slug(s: &str) -> String {
-            let mut out: String = s
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect();
-            while out.contains("--") {
-                out = out.replace("--", "-");
-            }
-            let trimmed = out.trim_matches('-').to_string();
-            if trimmed.is_empty() {
-                String::from("bar")
-            } else {
-                trimmed
-            }
-        }
-        /// Persist a fresh bar as a `[top.<name>]` entry right away (a
-        /// click, not a drag — no coalescing needed) and name the bar
-        /// after its entry. Entry names stay unique across outputs.
+        /// Persist a fresh bar as a `[[bar]]` entry right away (a
+        /// click, not a drag — no coalescing needed) and record its index.
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
-            let base = if output.is_empty() {
-                format!("{}-all", slug(anchor_name(anchor)))
-            } else {
-                format!("{}-{}", slug(anchor_name(anchor)), slug(&output))
-            };
-            let mut key = base.clone();
-            let mut n = 2;
-            while plots.config.top.contains_key(&key) {
-                key = format!("{base}-{n}");
-                n += 1;
-            }
-            top.name = key.clone();
-            let l = &top.local;
-            plots.config.top.insert(
-                key,
-                crate::config::TopConfig {
-                    anchor: anchor_name(anchor).to_lowercase(),
-                    output,
-                    length: l.length_pct,
-                    thickness: l.thickness_px,
-                    floating: l.floating,
-                    margin_top: l.margins.top,
-                    margin_right: l.margins.right,
-                    margin_bottom: l.margins.bottom,
-                    margin_left: l.margins.left,
-                    radius_top_left: l.radius.top_left,
-                    radius_top_right: l.radius.top_right,
-                    radius_bottom_left: l.radius.bottom_left,
-                    radius_bottom_right: l.radius.bottom_right,
-                },
-            );
+            let l = top.local.clone();
+            plots.config.bar.push(crate::config::TopConfig {
+                anchor: anchor_name(anchor).to_lowercase(),
+                output,
+                length: l.length_pct,
+                thickness: l.thickness_px,
+                floating: l.floating,
+                margin_top: l.margins.top,
+                margin_right: l.margins.right,
+                margin_bottom: l.margins.bottom,
+                margin_left: l.margins.left,
+                radius_top_left: l.radius.top_left,
+                radius_top_right: l.radius.top_right,
+                radius_bottom_left: l.radius.bottom_left,
+                radius_bottom_right: l.radius.bottom_right,
+            });
+            top.bar_index = plots.config.bar.len() - 1;
             plots.config_dirty = true;
             plots.flush_config_save();
         }

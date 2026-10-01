@@ -510,16 +510,14 @@ impl Plots {
                     cmds.push(cmd);
                     cmds.push(Self::repaint_burst());
                 }
-                // Declarative bars: one per `[top.<name>]` entry on this
+                // Declarative bars: one per `[[bar]]` entry on this
                 // output, skipped when that edge already has a bar (user
                 // additions and re-added outputs never duplicate).
-                // Sorted by name so spawn order is deterministic.
-                let mut entries: Vec<_> = self.config.top.iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
-                for (name, cfg) in entries {
+                // File order is spawn order (deterministic).
+                for (index, cfg) in self.config.bar.iter().enumerate() {
                     let Some(anchor) = Top::parse_anchor(&cfg.anchor) else {
                         eprintln!(
-                            "riced: [top.{name}]: unknown anchor {:?}, skipping",
+                            "riced: [[bar]] #{index}: unknown anchor {:?}, skipping",
                             cfg.anchor
                         );
                         continue;
@@ -545,7 +543,7 @@ impl Plots {
                     if taken {
                         continue;
                     }
-                    let top = Top::with_config(name.clone(), anchor, cfg.into());
+                    let top = Top::with_config(index, anchor, cfg.into());
                     let (sw, sh) = self
                         .output_infos
                         .get(&output_id)

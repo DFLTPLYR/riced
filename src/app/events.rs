@@ -61,7 +61,7 @@ pub enum TopEvent {
     Pressed(Id, Button),
     Released(Id, Button),
     /// Remove the bar: close its window, drop tracking, and delete its
-    /// `[top.<name>]` entry so it stays gone after restart.
+    /// `[[bar]]` entry so it stays gone after restart.
     Remove(Id),
     /// Bar length as % of the output long axis (1–100): applied live.
     SetLength(Id, f32),

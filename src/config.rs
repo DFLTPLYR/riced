@@ -37,11 +37,11 @@ use std::time::{Duration, SystemTime};
 /// speed = "medium"   # fast | medium | slow
 /// ```
 ///
-/// Named bars under `[top.<name>]`. Each entry spawns one bar per
+/// Named bars as a direct array. Each entry spawns one bar per
 /// matching output (on the entry's `anchor`, skipped when that edge
 /// already has a bar):
 /// ```toml
-/// [top.main]
+/// [[bar]]
 /// anchor = "top"     # top | bottom | left | right
 /// output = ""        # connector name (e.g. "DP-1"), "" = every output
 /// length = 100.0     # % of the output long axis (1-100)
@@ -56,9 +56,11 @@ use std::time::{Duration, SystemTime};
 /// radius_bottom_left = 12.0
 /// radius_bottom_right = 12.0
 /// ```
-/// Bars added via the context menu are written here on creation and
-/// panel edits update the entry (coalesced save), so bars survive
-/// restarts. Same-named bars on several outputs share one entry.
+/// Bars added via the context menu are appended here on creation and
+/// panel edits update the entry by index (coalesced save), so bars survive
+/// restarts. Same entry spawns on several outputs when `output = ""`.
+/// Legacy `[top.<name>]` tables are still read (sorted by name) and merged
+/// in when `[[bar]]` is empty, but never written back.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -66,8 +68,11 @@ pub struct Config {
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
     pub animation: AnimationConfig,
-    /// Named bar presets, keyed by the `[top.<name>]` table name.
+    /// Bar presets as a direct array (`[[bar]]`), no redundant key name.
     #[serde(default)]
+    pub bar: Vec<TopConfig>,
+    /// Legacy `[top.<name>]` tables: read for migration, never written.
+    #[serde(default, skip_serializing)]
     pub top: HashMap<String, TopConfig>,
 }
 
@@ -274,9 +279,9 @@ impl Default for ContextMenuItemConfig {
     }
 }
 
-/// One named bar preset from `[top.<name>]`: edge, size, floating look
+/// One bar preset from `[[bar]]`: edge, size, floating look
 /// (content inset) and per-corner rounding. Applied when the bar spawns;
-/// panel edits write back here (coalesced save), so bars survive restarts.
+/// panel edits write back by index (coalesced save), so bars survive restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TopConfig {
@@ -591,12 +596,29 @@ fn read_mtime(path: &std::path::Path) -> Option<SystemTime> {
 
 fn parse(content: &str) -> Config {
     match toml::from_str(content) {
-        Ok(cfg) => cfg,
+        Ok(cfg) => migrate_legacy_top(cfg),
         Err(e) => {
             eprintln!("config: parse error, keeping defaults: {e}");
             Config::default()
         }
     }
+}
+
+/// Move legacy `[top.<name>]` entries into `[[bar]]` when no bars exist
+/// yet (sorted by name for determinism). The legacy map is cleared so a
+/// later save writes only the new format.
+fn migrate_legacy_top(mut cfg: Config) -> Config {
+    if cfg.bar.is_empty() && !cfg.top.is_empty() {
+        let mut names: Vec<_> = cfg.top.keys().cloned().collect();
+        names.sort();
+        cfg.bar = names
+            .into_iter()
+            .filter_map(|k| cfg.top.remove(&k))
+            .collect();
+    } else {
+        cfg.top.clear();
+    }
+    cfg
 }
 
 impl Config {
@@ -985,12 +1007,13 @@ mod tests {
     }
 
     #[test]
-    fn top_section_parses_named_bars_with_defaults() {
+    fn bar_section_parses_direct_array_with_defaults() {
         let cfg: Config = toml::from_str(
-            "[top.main]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\nfloating = true\nmargin_top = 8\n",
+            "[[bar]]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\nfloating = true\nmargin_top = 8\n",
         )
         .unwrap();
-        let main = &cfg.top["main"];
+        assert_eq!(cfg.bar.len(), 1);
+        let main = &cfg.bar[0];
         assert_eq!(main.anchor, "bottom");
         assert_eq!(main.output, "DP-1");
         assert_eq!(main.length, 80.0);
@@ -1002,7 +1025,23 @@ mod tests {
         assert_eq!(main.radius_top_left, 0.0);
         // No section at all means no bars.
         let empty: Config = toml::from_str("").unwrap();
-        assert!(empty.top.is_empty());
+        assert!(empty.bar.is_empty());
+    }
+
+    #[test]
+    fn legacy_top_tables_migrate_to_bar_array() {
+        // NOTE: migration runs in `parse()` (file loads), not on raw
+        // `toml::from_str` — the file path is what matters in prod.
+        let cfg: Config =
+            parse("[top.main]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\n");
+        assert_eq!(cfg.bar.len(), 1);
+        assert_eq!(cfg.bar[0].anchor, "bottom");
+        assert_eq!(cfg.bar[0].output, "DP-1");
+        // Legacy map is consumed, so a re-save writes only [[bar]].
+        assert!(cfg.top.is_empty());
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[[bar]]"));
+        assert!(!text.contains("[top."));
     }
 
     #[test]

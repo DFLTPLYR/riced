@@ -275,7 +275,7 @@ impl Setting {
             let label = plots
                 .tops
                 .get(wid)
-                .map(|t| format!("{} {output:?}", t.name))
+                .map(|t| format!("{} {output:?}", t.anchor_label()))
                 .unwrap_or_else(|| format!("BAR {output:?}"));
             picker = picker.push(
                 button(text(label).size(13).color(theme::text()))
@@ -290,7 +290,7 @@ impl Setting {
         let remove_label = plots
             .tops
             .get(&selected)
-            .map(|t| format!("Remove {} bar", t.name))
+            .map(|t| format!("Remove {} bar", t.anchor_label()))
             .unwrap_or_else(|| String::from("Remove bar"));
         col = col.push(
             button(text(remove_label).size(13).color(theme::button_text()))
