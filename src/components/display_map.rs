@@ -179,6 +179,13 @@ impl MapLayer {
         if img.width > 0.0 && img.height > 0.0 {
             return Some((img.width, img.height));
         }
+        Self::file_dimensions(img)
+    }
+
+    /// File dimensions straight from the image header, ignoring any stored
+    /// `width`/`height` override. `None` for empty/unreadable paths.
+    /// Used by the wallpaper editor's Width/Height reset (actual resolution).
+    pub(crate) fn file_dimensions(img: &BackgroundImage) -> Option<(f32, f32)> {
         let path = img.local_path();
         if path.as_os_str().is_empty() {
             return None;
@@ -677,6 +684,34 @@ mod tests {
         assert_eq!(map.hit((75.0, 75.0)), Some(1));
         assert_eq!(map.hit((10.0, 10.0)), Some(0));
         assert_eq!(map.hit((500.0, 500.0)), None);
+    }
+
+    #[test]
+    fn file_dimensions_ignores_stored_override() {
+        use image::{ImageBuffer, Rgba};
+
+        let dir = std::env::temp_dir().join(format!("riced-filedims-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("w.png");
+        ImageBuffer::<Rgba<u8>, _>::from_pixel(40, 30, Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+
+        // Stored override present: file header still wins.
+        let img = BackgroundImage {
+            path: path.to_string_lossy().into_owned(),
+            width: 800.0,
+            height: 600.0,
+            ..Default::default()
+        };
+        assert_eq!(MapLayer::file_dimensions(&img), Some((40.0, 30.0)));
+        // Missing file → None (reset falls back to the native flag).
+        let missing = BackgroundImage {
+            path: dir.join("nope.png").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert_eq!(MapLayer::file_dimensions(&missing), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

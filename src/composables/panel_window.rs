@@ -17,9 +17,6 @@ use iced::{Element, Fill, Padding};
 #[derive(Default)]
 pub struct PanelWindow<'a> {
     content: Option<Element<'a, Plant>>,
-    /// Inner inset (px) around the content, painted transparent — the
-    /// QML `PanelWindow.margins` equivalent. The layer surface itself stays
-    /// edge-pinned (exclusive zone untouched); only the content shrinks.
     padding: Padding,
     on_press: Option<Plant>,
     on_release: Option<Plant>,
@@ -136,6 +133,14 @@ impl<'a> PanelWindow<'a> {
             container(content)
                 .width(Fill)
                 .height(Fill)
+                // Wrapper paints nothing — the inner layer content (bar
+                // fill, wallpaper, …) owns all pixels. Explicit `None`
+                // (not a transparent color fill) so no redundant fill
+                // stacks under the real backdrop.
+                .style(|_| container::Style {
+                    background: None,
+                    ..Default::default()
+                })
                 .padding(self.padding),
         );
         if let Some(m) = self.on_press {

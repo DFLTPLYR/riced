@@ -1,11 +1,12 @@
 use super::background::Background;
+use super::top::TopLocal;
 use crate::app::ConfigEvent;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
 use crate::app::{Plant, TopEvent};
-use crate::components::display_map::{MapView, images_layer, outputs_layer};
+use crate::components::display_map::{MapLayer, MapView, images_layer, outputs_layer};
 use crate::composables::spin_box::spin_box;
-use crate::config::{AnimationSpeed, ConfigPatch};
+use crate::config::{AnimationSpeed, BackgroundImage, ConfigPatch};
 use crate::theme;
 use iced::widget::{
     Checkbox, Space, button, column, container, row, rule, scrollable, slider, stack, text,
@@ -30,6 +31,9 @@ pub struct Setting {
     /// Bar picked in the Panel page picker row (`None` = first bar).
     /// Stored per-window like `page`, so each panel keeps its own pick.
     selected_bar: Option<window::Id>,
+    /// Wallpaper image picked in the editor below the map (`None` = first
+    /// image). Index into `[[background.image]]`; remapped on remove.
+    selected_image: Option<usize>,
 }
 
 /// Master-detail pages: nav buttons on the left switch this, the right pane
@@ -348,6 +352,46 @@ impl Setting {
                 move |v| Plant::TopPlot(TopEvent::SetThickness(wid, v as f32)),
                 None,
             ));
+            // Opacity presets (0/25/50/75/100): one commit per press, no
+            // drag stream. The view bakes the stepped alpha into a fresh
+            // RGBA fill.
+            {
+                let current = TopLocal::snap_opacity(top.local.opacity);
+                let mut presets = row![text("Opacity").width(Length::Fill)].spacing(8);
+                for step in TopLocal::OPACITY_STEPS {
+                    let label = format!("{:.0}", step * 100.0);
+                    presets = presets.push(
+                        button(text(label).size(12).color(theme::text()))
+                            .on_press(Plant::TopPlot(TopEvent::SetOpacity(wid, step)))
+                            .padding(6)
+                            .style(theme::nav_button(current == step)),
+                    );
+                }
+                col = col.push(presets);
+            }
+
+            col = col.push(rule::horizontal(2));
+            // Grid cells along the long axis. Named `Slots` (not
+            // columns/rows) so the label stays correct when the anchor
+            // flips between horizontal (top/bottom) and vertical
+            // (left/right).
+            let slots_label = format!("Slots ({})", top.local.slots);
+            col = col.push(
+                row![
+                    text(slots_label).width(Length::FillPortion(7)),
+                    spin_box(
+                        top.local.slots as f64,
+                        1.0..=TopLocal::MAX_SLOTS as f64,
+                        1.0,
+                        0,
+                        move |v| Plant::TopPlot(TopEvent::SetSlots(wid, v as u32)),
+                    )
+                    .width(Length::Fixed(120.0)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+
             col = col.push(rule::horizontal(2));
             col = col.push(
                 Checkbox::new(top.local.floating)
@@ -553,10 +597,189 @@ impl Setting {
 
     fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         column![
+            row![
+                button(text("Add wallpaper…").size(13).color(theme::button_text()))
+                    .on_press(Plant::BackgroundPlot(
+                        crate::app::BackgroundEvent::PickWallpaper
+                    ))
+                    .padding(8)
+                    .style(theme::menu_button(theme::RADIUS)),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(8),
             self.wallpaper_grid(id, plots),
+            self.wallpaper_images(id, plots),
             container(Space::new().height(Length::Fill).width(Length::Fill)),
         ]
+        .spacing(8)
         .into()
+    }
+
+    /// Image list below the map: picker row, remove, and per-property
+    /// spinboxes (x/y/z/width/height/scale) each with a reset button.
+    /// Commits go through `ConfigPatch` like every other panel edit, so
+    /// coalesced save + regen arming apply unchanged.
+    fn wallpaper_images(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+        let images = &plots.config.background.image;
+        if images.is_empty() {
+            return column![
+                text("No images yet.").size(13).color(theme::text()),
+                text("Add wallpaper… to place the first one.").size(11),
+            ]
+            .spacing(4)
+            .into();
+        }
+        // Clamped pick (stale after external edits, like the bar picker).
+        let sel = match self.selected_image {
+            Some(s) if s < images.len() => s,
+            _ => 0,
+        };
+        let mut picker = row![].spacing(8);
+        for (i, img) in images.iter().enumerate() {
+            let name = image_file_name(img);
+            picker = picker.push(
+                button(text(format!("{i}: {name}")).size(12).color(theme::text()))
+                    .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectImage(
+                        id, i,
+                    )))
+                    .padding(8)
+                    .style(theme::nav_button(i == sel)),
+            );
+        }
+        let img = &images[sel];
+        let name = image_file_name(img);
+        let (ix, iy, iz, iw, ih, iscale) = (img.x, img.y, img.z, img.width, img.height, img.scale);
+        // Actual file resolution for Width/Height reset (falls back to
+        // 0 = native flag when the file is unreadable).
+        let (fw, fh) = MapLayer::file_dimensions(img).unwrap_or((0.0, 0.0));
+        let mut col = column![picker, rule::horizontal(2)];
+        col = col.push(
+            row![
+                text(format!("Image {sel}: {name}"))
+                    .size(13)
+                    .color(theme::text())
+                    .width(Length::Fill),
+                button(text("Remove").size(12).color(theme::button_text()))
+                    .on_press(Plant::Config(ConfigEvent::Patch(
+                        ConfigPatch::RemoveImage { index: sel }
+                    )))
+                    .padding(6)
+                    .style(theme::menu_button(theme::RADIUS)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+        col = col.push(image_spin_row(
+            "X (px)",
+            ix as f64,
+            -20000.0..=20000.0,
+            1.0,
+            1,
+            move |v| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
+                    index: sel,
+                    x: v as f32,
+                    y: iy,
+                }))
+            },
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
+                index: sel,
+                x: 0.0,
+                y: iy,
+            })),
+        ));
+        col = col.push(image_spin_row(
+            "Y (px)",
+            iy as f64,
+            -20000.0..=20000.0,
+            1.0,
+            1,
+            move |v| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
+                    index: sel,
+                    x: ix,
+                    y: v as f32,
+                }))
+            },
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
+                index: sel,
+                x: ix,
+                y: 0.0,
+            })),
+        ));
+        col = col.push(image_spin_row(
+            "Z (stack)",
+            iz as f64,
+            -100.0..=100.0,
+            1.0,
+            0,
+            move |v| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageZ {
+                    index: sel,
+                    z: v as i32,
+                }))
+            },
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageZ {
+                index: sel,
+                z: 0,
+            })),
+        ));
+        col = col.push(image_spin_row(
+            format!("Width (px, file {fw:.0})"),
+            iw as f64,
+            0.0..=16000.0,
+            1.0,
+            0,
+            move |v| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
+                    index: sel,
+                    width: v as f32,
+                    height: ih,
+                }))
+            },
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
+                index: sel,
+                width: fw,
+                height: ih,
+            })),
+        ));
+        col = col.push(image_spin_row(
+            format!("Height (px, file {fh:.0})"),
+            ih as f64,
+            0.0..=16000.0,
+            1.0,
+            0,
+            move |v| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
+                    index: sel,
+                    width: iw,
+                    height: v as f32,
+                }))
+            },
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
+                index: sel,
+                width: iw,
+                height: fh,
+            })),
+        ));
+        col = col.push(image_spin_row(
+            "Scale (×)",
+            iscale as f64,
+            0.01..=8.0,
+            0.1,
+            2,
+            move |v| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageScale {
+                    index: sel,
+                    scale: v as f32,
+                }))
+            },
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageScale {
+                index: sel,
+                scale: 1.0,
+            })),
+        ));
+        col.spacing(8).width(Length::Fill).into()
     }
 
     fn wallpaper_grid(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
@@ -622,6 +845,29 @@ impl Setting {
             setting.selected_bar = Some(bar);
         }
         Command::none()
+    }
+
+    /// Pick the wallpaper image the editor below the map edits
+    /// (`SettingEvent::SelectImage`).
+    pub(crate) fn handle_select_image(
+        plots: &mut Plots,
+        id: window::Id,
+        index: usize,
+    ) -> Command<Plant> {
+        if let Some(setting) = plots.settings.get_mut(&id) {
+            setting.selected_image = Some(index);
+        }
+        Command::none()
+    }
+
+    /// Remap the picked image after `RemoveImage{index}` (later entries
+    /// shift down by one; a removed pick clears to first).
+    pub(crate) fn image_removed(&mut self, index: usize) {
+        match self.selected_image {
+            Some(s) if s == index => self.selected_image = None,
+            Some(s) if s > index => self.selected_image = Some(s - 1),
+            _ => {}
+        }
     }
 
     /// Handle `Plant::Sprout`: close the context menu (like `TopEvent::Sow`),
@@ -761,4 +1007,46 @@ fn plant_slider_row(
     column![text(label).size(13).color(theme::text()), sl,]
         .spacing(4)
         .into()
+}
+
+/// Short file name for an image entry (`"(empty path)"` for sparse entries).
+fn image_file_name(img: &BackgroundImage) -> String {
+    const EMPTY: &str = "(empty path)";
+    let name = img
+        .local_path()
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name.is_empty() {
+        EMPTY.to_string()
+    } else {
+        name
+    }
+}
+
+/// Label + [`spin_box`] + Reset button for one wallpaper image property.
+/// Commits go through `ConfigPatch`; reset restores the entry default.
+fn image_spin_row(
+    label: impl Into<String>,
+    value: f64,
+    range: RangeInclusive<f64>,
+    step: f64,
+    decimals: usize,
+    on_commit: impl Fn(f64) -> Plant + Clone + 'static,
+    on_reset: Plant,
+) -> Element<'static, Plant> {
+    row![
+        text(label.into())
+            .size(13)
+            .color(theme::text())
+            .width(Length::FillPortion(4)),
+        spin_box(value, range, step, decimals, on_commit).width(Length::Fixed(150.0)),
+        button(text("Reset").size(11).color(theme::button_text()))
+            .on_press(on_reset)
+            .padding(6)
+            .style(theme::menu_button(theme::RADIUS)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center)
+    .into()
 }

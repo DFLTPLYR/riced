@@ -46,6 +46,11 @@ use std::time::{Duration, SystemTime};
 /// output = ""        # connector name (e.g. "DP-1"), "" = every output
 /// length = 100.0     # % of the output long axis (1-100)
 /// thickness = 50.0   # px (1-thin output axis)
+/// slots = 3          # grid cells along the long axis: columns when
+///                    # horizontal (top/bottom), rows when vertical
+///                    # (left/right); 1..=32
+/// opacity = 1.0      # bar backdrop opacity, snapped to steps
+///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
 /// margin_top = 8
 /// margin_right = 8
@@ -92,6 +97,8 @@ defs! {
     default_scale: f32 = 1.0,
     default_bar_length: f32 = 100.0,
     default_bar_thickness: f32 = 50.0,
+    default_bar_slots: u32 = 1,
+    default_bar_opacity: f32 = 1.0,
 }
 
 fn default_bar_anchor() -> String {
@@ -294,6 +301,13 @@ pub struct TopConfig {
     pub length: f32,
     #[serde(default = "default_bar_thickness")]
     pub thickness: f32,
+    /// Grid cells along the bar's long axis (columns when horizontal,
+    /// rows when vertical). Clamped to 1..=32 at spawn.
+    #[serde(default = "default_bar_slots")]
+    pub slots: u32,
+    /// Backdrop opacity, snapped to 0.0/0.25/0.5/0.75/1.0 at spawn.
+    #[serde(default = "default_bar_opacity")]
+    pub opacity: f32,
     #[serde(default)]
     pub floating: bool,
     #[serde(default)]
@@ -321,6 +335,8 @@ impl Default for TopConfig {
             output: String::new(),
             length: default_bar_length(),
             thickness: default_bar_thickness(),
+            slots: default_bar_slots(),
+            opacity: default_bar_opacity(),
             floating: false,
             margin_top: 0,
             margin_right: 0,
@@ -566,6 +582,12 @@ pub enum ConfigPatch {
         index: usize,
         scale: f32,
     },
+    /// Native-size override (`0` = native file size, same as a sparse entry).
+    SetImageSize {
+        index: usize,
+        width: f32,
+        height: f32,
+    },
     SetImageZ {
         index: usize,
         z: i32,
@@ -699,6 +721,16 @@ impl Config {
             ConfigPatch::SetImageScale { index, scale } => {
                 if let Some(img) = images.get_mut(index) {
                     img.scale = scale.max(0.01);
+                }
+            }
+            ConfigPatch::SetImageSize {
+                index,
+                width,
+                height,
+            } => {
+                if let Some(img) = images.get_mut(index) {
+                    img.width = width.max(0.0);
+                    img.height = height.max(0.0);
                 }
             }
             ConfigPatch::ScaleImage { index, x, y, scale } => {
@@ -864,6 +896,36 @@ mod tests {
         assert_eq!(cfg.background.image[0].scale, 2.0);
         cfg.apply(ConfigPatch::SetImageZ { index: 0, z: 3 });
         assert_eq!(cfg.background.image[0].z, 3);
+        cfg.apply(ConfigPatch::SetImageSize {
+            index: 0,
+            width: 800.0,
+            height: 600.0,
+        });
+        assert_eq!(
+            (
+                cfg.background.image[0].width,
+                cfg.background.image[0].height
+            ),
+            (800.0, 600.0)
+        );
+        // Negative sizes clamp to 0 (= native); OOB index is a no-op.
+        cfg.apply(ConfigPatch::SetImageSize {
+            index: 0,
+            width: -5.0,
+            height: -5.0,
+        });
+        assert_eq!(
+            (
+                cfg.background.image[0].width,
+                cfg.background.image[0].height
+            ),
+            (0.0, 0.0)
+        );
+        cfg.apply(ConfigPatch::SetImageSize {
+            index: 9,
+            width: 1.0,
+            height: 1.0,
+        });
         cfg.apply(ConfigPatch::ScaleImage {
             index: 0,
             x: 11.0,
@@ -1021,11 +1083,29 @@ mod tests {
         assert_eq!(main.margin_top, 8);
         // Omitted keys fall back to bar defaults.
         assert_eq!(main.thickness, 50.0);
+        assert_eq!(main.slots, 1);
+        assert_eq!(main.opacity, 1.0);
         assert_eq!(main.margin_right, 0);
         assert_eq!(main.radius_top_left, 0.0);
         // No section at all means no bars.
         let empty: Config = toml::from_str("").unwrap();
         assert!(empty.bar.is_empty());
+    }
+
+    #[test]
+    fn bar_slots_parses_explicit_count() {
+        let cfg: Config =
+            toml::from_str("[[bar]]\nanchor = \"left\"\noutput = \"DP-1\"\nslots = 4\n").unwrap();
+        assert_eq!(cfg.bar.len(), 1);
+        assert_eq!(cfg.bar[0].slots, 4);
+    }
+
+    #[test]
+    fn bar_opacity_defaults_to_opaque_and_parses_steps() {
+        let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
+        assert_eq!(sparse.bar[0].opacity, 1.0);
+        let cfg: Config = toml::from_str("[[bar]]\nanchor = \"top\"\nopacity = 0.5\n").unwrap();
+        assert_eq!(cfg.bar[0].opacity, 0.5);
     }
 
     #[test]

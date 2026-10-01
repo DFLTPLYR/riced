@@ -67,6 +67,11 @@ pub enum TopEvent {
     SetLength(Id, f32),
     /// Bar thickness in px (1–thin output axis): applied live.
     SetThickness(Id, f32),
+    /// Grid cells along the long axis (columns when horizontal, rows when
+    /// vertical): applied live, persisted.
+    SetSlots(Id, u32),
+    /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
+    SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,
     /// exclusive zone kept): applied live.
     SetFloating(Id, bool),
@@ -91,6 +96,11 @@ pub enum BackgroundEvent {
     Repaint,
     Pressed(Id, Button),
     Released(Id, Button),
+    /// Open a native file dialog for a new wallpaper. The async result
+    /// comes back as `WallpaperPicked`: `Some(path)` on accept, `None`
+    /// when the dialog is cancelled — which is a no-op by design.
+    PickWallpaper,
+    WallpaperPicked(Option<String>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +108,9 @@ pub enum SettingEvent {
     Select(Id, crate::app::layers::SettingPage),
     /// Pick the bar edited by the Panel page (`id` = settings window).
     SelectBar(Id, Id),
+    /// Pick the wallpaper image edited below the map (`id` = settings
+    /// window, `usize` = index into `[[background.image]]`).
+    SelectImage(Id, usize),
     MapViewChanged {
         id: Id,
         view: crate::components::display_map::MapView,

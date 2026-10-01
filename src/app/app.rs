@@ -660,6 +660,12 @@ impl Plots {
                 Command::none()
             }
             Plant::BackgroundPlot(BackgroundEvent::Repaint) => Background::repaint(self),
+            Plant::BackgroundPlot(BackgroundEvent::PickWallpaper) => {
+                Background::handle_pick_wallpaper()
+            }
+            Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(picked)) => {
+                Background::handle_wallpaper_picked(self, picked)
+            }
             Plant::BackgroundPlot(BackgroundEvent::Pressed(id, button)) => {
                 Background::handle_panel_button(self, id, button, true)
             }
@@ -716,7 +722,7 @@ impl Plots {
                     patch,
                     ConfigPatch::AddImage(_) | ConfigPatch::RemoveImage { .. }
                 );
-                // Discrete wallpaper edits (add/remove/scale/z) arm a regen
+                // Discrete wallpaper edits (add/remove/scale/size/z) arm a regen
                 // 2s out. Per-move patches are deliberately excluded: drags
                 // stay silent until drop or panel close.
                 let wallpaper_touched = matches!(
@@ -724,6 +730,7 @@ impl Plots {
                     ConfigPatch::AddImage(_)
                         | ConfigPatch::RemoveImage { .. }
                         | ConfigPatch::SetImageScale { .. }
+                        | ConfigPatch::SetImageSize { .. }
                         | ConfigPatch::ScaleImage { .. }
                         | ConfigPatch::SetImageZ { .. }
                 );
@@ -737,9 +744,20 @@ impl Plots {
                 )
                 .then(|| crate::colorgen::effective_templates_dir(&self.config.theme))
                 .flatten();
+                // Removal shifts image indices: capture the index before
+                // `apply` moves `patch`, then remap every panel's pick.
+                let removed_index = match &patch {
+                    ConfigPatch::RemoveImage { index } => Some(*index),
+                    _ => None,
+                };
                 self.config.apply(patch);
                 if sync {
                     Self::sync_wallpapers(&self.config, &mut self.wallpapers);
+                }
+                if let Some(index) = removed_index {
+                    for setting in self.settings.values_mut() {
+                        setting.image_removed(index);
+                    }
                 }
                 self.config_dirty = true;
                 self.config_save_seq += 1;
@@ -809,6 +827,10 @@ impl Plots {
             Plant::TopPlot(TopEvent::SetThickness(id, value)) => {
                 Top::handle_set_thickness(self, id, value)
             }
+            Plant::TopPlot(TopEvent::SetSlots(id, value)) => Top::handle_set_slots(self, id, value),
+            Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
+                Top::handle_set_opacity(self, id, value)
+            }
             Plant::TopPlot(TopEvent::SetFloating(id, value)) => {
                 Top::handle_set_floating(self, id, value)
             }
@@ -841,6 +863,9 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::SelectBar(id, bar)) => {
                 Setting::handle_select_bar(self, id, bar)
+            }
+            Plant::SettingPlot(SettingEvent::SelectImage(id, index)) => {
+                Setting::handle_select_image(self, id, index)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
                 // Mouse drop ends the drag: the incoming view has drag None,
@@ -887,11 +912,17 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // A Graft release also ends selection via the safety net → All.
         Plant::BackgroundPlot(BackgroundEvent::Pressed(..))
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
+        // Accept re-emits as a Patch (already Scope::All); cancel is silent.
+        | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(Some(_))) => Scope::All,
+        Plant::BackgroundPlot(BackgroundEvent::PickWallpaper)
+        | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(None)) => Scope::None,
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
         | Plant::TopPlot(TopEvent::Remove(..))
         | Plant::TopPlot(TopEvent::SetLength(..))
         | Plant::TopPlot(TopEvent::SetThickness(..))
+        | Plant::TopPlot(TopEvent::SetSlots(..))
+        | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))
         | Plant::TopPlot(TopEvent::SetMarginRight(..))
@@ -924,6 +955,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::SettingPlot(
             SettingEvent::Select(id, _)
             | SettingEvent::SelectBar(id, _)
+            | SettingEvent::SelectImage(id, _)
             | SettingEvent::MapViewChanged { id, .. },
         ) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,

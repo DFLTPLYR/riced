@@ -33,3 +33,4 @@ toml = "0.8"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["time", "rt"] }
+rfd = "0.15"

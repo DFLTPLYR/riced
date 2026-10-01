@@ -4,7 +4,7 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::composables::panel_window::top_window;
 use crate::theme;
 use iced::mouse::Button;
-use iced::widget::{column, container, row};
+use iced::widget::{column, container, row, text};
 use iced::window;
 use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -45,17 +45,37 @@ pub struct Top {
     pub local: TopLocal,
 }
 
-/// Local data for one bar: length %, thickness px, floating + margins, rounding.
+/// Local data for one bar: length %, thickness px, grid slots, floating + margins, rounding.
 /// Plain runtime state on `Top`, deliberately outside `Config` so bars stay
 /// independent of the global config file and its hot-reload.
 #[derive(Debug, Clone)]
 pub struct TopLocal {
     pub length_pct: f32,
     pub thickness_px: f32,
+    /// Grid cells along the long axis: columns when horizontal
+    /// (top/bottom anchor), rows when vertical (left/right anchor).
+    pub slots: u32,
+    /// Backdrop opacity, always one of 0.0/0.25/0.5/0.75/1.0.
+    pub opacity: f32,
     pub floating: bool,
     /// Inset of the bar backdrop inside its surface (view-live padding).
     pub margins: Margins,
     pub radius: CornerRadius,
+}
+
+impl TopLocal {
+    /// Hard cap on grid slots (config asks 1..infinite; unbounded widget
+    /// counts would freeze the frame).
+    pub(crate) const MAX_SLOTS: u32 = 32;
+
+    /// Opacity steps: 0/25/50/75/100%. Snaps any value to the nearest step
+    /// so config, slider drags, and preset buttons all agree.
+    pub(crate) fn snap_opacity(v: f32) -> f32 {
+        (v.clamp(0.0, 1.0) * 4.0).round() / 4.0
+    }
+
+    /// All five steps, for the settings preset row.
+    pub(crate) const OPACITY_STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 }
 
 impl Default for TopLocal {
@@ -64,6 +84,8 @@ impl Default for TopLocal {
             length_pct: 100.0,
             // ~50px, the old fixed thickness.
             thickness_px: 50.0,
+            slots: 1,
+            opacity: 1.0,
             floating: false,
             margins: Margins::default(),
             radius: CornerRadius::default(),
@@ -96,6 +118,8 @@ impl From<&crate::config::TopConfig> for TopLocal {
         Self {
             length_pct: c.length,
             thickness_px: c.thickness,
+            slots: c.slots.clamp(1, Self::MAX_SLOTS),
+            opacity: Self::snap_opacity(c.opacity),
             floating: c.floating,
             margins: Margins {
                 top: c.margin_top.max(0),
@@ -213,7 +237,8 @@ impl Top {
             // surface stays edge-pinned with no layer offset.
             margin: None,
             namespace: Some(format!("Riced - {} {}", self.anchor_label(), output)),
-            blur_option: BlurOption::FullRegion,
+            // Bars never blur (frost fights the `opacity` fade).
+            blur_option: BlurOption::None,
             ..Default::default()
         };
 
@@ -234,7 +259,10 @@ impl Top {
             namespace: Some(format!("Riced - {} Active", self.anchor_label())),
             // Visual margins are widget padding (see `view`); no layer offset.
             margin: None,
-            blur_option: BlurOption::FullRegion,
+            // Bars never blur: frosted glass fights the `opacity` alpha fade
+            // (blur would frost the desktop behind a faded fill and the
+            // transparent margins), so the fill composites cleanly.
+            blur_option: BlurOption::None,
             ..Default::default()
         };
 
@@ -242,12 +270,35 @@ impl Top {
     }
 
     pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
+        // Grid along the long axis: one row of N columns when horizontal
+        // (top/bottom anchor), one column of N rows when vertical
+        // (left/right anchor). Cells are placeholders for future widgets.
+        let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
+        fn cell(i: usize) -> Element<'static, Plant> {
+            container(text(format!("{i}")).size(11))
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill)
+                .into()
+        }
         let content: Element<'_, Plant> = if self.is_horizontal() {
-            row![].width(Fill).height(Fill).into()
+            let mut r = row![].width(Fill).height(Fill).spacing(4);
+            for i in 1..=n {
+                r = r.push(cell(i));
+            }
+            r.into()
         } else {
-            column![].width(Fill).height(Fill).into()
+            let mut c = column![].width(Fill).height(Fill).spacing(4);
+            for i in 1..=n {
+                c = c.push(cell(i));
+            }
+            c.into()
         };
         let radius = self.local.radius;
+        // Stepped alpha baked into a fresh RGBA (not a live `scale_alpha`
+        // chain): one value per preset, no per-frame float drift.
+        let opacity = TopLocal::snap_opacity(self.local.opacity);
         // Margins inset the backdrop inside the edge-pinned surface
         // (transparent gap, exclusive zone untouched). Gated on floating so
         // an un-floating bar goes back to a full-bleed strip.
@@ -272,6 +323,13 @@ impl Top {
                     .center_y(Fill)
                     .style(move |theme: &iced::Theme| {
                         let mut s = theme::bar(theme);
+                        // Fresh RGBA with the stepped alpha baked in.
+                        if let Some(iced::Background::Color(c)) = s.background {
+                            s.background = Some(iced::Background::Color(iced::Color {
+                                a: c.a * opacity,
+                                ..c
+                            }));
+                        }
                         s.border.radius = iced::border::Radius {
                             top_left: radius.top_left,
                             top_right: radius.top_right,
@@ -354,6 +412,30 @@ impl Top {
             Self::apply_layout(plots, id),
             Self::persist_bar(plots, id),
         ])
+    }
+
+    pub(crate) fn handle_set_slots(
+        plots: &mut Plots,
+        id: window::Id,
+        value: u32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.slots = value.clamp(1, TopLocal::MAX_SLOTS);
+        }
+        // Window size is unchanged (cells share the bar) — persist only.
+        Self::persist_bar(plots, id)
+    }
+
+    pub(crate) fn handle_set_opacity(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            // Single commit per press (preset buttons, not a drag stream).
+            top.local.opacity = TopLocal::snap_opacity(value);
+        }
+        Self::persist_bar(plots, id)
     }
 
     pub(crate) fn handle_set_floating(
@@ -502,6 +584,8 @@ impl Top {
             output,
             length: local.length_pct,
             thickness: local.thickness_px,
+            slots: local.slots.clamp(1, TopLocal::MAX_SLOTS),
+            opacity: TopLocal::snap_opacity(local.opacity),
             floating: local.floating,
             margin_top: local.margins.top,
             margin_right: local.margins.right,
@@ -745,6 +829,8 @@ impl Top {
                 output,
                 length: l.length_pct,
                 thickness: l.thickness_px,
+                slots: l.slots.clamp(1, TopLocal::MAX_SLOTS),
+                opacity: TopLocal::snap_opacity(l.opacity),
                 floating: l.floating,
                 margin_top: l.margins.top,
                 margin_right: l.margins.right,

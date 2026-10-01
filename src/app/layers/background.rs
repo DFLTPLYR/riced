@@ -1,5 +1,5 @@
 use crate::app::app::{PlotInfo, Plots};
-use crate::app::{BackgroundEvent, Plant, TopEvent};
+use crate::app::{BackgroundEvent, ConfigEvent, Plant, TopEvent};
 use iced::mouse::Button;
 use iced::widget::image::Image;
 use iced::widget::{Space, button, column, container, stack, text};
@@ -224,6 +224,58 @@ impl Background {
     pub(crate) fn repaint(plots: &mut Plots) -> Command<Plant> {
         plots.repaint_seq += 1;
         Command::none()
+    }
+
+    /// Native "open image" dialog for a new wallpaper. Async via `rfd`
+    /// (never blocks the shell); the result returns as
+    /// `BackgroundEvent::WallpaperPicked`.
+    pub(crate) fn handle_pick_wallpaper() -> Command<Plant> {
+        Command::perform(
+            async {
+                rfd::AsyncFileDialog::new()
+                    .set_title("Add wallpaper")
+                    .add_filter(
+                        "Images",
+                        &[
+                            "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "tif", "svg",
+                        ],
+                    )
+                    .pick_file()
+                    .await
+                    .map(|h| h.path().to_string_lossy().into_owned())
+            },
+            |picked| Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(picked)),
+        )
+    }
+
+    /// Dialog result: accept appends a `[[background.image]]` entry (top of
+    /// the `z` stack, reusing the `AddImage` patch path so sync/regen/save
+    /// behave like every other image edit); cancel (`None`) is a no-op.
+    pub(crate) fn handle_wallpaper_picked(
+        plots: &mut Plots,
+        picked: Option<String>,
+    ) -> Command<Plant> {
+        let Some(path) = picked else {
+            return Command::none();
+        };
+        let z = plots
+            .config
+            .background
+            .image
+            .iter()
+            .map(|img| img.z)
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        // Origin placement at native size (`width`/`height` 0): the user
+        // drags it into place on the wallpaper map.
+        Command::done(Plant::Config(ConfigEvent::Patch(
+            crate::config::ConfigPatch::AddImage(crate::config::BackgroundImage {
+                path,
+                z,
+                ..Default::default()
+            }),
+        )))
     }
 
     fn last_local(plots: &Plots, id: window::Id) -> Point {

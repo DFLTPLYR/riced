@@ -605,10 +605,14 @@ pub fn selection_box(
     radius: iced::border::Radius,
 ) -> impl Fn(&Theme) -> container::Style {
     let a = active();
-    let background = a.primary.scale_alpha(0.5 * opacity);
+    // Fade rides on `Background::scale_alpha` (base fill at rest alpha ×
+    // live fade factor), so gradient fills would fade correctly too —
+    // not just the solid color. Border stays `Color::scale_alpha`
+    // (`Border.color` is a `Color`, no `Background` API there).
+    let background = iced::Background::Color(a.primary).scale_alpha(0.5 * opacity);
     let border_color = a.primary.scale_alpha(opacity);
     move |_| container::Style {
-        background: Some(background.into()),
+        background: Some(background),
         border: Border {
             color: border_color,
             width: BORDER_WIDTH,
