@@ -650,7 +650,13 @@ pub fn config_path() -> PathBuf {
 /// size = 13.0
 /// ```
 /// Scripts run sandboxed (no `io`, no shell/file escapes) with globals
-/// persisting between calls.
+/// persisting between calls. Besides the standard string/table/math
+/// libraries they see two live tables, refreshed before every due
+/// `render()`: `sysinfo` (`cpu_usage` %, `cpu_count`, `mem_used` /
+/// `mem_total` bytes, `mem_usage` %) and `gfxinfo` (`usage` % or nil
+/// when the GPU exposes nothing readable). Cell text may embed
+/// `{icon:name}` placeholders for theme-aware Lucide icons, e.g.
+/// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {
@@ -705,6 +711,12 @@ size = 13.0
 # file = "hello.lua"
 # interval = 60.0
 # size = 13.0
+
+# [[widget]]
+# name = "stats"
+# file = "stats.lua"
+# interval = 2.0
+# size = 13.0
 "#;
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
@@ -721,6 +733,17 @@ const SEED_HELLO_LUA: &str = r#"-- Label example: static text from a script. Unc
 -- [[widget]] entry in widgets.toml to use it.
 function render()
     return "hello"
+end
+"#;
+
+/// Seed stats example: icon + CPU + memory via the live tables.
+/// Uncomment its `[[widget]]` entry in widgets.toml to use it.
+const SEED_STATS_LUA: &str = r#"-- System stats: theme-aware icons plus live CPU/memory.
+-- Uncomment its [[widget]] entry in widgets.toml to use it.
+function render()
+    local cpu = string.format("%.0f", sysinfo.cpu_usage)
+    local mem = string.format("%.0f", sysinfo.mem_usage)
+    return "{icon:cpu} " .. cpu .. "%  {icon:memory-stick} " .. mem .. "%"
 end
 "#;
 
@@ -763,7 +786,11 @@ impl WidgetsFile {
             if let Err(e) = std::fs::write(&path, SEED_WIDGETS_TOML) {
                 eprintln!("widgets: cannot write {}: {e}", path.display());
             }
-            for (name, content) in [("clock.lua", SEED_CLOCK_LUA), ("hello.lua", SEED_HELLO_LUA)] {
+            for (name, content) in [
+                ("clock.lua", SEED_CLOCK_LUA),
+                ("hello.lua", SEED_HELLO_LUA),
+                ("stats.lua", SEED_STATS_LUA),
+            ] {
                 let script_path = widgets_dir().join(name);
                 if !script_path.exists() {
                     if let Some(parent) = script_path.parent() {

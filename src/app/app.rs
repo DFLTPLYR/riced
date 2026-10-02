@@ -78,6 +78,9 @@ pub struct Plots {
     pub(crate) widget_outputs: HashMap<String, String>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
     pub(crate) widget_last_error: HashMap<String, String>,
+    // Live system snapshot for the `sysinfo` Lua table (CPU + memory,
+    // refreshed on every widget tick; usage needs the delta).
+    pub(crate) sysinfo: sysinfo::System,
     // Local-first staging: `Patch` mutates live memory every tick (smooth
     // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
     // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
@@ -120,6 +123,9 @@ impl Plots {
         let mut wallpapers = HashMap::new();
         Self::sync_wallpapers(&config, &mut wallpapers);
         let (widgets, widgets_mtime) = crate::config::WidgetsFile::load();
+        let mut sysinfo = sysinfo::System::new();
+        sysinfo.refresh_cpu_usage();
+        sysinfo.refresh_memory();
         let mut plots = Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
@@ -151,6 +157,7 @@ impl Plots {
             widget_outputs: HashMap::new(),
             widget_last_run: HashMap::new(),
             widget_last_error: HashMap::new(),
+            sysinfo,
         };
         // Render Lua widgets once so bars populate on the first frame
         // instead of waiting out the first tick.

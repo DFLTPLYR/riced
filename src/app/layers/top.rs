@@ -380,6 +380,64 @@ fn lua_cell_text(
     outputs.get(name).cloned().map(|text| (text, def.size))
 }
 
+/// Refresh the `sysinfo`/`gfxinfo` globals of one Lua state from live
+/// system data. Scripts see `sysinfo.cpu_usage` (%, all cores),
+/// `sysinfo.cpu_count`, `sysinfo.mem_used`/`mem_total` (bytes),
+/// `sysinfo.mem_usage` (%), and `gfxinfo.usage` (% or nil when the
+/// GPU exposes nothing readable).
+fn publish_system_tables(lua: &Lua, sys: &sysinfo::System, gpu: Option<f32>) -> mlua::Result<()> {
+    let globals = lua.globals();
+    let info = lua.create_table()?;
+    info.set("cpu_usage", sys.global_cpu_usage())?;
+    info.set("cpu_count", sys.cpus().len())?;
+    info.set("mem_used", sys.used_memory())?;
+    info.set("mem_total", sys.total_memory())?;
+    let total = sys.total_memory();
+    info.set(
+        "mem_usage",
+        if total > 0 {
+            sys.used_memory() as f32 / total as f32 * 100.0
+        } else {
+            0.0
+        },
+    )?;
+    globals.set("sysinfo", info)?;
+    let gfx = lua.create_table()?;
+    match gpu {
+        Some(usage) => gfx.set("usage", usage)?,
+        None => gfx.set("usage", Value::Nil)?,
+    }
+    globals.set("gfxinfo", gfx)?;
+    Ok(())
+}
+
+/// GPU busy % from DRM sysfs (AMD + Intel expose `gpu_busy_percent`
+/// per card; NVIDIA needs NVML and reads as unavailable). Busiest
+/// card wins on multi-GPU setups.
+fn gpu_usage_percent() -> Option<f32> {
+    gpu_usage_in(std::path::Path::new("/sys/class/drm"))
+}
+
+fn gpu_usage_in(drm: &std::path::Path) -> Option<f32> {
+    std::fs::read_dir(drm)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_name().to_str().is_some_and(|name| {
+                name.strip_prefix("card").is_some_and(|rest| {
+                    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+        })
+        .filter_map(|entry| {
+            std::fs::read_to_string(entry.path().join("device/gpu_busy_percent")).ok()
+        })
+        .filter_map(|text| text.trim().parse::<f32>().ok())
+        .fold(None, |busiest: Option<f32>, usage| {
+            Some(busiest.map_or(usage, |peak| peak.max(usage)))
+        })
+}
+
 /// Sandboxed Lua state for one widget: string/table/math/os only, no
 /// `io`, no `require`, no shell or file escapes from `os`. `print`
 /// stays so scripts can log to the daemon output.
@@ -829,36 +887,53 @@ impl Top {
         Ok(())
     }
 
-    /// (Re)build Lua runtimes for every `lua` def and render once, so
-    /// bars populate immediately. Called at startup and after every
+    /// Publish fresh system tables and call one widget's `render()`.
+    /// Errors are returned for once-per-message logging by the caller.
+    fn render_lua_widget(
+        plots: &mut Plots,
+        def: &crate::config::WidgetDef,
+        gpu: Option<f32>,
+    ) -> Result<String, String> {
+        Self::ensure_widget_lua(plots, def)?;
+        let lua = plots
+            .widget_lua
+            .get(&def.name)
+            .ok_or_else(|| "runtime missing".to_string())?;
+        publish_system_tables(lua, &plots.sysinfo, gpu).map_err(|e| e.to_string())?;
+        call_widget_render(lua)
+    }
+
+    /// (Re)build runtimes for every def and render once, so bars
+    /// populate immediately. Called at startup and after every
     /// `widgets.toml` hot-reload (which clears the old states).
     pub(crate) fn init_widget_lua(plots: &mut Plots) {
         plots.widget_lua.clear();
         plots.widget_outputs.clear();
         plots.widget_last_run.clear();
         plots.widget_last_error.clear();
+        plots.sysinfo.refresh_cpu_usage();
+        plots.sysinfo.refresh_memory();
+        let gpu = gpu_usage_percent();
         let defs = plots.widgets.clone();
         let now = Instant::now();
         for def in &defs {
             plots.widget_last_run.insert(def.name.clone(), now);
-            if let Err(e) = Self::ensure_widget_lua(plots, def) {
-                Self::note_widget_error(plots, &def.name, e);
-                continue;
-            }
-            match plots.widget_lua.get(&def.name).map(call_widget_render) {
-                Some(Ok(text)) => {
+            match Self::render_lua_widget(plots, def, gpu) {
+                Ok(text) => {
                     plots.widget_outputs.insert(def.name.clone(), text);
                 }
-                Some(Err(e)) => Self::note_widget_error(plots, &def.name, e),
-                None => {}
+                Err(e) => Self::note_widget_error(plots, &def.name, e),
             }
         }
     }
 
-    /// Run every Lua `render()` whose interval elapsed. Returns `true`
+    /// Run every `render()` whose interval elapsed. Returns `true`
     /// when any output moved (caller repaints).
     fn run_due_widgets(plots: &mut Plots) -> bool {
         let now = Instant::now();
+        plots.sysinfo.refresh_cpu_usage();
+        plots.sysinfo.refresh_memory();
+        let gpu = gpu_usage_percent();
         let defs = plots.widgets.clone();
         let mut changed = false;
         for def in &defs {
@@ -871,15 +946,7 @@ impl Top {
                 continue;
             }
             plots.widget_last_run.insert(def.name.clone(), now);
-            if let Err(e) = Self::ensure_widget_lua(plots, def) {
-                Self::note_widget_error(plots, &def.name, e);
-                continue;
-            }
-            let result = match plots.widget_lua.get(&def.name) {
-                Some(lua) => call_widget_render(lua),
-                None => continue,
-            };
-            match result {
+            match Self::render_lua_widget(plots, def, gpu) {
                 Ok(text) => {
                     plots.widget_last_error.remove(&def.name);
                     if plots.widget_outputs.get(&def.name) != Some(&text) {
@@ -1529,6 +1596,40 @@ mod tests {
         assert!(icon_bytes("disk").is_some());
         assert!(icon_bytes("nope").is_none());
         assert!(icon_bytes("").is_none());
+    }
+
+    #[test]
+    fn system_tables_expose_cpu_memory_and_gpu() {
+        let lua = new_widget_lua().expect("sandbox");
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        publish_system_tables(&lua, &sys, Some(42.0)).expect("publish");
+        let cpu: f32 = lua.load("return sysinfo.cpu_usage").eval().expect("eval");
+        assert!(cpu >= 0.0);
+        assert!(sys.total_memory() > 0);
+        let gfx: f32 = lua.load("return gfxinfo.usage").eval().expect("eval");
+        assert_eq!(gfx, 42.0);
+        // Missing GPUs read as nil, not an error.
+        publish_system_tables(&lua, &sys, None).expect("publish");
+        let nil: Value = lua.load("return gfxinfo.usage").eval().expect("eval");
+        assert!(matches!(nil, Value::Nil));
+    }
+
+    #[test]
+    fn gpu_reader_picks_busiest_card() {
+        let dir = std::env::temp_dir().join(format!("riced-gpu-{}", std::process::id()));
+        let card0 = dir.join("card0/device");
+        let card1 = dir.join("card1/device");
+        let _ = std::fs::create_dir_all(&card0);
+        let _ = std::fs::create_dir_all(&card1);
+        // Connectors look like cards but are not all-digit suffixes.
+        let _ = std::fs::create_dir_all(dir.join("card0-DP-1"));
+        std::fs::write(card0.join("gpu_busy_percent"), "12\n").unwrap();
+        std::fs::write(card1.join("gpu_busy_percent"), "78\n").unwrap();
+        assert_eq!(gpu_usage_in(&dir), Some(78.0));
+        assert_eq!(gpu_usage_in(&dir.join("missing")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
