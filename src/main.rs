@@ -8,6 +8,7 @@ mod components;
 mod composables;
 mod config;
 mod theme;
+mod widgets;
 
 use app::{Plots, redraw_scope};
 use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};

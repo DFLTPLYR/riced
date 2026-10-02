@@ -1,5 +1,5 @@
 use super::background::Background;
-use super::top::{SlotAlign, TopLocal};
+use super::top::{SlotAlign, SlotWidget, TopLocal};
 use crate::app::ConfigEvent;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
@@ -426,6 +426,19 @@ impl Setting {
                     );
                 }
                 col = col.push(presets);
+                // Widget for the picked slot: one commit per press, like
+                // alignment (`None` = numbered placeholder).
+                let current_widget = top.local.widget_at(sel);
+                let mut widgets = row![text("Widget").width(Length::Fill)].spacing(8);
+                for widget in [SlotWidget::None, SlotWidget::Clock] {
+                    widgets = widgets.push(
+                        button(text(widget.as_str()).size(12).color(theme::text()))
+                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, widget)))
+                            .padding(6)
+                            .style(theme::nav_button(current_widget == widget)),
+                    );
+                }
+                col = col.push(widgets);
             }
 
             col = col.push(rule::horizontal(2));

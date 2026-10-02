@@ -3,6 +3,7 @@ use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::composables::panel_window::top_window;
 use crate::theme;
+use crate::widgets::clock;
 use iced::mouse::Button;
 use iced::widget::{column, container, row, text};
 use iced::window;
@@ -84,6 +85,34 @@ impl SlotAlign {
     }
 }
 
+/// Widget shown in one grid slot, picked by position. `None` is the
+/// numbered placeholder; each other variant renders its widget from
+/// `src/widgets/` (e.g. `Clock` → [`clock::view`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SlotWidget {
+    #[default]
+    None,
+    Clock,
+}
+
+impl SlotWidget {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Clock => "clock",
+        }
+    }
+
+    /// Parse a persisted widget (`[[bar]] widgets`); unknown or empty
+    /// strings fall back to `None`, never an error.
+    pub(crate) fn from_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "clock" => Self::Clock,
+            _ => Self::None,
+        }
+    }
+}
+
 /// Local data for one bar: length %, thickness px, grid slots, floating + margins, rounding.
 /// Plain runtime state on `Top`, deliberately outside `Config` so bars stay
 /// independent of the global config file and its hot-reload.
@@ -97,6 +126,9 @@ pub struct TopLocal {
     /// Child alignment per slot position (`len == slots`). Resized by
     /// [`TopLocal::ensure_aligns`], persisted as names.
     pub aligns: Vec<SlotAlign>,
+    /// Widget per slot position (`len == slots`). Resized by
+    /// [`TopLocal::ensure_widgets`], persisted as names.
+    pub widgets: Vec<SlotWidget>,
     /// Backdrop opacity, always one of 0.0/0.25/0.5/0.75/1.0.
     pub opacity: f32,
     pub floating: bool,
@@ -128,6 +160,7 @@ impl Default for TopLocal {
             thickness_px: 50.0,
             slots: 1,
             aligns: vec![SlotAlign::Center],
+            widgets: vec![SlotWidget::None],
             opacity: 1.0,
             floating: false,
             margins: Margins::default(),
@@ -167,6 +200,19 @@ impl TopLocal {
     pub(crate) fn align_at(&self, pos: usize) -> SlotAlign {
         self.aligns.get(pos).copied().unwrap_or(SlotAlign::Center)
     }
+
+    /// Keep `widgets` aligned with the slot count (truncate extras, pad
+    /// with `None`). Called with [`TopLocal::ensure_aligns`] after every
+    /// `slots` change and config load.
+    pub(crate) fn ensure_widgets(&mut self) {
+        let n = self.slots.clamp(1, Self::MAX_SLOTS) as usize;
+        self.widgets.resize(n, SlotWidget::None);
+    }
+
+    /// Widget by position (`None` past the end).
+    pub(crate) fn widget_at(&self, pos: usize) -> SlotWidget {
+        self.widgets.get(pos).copied().unwrap_or(SlotWidget::None)
+    }
 }
 
 impl From<&crate::config::TopConfig> for TopLocal {
@@ -174,11 +220,15 @@ impl From<&crate::config::TopConfig> for TopLocal {
         let slots = c.slots.clamp(1, Self::MAX_SLOTS);
         let mut aligns: Vec<SlotAlign> = c.aligns.iter().map(|a| SlotAlign::from_str(a)).collect();
         aligns.resize(slots as usize, SlotAlign::Center);
+        let mut widgets: Vec<SlotWidget> =
+            c.widgets.iter().map(|w| SlotWidget::from_str(w)).collect();
+        widgets.resize(slots as usize, SlotWidget::None);
         Self {
             length_pct: c.length,
             thickness_px: c.thickness,
             slots,
             aligns,
+            widgets,
             opacity: Self::snap_opacity(c.opacity),
             floating: c.floating,
             margins: Margins {
@@ -332,10 +382,14 @@ impl Top {
     pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
         // Grid along the long axis: one row of N columns when horizontal
         // (top/bottom anchor), one column of N rows when vertical
-        // (left/right anchor). Cells are numbered placeholders.
+        // (left/right anchor). Each cell renders its slot widget
+        // (`None` = numbered placeholder).
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let cell = |pos: usize, label: usize| -> Element<'_, Plant> {
-            let body: Element<'_, Plant> = text(format!("{label}")).size(11).into();
+            let body: Element<'_, Plant> = match self.local.widget_at(pos) {
+                SlotWidget::Clock => clock::view(),
+                SlotWidget::None => text(format!("{label}")).size(11).into(),
+            };
             let align = self.local.align_at(pos).iced();
             container(body)
                 .width(Fill)
@@ -484,8 +538,10 @@ impl Top {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.slots = value.clamp(1, TopLocal::MAX_SLOTS);
             // Count change resizes the per-slot rows (extras drop, new
-            // cells start centered) — placement survives by position.
+            // cells start centered with no widget) — placement survives
+            // by position.
             top.local.ensure_aligns();
+            top.local.ensure_widgets();
         }
         // Window size is unchanged (cells share the bar) — persist only.
         Self::persist_bar(plots, id)
@@ -507,6 +563,25 @@ impl Top {
         }
         // Window size is unchanged (alignment only moves the child
         // inside its cell) — persist only.
+        Self::persist_bar(plots, id)
+    }
+
+    /// Set one slot's widget (`TopEvent::SetSlotWidget`): single commit
+    /// per press (preset buttons, not a drag stream).
+    pub(crate) fn handle_set_slot_widget(
+        plots: &mut Plots,
+        id: window::Id,
+        pos: usize,
+        widget: SlotWidget,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.ensure_widgets();
+            if pos < top.local.widgets.len() {
+                top.local.widgets[pos] = widget;
+            }
+        }
+        // Window size is unchanged (the cell keeps its size, only its
+        // content swaps) — persist only.
         Self::persist_bar(plots, id)
     }
 
@@ -668,6 +743,11 @@ impl Top {
             .iter()
             .map(|a| a.as_str().to_string())
             .collect();
+        let widgets: Vec<String> = local
+            .widgets
+            .iter()
+            .map(|w| w.as_str().to_string())
+            .collect();
         let entry = crate::config::TopConfig {
             anchor,
             output,
@@ -675,6 +755,7 @@ impl Top {
             thickness: local.thickness_px,
             slots: local.slots.clamp(1, TopLocal::MAX_SLOTS),
             aligns,
+            widgets,
             opacity: TopLocal::snap_opacity(local.opacity),
             floating: local.floating,
             margin_top: local.margins.top,
@@ -915,6 +996,7 @@ impl Top {
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
             let l = top.local.clone();
             let aligns: Vec<String> = l.aligns.iter().map(|a| a.as_str().to_string()).collect();
+            let widgets: Vec<String> = l.widgets.iter().map(|w| w.as_str().to_string()).collect();
             plots.config.bar.push(crate::config::TopConfig {
                 anchor: anchor_name(anchor).to_lowercase(),
                 output,
@@ -922,6 +1004,7 @@ impl Top {
                 thickness: l.thickness_px,
                 slots: l.slots.clamp(1, TopLocal::MAX_SLOTS),
                 aligns,
+                widgets,
                 opacity: TopLocal::snap_opacity(l.opacity),
                 floating: l.floating,
                 margin_top: l.margins.top,

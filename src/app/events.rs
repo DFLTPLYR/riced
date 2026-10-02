@@ -73,6 +73,9 @@ pub enum TopEvent {
     /// Child alignment of one slot (position, not label): applied live,
     /// persisted to the bar's `[[bar]] aligns` entry.
     SetSlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
+    /// Widget of one slot (position, not label): applied live,
+    /// persisted to the bar's `[[bar]] widgets` entry.
+    SetSlotWidget(Id, usize, crate::app::layers::top::SlotWidget),
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,

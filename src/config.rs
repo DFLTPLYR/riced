@@ -51,6 +51,9 @@ use std::time::{Duration, SystemTime};
 ///                    # (left/right); 1..=32
 /// aligns = ["start", "center", "end"]
 ///                    # child alignment per slot (both axes)
+/// widgets = ["clock", "none"]
+///                    # widget per slot by position (`none` = placeholder;
+///                    # unknown entries read as `none`)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
 ///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
@@ -312,6 +315,10 @@ pub struct TopConfig {
     /// pad centered, longer ones truncate.
     #[serde(default)]
     pub aligns: Vec<String>,
+    /// Widget per slot by position (`clock`/`none`; unknown entries
+    /// read as `none`). Shorter lists pad empty, longer ones truncate.
+    #[serde(default)]
+    pub widgets: Vec<String>,
     /// Backdrop opacity, snapped to 0.0/0.25/0.5/0.75/1.0 at spawn.
     #[serde(default = "default_bar_opacity")]
     pub opacity: f32,
@@ -344,6 +351,7 @@ impl Default for TopConfig {
             thickness: default_bar_thickness(),
             slots: default_bar_slots(),
             aligns: Vec::new(),
+            widgets: Vec::new(),
             opacity: default_bar_opacity(),
             floating: false,
             margin_top: 0,
@@ -1117,6 +1125,18 @@ mod tests {
         assert_eq!(
             cfg.bar[0].aligns,
             vec!["start".to_string(), "end".to_string()]
+        );
+    }
+
+    #[test]
+    fn bar_widgets_default_empty_and_parse_names() {
+        let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
+        assert!(sparse.bar[0].widgets.is_empty());
+        let cfg: Config =
+            toml::from_str("[[bar]]\nanchor = \"top\"\nwidgets = [\"clock\", \"none\"]\n").unwrap();
+        assert_eq!(
+            cfg.bar[0].widgets,
+            vec!["clock".to_string(), "none".to_string()]
         );
     }
 
