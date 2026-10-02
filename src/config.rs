@@ -53,8 +53,7 @@ use std::time::{Duration, SystemTime};
 ///                    # child alignment per slot (both axes)
 /// widgets = ["clock", "none"]
 ///                    # widget names from widgets.toml by slot position
-///                    # (`none` = placeholder; unknown names render as
-///                    # placeholders too)
+///                    # (`none` = empty cell; unknown names render empty too)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
 ///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
@@ -326,7 +325,7 @@ pub struct TopConfig {
     #[serde(default)]
     pub aligns: Vec<String>,
     /// Widget name per slot by position, resolved against
-    /// `widgets.toml` (`none`/unknown = numbered placeholder).
+    /// `widgets.toml` (`none`/unknown = empty cell).
     /// Shorter lists pad empty, longer ones truncate.
     #[serde(default)]
     pub widgets: Vec<String>,
@@ -656,7 +655,7 @@ pub fn config_path() -> PathBuf {
 /// text = "hello"
 /// size = 13.0
 /// ```
-/// Unknown `type` values load fine and render as placeholders, never
+/// Unknown `type` values load fine and render as empty cells, never
 /// an error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

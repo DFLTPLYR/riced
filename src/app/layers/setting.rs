@@ -426,29 +426,40 @@ impl Setting {
                     );
                 }
                 col = col.push(presets);
-                // Widget for the picked slot: `none` plus every
-                // `widgets.toml` entry by name (one commit per press,
-                // like alignment). Unknown names render as placeholders.
+                // Widget for the picked slot: one toggle per
+                // `widgets.toml` entry — pressing the active one clears
+                // the slot. A stale (unresolvable) name gets its own
+                // highlighted chip so the slot can still be cleared.
                 let current = top.local.widget_at(sel).to_string();
                 let mut widgets = row![text("Widget").width(Length::Fill)].spacing(8);
-                widgets = widgets.push(
-                    button(text(TopLocal::NO_WIDGET).size(12).color(theme::text()))
-                        .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(
-                            wid,
-                            sel,
-                            TopLocal::NO_WIDGET.to_string(),
-                        )))
-                        .padding(6)
-                        .style(theme::nav_button(TopLocal::is_empty_widget(&current))),
-                );
+                if !TopLocal::is_empty_widget(&current)
+                    && !plots.widgets.iter().any(|d| d.name == current)
+                {
+                    let stale = current.clone();
+                    widgets = widgets.push(
+                        button(text(format!("{stale} ?")).size(12).color(theme::text()))
+                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(
+                                wid,
+                                sel,
+                                TopLocal::NO_WIDGET.to_string(),
+                            )))
+                            .padding(6)
+                            .style(theme::nav_button(true)),
+                    );
+                }
                 for def in &plots.widgets {
                     let name = def.name.clone();
-                    let selected = current == name;
+                    let active = current == name;
+                    let target = if active {
+                        TopLocal::NO_WIDGET.to_string()
+                    } else {
+                        name.clone()
+                    };
                     widgets = widgets.push(
-                        button(text(name.clone()).size(12).color(theme::text()))
-                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, name)))
+                        button(text(name).size(12).color(theme::text()))
+                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, target)))
                             .padding(6)
-                            .style(theme::nav_button(selected)),
+                            .style(theme::nav_button(active)),
                     );
                 }
                 col = col.push(widgets);

@@ -5,7 +5,7 @@ use crate::composables::panel_window::top_window;
 use crate::config::WidgetDef;
 use crate::theme;
 use iced::mouse::Button;
-use iced::widget::{column, container, row, text};
+use iced::widget::{Space, column, container, row, text};
 use iced::window;
 use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -99,7 +99,7 @@ pub struct TopLocal {
     /// [`TopLocal::ensure_aligns`], persisted as names.
     pub aligns: Vec<SlotAlign>,
     /// Widget name per slot position (`len == slots`), resolved against
-    /// `widgets.toml` (`none`/unknown = numbered placeholder). Resized
+    /// `widgets.toml` (`none`/unknown = empty cell). Resized
     /// by [`TopLocal::ensure_widgets`], persisted as names.
     pub widgets: Vec<String>,
     /// Backdrop opacity, always one of 0.0/0.25/0.5/0.75/1.0.
@@ -177,8 +177,8 @@ impl TopLocal {
     /// Sentinel for empty slots in `widgets` (`[[bar]]` name).
     pub(crate) const NO_WIDGET: &'static str = "none";
 
-    /// `true` for the empty sentinel (`none`, blank) — renders the
-    /// numbered placeholder.
+    /// `true` for the empty sentinel (`none`, blank) — renders an
+    /// empty cell.
     pub(crate) fn is_empty_widget(name: &str) -> bool {
         let name = name.trim();
         name.is_empty() || name.eq_ignore_ascii_case(Self::NO_WIDGET)
@@ -260,25 +260,25 @@ fn clock_text(format: &str) -> String {
         .replace("%S", &format!("{:02}", broken.tm_sec))
 }
 
-/// Numbered placeholder for empty slots (unknown names land here too).
-fn placeholder(label: usize) -> Element<'static, Plant> {
-    text(format!("{label}")).size(11).into()
+/// Empty cell for slots with no widget (unknown names land here too).
+fn empty_slot() -> Element<'static, Plant> {
+    Space::new().into()
 }
 
-/// Render one declarative widget by slot name (`none`/unknown =
-/// placeholder). Pure function of the `widgets.toml` registry, so new
+/// Render one declarative widget by slot name (`none`/unknown = empty
+/// cell). Pure function of the `widgets.toml` registry, so new
 /// renderers only touch this match.
-fn render_widget(name: &str, label: usize, defs: &[WidgetDef]) -> Element<'static, Plant> {
+fn render_widget(name: &str, defs: &[WidgetDef]) -> Element<'static, Plant> {
     if TopLocal::is_empty_widget(name) {
-        return placeholder(label);
+        return empty_slot();
     }
     match defs.iter().find(|d| d.name == name) {
         Some(def) => match def.widget_type.trim().to_lowercase().as_str() {
             "clock" => text(clock_text(&def.format)).size(def.size.max(1.0)).into(),
             "label" => text(def.text.clone()).size(def.size.max(1.0)).into(),
-            _ => placeholder(label),
+            _ => empty_slot(),
         },
-        None => placeholder(label),
+        None => empty_slot(),
     }
 }
 
@@ -418,10 +418,10 @@ impl Top {
         // Grid along the long axis: one row of N columns when horizontal
         // (top/bottom anchor), one column of N rows when vertical
         // (left/right anchor). Each cell renders its `widgets.toml`
-        // widget (`none`/unknown = numbered placeholder).
+        // widget (`none`/unknown = empty cell).
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        let cell = |pos: usize, label: usize| -> Element<'_, Plant> {
-            let body: Element<'_, Plant> = render_widget(self.local.widget_at(pos), label, widgets);
+        let cell = |pos: usize| -> Element<'_, Plant> {
+            let body: Element<'_, Plant> = render_widget(self.local.widget_at(pos), widgets);
             let align = self.local.align_at(pos).iced();
             container(body)
                 .width(Fill)
@@ -432,14 +432,14 @@ impl Top {
         };
         let content: Element<'_, Plant> = if self.is_horizontal() {
             let mut r = row![].width(Fill).height(Fill).spacing(4);
-            for i in 1..=n {
-                r = r.push(cell(i - 1, i));
+            for pos in 0..n {
+                r = r.push(cell(pos));
             }
             r.into()
         } else {
             let mut c = column![].width(Fill).height(Fill).spacing(4);
-            for i in 1..=n {
-                c = c.push(cell(i - 1, i));
+            for pos in 0..n {
+                c = c.push(cell(pos));
             }
             c.into()
         };
