@@ -2,6 +2,12 @@
 
 Wayland layer-shell daemon built with [`iced` 0.14](https://github.com/iced-rs/iced) + [`iced_exwlshell` 0.20](https://github.com/wayland-rs/iced_exwlshell) — per-output fullscreen backgrounds with global drag-selection, context menu, and top bars. Ported from a Quickshell `Background` + `selectionRect` QML singleton.
 
+## About this project
+
+Experiment in AI engineering: the code here is AI-generated from
+developer-written prompts rather than hand-written. The developer guides,
+reviews, and tests every change — prompts in, review before merge.
+
 ## Features
 
 - **Layer shell daemon** (`daemon` + `exwlshell`) — one `Background` (`Layer::Background`, `Anchor::all`, `Size::FILL`) + one `Top` bar (`50px`, `Anchor::Top`, `exclusive_zone`) per output via `OutputInsert`
