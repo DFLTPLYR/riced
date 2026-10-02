@@ -234,6 +234,119 @@ impl From<&crate::config::TopConfig> for TopLocal {
     }
 }
 
+/// Lucide icon bytes by name (`{icon:cpu}` in widget text). Lookup is
+/// case-insensitive and ignores `-_ ` separators, so `memory-stick`,
+/// `memory_stick` and `MemoryStick` all work. Unknown names render as
+/// literal text so typos stay visible.
+fn icon_bytes(name: &str) -> Option<&'static [u8]> {
+    use lucide_iced::bytes::*;
+    let key: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    match key.as_str() {
+        "cpu" => Some(CPU),
+        "gpu" => Some(GPU),
+        "memory" | "memorystick" | "mem" | "ram" => Some(MEMORY_STICK),
+        "thermometer" | "temp" => Some(THERMOMETER),
+        "thermometersun" => Some(THERMOMETER_SUN),
+        "harddrive" | "disk" => Some(HARD_DRIVE),
+        "wifi" => Some(WIFI),
+        "wifioff" => Some(WIFI_OFF),
+        "signal" => Some(SIGNAL),
+        "network" => Some(NETWORK),
+        "battery" => Some(BATTERY),
+        "batterycharging" => Some(BATTERY_CHARGING),
+        "activity" => Some(ACTIVITY),
+        "gauge" => Some(GAUGE),
+        "chartline" | "chart" => Some(CHART_LINE),
+        "zap" => Some(ZAP),
+        "fan" => Some(FAN),
+        "monitor" => Some(MONITOR),
+        "volume2" | "volume" | "vol" => Some(VOLUME_2),
+        "volumex" | "mute" => Some(VOLUME_X),
+        "heart" => Some(HEART),
+        "heartpulse" => Some(HEART_PULSE),
+        "clock" => Some(CLOCK),
+        "calendar" => Some(CALENDAR),
+        "sun" => Some(SUN),
+        "moon" => Some(MOON),
+        "cloud" => Some(CLOUD),
+        "download" => Some(DOWNLOAD),
+        "upload" => Some(UPLOAD),
+        "arrowup" | "up" => Some(ARROW_UP),
+        "arrowdown" | "down" => Some(ARROW_DOWN),
+        "power" => Some(POWER),
+        "settings" => Some(SETTINGS),
+        "bell" => Some(BELL),
+        _ => None,
+    }
+}
+
+/// One piece of widget text: plain text or an `{icon:name}` reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Segment<'a> {
+    Text(&'a str),
+    Icon(&'a str),
+}
+
+/// Split widget text on `{icon:name}` placeholders. Unterminated
+/// `{icon:` tails stay literal text.
+fn icon_segments(output: &str) -> Vec<Segment<'_>> {
+    let mut segments = Vec::new();
+    let mut rest = output;
+    while let Some(start) = rest.find("{icon:") {
+        if start > 0 {
+            segments.push(Segment::Text(&rest[..start]));
+        }
+        let after = &rest[start + "{icon:".len()..];
+        match after.find('}') {
+            Some(end) => {
+                segments.push(Segment::Icon(after[..end].trim()));
+                rest = &after[end + 1..];
+            }
+            None => {
+                segments.push(Segment::Text(&rest[start..]));
+                rest = "";
+            }
+        }
+    }
+    if !rest.is_empty() {
+        segments.push(Segment::Text(rest));
+    }
+    segments
+}
+
+/// Widget text with `{icon:name}` placeholders resolved to theme-aware
+/// Lucide icons (they inherit the surrounding text color, so they
+/// follow the theme like text does). Plain text without placeholders
+/// renders as a single text element, exactly like before.
+fn rich_text(output: String, size: f32) -> Element<'static, Plant> {
+    let size = size.max(1.0);
+    if !output.contains("{icon:") {
+        return text(output).size(size).into();
+    }
+    let mut row = row![]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .width(iced::Length::Shrink)
+        .height(iced::Length::Shrink);
+    for segment in icon_segments(&output) {
+        match segment {
+            Segment::Text(text_) if !text_.is_empty() => {
+                row = row.push(text(text_.to_owned()).size(size));
+            }
+            Segment::Icon(name) => match icon_bytes(name) {
+                Some(bytes) => row = row.push(lucide_iced::themed_icon(bytes, size)),
+                None => row = row.push(text(format!("{{icon:{name}}}")).size(size)),
+            },
+            _ => {}
+        }
+    }
+    row.into()
+}
+
 /// Empty cell for slots with no widget (unknown names land here too).
 fn empty_slot() -> Element<'static, Plant> {
     Space::new().into()
@@ -251,7 +364,7 @@ fn render_widget(
         return empty_slot();
     }
     match lua_cell_text(name, defs, outputs) {
-        Some((output, size)) => text(output).size(size.max(1.0)).into(),
+        Some((output, size)) => rich_text(output, size),
         None => empty_slot(),
     }
 }
@@ -1383,5 +1496,46 @@ mod tests {
         );
         // Unknown names never read the cache.
         assert_eq!(lua_cell_text("nope", &defs, &outputs), None);
+    }
+
+    #[test]
+    fn icon_segments_split_placeholders() {
+        use Segment::{Icon, Text};
+        assert_eq!(icon_segments("12%"), vec![Text("12%")]);
+        assert_eq!(
+            icon_segments("{icon:cpu} 12%"),
+            vec![Icon("cpu"), Text(" 12%")]
+        );
+        assert_eq!(
+            icon_segments("{icon:cpu}{icon:mem}"),
+            vec![Icon("cpu"), Icon("mem")]
+        );
+        // Unterminated tails and empty names stay structured but render
+        // literal (lookup misses on "").
+        assert_eq!(icon_segments("{icon:cpu"), vec![Text("{icon:cpu")]);
+        assert_eq!(icon_segments("{icon:}"), vec![Icon("")]);
+        assert_eq!(icon_segments(""), Vec::new());
+    }
+
+    #[test]
+    fn icon_bytes_resolves_names_case_insensitively() {
+        assert!(icon_bytes("cpu").is_some());
+        assert!(icon_bytes("CPU").is_some());
+        assert!(icon_bytes("Heart").is_some());
+        assert!(icon_bytes("memory-stick").is_some());
+        assert!(icon_bytes("memory_stick").is_some());
+        assert!(icon_bytes("MemoryStick").is_some());
+        assert!(icon_bytes("mem").is_some());
+        assert!(icon_bytes("disk").is_some());
+        assert!(icon_bytes("nope").is_none());
+        assert!(icon_bytes("").is_none());
+    }
+
+    #[test]
+    fn rich_text_builds_without_a_renderer() {
+        // Element construction is pure — smoke-test all three shapes.
+        let _ = rich_text("12%".to_string(), 13.0);
+        let _ = rich_text("{icon:cpu} 12%".to_string(), 13.0);
+        let _ = rich_text("{icon:nope}".to_string(), 13.0);
     }
 }
