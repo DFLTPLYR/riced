@@ -99,10 +99,11 @@ pub struct TopLocal {
     /// Child alignment per slot position (`len == slots`). Resized by
     /// [`TopLocal::ensure_aligns`], persisted as names.
     pub aligns: Vec<SlotAlign>,
-    /// Widget name per slot position (`len == slots`), resolved against
-    /// `widgets.toml` (`none`/unknown = empty cell). Resized
-    /// by [`TopLocal::ensure_widgets`], persisted as names.
-    pub widgets: Vec<String>,
+    /// Widget names per slot position (`len == slots`), resolved against
+    /// `widgets.toml`. Each slot renders its entries together along the
+    /// bar axis. Resized by [`TopLocal::ensure_widgets`], persisted as
+    /// name lists.
+    pub widgets: Vec<Vec<String>>,
     /// Inset inside every slot cell, around the widget content (px).
     pub slot_padding: f32,
     /// Gap between slot cells and between icon/text segments inside one
@@ -142,7 +143,7 @@ impl Default for TopLocal {
             thickness_px: 50.0,
             slots: 1,
             aligns: vec![SlotAlign::Center],
-            widgets: vec![TopLocal::NO_WIDGET.to_string()],
+            widgets: vec![Vec::new()],
             slot_padding: 0.0,
             slot_spacing: 4.0,
             opacity: 1.0,
@@ -196,20 +197,16 @@ impl TopLocal {
     }
 
     /// Keep `widgets` aligned with the slot count (truncate extras, pad
-    /// with [`TopLocal::NO_WIDGET`]). Called with
-    /// [`TopLocal::ensure_aligns`] after every `slots` change and
-    /// config load.
+    /// empty). Called with [`TopLocal::ensure_aligns`] after every
+    /// `slots` change and config load.
     pub(crate) fn ensure_widgets(&mut self) {
         let n = self.slots.clamp(1, Self::MAX_SLOTS) as usize;
-        self.widgets.resize(n, Self::NO_WIDGET.to_string());
+        self.widgets.resize(n, Vec::new());
     }
 
-    /// Widget name by position (`none` past the end).
-    pub(crate) fn widget_at(&self, pos: usize) -> &str {
-        self.widgets
-            .get(pos)
-            .map(String::as_str)
-            .unwrap_or(Self::NO_WIDGET)
+    /// Widget names by position (empty past the end).
+    pub(crate) fn widgets_at(&self, pos: usize) -> &[String] {
+        self.widgets.get(pos).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -218,8 +215,22 @@ impl From<&crate::config::TopConfig> for TopLocal {
         let slots = c.slots.clamp(1, Self::MAX_SLOTS);
         let mut aligns: Vec<SlotAlign> = c.aligns.iter().map(|a| SlotAlign::from_str(a)).collect();
         aligns.resize(slots as usize, SlotAlign::Center);
-        let mut widgets: Vec<String> = c.widgets.clone();
-        widgets.resize(slots as usize, TopLocal::NO_WIDGET.to_string());
+        let mut widgets: Vec<Vec<String>> = c
+            .widgets
+            .iter()
+            .map(|slot| match slot {
+                crate::config::SlotWidgets::One(name) if TopLocal::is_empty_widget(name) => {
+                    Vec::new()
+                }
+                crate::config::SlotWidgets::One(name) => vec![name.clone()],
+                crate::config::SlotWidgets::Many(names) => names
+                    .iter()
+                    .filter(|name| !TopLocal::is_empty_widget(name))
+                    .cloned()
+                    .collect(),
+            })
+            .collect();
+        widgets.resize(slots as usize, Vec::new());
         Self {
             length_pct: c.length,
             thickness_px: c.thickness,
@@ -364,21 +375,47 @@ fn empty_slot() -> Element<'static, Plant> {
     Space::new().into()
 }
 
-/// Render one declarative widget by slot name (`none`/unknown = empty
-/// cell). Pure function of the widget registry plus the last script
-/// outputs.
-fn render_widget(
-    name: &str,
+/// Render one slot's widgets side by side along the bar axis
+/// (`none`/unknown names are skipped; no entries = empty cell).
+fn render_slot_widgets(
+    names: &[String],
     defs: &[WidgetDef],
     outputs: &HashMap<String, String>,
-    spacing: f32,
+    gap: f32,
+    horizontal: bool,
 ) -> Element<'static, Plant> {
-    if TopLocal::is_empty_widget(name) {
+    let mut items = Vec::new();
+    for name in names {
+        if TopLocal::is_empty_widget(name) {
+            continue;
+        }
+        if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
+            items.push(rich_text(output, size, gap));
+        }
+    }
+    if items.is_empty() {
         return empty_slot();
     }
-    match lua_cell_text(name, defs, outputs) {
-        Some((output, size)) => rich_text(output, size, spacing),
-        None => empty_slot(),
+    if horizontal {
+        let mut row = row![]
+            .spacing(gap.max(0.0))
+            .align_y(iced::Alignment::Center)
+            .width(iced::Length::Shrink)
+            .height(iced::Length::Shrink);
+        for item in items {
+            row = row.push(item);
+        }
+        row.into()
+    } else {
+        let mut column = column![]
+            .spacing(gap.max(0.0))
+            .align_x(iced::Alignment::Center)
+            .width(iced::Length::Shrink)
+            .height(iced::Length::Shrink);
+        for item in items {
+            column = column.push(item);
+        }
+        column.into()
     }
 }
 
@@ -650,8 +687,13 @@ impl Top {
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let pad = self.local.slot_padding.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let cell = |pos: usize| -> Element<'_, Plant> {
-            let body: Element<'_, Plant> =
-                render_widget(self.local.widget_at(pos), widgets, outputs, gap);
+            let body: Element<'_, Plant> = render_slot_widgets(
+                self.local.widgets_at(pos),
+                widgets,
+                outputs,
+                gap,
+                self.is_horizontal(),
+            );
             let align = self.local.align_at(pos).iced();
             container(body)
                 .width(Fill)
@@ -823,19 +865,27 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
-    /// Set one slot's widget by `widgets.toml` name
-    /// (`TopEvent::SetSlotWidget`): single commit per press (preset
-    /// buttons, not a drag stream).
+    /// Check/uncheck one slot widget (`TopEvent::SetSlotWidget`):
+    /// checking appends the name (no duplicates, `none` never stored),
+    /// unchecking removes it. Single commit per toggle.
     pub(crate) fn handle_set_slot_widget(
         plots: &mut Plots,
         id: window::Id,
         pos: usize,
         widget: String,
+        enabled: bool,
     ) -> Command<Plant> {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.ensure_widgets();
             if pos < top.local.widgets.len() {
-                top.local.widgets[pos] = widget;
+                let slot = &mut top.local.widgets[pos];
+                if enabled {
+                    if !TopLocal::is_empty_widget(&widget) && !slot.iter().any(|w| w == &widget) {
+                        slot.push(widget);
+                    }
+                } else {
+                    slot.retain(|w| w != &widget);
+                }
             }
         }
         // Window size is unchanged (the cell keeps its size, only its
@@ -1158,7 +1208,11 @@ impl Top {
             .iter()
             .map(|a| a.as_str().to_string())
             .collect();
-        let widgets: Vec<String> = local.widgets.clone();
+        let widgets: Vec<crate::config::SlotWidgets> = local
+            .widgets
+            .iter()
+            .map(|slot| crate::config::SlotWidgets::Many(slot.clone()))
+            .collect();
         let entry = crate::config::TopConfig {
             anchor,
             output,
@@ -1409,7 +1463,11 @@ impl Top {
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
             let l = top.local.clone();
             let aligns: Vec<String> = l.aligns.iter().map(|a| a.as_str().to_string()).collect();
-            let widgets: Vec<String> = l.widgets.clone();
+            let widgets: Vec<crate::config::SlotWidgets> = l
+                .widgets
+                .iter()
+                .map(|slot| crate::config::SlotWidgets::Many(slot.clone()))
+                .collect();
             plots.config.bar.push(crate::config::TopConfig {
                 anchor: anchor_name(anchor).to_lowercase(),
                 output,
@@ -1678,6 +1736,33 @@ mod tests {
         let local = TopLocal::from(&cfg);
         assert_eq!(local.slot_padding, 0.0);
         assert_eq!(local.slot_spacing, TopLocal::MAX_SLOT_GAP);
+    }
+
+    #[test]
+    fn slot_widgets_normalize_flat_nested_and_none() {
+        use crate::config::{SlotWidgets, TopConfig};
+        let cfg = TopConfig {
+            slots: 3,
+            widgets: vec![
+                SlotWidgets::One("clock".to_string()),
+                SlotWidgets::One("none".to_string()),
+                SlotWidgets::Many(vec![
+                    "cpu".to_string(),
+                    "none".to_string(),
+                    "ram".to_string(),
+                ]),
+            ],
+            ..Default::default()
+        };
+        let local = TopLocal::from(&cfg);
+        assert_eq!(
+            local.widgets,
+            vec![
+                vec!["clock".to_string()],
+                Vec::<String>::new(),
+                vec!["cpu".to_string(), "ram".to_string()],
+            ]
+        );
     }
 
     #[test]

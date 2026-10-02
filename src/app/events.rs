@@ -77,9 +77,9 @@ pub enum TopEvent {
     /// persisted to the bar's `[[bar]] aligns` entry.
     SetSlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
     /// Widget of one slot by `widgets.toml` name (position, not
-    /// label): applied live, persisted to the bar's `[[bar]] widgets`
-    /// entry.
-    SetSlotWidget(Id, usize, String),
+    /// label): checked appends the name, unchecked removes it. Applied
+    /// live, persisted to the bar's `[[bar]] widgets` entry.
+    SetSlotWidget(Id, usize, String, bool),
     /// Inset inside every slot cell (px): applied live, persisted to
     /// the bar's `[[bar]] slot_padding` entry.
     SetSlotPadding(Id, f32),

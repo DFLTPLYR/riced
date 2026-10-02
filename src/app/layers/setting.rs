@@ -446,43 +446,33 @@ impl Setting {
                     );
                 }
                 col = col.push(presets);
-                // Widget for the picked slot: one toggle per
-                // `widgets.toml` entry — pressing the active one clears
-                // the slot. A stale (unresolvable) name gets its own
-                // highlighted chip so the slot can still be cleared.
-                let current = top.local.widget_at(sel).to_string();
-                let mut widgets = row![text("Widget").width(Length::Fill)].spacing(8);
-                if !TopLocal::is_empty_widget(&current)
-                    && !plots.widgets.iter().any(|d| d.name == current)
-                {
-                    let stale = current.clone();
-                    widgets = widgets.push(
-                        button(text(format!("{stale} ?")).size(12).color(theme::text()))
-                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(
-                                wid,
-                                sel,
-                                TopLocal::NO_WIDGET.to_string(),
-                            )))
-                            .padding(6)
-                            .style(theme::nav_button(true)),
-                    );
+                // Widgets for the picked slot: one checkbox per
+                // `widgets.toml` entry — checked entries render together
+                // in the slot. A stale (unresolvable) name gets a checked
+                // box too so the slot can still be cleared.
+                let current = top.local.widgets_at(sel).to_vec();
+                let mut list = column![text("Widgets").size(13)].spacing(4);
+                for stale in current.iter().filter(|name| {
+                    !TopLocal::is_empty_widget(name)
+                        && !plots.widgets.iter().any(|d| &d.name == *name)
+                }) {
+                    let name = stale.clone();
+                    list = list.push(Checkbox::new(true).label(format!("{name} ?")).on_toggle(
+                        move |on| {
+                            Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, name.clone(), on))
+                        },
+                    ));
                 }
                 for def in &plots.widgets {
                     let name = def.name.clone();
-                    let active = current == name;
-                    let target = if active {
-                        TopLocal::NO_WIDGET.to_string()
-                    } else {
-                        name.clone()
-                    };
-                    widgets = widgets.push(
-                        button(text(name).size(12).color(theme::text()))
-                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, target)))
-                            .padding(6)
-                            .style(theme::nav_button(active)),
-                    );
+                    let checked = current.iter().any(|w| w == &name);
+                    list = list.push(Checkbox::new(checked).label(name.clone()).on_toggle(
+                        move |on| {
+                            Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, name.clone(), on))
+                        },
+                    ));
                 }
-                col = col.push(widgets);
+                col = col.push(list);
             }
 
             col = col.push(rule::horizontal(2));

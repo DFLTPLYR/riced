@@ -883,8 +883,8 @@ impl Plots {
             Plant::TopPlot(TopEvent::SetSlotAlign(id, pos, align)) => {
                 Top::handle_set_slot_align(self, id, pos, align)
             }
-            Plant::TopPlot(TopEvent::SetSlotWidget(id, pos, widget)) => {
-                Top::handle_set_slot_widget(self, id, pos, widget)
+            Plant::TopPlot(TopEvent::SetSlotWidget(id, pos, widget, enabled)) => {
+                Top::handle_set_slot_widget(self, id, pos, widget, enabled)
             }
             Plant::TopPlot(TopEvent::SetSlotPadding(id, value)) => {
                 Top::handle_set_slot_padding(self, id, value)

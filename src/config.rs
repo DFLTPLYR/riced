@@ -51,9 +51,11 @@ use std::time::{Duration, SystemTime};
 ///                    # (left/right); 1..=32
 /// aligns = ["start", "center", "end"]
 ///                    # child alignment per slot (both axes)
-/// widgets = ["clock", "none"]
-///                    # widget names from widgets.toml by slot position
-///                    # (`none` = empty cell; unknown names render empty too)
+/// widgets = [["cpu", "ram"], ["clock"]]
+///                    # widget names from widgets.toml by slot position;
+///                    # each slot renders its entries together. A bare
+///                    # "name" reads as ["name"] (`none`/unknown render
+///                    # empty)
 /// slot_padding = 4.0   # px inset inside every slot, around content
 /// slot_spacing = 4.0   # px gap between slots (also icon/text runs)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
@@ -321,11 +323,11 @@ pub struct TopConfig {
     /// pad centered, longer ones truncate.
     #[serde(default)]
     pub aligns: Vec<String>,
-    /// Widget name per slot by position, resolved against
-    /// `widgets.toml` (`none`/unknown = empty cell).
-    /// Shorter lists pad empty, longer ones truncate.
+    /// Widget names per slot by position, resolved against
+    /// `widgets.toml`. Each slot renders its entries together;
+    /// shorter lists pad empty, longer ones truncate.
     #[serde(default)]
-    pub widgets: Vec<String>,
+    pub widgets: Vec<SlotWidgets>,
     /// Inset inside every slot cell, around the widget content (px,
     /// clamped to 0-64 at spawn).
     #[serde(default = "default_slot_padding")]
@@ -381,6 +383,16 @@ impl Default for TopConfig {
             radius_bottom_right: 0.0,
         }
     }
+}
+
+/// One slot's widgets: a single `"name"` or a `["first", "second"]`
+/// list (both read the same; saves always write lists). A `none`
+/// entry reads as an empty slot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SlotWidgets {
+    One(String),
+    Many(Vec<String>),
 }
 
 /// Wallpaper images under `[background.*]`, e.g.:
@@ -1395,12 +1407,19 @@ mod tests {
     fn bar_widgets_default_empty_and_parse_names() {
         let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
         assert!(sparse.bar[0].widgets.is_empty());
-        let cfg: Config =
-            toml::from_str("[[bar]]\nanchor = \"top\"\nwidgets = [\"clock\", \"none\"]\n").unwrap();
-        assert_eq!(
-            cfg.bar[0].widgets,
-            vec!["clock".to_string(), "none".to_string()]
-        );
+        // Flat names and nested lists read the same shape.
+        let cfg: Config = toml::from_str(
+            "[[bar]]\nanchor = \"top\"\nwidgets = [[\"cpu\", \"ram\"], \"clock\"]\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.bar[0].widgets[0],
+            SlotWidgets::Many(ref names) if names == &["cpu".to_string(), "ram".to_string()]
+        ));
+        assert!(matches!(
+            cfg.bar[0].widgets[1],
+            SlotWidgets::One(ref name) if name == "clock"
+        ));
     }
 
     #[test]
