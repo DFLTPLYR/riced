@@ -108,14 +108,6 @@ defs! {
     default_widget_interval: f32 = 1.0,
 }
 
-fn default_widget_type() -> String {
-    "label".to_string()
-}
-
-fn default_clock_format() -> String {
-    "%H:%M".to_string()
-}
-
 fn default_bar_anchor() -> String {
     "top".to_string()
 }
@@ -641,48 +633,38 @@ pub fn config_path() -> PathBuf {
 
 /// Declarative bar widgets (`~/.config/riced/widgets.toml`,
 /// `$XDG_CONFIG_HOME` aware). Slots reference entries by `name`
-/// (see `[[bar]] widgets`); `type` picks the renderer, the rest are
-/// per-type params (`none` is reserved and always renders empty):
+/// (see `[[bar]] widgets`); each entry is a Lua script with a global
+/// `render()` returning the cell text (`none` is reserved and always
+/// renders empty):
 /// ```toml
 /// [[widget]]
 /// name = "clock"   # slot reference
-/// type = "lua"     # clock | label | lua
-/// file = "clock.lua" # lua only, relative to the widgets dir
-/// interval = 1.0   # lua only, seconds between render() calls
+/// file = "clock.lua" # relative to the widgets dir
+/// interval = 1.0   # seconds between render() calls
 /// size = 13.0
 ///
 /// [[widget]]
 /// name = "hello"
-/// type = "label"
-/// text = "hello"
+/// file = "hello.lua"
+/// interval = 60.0
 /// size = 13.0
 /// ```
-/// Lua scripts define a global `render()` returning the cell text and
-/// run sandboxed (no `io`, no shell/file escapes). Unknown `type`
-/// values load fine and render as empty cells, never an error.
+/// Scripts run sandboxed (no `io`, no shell/file escapes) with globals
+/// persisting between calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {
     /// Slot reference (`[[bar]] widgets = [...]`).
     #[serde(default)]
     pub name: String,
-    /// Renderer: `clock` | `label` | `lua` (case-insensitive).
-    #[serde(rename = "type", default = "default_widget_type")]
-    pub widget_type: String,
-    /// Clock only: time format (`%H` `%M` `%S`; empty = `%H:%M`).
-    #[serde(default = "default_clock_format")]
-    pub format: String,
-    /// Label only: static text.
-    #[serde(default)]
-    pub text: String,
-    /// Lua only: script file, relative to the widgets dir (absolute
-    /// paths pass through).
+    /// Script file, relative to the widgets dir (absolute paths pass
+    /// through).
     #[serde(default)]
     pub file: String,
-    /// Lua only: seconds between `render()` calls (clamped to >= 0.25).
+    /// Seconds between `render()` calls (clamped to >= 0.25).
     #[serde(default = "default_widget_interval")]
     pub interval: f32,
-    /// Text size for every renderer.
+    /// Text size.
     #[serde(default = "default_widget_size")]
     pub size: f32,
 }
@@ -691,9 +673,6 @@ impl Default for WidgetDef {
     fn default() -> Self {
         Self {
             name: String::new(),
-            widget_type: default_widget_type(),
-            format: default_clock_format(),
-            text: String::new(),
             file: String::new(),
             interval: default_widget_interval(),
             size: default_widget_size(),
@@ -710,32 +689,38 @@ pub struct WidgetsFile {
 }
 
 /// Seed written when `widgets.toml` does not exist yet (same idea as
-/// the theme/template seeds): a Lua clock plus a commented label example.
+/// the theme/template seeds): a clock plus a commented hello example.
 const SEED_WIDGETS_TOML: &str = r#"# Riced widgets: declarative bar widgets referenced by [[bar]] `widgets`.
-# `type` picks the renderer: "clock" (local time), "label" (static text),
-# or "lua" (script file with a `render()` function, called every `interval`).
+# Each entry is a Lua script with a `render()` function returning the
+# cell text, called every `interval` seconds.
 
 [[widget]]
 name = "clock"
-type = "lua"
 file = "clock.lua"
 interval = 1.0
 size = 13.0
 
 # [[widget]]
 # name = "hello"
-# type = "label"
-# text = "hello"
+# file = "hello.lua"
+# interval = 60.0
 # size = 13.0
 "#;
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
 /// Globals persist between `render()` calls; only `render()` is invoked.
 const SEED_CLOCK_LUA: &str = r#"-- Clock widget: the returned string is the bar cell text.
--- Called every `interval` seconds (`os.date` follows the same tokens
--- as the old `format` field).
+-- Called every `interval` seconds.
 function render()
     return os.date("%H:%M")
+end
+"#;
+
+/// Seed Lua label example, written next to the seeded `widgets.toml`.
+const SEED_HELLO_LUA: &str = r#"-- Label example: static text from a script. Uncomment its
+-- [[widget]] entry in widgets.toml to use it.
+function render()
+    return "hello"
 end
 "#;
 
@@ -767,8 +752,8 @@ impl WidgetsFile {
     }
 
     /// Load from [`widgets_path`]. Creates the seeded files (plus
-    /// parent dirs) when `widgets.toml` does not exist yet; an existing
-    /// `clock.lua` is never overwritten.
+    /// parent dirs) when `widgets.toml` does not exist yet; existing
+    /// script files are never overwritten.
     pub fn load() -> (Vec<WidgetDef>, Option<SystemTime>) {
         let path = widgets_path();
         if !path.exists() {
@@ -778,13 +763,15 @@ impl WidgetsFile {
             if let Err(e) = std::fs::write(&path, SEED_WIDGETS_TOML) {
                 eprintln!("widgets: cannot write {}: {e}", path.display());
             }
-            let lua_path = widgets_dir().join("clock.lua");
-            if !lua_path.exists() {
-                if let Some(parent) = lua_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::write(&lua_path, SEED_CLOCK_LUA) {
-                    eprintln!("widgets: cannot write {}: {e}", lua_path.display());
+            for (name, content) in [("clock.lua", SEED_CLOCK_LUA), ("hello.lua", SEED_HELLO_LUA)] {
+                let script_path = widgets_dir().join(name);
+                if !script_path.exists() {
+                    if let Some(parent) = script_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(e) = std::fs::write(&script_path, content) {
+                        eprintln!("widgets: cannot write {}: {e}", script_path.display());
+                    }
                 }
             }
             return (Self::parse(SEED_WIDGETS_TOML), read_mtime(&path));
@@ -1323,35 +1310,19 @@ mod tests {
     }
 
     #[test]
-    fn widgets_file_parses_clock_and_label() {
+    fn widgets_file_parses_lua_entries() {
         let file: WidgetsFile = toml::from_str(
-            "[[widget]]\nname = \"clock\"\ntype = \"clock\"\nformat = \"%H:%M:%S\"\n\
-             [[widget]]\nname = \"hello\"\ntype = \"label\"\ntext = \"hi\"\n",
+            "[[widget]]\nname = \"clock\"\nfile = \"clock.lua\"\ninterval = 5.0\nsize = 14.0\n\
+             [[widget]]\nname = \"hello\"\nfile = \"hello.lua\"\n",
         )
         .unwrap();
         assert_eq!(file.widget.len(), 2);
-        assert_eq!(file.widget[0].widget_type, "clock");
-        assert_eq!(file.widget[0].format, "%H:%M:%S");
-        assert_eq!(file.widget[0].size, 13.0);
-        assert_eq!(file.widget[1].text, "hi");
-        // Sparse entry defaults the rest.
-        let sparse: WidgetsFile = toml::from_str("[[widget]]\nname = \"x\"\n").unwrap();
-        assert_eq!(sparse.widget[0].widget_type, "label");
-        assert_eq!(sparse.widget[0].format, "%H:%M");
-    }
-
-    #[test]
-    fn widgets_file_parses_lua_script_ref() {
-        let file: WidgetsFile = toml::from_str(
-            "[[widget]]\nname = \"w\"\ntype = \"lua\"\nfile = \"w.lua\"\ninterval = 5.0\n",
-        )
-        .unwrap();
-        assert_eq!(file.widget[0].file, "w.lua");
+        assert_eq!(file.widget[0].file, "clock.lua");
         assert_eq!(file.widget[0].interval, 5.0);
+        assert_eq!(file.widget[0].size, 14.0);
         // Sparse entry defaults the rest.
-        let sparse: WidgetsFile = toml::from_str("[[widget]]\nname = \"x\"\n").unwrap();
-        assert!(sparse.widget[0].file.is_empty());
-        assert_eq!(sparse.widget[0].interval, 1.0);
+        assert_eq!(file.widget[1].interval, 1.0);
+        assert_eq!(file.widget[1].size, 13.0);
     }
 
     #[test]

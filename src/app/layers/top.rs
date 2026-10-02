@@ -234,41 +234,14 @@ impl From<&crate::config::TopConfig> for TopLocal {
     }
 }
 
-/// Current local time rendered through a `%H`/`%M`/`%S` format
-/// (empty = `%H:%M`). Plain `libc` (`localtime_r`) instead of a
-/// datetime crate: one locked dep, no timezone database to ship —
-/// the process TZ is enough for a bar clock.
-fn clock_text(format: &str) -> String {
-    let format = if format.trim().is_empty() {
-        "%H:%M"
-    } else {
-        format
-    };
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as libc::time_t)
-        .unwrap_or(0);
-    let mut broken: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: `stamp` and `broken` are valid readable/writable locals;
-    // `localtime_r` writes a full `tm` or returns null on overflow.
-    let ok = unsafe { libc::localtime_r(&stamp, &mut broken) };
-    if ok.is_null() {
-        return String::from("--:--");
-    }
-    format
-        .replace("%H", &format!("{:02}", broken.tm_hour))
-        .replace("%M", &format!("{:02}", broken.tm_min))
-        .replace("%S", &format!("{:02}", broken.tm_sec))
-}
-
 /// Empty cell for slots with no widget (unknown names land here too).
 fn empty_slot() -> Element<'static, Plant> {
     Space::new().into()
 }
 
 /// Render one declarative widget by slot name (`none`/unknown = empty
-/// cell). Pure function of the `widgets.toml` registry plus the last
-/// Lua outputs, so new renderers only touch this match.
+/// cell). Pure function of the widget registry plus the last script
+/// outputs.
 fn render_widget(
     name: &str,
     defs: &[WidgetDef],
@@ -277,32 +250,21 @@ fn render_widget(
     if TopLocal::is_empty_widget(name) {
         return empty_slot();
     }
-    match defs.iter().find(|d| d.name == name) {
-        Some(def) => match def.widget_type.trim().to_lowercase().as_str() {
-            "clock" => text(clock_text(&def.format)).size(def.size.max(1.0)).into(),
-            "label" => text(def.text.clone()).size(def.size.max(1.0)).into(),
-            "lua" => match lua_cell_text(name, defs, outputs) {
-                Some(output) => text(output).size(def.size.max(1.0)).into(),
-                None => empty_slot(),
-            },
-            _ => empty_slot(),
-        },
+    match lua_cell_text(name, defs, outputs) {
+        Some((output, size)) => text(output).size(size.max(1.0)).into(),
         None => empty_slot(),
     }
 }
 
-/// Last Lua output by widget name (`None` = empty cell). Split out so
-/// the cache lookup stays testable without rendering.
+/// Last script output (text, size) by widget name (`None` = empty cell).
+/// Split out so the cache lookup stays testable without rendering.
 fn lua_cell_text(
     name: &str,
     defs: &[WidgetDef],
     outputs: &HashMap<String, String>,
-) -> Option<String> {
+) -> Option<(String, f32)> {
     let def = defs.iter().find(|d| d.name == name)?;
-    if !def.widget_type.trim().eq_ignore_ascii_case("lua") {
-        return None;
-    }
-    outputs.get(name).cloned()
+    outputs.get(name).cloned().map(|text| (text, def.size))
 }
 
 /// Sandboxed Lua state for one widget: string/table/math/os only, no
@@ -765,9 +727,6 @@ impl Top {
         let defs = plots.widgets.clone();
         let now = Instant::now();
         for def in &defs {
-            if !def.widget_type.trim().eq_ignore_ascii_case("lua") {
-                continue;
-            }
             plots.widget_last_run.insert(def.name.clone(), now);
             if let Err(e) = Self::ensure_widget_lua(plots, def) {
                 Self::note_widget_error(plots, &def.name, e);
@@ -790,9 +749,6 @@ impl Top {
         let defs = plots.widgets.clone();
         let mut changed = false;
         for def in &defs {
-            if !def.widget_type.trim().eq_ignore_ascii_case("lua") {
-                continue;
-            }
             let interval = def.interval.max(Self::MIN_WIDGET_INTERVAL);
             let due = plots
                 .widget_last_run
@@ -1374,7 +1330,7 @@ mod tests {
     fn lua_widget(name: &str) -> WidgetDef {
         WidgetDef {
             name: name.to_string(),
-            widget_type: "lua".to_string(),
+            size: 13.0,
             ..Default::default()
         }
     }
@@ -1415,32 +1371,17 @@ mod tests {
     }
 
     #[test]
-    fn lua_cell_text_reads_only_lua_cache() {
+    fn lua_cell_text_reads_cache_with_size() {
         let defs = vec![lua_widget("w")];
         let empty: HashMap<String, String> = HashMap::new();
         assert_eq!(lua_cell_text("w", &defs, &empty), None);
         let mut outputs = HashMap::new();
         outputs.insert("w".to_string(), "hi".to_string());
-        assert_eq!(lua_cell_text("w", &defs, &outputs), Some("hi".to_string()));
-        // Unknown names and non-lua defs never read the cache.
+        assert_eq!(
+            lua_cell_text("w", &defs, &outputs),
+            Some(("hi".to_string(), 13.0))
+        );
+        // Unknown names never read the cache.
         assert_eq!(lua_cell_text("nope", &defs, &outputs), None);
-        let label = WidgetDef {
-            name: "w".to_string(),
-            widget_type: "label".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(lua_cell_text("w", &[label], &outputs), None);
-    }
-
-    #[test]
-    fn clock_text_formats_tokens() {
-        // Shape is deterministic whatever the current time is.
-        let short = clock_text("%H:%M");
-        assert_eq!(short.len(), 5);
-        assert_eq!(short.chars().nth(2), Some(':'));
-        let full = clock_text("%H:%M:%S");
-        assert_eq!(full.len(), 8);
-        // Empty falls back to the default format.
-        assert_eq!(clock_text("").len(), 5);
     }
 }

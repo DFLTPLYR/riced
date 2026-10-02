@@ -431,11 +431,7 @@ impl Plots {
 
         // Lua widgets re-render on their own intervals (250ms cadence,
         // each script runs only when due). No timer at all without them.
-        if self
-            .widgets
-            .iter()
-            .any(|d| d.widget_type.trim().eq_ignore_ascii_case("lua"))
-        {
+        if !self.widgets.is_empty() {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::TopPlot(TopEvent::WidgetTick)),
