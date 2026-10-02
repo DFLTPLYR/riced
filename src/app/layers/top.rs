@@ -47,8 +47,9 @@ pub struct Top {
     pub local: TopLocal,
 }
 
-/// Alignment of a slot's child inside its cell, applied to both axes
-/// (`Start` = top-left, `Center` = centered, `End` = bottom-right).
+/// Position of a slot's child along the bar's long axis (`Start` =
+/// first, `Center` = middle, `End` = last). The cross axis stays
+/// centered so content never hugs the bar's thin edge.
 /// Per-slot so e.g. a clock can sit right while the next cell centers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SlotAlign {
@@ -82,6 +83,18 @@ impl SlotAlign {
             Self::Start => iced::Alignment::Start,
             Self::Center => iced::Alignment::Center,
             Self::End => iced::Alignment::End,
+        }
+    }
+
+    /// `(x, y)` cell alignment for a bar orientation: the preset rides
+    /// the long axis while the cross axis stays centered (vertical bars
+    /// center horizontally, horizontal bars vertically).
+    fn for_bar(self, horizontal: bool) -> (iced::Alignment, iced::Alignment) {
+        let align = self.iced();
+        if horizontal {
+            (align, iced::Alignment::Center)
+        } else {
+            (iced::Alignment::Center, align)
         }
     }
 }
@@ -686,20 +699,21 @@ impl Top {
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let pad = self.local.slot_padding.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+        let horizontal = self.is_horizontal();
         let cell = |pos: usize| -> Element<'_, Plant> {
             let body: Element<'_, Plant> = render_slot_widgets(
                 self.local.widgets_at(pos),
                 widgets,
                 outputs,
                 gap,
-                self.is_horizontal(),
+                horizontal,
             );
-            let align = self.local.align_at(pos).iced();
+            let (align_x, align_y) = self.local.align_at(pos).for_bar(horizontal);
             container(body)
                 .width(Fill)
                 .height(Fill)
-                .align_x(align)
-                .align_y(align)
+                .align_x(align_x)
+                .align_y(align_y)
                 .padding(pad)
                 .into()
         };
@@ -1782,6 +1796,17 @@ mod tests {
                 "usage seeds stay icon-free, got {out:?}"
             );
         }
+    }
+
+    #[test]
+    fn slot_align_rides_the_long_axis() {
+        use iced::Alignment as A;
+        assert_eq!(SlotAlign::Start.for_bar(true), (A::Start, A::Center));
+        assert_eq!(SlotAlign::End.for_bar(true), (A::End, A::Center));
+        assert_eq!(SlotAlign::Center.for_bar(true), (A::Center, A::Center));
+        assert_eq!(SlotAlign::Start.for_bar(false), (A::Center, A::Start));
+        assert_eq!(SlotAlign::End.for_bar(false), (A::Center, A::End));
+        assert_eq!(SlotAlign::Center.for_bar(false), (A::Center, A::Center));
     }
 
     #[test]

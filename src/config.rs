@@ -50,7 +50,8 @@ use std::time::{Duration, SystemTime};
 ///                    # horizontal (top/bottom), rows when vertical
 ///                    # (left/right); 1..=32
 /// aligns = ["start", "center", "end"]
-///                    # child alignment per slot (both axes)
+///                    # child position per slot along the bar
+///                    # (cross axis stays centered)
 /// widgets = [["cpu", "ram"], ["clock"]]
 ///                    # widget names from widgets.toml by slot position;
 ///                    # each slot renders its entries together. A bare
@@ -318,9 +319,9 @@ pub struct TopConfig {
     /// rows when vertical). Clamped to 1..=32 at spawn.
     #[serde(default = "default_bar_slots")]
     pub slots: u32,
-    /// Child alignment per slot by position (`start`/`center`/`end`,
-    /// both axes; unknown entries read as `center`). Shorter lists
-    /// pad centered, longer ones truncate.
+    /// Child position per slot along the bar (`start`/`center`/`end`;
+    /// the cross axis stays centered; unknown entries read as
+    /// `center`). Shorter lists pad centered, longer ones truncate.
     #[serde(default)]
     pub aligns: Vec<String>,
     /// Widget names per slot by position, resolved against
