@@ -731,6 +731,24 @@ size = 13.0
 # file = "stats.lua"
 # interval = 2.0
 # size = 13.0
+
+# [[widget]]
+# name = "cpu"
+# file = "cpu.lua"
+# interval = 2.0
+# size = 13.0
+
+# [[widget]]
+# name = "ram"
+# file = "ram.lua"
+# interval = 2.0
+# size = 13.0
+
+# [[widget]]
+# name = "gpu"
+# file = "gpu.lua"
+# interval = 2.0
+# size = 13.0
 "#;
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
@@ -758,6 +776,38 @@ function render()
     local cpu = string.format("%.0f", sysinfo.cpu_usage)
     local mem = string.format("%.0f", sysinfo.mem_usage)
     return "{icon:cpu} " .. cpu .. "%  {icon:memory-stick} " .. mem .. "%"
+end
+"#;
+
+/// Seed CPU usage: plain percent, no icon. Uncomment its
+/// `[[widget]]` entry in widgets.toml to use it.
+pub(crate) const SEED_CPU_LUA: &str = r#"-- CPU usage as plain percent, no icon.
+-- Uncomment its [[widget]] entry in widgets.toml to use it.
+function render()
+    return string.format("%.0f%%", sysinfo.cpu_usage)
+end
+"#;
+
+/// Seed RAM usage: plain percent, no icon. Uncomment its
+/// `[[widget]]` entry in widgets.toml to use it.
+pub(crate) const SEED_RAM_LUA: &str = r#"-- RAM usage as plain percent, no icon.
+-- Uncomment its [[widget]] entry in widgets.toml to use it.
+function render()
+    return string.format("%.0f%%", sysinfo.mem_usage)
+end
+"#;
+
+/// Seed GPU usage: plain percent, no icon. Reads "--" when the GPU
+/// exposes nothing readable. Uncomment its `[[widget]]` entry in
+/// widgets.toml to use it.
+pub(crate) const SEED_GPU_LUA: &str = r#"-- GPU usage as plain percent, no icon ("--" when unreadable).
+-- Uncomment its [[widget]] entry in widgets.toml to use it.
+function render()
+    local usage = gfxinfo.usage
+    if usage == nil then
+        return "--"
+    end
+    return string.format("%.0f%%", usage)
 end
 "#;
 
@@ -804,6 +854,9 @@ impl WidgetsFile {
                 ("clock.lua", SEED_CLOCK_LUA),
                 ("hello.lua", SEED_HELLO_LUA),
                 ("stats.lua", SEED_STATS_LUA),
+                ("cpu.lua", SEED_CPU_LUA),
+                ("ram.lua", SEED_RAM_LUA),
+                ("gpu.lua", SEED_GPU_LUA),
             ] {
                 let script_path = widgets_dir().join(name);
                 if !script_path.exists() {

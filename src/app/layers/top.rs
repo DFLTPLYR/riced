@@ -1681,6 +1681,25 @@ mod tests {
     }
 
     #[test]
+    fn seed_usage_scripts_render_icon_free_text() {
+        use crate::config::{SEED_CPU_LUA, SEED_GPU_LUA, SEED_RAM_LUA};
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        for source in [SEED_CPU_LUA, SEED_RAM_LUA, SEED_GPU_LUA] {
+            let lua = new_widget_lua().expect("sandbox");
+            load_widget_script(&lua, "seed", source).expect("load");
+            publish_system_tables(&lua, &sys, None).expect("publish");
+            let out = call_widget_render(&lua).expect("render");
+            assert!(!out.is_empty(), "seed must render text");
+            assert!(
+                !out.contains("{icon:"),
+                "usage seeds stay icon-free, got {out:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rich_text_builds_without_a_renderer() {
         // Element construction is pure — smoke-test all three shapes.
         let _ = rich_text("12%".to_string(), 13.0, 4.0);
