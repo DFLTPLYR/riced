@@ -52,8 +52,9 @@ use std::time::{Duration, SystemTime};
 /// aligns = ["start", "center", "end"]
 ///                    # child alignment per slot (both axes)
 /// widgets = ["clock", "none"]
-///                    # widget per slot by position (`none` = placeholder;
-///                    # unknown entries read as `none`)
+///                    # widget names from widgets.toml by slot position
+///                    # (`none` = placeholder; unknown names render as
+///                    # placeholders too)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
 ///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
@@ -104,6 +105,15 @@ defs! {
     default_bar_thickness: f32 = 50.0,
     default_bar_slots: u32 = 1,
     default_bar_opacity: f32 = 1.0,
+    default_widget_size: f32 = 13.0,
+}
+
+fn default_widget_type() -> String {
+    "label".to_string()
+}
+
+fn default_clock_format() -> String {
+    "%H:%M".to_string()
 }
 
 fn default_bar_anchor() -> String {
@@ -315,8 +325,9 @@ pub struct TopConfig {
     /// pad centered, longer ones truncate.
     #[serde(default)]
     pub aligns: Vec<String>,
-    /// Widget per slot by position (`clock`/`none`; unknown entries
-    /// read as `none`). Shorter lists pad empty, longer ones truncate.
+    /// Widget name per slot by position, resolved against
+    /// `widgets.toml` (`none`/unknown = numbered placeholder).
+    /// Shorter lists pad empty, longer ones truncate.
     #[serde(default)]
     pub widgets: Vec<String>,
     /// Backdrop opacity, snapped to 0.0/0.25/0.5/0.75/1.0 at spawn.
@@ -626,6 +637,135 @@ pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .map(|d| d.join("riced").join("config.toml"))
         .unwrap_or_else(|| PathBuf::from("riced.toml"))
+}
+
+/// Declarative bar widgets (`~/.config/riced/widgets.toml`,
+/// `$XDG_CONFIG_HOME` aware). Slots reference entries by `name`
+/// (see `[[bar]] widgets`); `type` picks the renderer, the rest are
+/// per-type params:
+/// ```toml
+/// [[widget]]
+/// name = "clock"   # slot reference
+/// type = "clock"   # clock | label
+/// format = "%H:%M" # clock only (%H %M %S)
+/// size = 13.0
+///
+/// [[widget]]
+/// name = "hello"
+/// type = "label"
+/// text = "hello"
+/// size = 13.0
+/// ```
+/// Unknown `type` values load fine and render as placeholders, never
+/// an error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetDef {
+    /// Slot reference (`[[bar]] widgets = [...]`).
+    #[serde(default)]
+    pub name: String,
+    /// Renderer: `clock` | `label` (case-insensitive).
+    #[serde(rename = "type", default = "default_widget_type")]
+    pub widget_type: String,
+    /// Clock only: time format (`%H` `%M` `%S`; empty = `%H:%M`).
+    #[serde(default = "default_clock_format")]
+    pub format: String,
+    /// Label only: static text.
+    #[serde(default)]
+    pub text: String,
+    /// Text size for either renderer.
+    #[serde(default = "default_widget_size")]
+    pub size: f32,
+}
+
+impl Default for WidgetDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            widget_type: default_widget_type(),
+            format: default_clock_format(),
+            text: String::new(),
+            size: default_widget_size(),
+        }
+    }
+}
+
+/// Whole `widgets.toml`: one `[[widget]]` entry per declarative widget.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetsFile {
+    #[serde(default)]
+    pub widget: Vec<WidgetDef>,
+}
+
+/// Seed written when `widgets.toml` does not exist yet (same idea as
+/// the theme/template seeds): a clock plus a commented label example.
+const SEED_WIDGETS_TOML: &str = r#"# Riced widgets: declarative bar widgets referenced by [[bar]] `widgets`.
+# `type` picks the renderer: "clock" (local time via `format`) or "label".
+
+[[widget]]
+name = "clock"
+type = "clock"
+format = "%H:%M"
+size = 13.0
+
+# [[widget]]
+# name = "hello"
+# type = "label"
+# text = "hello"
+# size = 13.0
+"#;
+
+/// `~/.config/riced/widgets.toml` (`$XDG_CONFIG_HOME` aware).
+pub fn widgets_path() -> PathBuf {
+    dirs::config_dir()
+        .map(|d| d.join("riced").join("widgets.toml"))
+        .unwrap_or_else(|| PathBuf::from("widgets.toml"))
+}
+
+impl WidgetsFile {
+    fn parse(content: &str) -> Vec<WidgetDef> {
+        match toml::from_str::<WidgetsFile>(content) {
+            Ok(file) => file.widget,
+            Err(e) => {
+                eprintln!("widgets: parse error, no widgets: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Load from [`widgets_path`]. Creates the file with a seeded clock
+    /// (plus parent dirs) when it does not exist yet.
+    pub fn load() -> (Vec<WidgetDef>, Option<SystemTime>) {
+        let path = widgets_path();
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&path, SEED_WIDGETS_TOML) {
+                eprintln!("widgets: cannot write {}: {e}", path.display());
+            }
+            return (Self::parse(SEED_WIDGETS_TOML), read_mtime(&path));
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => (Self::parse(&content), read_mtime(&path)),
+            Err(_) => (Vec::new(), None),
+        }
+    }
+
+    /// Hot-reload check for the poll tick: fresh defs when the file
+    /// changed since `known_mtime` (or appeared). Never fails.
+    pub fn poll(known_mtime: &Option<SystemTime>) -> Option<(Vec<WidgetDef>, Option<SystemTime>)> {
+        let path = widgets_path();
+        let mtime = read_mtime(&path);
+        if mtime != *known_mtime && path.exists() {
+            let (defs, mtime) = Self::load();
+            if mtime != *known_mtime {
+                return Some((defs, mtime));
+            }
+        }
+        None
+    }
 }
 
 fn read_mtime(path: &std::path::Path) -> Option<SystemTime> {
@@ -1138,6 +1278,24 @@ mod tests {
             cfg.bar[0].widgets,
             vec!["clock".to_string(), "none".to_string()]
         );
+    }
+
+    #[test]
+    fn widgets_file_parses_clock_and_label() {
+        let file: WidgetsFile = toml::from_str(
+            "[[widget]]\nname = \"clock\"\ntype = \"clock\"\nformat = \"%H:%M:%S\"\n\
+             [[widget]]\nname = \"hello\"\ntype = \"label\"\ntext = \"hi\"\n",
+        )
+        .unwrap();
+        assert_eq!(file.widget.len(), 2);
+        assert_eq!(file.widget[0].widget_type, "clock");
+        assert_eq!(file.widget[0].format, "%H:%M:%S");
+        assert_eq!(file.widget[0].size, 13.0);
+        assert_eq!(file.widget[1].text, "hi");
+        // Sparse entry defaults the rest.
+        let sparse: WidgetsFile = toml::from_str("[[widget]]\nname = \"x\"\n").unwrap();
+        assert_eq!(sparse.widget[0].widget_type, "label");
+        assert_eq!(sparse.widget[0].format, "%H:%M");
     }
 
     #[test]

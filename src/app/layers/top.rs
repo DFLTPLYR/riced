@@ -2,8 +2,8 @@ use super::background::Background;
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::composables::panel_window::top_window;
+use crate::config::WidgetDef;
 use crate::theme;
-use crate::widgets::clock;
 use iced::mouse::Button;
 use iced::widget::{column, container, row, text};
 use iced::window;
@@ -85,34 +85,6 @@ impl SlotAlign {
     }
 }
 
-/// Widget shown in one grid slot, picked by position. `None` is the
-/// numbered placeholder; each other variant renders its widget from
-/// `src/widgets/` (e.g. `Clock` → [`clock::view`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SlotWidget {
-    #[default]
-    None,
-    Clock,
-}
-
-impl SlotWidget {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Clock => "clock",
-        }
-    }
-
-    /// Parse a persisted widget (`[[bar]] widgets`); unknown or empty
-    /// strings fall back to `None`, never an error.
-    pub(crate) fn from_str(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
-            "clock" => Self::Clock,
-            _ => Self::None,
-        }
-    }
-}
-
 /// Local data for one bar: length %, thickness px, grid slots, floating + margins, rounding.
 /// Plain runtime state on `Top`, deliberately outside `Config` so bars stay
 /// independent of the global config file and its hot-reload.
@@ -126,9 +98,10 @@ pub struct TopLocal {
     /// Child alignment per slot position (`len == slots`). Resized by
     /// [`TopLocal::ensure_aligns`], persisted as names.
     pub aligns: Vec<SlotAlign>,
-    /// Widget per slot position (`len == slots`). Resized by
-    /// [`TopLocal::ensure_widgets`], persisted as names.
-    pub widgets: Vec<SlotWidget>,
+    /// Widget name per slot position (`len == slots`), resolved against
+    /// `widgets.toml` (`none`/unknown = numbered placeholder). Resized
+    /// by [`TopLocal::ensure_widgets`], persisted as names.
+    pub widgets: Vec<String>,
     /// Backdrop opacity, always one of 0.0/0.25/0.5/0.75/1.0.
     pub opacity: f32,
     pub floating: bool,
@@ -160,7 +133,7 @@ impl Default for TopLocal {
             thickness_px: 50.0,
             slots: 1,
             aligns: vec![SlotAlign::Center],
-            widgets: vec![SlotWidget::None],
+            widgets: vec![TopLocal::NO_WIDGET.to_string()],
             opacity: 1.0,
             floating: false,
             margins: Margins::default(),
@@ -201,17 +174,31 @@ impl TopLocal {
         self.aligns.get(pos).copied().unwrap_or(SlotAlign::Center)
     }
 
-    /// Keep `widgets` aligned with the slot count (truncate extras, pad
-    /// with `None`). Called with [`TopLocal::ensure_aligns`] after every
-    /// `slots` change and config load.
-    pub(crate) fn ensure_widgets(&mut self) {
-        let n = self.slots.clamp(1, Self::MAX_SLOTS) as usize;
-        self.widgets.resize(n, SlotWidget::None);
+    /// Sentinel for empty slots in `widgets` (`[[bar]]` name).
+    pub(crate) const NO_WIDGET: &'static str = "none";
+
+    /// `true` for the empty sentinel (`none`, blank) — renders the
+    /// numbered placeholder.
+    pub(crate) fn is_empty_widget(name: &str) -> bool {
+        let name = name.trim();
+        name.is_empty() || name.eq_ignore_ascii_case(Self::NO_WIDGET)
     }
 
-    /// Widget by position (`None` past the end).
-    pub(crate) fn widget_at(&self, pos: usize) -> SlotWidget {
-        self.widgets.get(pos).copied().unwrap_or(SlotWidget::None)
+    /// Keep `widgets` aligned with the slot count (truncate extras, pad
+    /// with [`TopLocal::NO_WIDGET`]). Called with
+    /// [`TopLocal::ensure_aligns`] after every `slots` change and
+    /// config load.
+    pub(crate) fn ensure_widgets(&mut self) {
+        let n = self.slots.clamp(1, Self::MAX_SLOTS) as usize;
+        self.widgets.resize(n, Self::NO_WIDGET.to_string());
+    }
+
+    /// Widget name by position (`none` past the end).
+    pub(crate) fn widget_at(&self, pos: usize) -> &str {
+        self.widgets
+            .get(pos)
+            .map(String::as_str)
+            .unwrap_or(Self::NO_WIDGET)
     }
 }
 
@@ -220,9 +207,8 @@ impl From<&crate::config::TopConfig> for TopLocal {
         let slots = c.slots.clamp(1, Self::MAX_SLOTS);
         let mut aligns: Vec<SlotAlign> = c.aligns.iter().map(|a| SlotAlign::from_str(a)).collect();
         aligns.resize(slots as usize, SlotAlign::Center);
-        let mut widgets: Vec<SlotWidget> =
-            c.widgets.iter().map(|w| SlotWidget::from_str(w)).collect();
-        widgets.resize(slots as usize, SlotWidget::None);
+        let mut widgets: Vec<String> = c.widgets.clone();
+        widgets.resize(slots as usize, TopLocal::NO_WIDGET.to_string());
         Self {
             length_pct: c.length,
             thickness_px: c.thickness,
@@ -244,6 +230,55 @@ impl From<&crate::config::TopConfig> for TopLocal {
                 bottom_right: c.radius_bottom_right.max(0.0),
             },
         }
+    }
+}
+
+/// Current local time rendered through a `%H`/`%M`/`%S` format
+/// (empty = `%H:%M`). Plain `libc` (`localtime_r`) instead of a
+/// datetime crate: one locked dep, no timezone database to ship —
+/// the process TZ is enough for a bar clock.
+fn clock_text(format: &str) -> String {
+    let format = if format.trim().is_empty() {
+        "%H:%M"
+    } else {
+        format
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut broken: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `stamp` and `broken` are valid readable/writable locals;
+    // `localtime_r` writes a full `tm` or returns null on overflow.
+    let ok = unsafe { libc::localtime_r(&stamp, &mut broken) };
+    if ok.is_null() {
+        return String::from("--:--");
+    }
+    format
+        .replace("%H", &format!("{:02}", broken.tm_hour))
+        .replace("%M", &format!("{:02}", broken.tm_min))
+        .replace("%S", &format!("{:02}", broken.tm_sec))
+}
+
+/// Numbered placeholder for empty slots (unknown names land here too).
+fn placeholder(label: usize) -> Element<'static, Plant> {
+    text(format!("{label}")).size(11).into()
+}
+
+/// Render one declarative widget by slot name (`none`/unknown =
+/// placeholder). Pure function of the `widgets.toml` registry, so new
+/// renderers only touch this match.
+fn render_widget(name: &str, label: usize, defs: &[WidgetDef]) -> Element<'static, Plant> {
+    if TopLocal::is_empty_widget(name) {
+        return placeholder(label);
+    }
+    match defs.iter().find(|d| d.name == name) {
+        Some(def) => match def.widget_type.trim().to_lowercase().as_str() {
+            "clock" => text(clock_text(&def.format)).size(def.size.max(1.0)).into(),
+            "label" => text(def.text.clone()).size(def.size.max(1.0)).into(),
+            _ => placeholder(label),
+        },
+        None => placeholder(label),
     }
 }
 
@@ -379,17 +414,14 @@ impl Top {
         (id, settings)
     }
 
-    pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
+    pub fn view(&self, id: window::Id, widgets: &[WidgetDef]) -> Element<'_, Plant> {
         // Grid along the long axis: one row of N columns when horizontal
         // (top/bottom anchor), one column of N rows when vertical
-        // (left/right anchor). Each cell renders its slot widget
-        // (`None` = numbered placeholder).
+        // (left/right anchor). Each cell renders its `widgets.toml`
+        // widget (`none`/unknown = numbered placeholder).
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let cell = |pos: usize, label: usize| -> Element<'_, Plant> {
-            let body: Element<'_, Plant> = match self.local.widget_at(pos) {
-                SlotWidget::Clock => clock::view(),
-                SlotWidget::None => text(format!("{label}")).size(11).into(),
-            };
+            let body: Element<'_, Plant> = render_widget(self.local.widget_at(pos), label, widgets);
             let align = self.local.align_at(pos).iced();
             container(body)
                 .width(Fill)
@@ -566,13 +598,14 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
-    /// Set one slot's widget (`TopEvent::SetSlotWidget`): single commit
-    /// per press (preset buttons, not a drag stream).
+    /// Set one slot's widget by `widgets.toml` name
+    /// (`TopEvent::SetSlotWidget`): single commit per press (preset
+    /// buttons, not a drag stream).
     pub(crate) fn handle_set_slot_widget(
         plots: &mut Plots,
         id: window::Id,
         pos: usize,
-        widget: SlotWidget,
+        widget: String,
     ) -> Command<Plant> {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.ensure_widgets();
@@ -743,11 +776,7 @@ impl Top {
             .iter()
             .map(|a| a.as_str().to_string())
             .collect();
-        let widgets: Vec<String> = local
-            .widgets
-            .iter()
-            .map(|w| w.as_str().to_string())
-            .collect();
+        let widgets: Vec<String> = local.widgets.clone();
         let entry = crate::config::TopConfig {
             anchor,
             output,
@@ -996,7 +1025,7 @@ impl Top {
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
             let l = top.local.clone();
             let aligns: Vec<String> = l.aligns.iter().map(|a| a.as_str().to_string()).collect();
-            let widgets: Vec<String> = l.widgets.iter().map(|w| w.as_str().to_string()).collect();
+            let widgets: Vec<String> = l.widgets.clone();
             plots.config.bar.push(crate::config::TopConfig {
                 anchor: anchor_name(anchor).to_lowercase(),
                 output,

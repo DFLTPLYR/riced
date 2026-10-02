@@ -67,6 +67,10 @@ pub struct Plots {
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
+    // Declarative widgets (`widgets.toml`) + last seen file mtime.
+    // Bars reference entries by name; hot-reloaded like the config.
+    pub(crate) widgets: Vec<crate::config::WidgetDef>,
+    pub(crate) widgets_mtime: Option<std::time::SystemTime>,
     // Local-first staging: `Patch` mutates live memory every tick (smooth
     // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
     // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
@@ -108,6 +112,7 @@ impl Plots {
         crate::theme::sync(&config.theme);
         let mut wallpapers = HashMap::new();
         Self::sync_wallpapers(&config, &mut wallpapers);
+        let (widgets, widgets_mtime) = crate::config::WidgetsFile::load();
         Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
@@ -125,6 +130,8 @@ impl Plots {
             press_starts: HashMap::new(),
             config,
             config_mtime,
+            widgets,
+            widgets_mtime,
             config_dirty: false,
             config_save_seq: 0,
             theme_mtime,
@@ -429,7 +436,7 @@ impl Plots {
             Some(PlotInfo::Top(_output)) => self
                 .tops
                 .get(&id)
-                .map(|t| t.view(id))
+                .map(|t| t.view(id, &self.widgets))
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
@@ -688,6 +695,12 @@ impl Plots {
                         self.config.clone(),
                     )));
                 }
+                // Declarative widgets hot-reload on the same tick: fresh
+                // defs repaint every bar on the next frame.
+                if let Some((defs, mtime)) = crate::config::WidgetsFile::poll(&self.widgets_mtime) {
+                    self.widgets_mtime = mtime;
+                    return Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(defs)));
+                }
                 Command::none()
             }
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
@@ -707,6 +720,12 @@ impl Plots {
                 if images_changed || switched_to_dynamic {
                     return self.arm_regen_theme();
                 }
+                Command::none()
+            }
+            Plant::Config(ConfigEvent::WidgetsReloaded(defs)) => {
+                // `widgets.toml` changed under us: swap the live registry.
+                // Bars re-resolve slot names on the next redraw (Scope::All).
+                self.widgets = defs;
                 Command::none()
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
@@ -956,9 +975,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Config(ConfigEvent::SaveTimer(_))
         | Plant::Config(ConfigEvent::SaveNow)
         | Plant::IpcPoll => Scope::None,
-        Plant::Config(ConfigEvent::ConfigReloaded(_)) | Plant::Config(ConfigEvent::Patch(_)) => {
-            Scope::All
-        }
+        Plant::Config(ConfigEvent::ConfigReloaded(_))
+        | Plant::Config(ConfigEvent::Patch(_))
+        | Plant::Config(ConfigEvent::WidgetsReloaded(_)) => Scope::All,
         // Fresh dynamic.json on disk: repaint so the new palette applies
         // (theme::sync picks the new mtime up during the redraw).
         Plant::Config(ConfigEvent::ThemeRegenerated(_)) => Scope::All,

@@ -51,6 +51,9 @@ pub enum ConfigEvent {
     /// (empty errors) or the failure reasons. Always repaints so new
     /// colors apply on the next frame.
     ThemeRegenerated(Vec<String>),
+    /// `widgets.toml` changed on disk: fresh declarative widget defs.
+    /// Stored live and repainted (bars re-resolve slot names).
+    WidgetsReloaded(Vec<crate::config::WidgetDef>),
 }
 
 #[derive(Debug, Clone)]
@@ -73,9 +76,10 @@ pub enum TopEvent {
     /// Child alignment of one slot (position, not label): applied live,
     /// persisted to the bar's `[[bar]] aligns` entry.
     SetSlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
-    /// Widget of one slot (position, not label): applied live,
-    /// persisted to the bar's `[[bar]] widgets` entry.
-    SetSlotWidget(Id, usize, crate::app::layers::top::SlotWidget),
+    /// Widget of one slot by `widgets.toml` name (position, not
+    /// label): applied live, persisted to the bar's `[[bar]] widgets`
+    /// entry.
+    SetSlotWidget(Id, usize, String),
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,

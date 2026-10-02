@@ -1,5 +1,5 @@
 use super::background::Background;
-use super::top::{SlotAlign, SlotWidget, TopLocal};
+use super::top::{SlotAlign, TopLocal};
 use crate::app::ConfigEvent;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
@@ -426,16 +426,29 @@ impl Setting {
                     );
                 }
                 col = col.push(presets);
-                // Widget for the picked slot: one commit per press, like
-                // alignment (`None` = numbered placeholder).
-                let current_widget = top.local.widget_at(sel);
+                // Widget for the picked slot: `none` plus every
+                // `widgets.toml` entry by name (one commit per press,
+                // like alignment). Unknown names render as placeholders.
+                let current = top.local.widget_at(sel).to_string();
                 let mut widgets = row![text("Widget").width(Length::Fill)].spacing(8);
-                for widget in [SlotWidget::None, SlotWidget::Clock] {
+                widgets = widgets.push(
+                    button(text(TopLocal::NO_WIDGET).size(12).color(theme::text()))
+                        .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(
+                            wid,
+                            sel,
+                            TopLocal::NO_WIDGET.to_string(),
+                        )))
+                        .padding(6)
+                        .style(theme::nav_button(TopLocal::is_empty_widget(&current))),
+                );
+                for def in &plots.widgets {
+                    let name = def.name.clone();
+                    let selected = current == name;
                     widgets = widgets.push(
-                        button(text(widget.as_str()).size(12).color(theme::text()))
-                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, widget)))
+                        button(text(name.clone()).size(12).color(theme::text()))
+                            .on_press(Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, name)))
                             .padding(6)
-                            .style(theme::nav_button(current_widget == widget)),
+                            .style(theme::nav_button(selected)),
                     );
                 }
                 col = col.push(widgets);
