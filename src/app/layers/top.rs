@@ -45,6 +45,45 @@ pub struct Top {
     pub local: TopLocal,
 }
 
+/// Alignment of a slot's child inside its cell, applied to both axes
+/// (`Start` = top-left, `Center` = centered, `End` = bottom-right).
+/// Per-slot so e.g. a clock can sit right while the next cell centers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SlotAlign {
+    Start,
+    #[default]
+    Center,
+    End,
+}
+
+impl SlotAlign {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Center => "center",
+            Self::End => "end",
+        }
+    }
+
+    /// Parse a persisted alignment (`[[bar]] aligns`); unknown or empty
+    /// strings fall back to `Center`, never an error.
+    pub(crate) fn from_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "start" | "left" | "top" => Self::Start,
+            "end" | "right" | "bottom" => Self::End,
+            _ => Self::Center,
+        }
+    }
+
+    fn iced(self) -> iced::Alignment {
+        match self {
+            Self::Start => iced::Alignment::Start,
+            Self::Center => iced::Alignment::Center,
+            Self::End => iced::Alignment::End,
+        }
+    }
+}
+
 /// Local data for one bar: length %, thickness px, grid slots, floating + margins, rounding.
 /// Plain runtime state on `Top`, deliberately outside `Config` so bars stay
 /// independent of the global config file and its hot-reload.
@@ -55,6 +94,9 @@ pub struct TopLocal {
     /// Grid cells along the long axis: columns when horizontal
     /// (top/bottom anchor), rows when vertical (left/right anchor).
     pub slots: u32,
+    /// Child alignment per slot position (`len == slots`). Resized by
+    /// [`TopLocal::ensure_aligns`], persisted as names.
+    pub aligns: Vec<SlotAlign>,
     /// Backdrop opacity, always one of 0.0/0.25/0.5/0.75/1.0.
     pub opacity: f32,
     pub floating: bool,
@@ -85,6 +127,7 @@ impl Default for TopLocal {
             // ~50px, the old fixed thickness.
             thickness_px: 50.0,
             slots: 1,
+            aligns: vec![SlotAlign::Center],
             opacity: 1.0,
             floating: false,
             margins: Margins::default(),
@@ -111,14 +154,31 @@ impl TopLocal {
     pub(crate) fn max_thickness(sw: f32, sh: f32, horizontal: bool) -> f32 {
         if horizontal { sh } else { sw }
     }
+
+    /// Keep `aligns` aligned with the slot count (truncate extras, pad
+    /// with `Center`). Called after every `slots` change and config
+    /// load so views can index by position without clamping.
+    pub(crate) fn ensure_aligns(&mut self) {
+        let n = self.slots.clamp(1, Self::MAX_SLOTS) as usize;
+        self.aligns.resize(n, SlotAlign::Center);
+    }
+
+    /// Child alignment by position (`Center` past the end).
+    pub(crate) fn align_at(&self, pos: usize) -> SlotAlign {
+        self.aligns.get(pos).copied().unwrap_or(SlotAlign::Center)
+    }
 }
 
 impl From<&crate::config::TopConfig> for TopLocal {
     fn from(c: &crate::config::TopConfig) -> Self {
+        let slots = c.slots.clamp(1, Self::MAX_SLOTS);
+        let mut aligns: Vec<SlotAlign> = c.aligns.iter().map(|a| SlotAlign::from_str(a)).collect();
+        aligns.resize(slots as usize, SlotAlign::Center);
         Self {
             length_pct: c.length,
             thickness_px: c.thickness,
-            slots: c.slots.clamp(1, Self::MAX_SLOTS),
+            slots,
+            aligns,
             opacity: Self::snap_opacity(c.opacity),
             floating: c.floating,
             margins: Margins {
@@ -272,26 +332,28 @@ impl Top {
     pub fn view(&self, id: window::Id) -> Element<'_, Plant> {
         // Grid along the long axis: one row of N columns when horizontal
         // (top/bottom anchor), one column of N rows when vertical
-        // (left/right anchor). Cells are placeholders for future widgets.
+        // (left/right anchor). Cells are numbered placeholders.
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        fn cell(i: usize) -> Element<'static, Plant> {
-            container(text(format!("{i}")).size(11))
+        let cell = |pos: usize, label: usize| -> Element<'_, Plant> {
+            let body: Element<'_, Plant> = text(format!("{label}")).size(11).into();
+            let align = self.local.align_at(pos).iced();
+            container(body)
                 .width(Fill)
                 .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)
+                .align_x(align)
+                .align_y(align)
                 .into()
-        }
+        };
         let content: Element<'_, Plant> = if self.is_horizontal() {
             let mut r = row![].width(Fill).height(Fill).spacing(4);
             for i in 1..=n {
-                r = r.push(cell(i));
+                r = r.push(cell(i - 1, i));
             }
             r.into()
         } else {
             let mut c = column![].width(Fill).height(Fill).spacing(4);
             for i in 1..=n {
-                c = c.push(cell(i));
+                c = c.push(cell(i - 1, i));
             }
             c.into()
         };
@@ -421,8 +483,30 @@ impl Top {
     ) -> Command<Plant> {
         if let Some(top) = plots.tops.get_mut(&id) {
             top.local.slots = value.clamp(1, TopLocal::MAX_SLOTS);
+            // Count change resizes the per-slot rows (extras drop, new
+            // cells start centered) — placement survives by position.
+            top.local.ensure_aligns();
         }
         // Window size is unchanged (cells share the bar) — persist only.
+        Self::persist_bar(plots, id)
+    }
+
+    /// Set one slot's child alignment (`TopEvent::SetSlotAlign`): single
+    /// commit per press (preset buttons, not a drag stream).
+    pub(crate) fn handle_set_slot_align(
+        plots: &mut Plots,
+        id: window::Id,
+        pos: usize,
+        align: SlotAlign,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.ensure_aligns();
+            if pos < top.local.aligns.len() {
+                top.local.aligns[pos] = align;
+            }
+        }
+        // Window size is unchanged (alignment only moves the child
+        // inside its cell) — persist only.
         Self::persist_bar(plots, id)
     }
 
@@ -579,12 +663,18 @@ impl Top {
             None => return Command::none(),
         };
         let output = Self::output_name(plots, bar_id);
+        let aligns: Vec<String> = local
+            .aligns
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
         let entry = crate::config::TopConfig {
             anchor,
             output,
             length: local.length_pct,
             thickness: local.thickness_px,
             slots: local.slots.clamp(1, TopLocal::MAX_SLOTS),
+            aligns,
             opacity: TopLocal::snap_opacity(local.opacity),
             floating: local.floating,
             margin_top: local.margins.top,
@@ -824,12 +914,14 @@ impl Top {
         /// click, not a drag — no coalescing needed) and record its index.
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
             let l = top.local.clone();
+            let aligns: Vec<String> = l.aligns.iter().map(|a| a.as_str().to_string()).collect();
             plots.config.bar.push(crate::config::TopConfig {
                 anchor: anchor_name(anchor).to_lowercase(),
                 output,
                 length: l.length_pct,
                 thickness: l.thickness_px,
                 slots: l.slots.clamp(1, TopLocal::MAX_SLOTS),
+                aligns,
                 opacity: TopLocal::snap_opacity(l.opacity),
                 floating: l.floating,
                 margin_top: l.margins.top,

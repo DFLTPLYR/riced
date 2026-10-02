@@ -49,6 +49,8 @@ use std::time::{Duration, SystemTime};
 /// slots = 3          # grid cells along the long axis: columns when
 ///                    # horizontal (top/bottom), rows when vertical
 ///                    # (left/right); 1..=32
+/// aligns = ["start", "center", "end"]
+///                    # child alignment per slot (both axes)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
 ///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
@@ -305,6 +307,11 @@ pub struct TopConfig {
     /// rows when vertical). Clamped to 1..=32 at spawn.
     #[serde(default = "default_bar_slots")]
     pub slots: u32,
+    /// Child alignment per slot by position (`start`/`center`/`end`,
+    /// both axes; unknown entries read as `center`). Shorter lists
+    /// pad centered, longer ones truncate.
+    #[serde(default)]
+    pub aligns: Vec<String>,
     /// Backdrop opacity, snapped to 0.0/0.25/0.5/0.75/1.0 at spawn.
     #[serde(default = "default_bar_opacity")]
     pub opacity: f32,
@@ -336,6 +343,7 @@ impl Default for TopConfig {
             length: default_bar_length(),
             thickness: default_bar_thickness(),
             slots: default_bar_slots(),
+            aligns: Vec::new(),
             opacity: default_bar_opacity(),
             floating: false,
             margin_top: 0,
@@ -1098,6 +1106,18 @@ mod tests {
             toml::from_str("[[bar]]\nanchor = \"left\"\noutput = \"DP-1\"\nslots = 4\n").unwrap();
         assert_eq!(cfg.bar.len(), 1);
         assert_eq!(cfg.bar[0].slots, 4);
+    }
+
+    #[test]
+    fn bar_aligns_default_empty_and_parse_names() {
+        let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
+        assert!(sparse.bar[0].aligns.is_empty());
+        let cfg: Config =
+            toml::from_str("[[bar]]\nanchor = \"top\"\naligns = [\"start\", \"end\"]\n").unwrap();
+        assert_eq!(
+            cfg.bar[0].aligns,
+            vec!["start".to_string(), "end".to_string()]
+        );
     }
 
     #[test]

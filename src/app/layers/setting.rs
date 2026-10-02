@@ -1,5 +1,5 @@
 use super::background::Background;
-use super::top::TopLocal;
+use super::top::{SlotAlign, TopLocal};
 use crate::app::ConfigEvent;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
@@ -34,6 +34,9 @@ pub struct Setting {
     /// Wallpaper image picked in the editor below the map (`None` = first
     /// image). Index into `[[background.image]]`; remapped on remove.
     selected_image: Option<usize>,
+    /// Slot picked in the Panel page align row (`None` = first slot).
+    /// Stored per-window like `selected_bar`.
+    selected_slot: Option<usize>,
 }
 
 /// Master-detail pages: nav buttons on the left switch this, the right pane
@@ -391,6 +394,39 @@ impl Setting {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
+            // Per-slot child alignment: picker row of slots, then
+            // Start/Center/End presets for the picked one (one commit
+            // per press, like opacity).
+            {
+                let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
+                let sel = match self.selected_slot {
+                    Some(s) if s < n => s,
+                    _ => 0,
+                };
+                let mut picker = row![text("Align").width(Length::Fill)].spacing(8);
+                for pos in 0..n {
+                    picker = picker.push(
+                        button(text(format!("{}", pos + 1)).size(12).color(theme::text()))
+                            .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectSlot(
+                                id, pos,
+                            )))
+                            .padding(6)
+                            .style(theme::nav_button(pos == sel)),
+                    );
+                }
+                col = col.push(picker);
+                let current = top.local.align_at(sel);
+                let mut presets = row![].spacing(8);
+                for align in [SlotAlign::Start, SlotAlign::Center, SlotAlign::End] {
+                    presets = presets.push(
+                        button(text(align.as_str()).size(12).color(theme::text()))
+                            .on_press(Plant::TopPlot(TopEvent::SetSlotAlign(wid, sel, align)))
+                            .padding(6)
+                            .style(theme::nav_button(current == align)),
+                    );
+                }
+                col = col.push(presets);
+            }
 
             col = col.push(rule::horizontal(2));
             col = col.push(
@@ -843,6 +879,18 @@ impl Setting {
     ) -> Command<Plant> {
         if let Some(setting) = plots.settings.get_mut(&id) {
             setting.selected_bar = Some(bar);
+        }
+        Command::none()
+    }
+
+    /// Pick the slot the Panel page aligns (`SettingEvent::SelectSlot`).
+    pub(crate) fn handle_select_slot(
+        plots: &mut Plots,
+        id: window::Id,
+        pos: usize,
+    ) -> Command<Plant> {
+        if let Some(setting) = plots.settings.get_mut(&id) {
+            setting.selected_slot = Some(pos);
         }
         Command::none()
     }

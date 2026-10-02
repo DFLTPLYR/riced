@@ -828,6 +828,9 @@ impl Plots {
                 Top::handle_set_thickness(self, id, value)
             }
             Plant::TopPlot(TopEvent::SetSlots(id, value)) => Top::handle_set_slots(self, id, value),
+            Plant::TopPlot(TopEvent::SetSlotAlign(id, pos, align)) => {
+                Top::handle_set_slot_align(self, id, pos, align)
+            }
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
                 Top::handle_set_opacity(self, id, value)
             }
@@ -866,6 +869,9 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::SelectImage(id, index)) => {
                 Setting::handle_select_image(self, id, index)
+            }
+            Plant::SettingPlot(SettingEvent::SelectSlot(id, pos)) => {
+                Setting::handle_select_slot(self, id, pos)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
                 // Mouse drop ends the drag: the incoming view has drag None,
@@ -922,6 +928,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::SetLength(..))
         | Plant::TopPlot(TopEvent::SetThickness(..))
         | Plant::TopPlot(TopEvent::SetSlots(..))
+        | Plant::TopPlot(TopEvent::SetSlotAlign(..))
         | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))
@@ -956,6 +963,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
             SettingEvent::Select(id, _)
             | SettingEvent::SelectBar(id, _)
             | SettingEvent::SelectImage(id, _)
+            | SettingEvent::SelectSlot(id, _)
             | SettingEvent::MapViewChanged { id, .. },
         ) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,

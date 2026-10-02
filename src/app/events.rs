@@ -70,6 +70,9 @@ pub enum TopEvent {
     /// Grid cells along the long axis (columns when horizontal, rows when
     /// vertical): applied live, persisted.
     SetSlots(Id, u32),
+    /// Child alignment of one slot (position, not label): applied live,
+    /// persisted to the bar's `[[bar]] aligns` entry.
+    SetSlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,
@@ -111,6 +114,9 @@ pub enum SettingEvent {
     /// Pick the wallpaper image edited below the map (`id` = settings
     /// window, `usize` = index into `[[background.image]]`).
     SelectImage(Id, usize),
+    /// Pick the slot the Panel page aligns (`id` = settings window,
+    /// `usize` = position into the edited bar's slots).
+    SelectSlot(Id, usize),
     MapViewChanged {
         id: Id,
         view: crate::components::display_map::MapView,
