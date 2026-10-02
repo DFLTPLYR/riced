@@ -394,6 +394,26 @@ impl Setting {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
+            // Cell gaps: inset inside every slot around its content, plus
+            // the gap between cells (also used between icon/text runs).
+            let slot_padding = top.local.slot_padding.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+            let slot_spacing = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+            col = col.push(plant_slider_row(
+                format!("Slot padding {:.0}px", slot_padding),
+                slot_padding as f64,
+                0.0..=32.0,
+                1.0,
+                move |v| Plant::TopPlot(TopEvent::SetSlotPadding(wid, v as f32)),
+                None,
+            ));
+            col = col.push(plant_slider_row(
+                format!("Slot spacing {:.0}px", slot_spacing),
+                slot_spacing as f64,
+                0.0..=32.0,
+                1.0,
+                move |v| Plant::TopPlot(TopEvent::SetSlotSpacing(wid, v as f32)),
+                None,
+            ));
             // Per-slot child alignment: picker row of slots, then
             // Start/Center/End presets for the picked one (one commit
             // per press, like opacity).

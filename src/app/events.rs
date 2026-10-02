@@ -80,6 +80,12 @@ pub enum TopEvent {
     /// label): applied live, persisted to the bar's `[[bar]] widgets`
     /// entry.
     SetSlotWidget(Id, usize, String),
+    /// Inset inside every slot cell (px): applied live, persisted to
+    /// the bar's `[[bar]] slot_padding` entry.
+    SetSlotPadding(Id, f32),
+    /// Gap between slot cells and icon/text segments (px): applied
+    /// live, persisted to the bar's `[[bar]] slot_spacing` entry.
+    SetSlotSpacing(Id, f32),
     /// 250ms Lua-widget timer: re-runs every `render()` whose interval
     /// elapsed. Never repaints by itself — emits `WidgetsChanged` when
     /// an output moved.

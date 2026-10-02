@@ -103,6 +103,11 @@ pub struct TopLocal {
     /// `widgets.toml` (`none`/unknown = empty cell). Resized
     /// by [`TopLocal::ensure_widgets`], persisted as names.
     pub widgets: Vec<String>,
+    /// Inset inside every slot cell, around the widget content (px).
+    pub slot_padding: f32,
+    /// Gap between slot cells and between icon/text segments inside one
+    /// widget (px).
+    pub slot_spacing: f32,
     /// Backdrop opacity, always one of 0.0/0.25/0.5/0.75/1.0.
     pub opacity: f32,
     pub floating: bool,
@@ -115,6 +120,9 @@ impl TopLocal {
     /// Hard cap on grid slots (config asks 1..infinite; unbounded widget
     /// counts would freeze the frame).
     pub(crate) const MAX_SLOTS: u32 = 32;
+
+    /// Hard cap for slot padding/spacing (px).
+    pub(crate) const MAX_SLOT_GAP: f32 = 64.0;
 
     /// Opacity steps: 0/25/50/75/100%. Snaps any value to the nearest step
     /// so config, slider drags, and preset buttons all agree.
@@ -135,6 +143,8 @@ impl Default for TopLocal {
             slots: 1,
             aligns: vec![SlotAlign::Center],
             widgets: vec![TopLocal::NO_WIDGET.to_string()],
+            slot_padding: 0.0,
+            slot_spacing: 4.0,
             opacity: 1.0,
             floating: false,
             margins: Margins::default(),
@@ -216,6 +226,8 @@ impl From<&crate::config::TopConfig> for TopLocal {
             slots,
             aligns,
             widgets,
+            slot_padding: c.slot_padding.clamp(0.0, Self::MAX_SLOT_GAP),
+            slot_spacing: c.slot_spacing.clamp(0.0, Self::MAX_SLOT_GAP),
             opacity: Self::snap_opacity(c.opacity),
             floating: c.floating,
             margins: Margins {
@@ -322,13 +334,13 @@ fn icon_segments(output: &str) -> Vec<Segment<'_>> {
 /// Lucide icons (they inherit the surrounding text color, so they
 /// follow the theme like text does). Plain text without placeholders
 /// renders as a single text element, exactly like before.
-fn rich_text(output: String, size: f32) -> Element<'static, Plant> {
+fn rich_text(output: String, size: f32, spacing: f32) -> Element<'static, Plant> {
     let size = size.max(1.0);
     if !output.contains("{icon:") {
         return text(output).size(size).into();
     }
     let mut row = row![]
-        .spacing(4)
+        .spacing(spacing.max(0.0))
         .align_y(iced::Alignment::Center)
         .width(iced::Length::Shrink)
         .height(iced::Length::Shrink);
@@ -359,12 +371,13 @@ fn render_widget(
     name: &str,
     defs: &[WidgetDef],
     outputs: &HashMap<String, String>,
+    spacing: f32,
 ) -> Element<'static, Plant> {
     if TopLocal::is_empty_widget(name) {
         return empty_slot();
     }
     match lua_cell_text(name, defs, outputs) {
-        Some((output, size)) => rich_text(output, size),
+        Some((output, size)) => rich_text(output, size, spacing),
         None => empty_slot(),
     }
 }
@@ -594,8 +607,6 @@ impl Top {
             exclusive_zone: Some(edge),
             size: LayerSize::px(w, h),
             output_option: OutputOption::GlobalName(output),
-            // Visual margins are widget padding (see `view`); the compositor
-            // surface stays edge-pinned with no layer offset.
             margin: None,
             namespace: Some(format!("Riced - {} {}", self.anchor_label(), output)),
             // Bars never blur (frost fights the `opacity` fade).
@@ -618,7 +629,6 @@ impl Top {
             size: LayerSize::fill_width(50),
             output_option: OutputOption::Active,
             namespace: Some(format!("Riced - {} Active", self.anchor_label())),
-            // Visual margins are widget padding (see `view`); no layer offset.
             margin: None,
             // Bars never blur: frosted glass fights the `opacity` alpha fade
             // (blur would frost the desktop behind a faded fill and the
@@ -636,42 +646,36 @@ impl Top {
         widgets: &[WidgetDef],
         outputs: &HashMap<String, String>,
     ) -> Element<'_, Plant> {
-        // Grid along the long axis: one row of N columns when horizontal
-        // (top/bottom anchor), one column of N rows when vertical
-        // (left/right anchor). Each cell renders its `widgets.toml`
-        // widget (`none`/unknown = empty cell).
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
+        let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+        let pad = self.local.slot_padding.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let cell = |pos: usize| -> Element<'_, Plant> {
             let body: Element<'_, Plant> =
-                render_widget(self.local.widget_at(pos), widgets, outputs);
+                render_widget(self.local.widget_at(pos), widgets, outputs, gap);
             let align = self.local.align_at(pos).iced();
             container(body)
                 .width(Fill)
                 .height(Fill)
                 .align_x(align)
                 .align_y(align)
+                .padding(pad)
                 .into()
         };
         let content: Element<'_, Plant> = if self.is_horizontal() {
-            let mut r = row![].width(Fill).height(Fill).spacing(4);
+            let mut r = row![].width(Fill).height(Fill).spacing(gap);
             for pos in 0..n {
                 r = r.push(cell(pos));
             }
             r.into()
         } else {
-            let mut c = column![].width(Fill).height(Fill).spacing(4);
+            let mut c = column![].width(Fill).height(Fill).spacing(gap);
             for pos in 0..n {
                 c = c.push(cell(pos));
             }
             c.into()
         };
         let radius = self.local.radius;
-        // Stepped alpha baked into a fresh RGBA (not a live `scale_alpha`
-        // chain): one value per preset, no per-frame float drift.
         let opacity = TopLocal::snap_opacity(self.local.opacity);
-        // Margins inset the backdrop inside the edge-pinned surface
-        // (transparent gap, exclusive zone untouched). Gated on floating so
-        // an un-floating bar goes back to a full-bleed strip.
         let m = self.local.margins;
         let padding = if self.local.floating {
             iced::Padding {
@@ -693,7 +697,6 @@ impl Top {
                     .center_y(Fill)
                     .style(move |theme: &iced::Theme| {
                         let mut s = theme::bar(theme);
-                        // Fresh RGBA with the stepped alpha baked in.
                         if let Some(iced::Background::Color(c)) = s.background {
                             s.background = Some(iced::Background::Color(iced::Color {
                                 a: c.a * opacity,
@@ -837,6 +840,34 @@ impl Top {
         }
         // Window size is unchanged (the cell keeps its size, only its
         // content swaps) — persist only.
+        Self::persist_bar(plots, id)
+    }
+
+    /// Set the slot cell padding (`TopEvent::SetSlotPadding`): single
+    /// commit per press (slider, not a drag stream — still coalesced).
+    pub(crate) fn handle_set_slot_padding(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.slot_padding = value.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+        }
+        // Window size is unchanged (padding lives inside the cells) —
+        // persist only.
+        Self::persist_bar(plots, id)
+    }
+
+    /// Set the slot gaps (`TopEvent::SetSlotSpacing`): single commit per
+    /// press, like padding.
+    pub(crate) fn handle_set_slot_spacing(
+        plots: &mut Plots,
+        id: window::Id,
+        value: f32,
+    ) -> Command<Plant> {
+        if let Some(top) = plots.tops.get_mut(&id) {
+            top.local.slot_spacing = value.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+        }
         Self::persist_bar(plots, id)
     }
 
@@ -1136,6 +1167,8 @@ impl Top {
             slots: local.slots.clamp(1, TopLocal::MAX_SLOTS),
             aligns,
             widgets,
+            slot_padding: local.slot_padding,
+            slot_spacing: local.slot_spacing,
             opacity: TopLocal::snap_opacity(local.opacity),
             floating: local.floating,
             margin_top: local.margins.top,
@@ -1385,6 +1418,8 @@ impl Top {
                 slots: l.slots.clamp(1, TopLocal::MAX_SLOTS),
                 aligns,
                 widgets,
+                slot_padding: l.slot_padding,
+                slot_spacing: l.slot_spacing,
                 opacity: TopLocal::snap_opacity(l.opacity),
                 floating: l.floating,
                 margin_top: l.margins.top,
@@ -1633,10 +1668,23 @@ mod tests {
     }
 
     #[test]
+    fn slot_gaps_clamp_to_range() {
+        use crate::config::TopConfig;
+        let cfg = TopConfig {
+            slot_padding: -5.0,
+            slot_spacing: 500.0,
+            ..Default::default()
+        };
+        let local = TopLocal::from(&cfg);
+        assert_eq!(local.slot_padding, 0.0);
+        assert_eq!(local.slot_spacing, TopLocal::MAX_SLOT_GAP);
+    }
+
+    #[test]
     fn rich_text_builds_without_a_renderer() {
         // Element construction is pure — smoke-test all three shapes.
-        let _ = rich_text("12%".to_string(), 13.0);
-        let _ = rich_text("{icon:cpu} 12%".to_string(), 13.0);
-        let _ = rich_text("{icon:nope}".to_string(), 13.0);
+        let _ = rich_text("12%".to_string(), 13.0, 4.0);
+        let _ = rich_text("{icon:cpu} 12%".to_string(), 13.0, 4.0);
+        let _ = rich_text("{icon:nope}".to_string(), 13.0, 4.0);
     }
 }

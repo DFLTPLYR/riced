@@ -54,6 +54,8 @@ use std::time::{Duration, SystemTime};
 /// widgets = ["clock", "none"]
 ///                    # widget names from widgets.toml by slot position
 ///                    # (`none` = empty cell; unknown names render empty too)
+/// slot_padding = 4.0   # px inset inside every slot, around content
+/// slot_spacing = 4.0   # px gap between slots (also icon/text runs)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
 ///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
@@ -106,6 +108,8 @@ defs! {
     default_bar_opacity: f32 = 1.0,
     default_widget_size: f32 = 13.0,
     default_widget_interval: f32 = 1.0,
+    default_slot_padding: f32 = 0.0,
+    default_slot_spacing: f32 = 4.0,
 }
 
 fn default_bar_anchor() -> String {
@@ -322,6 +326,14 @@ pub struct TopConfig {
     /// Shorter lists pad empty, longer ones truncate.
     #[serde(default)]
     pub widgets: Vec<String>,
+    /// Inset inside every slot cell, around the widget content (px,
+    /// clamped to 0-64 at spawn).
+    #[serde(default = "default_slot_padding")]
+    pub slot_padding: f32,
+    /// Gap between slot cells and icon/text segments (px, clamped to
+    /// 0-64 at spawn).
+    #[serde(default = "default_slot_spacing")]
+    pub slot_spacing: f32,
     /// Backdrop opacity, snapped to 0.0/0.25/0.5/0.75/1.0 at spawn.
     #[serde(default = "default_bar_opacity")]
     pub opacity: f32,
@@ -355,6 +367,8 @@ impl Default for TopConfig {
             slots: default_bar_slots(),
             aligns: Vec::new(),
             widgets: Vec::new(),
+            slot_padding: default_slot_padding(),
+            slot_spacing: default_slot_spacing(),
             opacity: default_bar_opacity(),
             floating: false,
             margin_top: 0,
@@ -1350,6 +1364,18 @@ mod tests {
         // Sparse entry defaults the rest.
         assert_eq!(file.widget[1].interval, 1.0);
         assert_eq!(file.widget[1].size, 13.0);
+    }
+
+    #[test]
+    fn bar_slot_gaps_default_to_bare_cells() {
+        let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
+        assert_eq!(sparse.bar[0].slot_padding, 0.0);
+        assert_eq!(sparse.bar[0].slot_spacing, 4.0);
+        let cfg: Config =
+            toml::from_str("[[bar]]\nanchor = \"top\"\nslot_padding = 6.0\nslot_spacing = 2.0\n")
+                .unwrap();
+        assert_eq!(cfg.bar[0].slot_padding, 6.0);
+        assert_eq!(cfg.bar[0].slot_spacing, 2.0);
     }
 
     #[test]

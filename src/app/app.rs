@@ -886,6 +886,12 @@ impl Plots {
             Plant::TopPlot(TopEvent::SetSlotWidget(id, pos, widget)) => {
                 Top::handle_set_slot_widget(self, id, pos, widget)
             }
+            Plant::TopPlot(TopEvent::SetSlotPadding(id, value)) => {
+                Top::handle_set_slot_padding(self, id, value)
+            }
+            Plant::TopPlot(TopEvent::SetSlotSpacing(id, value)) => {
+                Top::handle_set_slot_spacing(self, id, value)
+            }
             Plant::TopPlot(TopEvent::WidgetTick) => Top::handle_widget_tick(self),
             Plant::TopPlot(TopEvent::WidgetsChanged) => Command::none(),
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
@@ -990,6 +996,8 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::SetSlots(..))
         | Plant::TopPlot(TopEvent::SetSlotAlign(..))
         | Plant::TopPlot(TopEvent::SetSlotWidget(..))
+        | Plant::TopPlot(TopEvent::SetSlotPadding(..))
+        | Plant::TopPlot(TopEvent::SetSlotSpacing(..))
         | Plant::TopPlot(TopEvent::WidgetsChanged)
         | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
