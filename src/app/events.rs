@@ -80,6 +80,12 @@ pub enum TopEvent {
     /// label): applied live, persisted to the bar's `[[bar]] widgets`
     /// entry.
     SetSlotWidget(Id, usize, String),
+    /// 250ms Lua-widget timer: re-runs every `render()` whose interval
+    /// elapsed. Never repaints by itself — emits `WidgetsChanged` when
+    /// an output moved.
+    WidgetTick,
+    /// A Lua widget output moved: repaint so bars pick the new text up.
+    WidgetsChanged,
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,

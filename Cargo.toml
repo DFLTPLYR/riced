@@ -35,3 +35,4 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["time", "rt"] }
 rfd = "0.15"
 libc = "0.2"
+mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }

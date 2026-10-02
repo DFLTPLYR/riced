@@ -71,6 +71,13 @@ pub struct Plots {
     // Bars reference entries by name; hot-reloaded like the config.
     pub(crate) widgets: Vec<crate::config::WidgetDef>,
     pub(crate) widgets_mtime: Option<std::time::SystemTime>,
+    // Lua widget runtimes keyed by def name, last rendered text, last
+    // run tick, and last error (errors log only on change, never per
+    // tick). States are rebuilt on every widgets.toml hot-reload.
+    pub(crate) widget_lua: HashMap<String, mlua::Lua>,
+    pub(crate) widget_outputs: HashMap<String, String>,
+    pub(crate) widget_last_run: HashMap<String, Instant>,
+    pub(crate) widget_last_error: HashMap<String, String>,
     // Local-first staging: `Patch` mutates live memory every tick (smooth
     // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
     // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
@@ -113,7 +120,7 @@ impl Plots {
         let mut wallpapers = HashMap::new();
         Self::sync_wallpapers(&config, &mut wallpapers);
         let (widgets, widgets_mtime) = crate::config::WidgetsFile::load();
-        Self {
+        let mut plots = Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
             settings: HashMap::new(),
@@ -140,7 +147,15 @@ impl Plots {
             theme_regen_dirty: false,
             theme_regen_running: false,
             theme_regen_seq: 0,
-        }
+            widget_lua: HashMap::new(),
+            widget_outputs: HashMap::new(),
+            widget_last_run: HashMap::new(),
+            widget_last_error: HashMap::new(),
+        };
+        // Render Lua widgets once so bars populate on the first frame
+        // instead of waiting out the first tick.
+        Top::init_widget_lua(&mut plots);
+        plots
     }
 
     fn sync_wallpapers(config: &Config, wallpapers: &mut HashMap<PathBuf, Handle>) {
@@ -414,6 +429,19 @@ impl Plots {
             );
         }
 
+        // Lua widgets re-render on their own intervals (250ms cadence,
+        // each script runs only when due). No timer at all without them.
+        if self
+            .widgets
+            .iter()
+            .any(|d| d.widget_type.trim().eq_ignore_ascii_case("lua"))
+        {
+            subs.push(
+                iced::time::every(Duration::from_millis(250))
+                    .map(|_| Plant::TopPlot(TopEvent::WidgetTick)),
+            );
+        }
+
         iced::Subscription::batch(subs)
     }
 
@@ -436,7 +464,7 @@ impl Plots {
             Some(PlotInfo::Top(_output)) => self
                 .tops
                 .get(&id)
-                .map(|t| t.view(id, &self.widgets))
+                .map(|t| t.view(id, &self.widgets, &self.widget_outputs))
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
@@ -723,9 +751,11 @@ impl Plots {
                 Command::none()
             }
             Plant::Config(ConfigEvent::WidgetsReloaded(defs)) => {
-                // `widgets.toml` changed under us: swap the live registry.
+                // `widgets.toml` changed under us: swap the live registry
+                // and rebuild Lua states (scripts may have changed too).
                 // Bars re-resolve slot names on the next redraw (Scope::All).
                 self.widgets = defs;
+                Top::init_widget_lua(self);
                 Command::none()
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
@@ -853,6 +883,8 @@ impl Plots {
             Plant::TopPlot(TopEvent::SetSlotWidget(id, pos, widget)) => {
                 Top::handle_set_slot_widget(self, id, pos, widget)
             }
+            Plant::TopPlot(TopEvent::WidgetTick) => Top::handle_widget_tick(self),
+            Plant::TopPlot(TopEvent::WidgetsChanged) => Command::none(),
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
                 Top::handle_set_opacity(self, id, value)
             }
@@ -944,6 +976,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(Some(_))) => Scope::All,
         Plant::BackgroundPlot(BackgroundEvent::PickWallpaper)
         | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(None)) => Scope::None,
+        // Lua-widget timer only runs due scripts (repaint goes through
+        // WidgetsChanged when an output actually moved).
+        Plant::TopPlot(TopEvent::WidgetTick) => Scope::None,
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
         | Plant::TopPlot(TopEvent::Remove(..))
@@ -952,6 +987,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::SetSlots(..))
         | Plant::TopPlot(TopEvent::SetSlotAlign(..))
         | Plant::TopPlot(TopEvent::SetSlotWidget(..))
+        | Plant::TopPlot(TopEvent::WidgetsChanged)
         | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))

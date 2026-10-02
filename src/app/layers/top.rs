@@ -1,6 +1,6 @@
 use super::background::Background;
-use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
+use crate::app::{Plant, TopEvent};
 use crate::composables::panel_window::top_window;
 use crate::config::WidgetDef;
 use crate::theme;
@@ -14,6 +14,7 @@ use iced_exwlshell::reexport::{
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::{OutputId, OutputInfo};
+use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -266,9 +267,13 @@ fn empty_slot() -> Element<'static, Plant> {
 }
 
 /// Render one declarative widget by slot name (`none`/unknown = empty
-/// cell). Pure function of the `widgets.toml` registry, so new
-/// renderers only touch this match.
-fn render_widget(name: &str, defs: &[WidgetDef]) -> Element<'static, Plant> {
+/// cell). Pure function of the `widgets.toml` registry plus the last
+/// Lua outputs, so new renderers only touch this match.
+fn render_widget(
+    name: &str,
+    defs: &[WidgetDef],
+    outputs: &HashMap<String, String>,
+) -> Element<'static, Plant> {
     if TopLocal::is_empty_widget(name) {
         return empty_slot();
     }
@@ -276,9 +281,87 @@ fn render_widget(name: &str, defs: &[WidgetDef]) -> Element<'static, Plant> {
         Some(def) => match def.widget_type.trim().to_lowercase().as_str() {
             "clock" => text(clock_text(&def.format)).size(def.size.max(1.0)).into(),
             "label" => text(def.text.clone()).size(def.size.max(1.0)).into(),
+            "lua" => match lua_cell_text(name, defs, outputs) {
+                Some(output) => text(output).size(def.size.max(1.0)).into(),
+                None => empty_slot(),
+            },
             _ => empty_slot(),
         },
         None => empty_slot(),
+    }
+}
+
+/// Last Lua output by widget name (`None` = empty cell). Split out so
+/// the cache lookup stays testable without rendering.
+fn lua_cell_text(
+    name: &str,
+    defs: &[WidgetDef],
+    outputs: &HashMap<String, String>,
+) -> Option<String> {
+    let def = defs.iter().find(|d| d.name == name)?;
+    if !def.widget_type.trim().eq_ignore_ascii_case("lua") {
+        return None;
+    }
+    outputs.get(name).cloned()
+}
+
+/// Sandboxed Lua state for one widget: string/table/math/os only, no
+/// `io`, no `require`, no shell or file escapes from `os`. `print`
+/// stays so scripts can log to the daemon output.
+fn new_widget_lua() -> mlua::Result<Lua> {
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::OS,
+        LuaOptions::default(),
+    )?;
+    let globals = lua.globals();
+    for key in ["dofile", "loadfile", "require"] {
+        globals.set(key, Value::Nil)?;
+    }
+    let os: Table = globals.get("os")?;
+    for key in ["execute", "exit", "remove", "rename", "setlocale"] {
+        os.set(key, Value::Nil)?;
+    }
+    Ok(lua)
+}
+
+/// Load a widget script into its state and verify it defines `render`.
+fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::Result<()> {
+    lua.load(source).set_name(format!("@{label}")).exec()?;
+    let _: Function = lua.globals().get("render")?;
+    Ok(())
+}
+
+fn lua_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Nil => "nil",
+        Value::Boolean(_) => "boolean",
+        Value::LightUserData(_) => "light userdata",
+        Value::Integer(_) => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Table(_) => "table",
+        Value::Function(_) => "function",
+        Value::Thread(_) => "thread",
+        Value::UserData(_) => "userdata",
+        Value::Error(_) => "error",
+        _ => "other",
+    }
+}
+
+/// Call a widget's `render()`, tolerantly coerced to text (numbers and
+/// booleans stringify, `nil` is empty). Anything else is an error.
+fn call_widget_render(lua: &Lua) -> Result<String, String> {
+    let render: Function = lua.globals().get("render").map_err(|e| e.to_string())?;
+    match render.call::<Value>(()).map_err(|e| e.to_string())? {
+        Value::String(s) => Ok(s.to_string_lossy()),
+        Value::Integer(i) => Ok(i.to_string()),
+        Value::Number(n) => Ok(n.to_string()),
+        Value::Boolean(b) => Ok(b.to_string()),
+        Value::Nil => Ok(String::new()),
+        other => Err(format!(
+            "render() must return a string, got {}",
+            lua_value_kind(&other)
+        )),
     }
 }
 
@@ -414,14 +497,20 @@ impl Top {
         (id, settings)
     }
 
-    pub fn view(&self, id: window::Id, widgets: &[WidgetDef]) -> Element<'_, Plant> {
+    pub fn view(
+        &self,
+        id: window::Id,
+        widgets: &[WidgetDef],
+        outputs: &HashMap<String, String>,
+    ) -> Element<'_, Plant> {
         // Grid along the long axis: one row of N columns when horizontal
         // (top/bottom anchor), one column of N rows when vertical
         // (left/right anchor). Each cell renders its `widgets.toml`
         // widget (`none`/unknown = empty cell).
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let cell = |pos: usize| -> Element<'_, Plant> {
-            let body: Element<'_, Plant> = render_widget(self.local.widget_at(pos), widgets);
+            let body: Element<'_, Plant> =
+                render_widget(self.local.widget_at(pos), widgets, outputs);
             let align = self.local.align_at(pos).iced();
             container(body)
                 .width(Fill)
@@ -616,6 +705,132 @@ impl Top {
         // Window size is unchanged (the cell keeps its size, only its
         // content swaps) — persist only.
         Self::persist_bar(plots, id)
+    }
+
+    /// Minimum seconds between two `render()` calls of one Lua widget
+    /// (keeps a `interval = 0` typo from hot-looping the update thread).
+    const MIN_WIDGET_INTERVAL: f32 = 0.25;
+
+    /// Script file for a Lua def, resolved against the widgets dir
+    /// (absolute paths pass through).
+    pub(crate) fn widget_script_path(def: &crate::config::WidgetDef) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from(def.file.trim());
+        if path.is_absolute() {
+            path
+        } else {
+            crate::config::widgets_dir().join(path)
+        }
+    }
+
+    /// Log a widget error once per message (a broken 1s script must not
+    /// flood the log every tick; fixing the file logs nothing new until
+    /// it breaks differently).
+    fn note_widget_error(plots: &mut Plots, name: &str, err: String) {
+        if plots
+            .widget_last_error
+            .get(name)
+            .is_some_and(|last| *last == err)
+        {
+            return;
+        }
+        eprintln!("riced: widget {name:?}: {err}");
+        plots.widget_last_error.insert(name.to_string(), err);
+    }
+
+    /// Ensure a sandboxed runtime for one Lua def (load + `render`
+    /// check). Retried on later ticks while missing, so fixing the
+    /// file recovers without a restart.
+    fn ensure_widget_lua(plots: &mut Plots, def: &crate::config::WidgetDef) -> Result<(), String> {
+        if plots.widget_lua.contains_key(&def.name) {
+            return Ok(());
+        }
+        let path = Self::widget_script_path(def);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let lua = new_widget_lua().map_err(|e| e.to_string())?;
+        load_widget_script(&lua, &def.name, &source)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        plots.widget_lua.insert(def.name.clone(), lua);
+        Ok(())
+    }
+
+    /// (Re)build Lua runtimes for every `lua` def and render once, so
+    /// bars populate immediately. Called at startup and after every
+    /// `widgets.toml` hot-reload (which clears the old states).
+    pub(crate) fn init_widget_lua(plots: &mut Plots) {
+        plots.widget_lua.clear();
+        plots.widget_outputs.clear();
+        plots.widget_last_run.clear();
+        plots.widget_last_error.clear();
+        let defs = plots.widgets.clone();
+        let now = Instant::now();
+        for def in &defs {
+            if !def.widget_type.trim().eq_ignore_ascii_case("lua") {
+                continue;
+            }
+            plots.widget_last_run.insert(def.name.clone(), now);
+            if let Err(e) = Self::ensure_widget_lua(plots, def) {
+                Self::note_widget_error(plots, &def.name, e);
+                continue;
+            }
+            match plots.widget_lua.get(&def.name).map(call_widget_render) {
+                Some(Ok(text)) => {
+                    plots.widget_outputs.insert(def.name.clone(), text);
+                }
+                Some(Err(e)) => Self::note_widget_error(plots, &def.name, e),
+                None => {}
+            }
+        }
+    }
+
+    /// Run every Lua `render()` whose interval elapsed. Returns `true`
+    /// when any output moved (caller repaints).
+    fn run_due_widgets(plots: &mut Plots) -> bool {
+        let now = Instant::now();
+        let defs = plots.widgets.clone();
+        let mut changed = false;
+        for def in &defs {
+            if !def.widget_type.trim().eq_ignore_ascii_case("lua") {
+                continue;
+            }
+            let interval = def.interval.max(Self::MIN_WIDGET_INTERVAL);
+            let due = plots
+                .widget_last_run
+                .get(&def.name)
+                .is_none_or(|t| now.duration_since(*t) >= Duration::from_secs_f32(interval));
+            if !due {
+                continue;
+            }
+            plots.widget_last_run.insert(def.name.clone(), now);
+            if let Err(e) = Self::ensure_widget_lua(plots, def) {
+                Self::note_widget_error(plots, &def.name, e);
+                continue;
+            }
+            let result = match plots.widget_lua.get(&def.name) {
+                Some(lua) => call_widget_render(lua),
+                None => continue,
+            };
+            match result {
+                Ok(text) => {
+                    plots.widget_last_error.remove(&def.name);
+                    if plots.widget_outputs.get(&def.name) != Some(&text) {
+                        plots.widget_outputs.insert(def.name.clone(), text);
+                        changed = true;
+                    }
+                }
+                Err(e) => Self::note_widget_error(plots, &def.name, e),
+            }
+        }
+        changed
+    }
+
+    /// Re-render due Lua widgets (`TopEvent::WidgetTick`): emits
+    /// `WidgetsChanged` only when an output moved (which repaints).
+    pub(crate) fn handle_widget_tick(plots: &mut Plots) -> Command<Plant> {
+        if Self::run_due_widgets(plots) {
+            return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
+        }
+        Command::none()
     }
 
     pub(crate) fn handle_set_opacity(
@@ -1149,5 +1364,83 @@ impl Top {
                 id: win_id,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lua_widget(name: &str) -> WidgetDef {
+        WidgetDef {
+            name: name.to_string(),
+            widget_type: "lua".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lua_sandbox_runs_render() {
+        let lua = new_widget_lua().expect("sandbox");
+        load_widget_script(&lua, "test", "function render() return 'hi' end").expect("load");
+        assert_eq!(call_widget_render(&lua).unwrap(), "hi");
+    }
+
+    #[test]
+    fn lua_return_values_coerce_to_text() {
+        let lua = new_widget_lua().expect("sandbox");
+        load_widget_script(&lua, "test", "function render() return 42 end").expect("load");
+        assert_eq!(call_widget_render(&lua).unwrap(), "42");
+        load_widget_script(&lua, "test", "function render() return true end").expect("load");
+        assert_eq!(call_widget_render(&lua).unwrap(), "true");
+        load_widget_script(&lua, "test", "function render() return nil end").expect("load");
+        assert_eq!(call_widget_render(&lua).unwrap(), "");
+        load_widget_script(&lua, "test", "function render() return {} end").expect("load");
+        assert!(call_widget_render(&lua).is_err());
+    }
+
+    #[test]
+    fn lua_missing_render_is_rejected() {
+        let lua = new_widget_lua().expect("sandbox");
+        assert!(load_widget_script(&lua, "test", "x = 1").is_err());
+    }
+
+    #[test]
+    fn lua_sandbox_blocks_escapes_but_keeps_time() {
+        let lua = new_widget_lua().expect("sandbox");
+        let execute: Value = lua.load("return os.execute").eval().expect("eval");
+        assert!(matches!(execute, Value::Nil));
+        let hour: String = lua.load("return os.date('%H')").eval().expect("eval");
+        assert_eq!(hour.len(), 2);
+    }
+
+    #[test]
+    fn lua_cell_text_reads_only_lua_cache() {
+        let defs = vec![lua_widget("w")];
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(lua_cell_text("w", &defs, &empty), None);
+        let mut outputs = HashMap::new();
+        outputs.insert("w".to_string(), "hi".to_string());
+        assert_eq!(lua_cell_text("w", &defs, &outputs), Some("hi".to_string()));
+        // Unknown names and non-lua defs never read the cache.
+        assert_eq!(lua_cell_text("nope", &defs, &outputs), None);
+        let label = WidgetDef {
+            name: "w".to_string(),
+            widget_type: "label".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(lua_cell_text("w", &[label], &outputs), None);
+    }
+
+    #[test]
+    fn clock_text_formats_tokens() {
+        // Shape is deterministic whatever the current time is.
+        let short = clock_text("%H:%M");
+        assert_eq!(short.len(), 5);
+        assert_eq!(short.chars().nth(2), Some(':'));
+        let full = clock_text("%H:%M:%S");
+        assert_eq!(full.len(), 8);
+        // Empty falls back to the default format.
+        assert_eq!(clock_text("").len(), 5);
     }
 }
