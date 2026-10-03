@@ -781,10 +781,10 @@ size = 13.0
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
 /// Globals persist between calls; clicking the cell toggles the date menu.
-const SEED_CLOCK_LUA: &str = r#"-- Clock widget: the returned string is the bar cell text.
+pub(crate) const SEED_CLOCK_LUA: &str = r#"-- Clock widget: time plus icon, composed with ui constructors.
 -- Called every `interval` seconds. Clicking toggles the date menu.
 function render()
-    return os.date("%H:%M")
+    return ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) })
 end
 
 function popup()
@@ -793,16 +793,16 @@ end
 "#;
 
 /// Seed Lua label example, written next to the seeded `widgets.toml`.
-const SEED_HELLO_LUA: &str = r#"-- Label example: static text from a script. Uncomment its
+pub(crate) const SEED_HELLO_LUA: &str = r#"-- Label example: static text via ui.text. Uncomment its
 -- [[widget]] entry in widgets.toml to use it.
 function render()
-    return "hello"
+    return ui.text("hello")
 end
 "#;
 
 /// Seed stats example: icon + CPU + memory via the live tables.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
-const SEED_STATS_LUA: &str = r#"-- System stats: theme-aware icons plus live CPU/memory.
+pub(crate) const SEED_STATS_LUA: &str = r#"-- System stats: composed row with icons plus live CPU/memory.
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 -- Clicking toggles a menu with a details switch (custom size + action).
 local details = false
@@ -810,7 +810,10 @@ local details = false
 function render()
     local cpu = string.format("%.0f", sysinfo.cpu_usage)
     local mem = string.format("%.0f", sysinfo.mem_usage)
-    return "{icon:cpu} " .. cpu .. "%  {icon:memory-stick} " .. mem .. "%"
+    return ui.row({
+        ui.icon("cpu"), ui.text(cpu .. "%"),
+        ui.icon("memory-stick"), ui.text(mem .. "%"),
+    })
 end
 
 function popup()
@@ -838,33 +841,33 @@ end
 
 /// Seed CPU usage: plain percent, no icon. Uncomment its
 /// `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_CPU_LUA: &str = r#"-- CPU usage as plain percent, no icon.
+pub(crate) const SEED_CPU_LUA: &str = r#"-- CPU usage as plain text, no icon.
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 function render()
-    return string.format("%.0f%%", sysinfo.cpu_usage)
+    return ui.text(string.format("%.0f%%", sysinfo.cpu_usage))
 end
 "#;
 
 /// Seed RAM usage: plain percent, no icon. Uncomment its
 /// `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_RAM_LUA: &str = r#"-- RAM usage as plain percent, no icon.
+pub(crate) const SEED_RAM_LUA: &str = r#"-- RAM usage as plain text, no icon.
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 function render()
-    return string.format("%.0f%%", sysinfo.mem_usage)
+    return ui.text(string.format("%.0f%%", sysinfo.mem_usage))
 end
 "#;
 
 /// Seed GPU usage: plain percent, no icon. Reads "--" when the GPU
 /// exposes nothing readable. Uncomment its `[[widget]]` entry in
 /// widgets.toml to use it.
-pub(crate) const SEED_GPU_LUA: &str = r#"-- GPU usage as plain percent, no icon ("--" when unreadable).
+pub(crate) const SEED_GPU_LUA: &str = r#"-- GPU usage as plain text, no icon ("--" when unreadable).
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 function render()
     local usage = gfxinfo.usage
     if usage == nil then
-        return "--"
+        return ui.text("--")
     end
-    return string.format("%.0f%%", usage)
+    return ui.text(string.format("%.0f%%", usage))
 end
 "#;
 

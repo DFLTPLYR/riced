@@ -1371,19 +1371,26 @@ impl Top {
                 continue;
             }
             plots.widget_last_run.insert(def.name.clone(), now);
-            let before = (
-                plots.widget_outputs.get(&def.name).cloned(),
-                plots.widget_trees.get(&def.name).cloned(),
-            );
-            let result = Self::render_lua_value(plots, def, gpu);
-            Self::ingest_render_value(plots, def, result);
-            let after = (
-                plots.widget_outputs.get(&def.name).cloned(),
-                plots.widget_trees.get(&def.name).cloned(),
-            );
-            changed |= before != after;
+            changed |= Self::refresh_widget(plots, def, gpu);
         }
         changed
+    }
+
+    /// Re-render one widget now and report whether visible output
+    /// moved (text or tree). Shared by the interval tick and the
+    /// `on_press()` click path.
+    fn refresh_widget(plots: &mut Plots, def: &crate::config::WidgetDef, gpu: Option<f32>) -> bool {
+        let before = (
+            plots.widget_outputs.get(&def.name).cloned(),
+            plots.widget_trees.get(&def.name).cloned(),
+        );
+        let result = Self::render_lua_value(plots, def, gpu);
+        Self::ingest_render_value(plots, def, result);
+        let after = (
+            plots.widget_outputs.get(&def.name).cloned(),
+            plots.widget_trees.get(&def.name).cloned(),
+        );
+        before != after
     }
 
     /// Re-render due Lua widgets (`TopEvent::WidgetTick`): emits
@@ -1823,17 +1830,16 @@ impl Top {
                 Some(lua) => {
                     let acted = publish_system_tables(lua, &plots.sysinfo, gpu)
                         .map_err(|e| e.to_string())
-                        .and_then(|()| call_lua_action(lua))
-                        .and_then(|()| call_lua_text(lua, "render"));
+                        .and_then(|()| call_lua_action(lua));
                     Some(acted)
                 }
                 None => None,
             };
             match outcome {
-                Some(Ok(text)) => {
-                    plots.widget_last_error.remove(&name);
-                    if plots.widget_outputs.get(&name) != Some(&text) {
-                        plots.widget_outputs.insert(name, text);
+                Some(Ok(())) => {
+                    if let Some(def) = plots.widgets.iter().find(|d| d.name == name).cloned()
+                        && Self::refresh_widget(plots, &def, gpu)
+                    {
                         cmds.push(Command::done(Plant::TopPlot(TopEvent::WidgetsChanged)));
                     }
                 }
@@ -2234,6 +2240,16 @@ mod tests {
         );
     }
 
+    fn node_has_icon(node: &WidgetNode) -> bool {
+        match node {
+            WidgetNode::Icon(_) => true,
+            WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+                children.iter().any(node_has_icon)
+            }
+            _ => false,
+        }
+    }
+
     #[test]
     fn seed_usage_scripts_render_icon_free_text() {
         use crate::config::{SEED_CPU_LUA, SEED_GPU_LUA, SEED_RAM_LUA};
@@ -2244,12 +2260,36 @@ mod tests {
             let lua = new_widget_lua().expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
             publish_system_tables(&lua, &sys, None).expect("publish");
-            let out = call_lua_text(&lua, "render").expect("render");
-            assert!(!out.is_empty(), "seed must render text");
-            assert!(
-                !out.contains("{icon:"),
-                "usage seeds stay icon-free, got {out:?}"
-            );
+            let value = call_lua_value(&lua, "render").expect("render");
+            let node = parse_node(&value).expect("parse");
+            assert!(!node_has_icon(&node), "usage seeds stay icon-free");
+        }
+    }
+
+    /// Seeds render through the full pipeline: parse plus build.
+    #[test]
+    fn seed_scripts_parse_and_build() {
+        use crate::config::{
+            SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA, SEED_RAM_LUA,
+            SEED_STATS_LUA,
+        };
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        for source in [
+            SEED_CLOCK_LUA,
+            SEED_HELLO_LUA,
+            SEED_STATS_LUA,
+            SEED_CPU_LUA,
+            SEED_RAM_LUA,
+            SEED_GPU_LUA,
+        ] {
+            let lua = new_widget_lua().expect("sandbox");
+            load_widget_script(&lua, "seed", source).expect("load");
+            publish_system_tables(&lua, &sys, None).expect("publish");
+            let value = call_lua_value(&lua, "render").expect("render");
+            let node = parse_node(&value).expect("parse");
+            let _ = build_node(&node, 13.0, None).expect("builds");
         }
     }
 
