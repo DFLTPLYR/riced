@@ -120,7 +120,6 @@ pub enum TopEvent {
 #[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 pub enum BackgroundEvent {
-    Sow,
     SelectionTick,
     Repaint,
     Pressed(Id, Button),

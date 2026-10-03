@@ -158,12 +158,6 @@ impl Background {
         local
     }
 
-    /// Global -> local for a given Background output (for view positioning).
-    #[allow(dead_code)]
-    pub fn to_local(global: Point, avail: (f32, f32, f32, f32)) -> Point {
-        Point::new(global.x - avail.0, global.y - avail.1)
-    }
-
     /// Utils.intersects(a,b) for global rect vs this Background's available rect.
     pub fn intersects(rect: &SelectionRect, avail: (f32, f32, f32, f32)) -> bool {
         if rect.width <= 0.0 || rect.height <= 0.0 {
@@ -303,8 +297,6 @@ impl Background {
     ) -> Command<Plant> {
         plots.last_cursor.insert(id, position);
         if plots.selection_rect.selecting {
-            let now = Instant::now();
-            plots.last_selection_tick = Some(now);
             if let Some(sp) = plots.selection_rect.start_point {
                 let gp = Self::to_global(id, position, &plots.ids, &plots.output_infos);
                 // skip tiny moves <1px to reduce choppy updates

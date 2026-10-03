@@ -72,6 +72,53 @@ src/app/app.rs:99       subscription: listen_with(throttled_graft) + shell_event
 src/app/app.rs:454      redraw_scope: SelectionTick|Button => All, CursorMoved => None
 ```
 
+## Widgets (Lua)
+
+Bar cells are Lua scripts in `~/.config/riced/widgets/`, declared in
+`~/.config/riced/widgets.toml` and referenced by name from `[[bar]]`
+`widgets` entries. First run seeds a clock plus commented
+hello/stats/cpu/ram/gpu/hypr/clinepass examples — uncomment a
+`[[widget]]` entry to use it.
+
+```toml
+[[widget]]
+name = "clock"
+file = "clock.lua"
+interval = 1.0  # seconds between render() calls (>= 0.25)
+size = 13.0
+exec_allow = ["hyprctl"]  # default: hyprctl,niri,jq,curl
+```
+
+```lua
+-- clock.lua: render() every interval, popup() on click
+function render()
+    return ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) })
+end
+function popup()
+    return { ui = ui.text(os.date("%A, %d %B %Y")), width = 300, height = 200 }
+end
+```
+
+- **Lifecycle**: one sandboxed state per widget, globals persist
+  (use them as the cache). `render()` re-runs every `interval`;
+  output changes repaint. `.lua` edits hot-reload, `widgets.toml`
+  edits rebuild all states, errors log once per message.
+- **Sandbox**: string/table/math/os only — no `io`/`require`, no
+  `os.execute`. The way out is `sys.exec({"binary", "args..."})`
+  (argv array, never a shell string; binary must be in `exec_allow`;
+  2s timeout, 64KB cap).
+- **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil), `sys.exec`,
+  `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
+  `button`, `progress`, `spinner`).
+- **Clicks**: `popup()` toggles a menu (`text`/`width`/`height`/
+  `items`/`ui`); else `on_press()` runs bare. Cell `ui.button`s call
+  that widget's `on_action(key)` directly; popup rows do the same.
+- **Slow fetches**: return `ui.spinner()` first, fill a global in
+  `render()`, show cached rows after (see `clinepass.lua`).
+
+Full contract with shapes and edge cases lives on `WidgetDef` in
+`src/config.rs` (the `/// Widgets:` doc block).
+
 ## Configuration
 
 `src/main.rs:24` `LayerShellSettings`:

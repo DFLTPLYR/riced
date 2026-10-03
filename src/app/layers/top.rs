@@ -447,9 +447,11 @@ pub(crate) enum WidgetNode {
         children: Vec<WidgetNode>,
         spacing: f32,
     },
-    /// Label plus `on_action()` key. In cells the look is a button but
-    /// clicks fall through to the slot's own popup/`on_press()` (cells
-    /// have no per-button hit regions); in popups it would send the key.
+    /// Label plus `on_action()` key. In cells each button is a
+    /// per-widget MouseArea (`CellAction` carries the owner, so clicks
+    /// route to that widget's `on_action` — never the slot-wide
+    /// popup/`on_press` fallback). In popups buttons render inert
+    /// (popup clicks go through item rows + `PopupSelect`).
     Button {
         label: String,
         action: String,
@@ -862,7 +864,10 @@ pub(crate) fn coerce_text(value: Value, what: &str) -> Result<String, String> {
     }
 }
 
-/// Call a widget's `render()`, tolerantly coerced to text.
+/// Call a widget script function, tolerantly coerced to text.
+/// Test-only since the popup-select refresh went tree-aware (prod
+/// paths use `call_lua_value` + `ingest_render_value` instead).
+#[cfg(test)]
 pub(crate) fn call_lua_text(lua: &Lua, func: &str) -> Result<String, String> {
     let value = call_lua_value(lua, func)?;
     coerce_text(value, &format!("{func}()"))
@@ -1172,7 +1177,7 @@ impl Top {
             })
             .map(|info| {
                 let (_, _, sw, sh) = Background::output_geometry(info);
-                let horizontal = plots.tops.get(&id).map_or(true, |t| t.is_horizontal());
+                let horizontal = plots.tops.get(&id).is_none_or(|t| t.is_horizontal());
                 TopLocal::max_thickness(sw, sh, horizontal).max(1.0)
             })
             .unwrap_or(1080.0);
@@ -1477,9 +1482,13 @@ impl Top {
     }
 
     /// Re-render one widget now and report whether visible output
-    /// moved (text or tree). Shared by the interval tick and the
-    /// `on_press()` click path.
-    fn refresh_widget(plots: &mut Plots, def: &crate::config::WidgetDef, gpu: Option<f32>) -> bool {
+    /// moved (text or tree). Shared by the interval tick, the
+    /// `on_press()` click path, cell actions, and popup selects.
+    pub(crate) fn refresh_widget(
+        plots: &mut Plots,
+        def: &crate::config::WidgetDef,
+        gpu: Option<f32>,
+    ) -> bool {
         let before = (
             plots.widget_outputs.get(&def.name).cloned(),
             plots.widget_trees.get(&def.name).cloned(),

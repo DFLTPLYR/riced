@@ -510,7 +510,7 @@ fn resolve_container(classes: &[Class]) -> container::Style {
             | Class::TextFaint
             | Class::TextOnPrimary
             | Class::TextDisabled => {
-                style.text_color = Some(shade(&a, *class).into());
+                style.text_color = Some(shade(&a, *class));
             }
             Class::BorderOutline => {
                 style.border.color = shade(&a, *class);

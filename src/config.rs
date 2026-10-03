@@ -148,8 +148,10 @@ fn default_variant() -> String {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AnimationSpeed {
     Fast,
+    #[default]
     Medium,
     Slow,
 }
@@ -178,24 +180,11 @@ impl AnimationSpeed {
     }
 }
 
-impl Default for AnimationSpeed {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AnimationConfig {
     pub speed: AnimationSpeed,
-}
-
-impl Default for AnimationConfig {
-    fn default() -> Self {
-        Self {
-            speed: AnimationSpeed::default(),
-        }
-    }
 }
 
 /// Theme selection under `[theme]`, mirroring reshell's `Global.general`
@@ -672,12 +661,15 @@ pub fn config_path() -> PathBuf {
 /// (see `[[bar]] widgets`); each entry is a Lua script with a global
 /// `render()` returning the cell text (`none` is reserved and always
 /// renders empty):
+/// Widgets: Lua scripts rendering bar cells (`~/.config/riced/widgets/`).
+///
 /// ```toml
 /// [[widget]]
 /// name = "clock"   # slot reference
 /// file = "clock.lua" # relative to the widgets dir
 /// interval = 1.0   # seconds between render() calls
 /// size = 13.0
+/// exec_allow = ["hyprctl"] # binaries for sys.exec (default: hyprctl,niri,jq,curl)
 ///
 /// [[widget]]
 /// name = "hello"
@@ -685,36 +677,88 @@ pub fn config_path() -> PathBuf {
 /// interval = 60.0
 /// size = 13.0
 /// ```
-/// Scripts run sandboxed (no `io`, no shell/file escapes) with globals
-/// persisting between calls. Besides the standard string/table/math
-/// libraries they see three tables: `sysinfo`/`gfxinfo` (live system
-/// readings, refreshed before every due `render()`) and `sys`
-/// (`sys.exec(argv)` runs one allowlisted binary — argv array, never
-/// a shell string — and returns its stdout; the binary must be listed
-/// in the widget's `exec_allow`, default `hyprctl,niri,jq,curl`). Cell text may embed
-/// `{icon:name}` placeholders for theme-aware Lucide icons, e.g.
-/// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
-/// Clicking a slot runs widget Lua too: `popup()` (when defined)
-/// toggles a menu with its return — either body text or a table with
-/// `text`, `width`/`height`, clickable `items` (`{ label, action }`
-/// rows calling `on_action(action)`), and a composed `ui` body (any
-/// `ui.*` tree, rendered above the items); otherwise `on_press()` runs
-/// as a bare click action and the cell re-renders after it. A popup
-/// with no text, tree, or items never opens. Size without items is
-/// just `{ text = os.date("%A"), width = 300, height = 200 }`.
 ///
-/// `render()` may also return a composable node tree built with the
-/// `ui` constructors (present next to `sysinfo`/`gfxinfo`):
-/// `ui.text(s)`, `ui.icon(name)`, `ui.row({...} [, spacing])`,
-/// `ui.column({...} [, spacing])`, `ui.button(label, action)`,
-/// `ui.progress(0.0-1.0)`, `ui.spinner()` (loading ring for slow
-/// fetches — return it first, swap in cached data on later ticks).
-/// Tables compose freely — e.g.
-/// `ui.row({ ui.icon("cpu"), ui.text("42%") })` — and refresh on the
-/// entry's interval like plain text. Cell buttons are per-widget
-/// MouseAreas: clicking one calls that widget's `on_action(action)`
-/// directly (missing `on_action` is a silent no-op), never the
-/// slot-wide popup/`on_press()` fallback.
+/// ## Lifecycle
+///
+/// Each widget owns a sandboxed Lua state, created on first render and
+/// kept across ticks (globals persist — use them as the cache). Every
+/// `interval` seconds (clamped to >= 0.25) the engine publishes fresh
+/// `sysinfo`/`gfxinfo` tables and calls `render()`; when the output
+/// (text or tree) differs from the last tick, the bar repaints. Editing
+/// the `.lua` file reloads it live (mtime watch); editing
+/// `widgets.toml` rebuilds all states. Errors log once per message,
+/// never per tick.
+///
+/// ## Sandbox
+///
+/// Scripts see string/table/math/os only — no `io`, no `require`, and
+/// `os.execute`/`os.exit`/`os.remove`/`os.rename` are nil'd. The only
+/// way out is `sys.exec(argv)`: an argv array (never a shell string)
+/// running one binary from the widget's `exec_allow` list (matched on
+/// basename), 2s timeout, 64KB stdout cap. `"; rm -rf /"` passes
+/// through as a literal argument — there is no shell to escape from.
+/// `print()` stays for daemon-log debugging.
+///
+/// ## Globals
+///
+/// - `sysinfo`: `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total`
+///   (bytes), `mem_usage` (%). Refreshed before every due `render()`.
+/// - `gfxinfo`: `usage` (% or nil when the GPU exposes nothing).
+/// - `sys.exec(argv)`: stdout string on success, Lua error otherwise
+///   (wrap slow calls in `pcall`; cache in a global, refresh hourly).
+/// - `ui.*`: composable node constructors (below). Cell text may also
+///   embed `{icon:name}` placeholders for theme-aware Lucide icons,
+///   e.g. `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage)`.
+///
+/// ## `render()`
+///
+/// Required. Returns either plain text (numbers/booleans coerce,
+/// `nil` is empty) or a `ui.*` tree. Trees refresh on the interval
+/// like text; switching shapes clears the other cache.
+///
+/// ```lua
+/// function render()
+///     return ui.row({ ui.icon("cpu"), ui.text("42%") })
+/// end
+/// ```
+///
+/// ## `ui.*` constructors
+///
+/// - `ui.text(s)`: themed text (icon placeholders resolved).
+/// - `ui.icon(name)`: full Lucide set by name (`"bot"`,
+///   `"robot-vacuum"`, `"memory-stick"` — case/separators ignored)
+///   plus short aliases (`mem`, `vol`, `up`...). Unknown names render
+///   literal so typos stay visible.
+/// - `ui.row({...} [, spacing])` / `ui.column({...} [, spacing])`:
+///   nest freely.
+/// - `ui.button(label, action)`: per-widget MouseArea — clicking calls
+///   that widget's `on_action(action)` directly (missing `on_action`
+///   is a silent no-op), never the slot popup/`on_press` fallback.
+/// - `ui.progress(0.0-1.0)`: bar (clamped).
+/// - `ui.spinner()`: loading ring for slow fetches — return it first,
+///   swap in cached data on later ticks (see clinepass seed).
+///
+/// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
+///
+/// Clicking a slot runs widget Lua: `popup()` (when defined) toggles a
+/// menu with its return — either body text or a table with `text`,
+/// `width`/`height`, clickable `items` (`{ label, action }` rows
+/// calling `on_action(action)`), and a composed `ui` body (any `ui.*`
+/// tree, rendered above the items); otherwise `on_press()` runs as a
+/// bare click action and the cell re-renders after it. A popup with no
+/// text, tree, or items never opens. Size without items is just
+/// `{ text = os.date("%A"), width = 300, height = 200 }`.
+///
+/// ```lua
+/// function popup()
+///     return { ui = ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) }),
+///              width = 300, height = 200 }
+/// end
+///
+/// function on_action(name)  -- popup items + cell buttons land here
+///     if name == "toggle" then details = not details end
+/// end
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {

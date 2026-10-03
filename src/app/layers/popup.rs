@@ -1,10 +1,10 @@
 use super::background::Background;
 use super::top::{
-    Top, TopLocal, WidgetNode, build_node, call_lua_text, call_lua_value, coerce_text,
-    lua_has_func, lua_value_kind, parse_node, publish_system_tables, rich_text,
+    Top, TopLocal, WidgetNode, build_node, call_lua_value, coerce_text, lua_has_func,
+    lua_value_kind, parse_node, publish_system_tables, rich_text,
 };
-use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
+use crate::app::{Plant, TopEvent};
 use crate::theme;
 use iced::window;
 use iced::{Element, Length, Point, Task as Command};
@@ -528,10 +528,17 @@ impl Popup {
             Some(Ok(())) => {
                 plots.widget_last_error.remove(&widget);
                 let refresh = Self::refresh_bodies(plots);
-                if let Some(lua) = plots.widget_lua.get(&widget)
-                    && let Ok(text) = call_lua_text(lua, "render")
-                {
-                    plots.widget_outputs.insert(widget, text);
+                // Tree-aware cell refresh (same as the cell-action
+                // path): a tree render() must update widget_trees, not
+                // just the text cache.
+                if let Some(def) = plots.widgets.iter().find(|d| d.name == widget).cloned() {
+                    let gpu = Self::gpu_usage_percent();
+                    if Top::refresh_widget(plots, &def, gpu) {
+                        return Command::batch(vec![
+                            refresh,
+                            Command::done(Plant::TopPlot(TopEvent::WidgetsChanged)),
+                        ]);
+                    }
                 }
                 return refresh;
             }

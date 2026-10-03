@@ -61,8 +61,6 @@ pub struct Plots {
     pub(crate) output_infos: HashMap<OutputId, OutputInfo>,
     // context menu state (global, like Background contextMenu)
     pub(crate) context_menu: Option<ContextMenu>,
-    // throttling for smooth 60fps selection updates
-    pub(crate) last_selection_tick: Option<Instant>,
     // press start per window for hold detection (Top hold, shared via PanelWindow)
     pub(crate) press_starts: HashMap<iced::window::Id, Instant>,
     // hot-reloaded config + last seen file mtime
@@ -148,7 +146,6 @@ impl Plots {
             fade_rect: None,
             fade_start: None,
             context_menu: None,
-            last_selection_tick: None,
             press_starts: HashMap::new(),
             config,
             config_mtime,
