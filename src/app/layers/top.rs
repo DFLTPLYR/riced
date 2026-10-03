@@ -1453,9 +1453,8 @@ impl Top {
         };
         let horizontal = top.is_horizontal();
         let (bw, bh) = top.local.px_size(sw, sh, horizontal);
-        let full_length = top.local.length_pct >= 100.0;
-        let (bx, by) = Popup::bar_origin(top.anchor(), bw as f32, bh as f32, sw, sh, full_length);
-        // Content rect: floating margins inset the painted cells.
+        // Content rect: floating margins inset the painted cells. Cursor
+        // positions are bar-local, so no output translation is needed.
         let (pl, pt, pr, pb) = if top.local.floating {
             let m = top.local.margins;
             (
@@ -1469,15 +1468,11 @@ impl Top {
         };
         let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        let cursor = plots
-            .last_cursor
-            .get(&bar_id)
-            .copied()
-            .map(|p| Point::new(p.x + bx, p.y + by));
+        let cursor = plots.last_cursor.get(&bar_id).copied();
         let pos = cursor
             .and_then(|p| {
                 Popup::slot_at_point(
-                    (bx + pl, by + pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
+                    (pl, pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
                     n,
                     gap,
                     horizontal,
@@ -1512,22 +1507,11 @@ impl Top {
             }
         }
         let names = top.local.widgets_at(pos).to_vec();
-        // Anchor the menu at the click, falling back to the slot center.
-        let anchor = cursor.unwrap_or_else(|| {
-            Popup::slot_center(
-                (bx, by, bw as f32, bh as f32),
-                (pl, pt, pr, pb),
-                n,
-                gap,
-                horizontal,
-                pos,
-            )
-        });
         if names
             .iter()
             .any(|w| lua_has_func(&plots.widget_lua, w, "popup"))
         {
-            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos, anchor) {
+            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos) {
                 cmds.push(cmd);
             }
             return if cmds.is_empty() {

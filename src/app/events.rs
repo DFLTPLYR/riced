@@ -92,8 +92,6 @@ pub enum TopEvent {
     WidgetTick,
     /// A Lua widget output moved: repaint so bars pick the new text up.
     WidgetsChanged,
-    /// Click anywhere on a widget popup overlay: close that popup window.
-    PopupDismiss(Id),
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,

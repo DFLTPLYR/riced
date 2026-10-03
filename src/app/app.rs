@@ -927,7 +927,6 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::WidgetTick) => Top::handle_widget_tick(self),
             Plant::TopPlot(TopEvent::WidgetsChanged) => Popup::refresh_bodies(self),
-            Plant::TopPlot(TopEvent::PopupDismiss(id)) => Popup::handle_dismiss(self, id),
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
                 Top::handle_set_opacity(self, id, value)
             }
@@ -1033,7 +1032,6 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::SetSlotPadding(..))
         | Plant::TopPlot(TopEvent::SetSlotSpacing(..))
         | Plant::TopPlot(TopEvent::WidgetsChanged)
-        | Plant::TopPlot(TopEvent::PopupDismiss(..))
         | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))
