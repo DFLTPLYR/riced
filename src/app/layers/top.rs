@@ -1511,7 +1511,9 @@ impl Top {
             .iter()
             .any(|w| lua_has_func(&plots.widget_lua, w, "popup"))
         {
-            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos) {
+            if let Some(cmd) =
+                Popup::open_for(plots, bar_id, output, pos, cursor.map(|p| (p.x, p.y)))
+            {
                 cmds.push(cmd);
             }
             return if cmds.is_empty() {

@@ -150,6 +150,32 @@ impl Popup {
             })
     }
 
+    /// Anchor point (bar-local px) for the popup: centered on the
+    /// cursor along the bar axis and pinned to the bar's outer edge on
+    /// the cross axis, so the menu grows off the edge under the pointer.
+    /// Without a cursor, falls back to the slot center (edge-pinned the
+    /// same way). The compositor slides the box into the output.
+    pub(crate) fn popup_anchor(
+        bar: (f32, f32),
+        horizontal: bool,
+        first_side: bool,
+        slot: (i32, i32, u32, u32),
+        cursor: Option<(f32, f32)>,
+    ) -> (i32, i32) {
+        let (bw, bh) = bar;
+        let (rx, ry, rw, rh) = slot;
+        let (cx, cy) = cursor.unwrap_or((rx as f32 + rw as f32 / 2.0, ry as f32 + rh as f32 / 2.0));
+        if horizontal {
+            let x = cx.clamp(0.0, (bw - 1.0).max(0.0)).round() as i32;
+            let y = if first_side { bh as i32 - 1 } else { 0 };
+            (x, y.max(0))
+        } else {
+            let y = cy.clamp(0.0, (bh - 1.0).max(0.0)).round() as i32;
+            let x = if first_side { bw as i32 - 1 } else { 0 };
+            (x.max(0), y)
+        }
+    }
+
     /// Open a popup for the first `popup()`-capable widget in a slot,
     /// anchored to the slot rect with the menu growing off the bar edge
     /// (flipped/slid into view by the compositor on overflow).
@@ -159,6 +185,7 @@ impl Popup {
         bar_id: window::Id,
         output: OutputId,
         pos: usize,
+        cursor: Option<(f32, f32)>,
     ) -> Option<Command<Plant>> {
         let top = plots.tops.get(&bar_id)?.clone();
         let names: Vec<String> = top.local.widgets_at(pos).to_vec();
@@ -201,8 +228,15 @@ impl Popup {
         );
         let (w, h) = Self::size_for(sw, &body);
         let size = PixelSize::try_px(w, h)?;
-        let anchor_size = PixelSize::try_px(rw, rh)?;
         let first_side = top.anchor() == Anchor::Top || top.anchor() == Anchor::Left;
+        let anchor_at = Self::popup_anchor(
+            (bw as f32, bh as f32),
+            horizontal,
+            first_side,
+            (rx, ry, rw, rh),
+            cursor,
+        );
+        let anchor_size = PixelSize::try_px(1, 1)?;
         let (anchor, gravity) = if horizontal {
             if first_side {
                 (PopupAnchor::Bottom, PopupGravity::Bottom)
@@ -214,7 +248,7 @@ impl Popup {
         } else {
             (PopupAnchor::Left, PopupGravity::Left)
         };
-        let settings = IcedNewPopupSettings::new(bar_id, size, (rx, ry), anchor_size)
+        let settings = IcedNewPopupSettings::new(bar_id, size, anchor_at, anchor_size)
             .anchor(anchor)
             .gravity(gravity)
             .constraint_adjustment(
@@ -406,6 +440,59 @@ mod tests {
         assert_eq!(Popup::size_for(1920.0, "one\ntwo\nthree"), (280, 110));
         // Narrow outputs shrink the box, never below 1px.
         assert_eq!(Popup::size_for(200.0, "one"), (200, 80));
+    }
+
+    #[test]
+    fn popup_anchor_centers_on_cursor_at_bar_edge() {
+        // Top bar: x follows the cursor, y pins to the bottom edge.
+        assert_eq!(
+            Popup::popup_anchor(
+                (1920.0, 50.0),
+                true,
+                true,
+                (0, 0, 100, 50),
+                Some((100.2, 20.0))
+            ),
+            (100, 49)
+        );
+        // Bottom bar: pins to the top edge instead.
+        assert_eq!(
+            Popup::popup_anchor(
+                (1920.0, 50.0),
+                true,
+                false,
+                (0, 0, 100, 50),
+                Some((100.0, 20.0))
+            ),
+            (100, 0)
+        );
+        // Left bar: y follows the cursor, x pins to the right edge.
+        assert_eq!(
+            Popup::popup_anchor(
+                (50.0, 1080.0),
+                false,
+                true,
+                (0, 0, 50, 100),
+                Some((20.0, 100.0))
+            ),
+            (49, 100)
+        );
+        // Cursor clamps into the bar; missing cursor falls back to the
+        // slot center, edge-pinned the same way.
+        assert_eq!(
+            Popup::popup_anchor(
+                (1920.0, 50.0),
+                true,
+                true,
+                (0, 0, 100, 50),
+                Some((-5.0, 20.0))
+            ),
+            (0, 49)
+        );
+        assert_eq!(
+            Popup::popup_anchor((1920.0, 50.0), true, true, (0, 0, 100, 50), None),
+            (50, 49)
+        );
     }
 
     #[test]
