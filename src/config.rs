@@ -127,10 +127,10 @@ fn default_darkmode() -> bool {
     true
 }
 
-/// Default `sys.exec` allowlist: compositor CLIs plus `jq` for
-/// parsing their JSON output in Lua.
+/// Default `sys.exec` allowlist: compositor CLIs plus `jq`/`curl`
+/// for querying JSON APIs from Lua widgets.
 fn default_widget_exec_allow() -> Vec<String> {
-    ["hyprctl", "niri", "jq"]
+    ["hyprctl", "niri", "jq", "curl"]
         .iter()
         .map(|s| s.to_string())
         .collect()
@@ -691,7 +691,7 @@ pub fn config_path() -> PathBuf {
 /// readings, refreshed before every due `render()`) and `sys`
 /// (`sys.exec(argv)` runs one allowlisted binary — argv array, never
 /// a shell string — and returns its stdout; the binary must be listed
-/// in the widget's `exec_allow`, default `hyprctl,niri,jq`). Cell text may embed
+/// in the widget's `exec_allow`, default `hyprctl,niri,jq,curl`). Cell text may embed
 /// `{icon:name}` placeholders for theme-aware Lucide icons, e.g.
 /// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
 /// Clicking a slot runs widget Lua too: `popup()` (when defined)
@@ -709,8 +709,10 @@ pub fn config_path() -> PathBuf {
 /// `ui.column({...} [, spacing])`, `ui.button(label, action)`,
 /// `ui.progress(0.0-1.0)`. Tables compose freely — e.g.
 /// `ui.row({ ui.icon("cpu"), ui.text("42%") })` — and refresh on the
-/// entry's interval like plain text. Cell buttons are visual only
-/// (clicks run the slot's own popup/`on_press()`).
+/// entry's interval like plain text. Cell buttons are per-widget
+/// MouseAreas: clicking one calls that widget's `on_action(action)`
+/// directly (missing `on_action` is a silent no-op), never the
+/// slot-wide popup/`on_press()` fallback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {
@@ -802,6 +804,14 @@ size = 13.0
 # name = "hypr"
 # file = "hypr.lua"
 # interval = 0.5
+# size = 13.0
+
+# Cline Pass usage: robot cell, usage popup (paste API_KEY into
+# clinepass.lua first). Refresh every 5 min, not every tick.
+# [[widget]]
+# name = "clinepass"
+# file = "clinepass.lua"
+# interval = 300.0
 # size = 13.0
 "#;
 
@@ -937,6 +947,60 @@ function on_action(name)
 end
 "#;
 
+/// Seed Cline Pass usage: robot icon cell, popup with quota rows.
+/// Paste the API key into `API_KEY` below (no input widget exists —
+/// the file hot-reloads on save). Blank key renders a connect hint.
+pub(crate) const SEED_CLINEPASS_LUA: &str = r#"-- Cline Pass usage via api.cline.bot (argv array, never a shell).
+-- curl must be in exec_allow (default on). Paste your key below.
+local API_KEY = ""
+
+local URL = "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
+
+function render()
+    return ui.icon("bot")
+end
+
+function popup()
+    if API_KEY == "" then
+        return {
+            ui = ui.column({
+                ui.row({ ui.icon("bot"), ui.text("Cline Pass") }),
+                ui.text("paste API_KEY into clinepass.lua"),
+            }),
+            width = 300,
+        }
+    end
+    local ok, body = pcall(sys.exec, {
+        "curl", "-sS", "--max-time", "10",
+        "-H", "Authorization: Bearer " .. API_KEY, URL,
+    })
+    if not ok then
+        return { text = "cline: request failed", width = 300 }
+    end
+    if body:match('"error"') then
+        return { text = "cline: unauthorized (bad key?)", width = 300 }
+    end
+    local rows = { ui.row({ ui.icon("bot"), ui.text("Cline Pass") }) }
+    -- Generic limit/usage pairs: "name": { "limit": N, "used": M }.
+    for name, limit, used in body:gmatch('"([%w_%-]+)"%s*:%s*{%s*"limit"%s*:%s*(%d+)%s*,%s*"used"%s*:%s*(%d+)') do
+        rows[#rows + 1] = ui.text(name .. "  " .. used .. " / " .. limit)
+        rows[#rows + 1] = ui.progress(tonumber(used) / math.max(1, tonumber(limit)))
+    end
+    -- Flat fallback: any "used": N / "limit": M nearby.
+    if #rows == 1 then
+        local used = body:match('"used"%s*:%s*(%d+)')
+        local limit = body:match('"limit"%s*:%s*(%d+)')
+        if used and limit then
+            rows[#rows + 1] = ui.text(used .. " / " .. limit)
+            rows[#rows + 1] = ui.progress(tonumber(used) / math.max(1, tonumber(limit)))
+        else
+            rows[#rows + 1] = ui.text("no usage fields parsed")
+        end
+    end
+    return { ui = ui.column(rows), width = 300 }
+end
+"#;
+
 /// `~/.config/riced/widgets.toml` (`$XDG_CONFIG_HOME` aware).
 pub fn widgets_path() -> PathBuf {
     dirs::config_dir()
@@ -988,6 +1052,7 @@ impl WidgetsFile {
             ("ram.lua", SEED_RAM_LUA),
             ("gpu.lua", SEED_GPU_LUA),
             ("hypr.lua", SEED_HYPR_LUA),
+            ("clinepass.lua", SEED_CLINEPASS_LUA),
         ] {
             Self::seed_script(dir, name, content);
         }
@@ -1569,6 +1634,11 @@ mod tests {
         // Sparse entry defaults the rest.
         assert_eq!(file.widget[1].interval, 1.0);
         assert_eq!(file.widget[1].size, 13.0);
+        // exec_allow defaults to the compositor/API list; explicit wins.
+        assert_eq!(file.widget[1].exec_allow, default_widget_exec_allow());
+        let custom: WidgetsFile =
+            toml::from_str("[[widget]]\nname = \"x\"\nexec_allow = [\"hyprctl\"]\n").unwrap();
+        assert_eq!(custom.widget[0].exec_allow, vec!["hyprctl".to_string()]);
     }
 
     #[test]
@@ -1583,6 +1653,7 @@ mod tests {
         assert!(dir.join("gpu.lua").is_file());
         assert!(dir.join("hello.lua").is_file());
         assert!(dir.join("hypr.lua").is_file());
+        assert!(dir.join("clinepass.lua").is_file());
         assert!(dir.join("ram.lua").is_file());
         assert!(dir.join("stats.lua").is_file());
         // A user script is never overwritten by a re-seed.

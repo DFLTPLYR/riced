@@ -936,6 +936,9 @@ impl Plots {
             Plant::TopPlot(TopEvent::PopupSelect(id, action)) => {
                 Popup::handle_select(self, id, action)
             }
+            Plant::TopPlot(TopEvent::CellAction(widget, action)) => {
+                Top::handle_cell_action(self, widget, action)
+            }
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
                 Top::handle_set_opacity(self, id, value)
             }
@@ -1042,6 +1045,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::SetSlotSpacing(..))
         | Plant::TopPlot(TopEvent::WidgetsChanged)
         | Plant::TopPlot(TopEvent::PopupSelect(..))
+        | Plant::TopPlot(TopEvent::CellAction(..))
         | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))

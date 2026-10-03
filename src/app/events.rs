@@ -95,6 +95,10 @@ pub enum TopEvent {
     /// Click a popup item: run the widget's `on_action()` with the item
     /// key, then re-render menu and cell.
     PopupSelect(Id, String),
+    /// Click a cell button (`ui.button` in a `render()` tree): run the
+    /// owning widget's `on_action()` with the button key, then
+    /// re-render that widget (a toggle flips its next output).
+    CellAction(String, String),
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,

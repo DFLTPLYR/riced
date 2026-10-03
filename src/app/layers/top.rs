@@ -411,7 +411,12 @@ fn render_slot_widgets(
                 .map(|d| d.size)
                 .unwrap_or(13.0);
             // Trees failing to build render nothing (logged at ingest).
-            if let Ok(item) = build_node(node, size, None) {
+            // Buttons arm a per-widget MouseArea: the click carries the
+            // owning widget, so on_action routes back to its own state.
+            let widget = name.clone();
+            let msg =
+                move |action: String| Plant::TopPlot(TopEvent::CellAction(widget.clone(), action));
+            if let Ok(item) = build_node(node, size, Some(&msg)) {
                 items.push(item);
             }
         } else if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
@@ -895,6 +900,18 @@ fn call_lua_action(lua: &Lua) -> Result<(), String> {
     action.call::<()>(()).map_err(|e| e.to_string())
 }
 
+/// Run a widget's `on_action(key)` (cell buttons and popup items share
+/// it). Missing `on_action` is a silent no-op so plain-text widgets
+/// coexist with button trees.
+fn call_lua_named_action(lua: &Lua, action: &str) -> Result<(), String> {
+    let func: Function = match lua.globals().get("on_action") {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+    func.call::<()>(action.to_string())
+        .map_err(|e| e.to_string())
+}
+
 impl Top {
     /// Hold threshold: press held >= this on release counts as hold.
     const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
@@ -1127,8 +1144,11 @@ impl Top {
         if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }
-        plots.press_starts.insert(id, Instant::now());
-        println!("top press {button:?} on {id:?}");
+        // Stamp the press: release compares against HOLD_THRESHOLD to
+        // tell clicks (popup/on_press) from holds (nothing, for now).
+        if button == Button::Left {
+            plots.press_starts.insert(id, Instant::now());
+        }
         Command::none()
     }
 
@@ -1496,6 +1516,37 @@ impl Top {
         Command::none()
     }
 
+    /// Click a cell button: run the owning widget's `on_action(key)`
+    /// (the view closure stamps the owner, so the key routes to its
+    /// own Lua state — no slot-wide popup/`on_press` fallback), then
+    /// re-render that widget like the click path does.
+    pub(crate) fn handle_cell_action(
+        plots: &mut Plots,
+        widget: String,
+        action: String,
+    ) -> Command<Plant> {
+        let gpu = Popup::gpu_usage_percent();
+        let outcome = plots.widget_lua.get(&widget).map(|lua| {
+            publish_system_tables(lua, &plots.sysinfo, gpu)
+                .map_err(|e| e.to_string())
+                .and_then(|()| call_lua_named_action(lua, &action))
+        });
+        match outcome {
+            Some(Ok(())) => {
+                plots.widget_last_error.remove(&widget);
+                if let Some(def) = plots.widgets.iter().find(|d| d.name == widget).cloned()
+                    && Self::refresh_widget(plots, &def, gpu)
+                {
+                    return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
+                }
+            }
+            Some(Err(e)) => Self::note_widget_error(plots, &widget, e),
+            // Unknown widget: ignore (stale message after hot-reload).
+            None => {}
+        }
+        Command::none()
+    }
+
     pub(crate) fn handle_set_opacity(
         plots: &mut Plots,
         id: window::Id,
@@ -1809,18 +1860,10 @@ impl Top {
         let start = plots.press_starts.remove(&id);
         let clicked = button == Button::Left
             && matches!(&start, Some(t) if t.elapsed() < Self::HOLD_THRESHOLD);
-        match start {
-            Some(t) if t.elapsed() >= Self::HOLD_THRESHOLD => {
-                println!("top hold {button:?} on {id:?} after {:?}", t.elapsed());
-            }
-            Some(t) => {
-                println!("top click {button:?} on {id:?} after {:?}", t.elapsed());
-            }
-            // Silent: the global Graft release safety net in update can clear
-            // the press first when release lands on another window, and a
-            // same-window release fires both PanelWindow and Graft paths.
-            None => {}
-        }
+        // Silent either way: the global Graft release safety net in
+        // update can clear the press first when release lands on another
+        // window, and a same-window release fires both PanelWindow and
+        // Graft paths. Only clicks act (slot popup/on_press below).
         if clicked {
             return Self::handle_slot_click(plots, id);
         }
@@ -2406,8 +2449,8 @@ mod tests {
     #[test]
     fn seed_scripts_parse_and_build() {
         use crate::config::{
-            SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA, SEED_RAM_LUA,
-            SEED_STATS_LUA,
+            SEED_CLINEPASS_LUA, SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA,
+            SEED_RAM_LUA, SEED_STATS_LUA,
         };
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
@@ -2419,6 +2462,7 @@ mod tests {
             SEED_CPU_LUA,
             SEED_RAM_LUA,
             SEED_GPU_LUA,
+            SEED_CLINEPASS_LUA,
         ] {
             let lua = new_widget_lua(&[]).expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
@@ -2427,6 +2471,12 @@ mod tests {
             let node = parse_node(&value).expect("parse");
             let _ = build_node(&node, 13.0, None).expect("builds");
         }
+        // Blank-key clinepass renders the connect hint popup (ui tree).
+        let lua = new_widget_lua(&[]).expect("sandbox");
+        load_widget_script(&lua, "clinepass", SEED_CLINEPASS_LUA).expect("load");
+        let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        assert!(content.tree.is_some());
     }
 
     #[test]
@@ -2556,6 +2606,11 @@ mod tests {
         on_action.call::<()>("toggle".to_string()).expect("call");
         let seen: String = lua.load("return seen[1]").eval().expect("eval");
         assert_eq!(seen, "toggle");
+        // Missing on_action is a silent no-op (plain-text widgets
+        // coexist with cell buttons without erroring).
+        let lua = new_widget_lua(&[]).expect("sandbox");
+        load_widget_script(&lua, "plain", "function render() return 'x' end").expect("load");
+        call_lua_named_action(&lua, "ws:1").expect("noop");
     }
 
     #[test]
