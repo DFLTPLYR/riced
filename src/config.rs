@@ -981,21 +981,16 @@ function popup()
         return { text = "cline: unauthorized (bad key?)", width = 300 }
     end
     local rows = { ui.row({ ui.icon("bot"), ui.text("Cline Pass") }) }
-    -- Generic limit/usage pairs: "name": { "limit": N, "used": M }.
-    for name, limit, used in body:gmatch('"([%w_%-]+)"%s*:%s*{%s*"limit"%s*:%s*(%d+)%s*,%s*"used"%s*:%s*(%d+)') do
-        rows[#rows + 1] = ui.text(name .. "  " .. used .. " / " .. limit)
-        rows[#rows + 1] = ui.progress(tonumber(used) / math.max(1, tonumber(limit)))
+    -- Real shape: {"data":{"limits":[{"type":"five_hour",
+    -- "percentUsed":14,"resetsAt":"..."}]},"success":true}.
+    for kind, pct in body:gmatch('"type"%s*:%s*"([%w_%-]+)"%s*,%s*"percentUsed"%s*:%s*(%d+)') do
+        local p = tonumber(pct) or 0
+        local label = kind:gsub("_", " ")
+        rows[#rows + 1] = ui.text(label .. "  " .. p .. "%")
+        rows[#rows + 1] = ui.progress(p / 100)
     end
-    -- Flat fallback: any "used": N / "limit": M nearby.
     if #rows == 1 then
-        local used = body:match('"used"%s*:%s*(%d+)')
-        local limit = body:match('"limit"%s*:%s*(%d+)')
-        if used and limit then
-            rows[#rows + 1] = ui.text(used .. " / " .. limit)
-            rows[#rows + 1] = ui.progress(tonumber(used) / math.max(1, tonumber(limit)))
-        else
-            rows[#rows + 1] = ui.text("no usage fields parsed")
-        end
+        rows[#rows + 1] = ui.text("no usage fields parsed")
     end
     return { ui = ui.column(rows), width = 300 }
 end

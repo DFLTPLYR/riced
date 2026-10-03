@@ -2455,6 +2455,44 @@ mod tests {
     }
 
     #[test]
+    fn clinepass_popup_parses_real_usage_shape() {
+        use crate::config::SEED_CLINEPASS_LUA;
+        // Shape from the live endpoint (values redacted): three
+        // percentUsed bars, one per window.
+        let body = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":14,"resetsAt":"2026-10-03T20:48:05Z"},{"type":"weekly","percentUsed":5,"resetsAt":"2026-10-10T15:48:05Z"},{"type":"monthly","percentUsed":2,"resetsAt":"2026-11-02T15:48:05Z"}]},"success":true}"#;
+        let lua = new_widget_lua(&["curl".to_string()]).expect("sandbox");
+        // Stub curl: return the canned body regardless of argv.
+        lua.globals()
+            .set("sys", {
+                let body = body.to_string();
+                let t = lua.create_table().expect("table");
+                t.set(
+                    "exec",
+                    lua.create_function(move |_, _: Vec<String>| Ok(body.clone()))
+                        .expect("fn"),
+                )
+                .expect("set");
+                t
+            })
+            .expect("sys");
+        // Key must be non-empty or popup() takes the hint branch.
+        lua.load(SEED_CLINEPASS_LUA.replace(r#"local API_KEY = """#, r#"local API_KEY = "x""#))
+            .exec()
+            .expect("load");
+        let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let tree = content.tree.expect("usage tree");
+        let built = build_node(&tree, 13.0, None).expect("builds");
+        let _ = built;
+        // Three progress bars' worth of structure: header + 3 labels
+        // + 3 bars = column of 7.
+        match tree {
+            WidgetNode::Column { children, .. } => assert_eq!(children.len(), 7),
+            other => panic!("expected column, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn slot_align_rides_the_long_axis() {
         use iced::Alignment as A;
         assert_eq!(SlotAlign::Start.for_bar(true), (A::Start, A::Center));
