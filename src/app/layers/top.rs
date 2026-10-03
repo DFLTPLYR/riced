@@ -274,70 +274,22 @@ impl From<&crate::config::TopConfig> for TopLocal {
 /// Lucide icon bytes by name (`{icon:cpu}` in widget text). Lookup is
 /// case-insensitive and ignores `-_ ` separators, so `memory-stick`,
 /// `memory_stick` and `MemoryStick` all resolve. Covers the full
-/// Lucide set generated at build time (~1850 icons) plus short
-/// aliases (`mem`, `vol`, `up`...). Unknown names render as literal
-/// text so typos stay visible.
+/// Lucide set via the build-generated lookup (same fresh-icons
+/// guarantee as lucide-iced itself — no hand list, no checked-in
+/// table) plus short aliases (`mem`, `vol`, `up`...). Unknown names
+/// render as literal text so typos stay visible.
 fn icon_bytes(name: &str) -> Option<&'static [u8]> {
-    use lucide_iced::bytes::*;
     let key: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
         .to_lowercase();
-    Some(match key.as_str() {
-        "bot" | "robot" => BOT,
-        "botmessage" | "botmessagesquare" => BOT_MESSAGE_SQUARE,
-        "botoff" => BOT_OFF,
-        "cpu" => CPU,
-        "gpu" => GPU,
-        "memory" | "memorystick" | "mem" | "ram" => MEMORY_STICK,
-        "thermometer" | "temp" => THERMOMETER,
-        "thermometersun" => THERMOMETER_SUN,
-        "harddrive" | "disk" => HARD_DRIVE,
-        "wifi" => WIFI,
-        "wifioff" => WIFI_OFF,
-        "signal" => SIGNAL,
-        "network" => NETWORK,
-        "battery" => BATTERY,
-        "batterycharging" => BATTERY_CHARGING,
-        "activity" => ACTIVITY,
-        "gauge" => GAUGE,
-        "chartline" | "chart" => CHART_LINE,
-        "zap" => ZAP,
-        "fan" => FAN,
-        "monitor" => MONITOR,
-        "volume2" | "volume" | "vol" => VOLUME_2,
-        "volumex" | "mute" => VOLUME_X,
-        "heart" => HEART,
-        "heartpulse" => HEART_PULSE,
-        "clock" => CLOCK,
-        "calendar" => CALENDAR,
-        "sun" => SUN,
-        "moon" => MOON,
-        "cloud" => CLOUD,
-        "download" => DOWNLOAD,
-        "upload" => UPLOAD,
-        "arrowup" | "up" => ARROW_UP,
-        "arrowdown" | "down" => ARROW_DOWN,
-        "power" => POWER,
-        "settings" => SETTINGS,
-        "bell" => BELL,
-        _ => return icon_bytes_generated(&key),
-    })
+    generated_icon_bytes(&key)
 }
 
-/// Fallback: full generated Lucide set (~1850 icons) via a sorted
-/// name table + binary search (no per-icon match arms, no startup
-/// map). Names are SNAKE_UPPER (`MEMORY_STICK`); the key is already
-/// normalized lowercase-alphanumeric. Regenerate
-/// `icon_table.rs` with the one-liner in its header when bumping
-/// lucide-iced.
-fn icon_bytes_generated(key: &str) -> Option<&'static [u8]> {
-    super::icon_table::ICON_TABLE
-        .binary_search_by(|(name, _)| name.cmp(&key))
-        .ok()
-        .map(|i| super::icon_table::ICON_TABLE[i].1)
-}
+// Build-generated full-set lookup (see build.rs): one match arm per
+// Lucide icon, derived from lucide-iced's own build output.
+include!(concat!(env!("OUT_DIR"), "/lucide_lookup.rs"));
 
 /// One piece of widget text: plain text or an `{icon:name}` reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

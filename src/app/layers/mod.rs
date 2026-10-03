@@ -1,5 +1,4 @@
 pub mod background;
-pub mod icon_table;
 pub mod popup;
 pub mod setting;
 pub mod top;
