@@ -937,9 +937,14 @@ impl Top {
     const MIN_WIDGET_INTERVAL: f32 = 0.25;
 
     /// Script file for a Lua def, resolved against the widgets dir
-    /// (absolute paths pass through).
+    /// (absolute paths pass through). An empty `file` defaults to
+    /// `<name>.lua`, so bare `name`-only entries just work.
     pub(crate) fn widget_script_path(def: &crate::config::WidgetDef) -> std::path::PathBuf {
-        let path = std::path::PathBuf::from(def.file.trim());
+        let trimmed = def.file.trim();
+        if trimmed.is_empty() {
+            return crate::config::widgets_dir().join(format!("{}.lua", def.name.trim()));
+        }
+        let path = std::path::PathBuf::from(trimmed);
         if path.is_absolute() {
             path
         } else {
@@ -1992,6 +1997,37 @@ mod tests {
         assert!(!lua_has_func(&states, "w", "on_press"));
         assert!(!lua_has_func(&states, "missing", "render"));
         assert!(call_lua_action(&states["w"]).is_err());
+    }
+
+    #[test]
+    fn widget_script_path_defaults_to_name_lua() {
+        use crate::config::WidgetDef;
+        let bare = WidgetDef {
+            name: "clock".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            Top::widget_script_path(&bare),
+            crate::config::widgets_dir().join("clock.lua")
+        );
+        let relative = WidgetDef {
+            name: "x".to_string(),
+            file: "sub/y.lua".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            Top::widget_script_path(&relative),
+            crate::config::widgets_dir().join("sub/y.lua")
+        );
+        let absolute = WidgetDef {
+            name: "x".to_string(),
+            file: "/tmp/abs.lua".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            Top::widget_script_path(&absolute),
+            std::path::PathBuf::from("/tmp/abs.lua")
+        );
     }
 
     #[test]

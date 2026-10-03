@@ -694,7 +694,7 @@ pub struct WidgetDef {
     #[serde(default)]
     pub name: String,
     /// Script file, relative to the widgets dir (absolute paths pass
-    /// through).
+    /// through). Empty defaults to `<name>.lua`.
     #[serde(default)]
     pub file: String,
     /// Seconds between `render()` calls (clamped to >= 0.25).
@@ -858,9 +858,43 @@ impl WidgetsFile {
         }
     }
 
+    /// Seed one script file when missing (never overwrite).
+    fn seed_script(dir: &std::path::Path, name: &str, content: &str) {
+        let script_path = dir.join(name);
+        if script_path.exists() {
+            return;
+        }
+        if let Some(parent) = script_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&script_path, content) {
+            eprintln!("widgets: cannot write {}: {e}", script_path.display());
+        }
+    }
+
+    /// Restore every seed script that is missing (never overwrite).
+    fn seed_all_in(dir: &std::path::Path) {
+        for (name, content) in [
+            ("clock.lua", SEED_CLOCK_LUA),
+            ("hello.lua", SEED_HELLO_LUA),
+            ("stats.lua", SEED_STATS_LUA),
+            ("cpu.lua", SEED_CPU_LUA),
+            ("ram.lua", SEED_RAM_LUA),
+            ("gpu.lua", SEED_GPU_LUA),
+        ] {
+            Self::seed_script(dir, name, content);
+        }
+    }
+
+    /// Restore every seed script under the live widgets dir.
+    fn seed_all() {
+        Self::seed_all_in(&widgets_dir());
+    }
+
     /// Load from [`widgets_path`]. Creates the seeded files (plus
-    /// parent dirs) when `widgets.toml` does not exist yet; existing
-    /// script files are never overwritten.
+    /// parent dirs) when `widgets.toml` does not exist yet. Seed
+    /// scripts are also restored whenever missing (never overwritten),
+    /// so old installs missing `clock.lua` heal on restart.
     pub fn load() -> (Vec<WidgetDef>, Option<SystemTime>) {
         let path = widgets_path();
         if !path.exists() {
@@ -870,26 +904,10 @@ impl WidgetsFile {
             if let Err(e) = std::fs::write(&path, SEED_WIDGETS_TOML) {
                 eprintln!("widgets: cannot write {}: {e}", path.display());
             }
-            for (name, content) in [
-                ("clock.lua", SEED_CLOCK_LUA),
-                ("hello.lua", SEED_HELLO_LUA),
-                ("stats.lua", SEED_STATS_LUA),
-                ("cpu.lua", SEED_CPU_LUA),
-                ("ram.lua", SEED_RAM_LUA),
-                ("gpu.lua", SEED_GPU_LUA),
-            ] {
-                let script_path = widgets_dir().join(name);
-                if !script_path.exists() {
-                    if let Some(parent) = script_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if let Err(e) = std::fs::write(&script_path, content) {
-                        eprintln!("widgets: cannot write {}: {e}", script_path.display());
-                    }
-                }
-            }
+            Self::seed_all();
             return (Self::parse(SEED_WIDGETS_TOML), read_mtime(&path));
         }
+        Self::seed_all();
         match std::fs::read_to_string(&path) {
             Ok(content) => (Self::parse(&content), read_mtime(&path)),
             Err(_) => (Vec::new(), None),
@@ -1444,6 +1462,29 @@ mod tests {
         // Sparse entry defaults the rest.
         assert_eq!(file.widget[1].interval, 1.0);
         assert_eq!(file.widget[1].size, 13.0);
+    }
+
+    #[test]
+    fn widgets_seeds_restore_missing_scripts_without_overwriting() {
+        // Hermetic temp dir (no env manipulation: parallel tests share
+        // process-global env, so seeds take an explicit dir instead).
+        let dir = std::env::temp_dir().join(format!("riced-widgets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        WidgetsFile::seed_all_in(&dir);
+        assert!(dir.join("clock.lua").is_file());
+        assert!(dir.join("cpu.lua").is_file());
+        assert!(dir.join("gpu.lua").is_file());
+        assert!(dir.join("hello.lua").is_file());
+        assert!(dir.join("ram.lua").is_file());
+        assert!(dir.join("stats.lua").is_file());
+        // A user script is never overwritten by a re-seed.
+        std::fs::write(dir.join("clock.lua"), "-- mine").unwrap();
+        WidgetsFile::seed_all_in(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("clock.lua")).unwrap(),
+            "-- mine"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
