@@ -6,7 +6,7 @@ use crate::composables::panel_window::top_window;
 use crate::config::WidgetDef;
 use crate::theme;
 use iced::mouse::Button;
-use iced::widget::{Space, column, container, row, text};
+use iced::widget::{Space, button, column, container, progress_bar, row, text};
 use iced::window;
 use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -395,6 +395,7 @@ fn render_slot_widgets(
     names: &[String],
     defs: &[WidgetDef],
     outputs: &HashMap<String, String>,
+    trees: &HashMap<String, WidgetNode>,
     gap: f32,
     horizontal: bool,
 ) -> Element<'static, Plant> {
@@ -403,7 +404,17 @@ fn render_slot_widgets(
         if TopLocal::is_empty_widget(name) {
             continue;
         }
-        if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
+        if let Some(node) = trees.get(name) {
+            let size = defs
+                .iter()
+                .find(|d| d.name == *name)
+                .map(|d| d.size)
+                .unwrap_or(13.0);
+            // Trees failing to build render nothing (logged at ingest).
+            if let Ok(item) = build_node(node, size, None) {
+                items.push(item);
+            }
+        } else if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
             items.push(rich_text(output, size, gap));
         }
     }
@@ -442,6 +453,178 @@ fn lua_cell_text(
 ) -> Option<(String, f32)> {
     let def = defs.iter().find(|d| d.name == name)?;
     outputs.get(name).cloned().map(|text| (text, def.size))
+}
+
+/// One composable UI node, built in Lua via the `ui` table and
+/// interpreted here into iced widgets. Lua never holds real widgets —
+/// it composes these descriptions, which is the entire expressive
+/// range (nesting is free; new primitives add one constructor plus one
+/// match arm below).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WidgetNode {
+    Text(String),
+    Icon(String),
+    Row {
+        children: Vec<WidgetNode>,
+        spacing: f32,
+    },
+    Column {
+        children: Vec<WidgetNode>,
+        spacing: f32,
+    },
+    /// Label plus `on_action()` key. In cells the look is a button but
+    /// clicks fall through to the slot's own popup/`on_press()` (cells
+    /// have no per-button hit regions); in popups it would send the key.
+    Button {
+        label: String,
+        action: String,
+    },
+    Progress(f32),
+}
+
+/// Parse a `render()` table return into a node tree. Scalars coerce to
+/// text like before; malformed structure is an error (logged
+/// once-per-message by the caller, cell renders empty).
+fn parse_node(value: &Value) -> Result<WidgetNode, String> {
+    match value {
+        Value::Table(t) => {
+            let kind: String = match t.get::<Value>("type").map_err(|e| e.to_string())? {
+                Value::String(s) => s.to_string_lossy(),
+                Value::Nil => {
+                    return Err("ui node table needs a type field".to_string());
+                }
+                other => {
+                    return Err(format!(
+                        "ui node type must be a string, got {}",
+                        lua_value_kind(&other)
+                    ));
+                }
+            };
+            match kind.as_str() {
+                "text" => Ok(WidgetNode::Text(coerce_text(
+                    t.get::<Value>("text").map_err(|e| e.to_string())?,
+                    "ui.text()",
+                )?)),
+                "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
+                    Value::String(s) => Ok(WidgetNode::Icon(s.to_string_lossy())),
+                    Value::Nil => Err("ui.icon() needs a name".to_string()),
+                    other => Err(format!(
+                        "ui.icon() name must be a string, got {}",
+                        lua_value_kind(&other)
+                    )),
+                },
+                "row" | "column" => {
+                    let children = match t.get::<Value>("children").map_err(|e| e.to_string())? {
+                        Value::Table(list) => list
+                            .sequence_values::<Value>()
+                            .map(|child| {
+                                child
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|child| parse_node(&child))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        Value::Nil => Vec::new(),
+                        other => {
+                            return Err(format!(
+                                "ui.{}() children must be an array, got {}",
+                                kind,
+                                lua_value_kind(&other)
+                            ));
+                        }
+                    };
+                    let spacing = match t.get::<Value>("spacing").map_err(|e| e.to_string())? {
+                        Value::Nil => 4.0,
+                        Value::Integer(i) => i as f32,
+                        Value::Number(n) => n as f32,
+                        other => {
+                            return Err(format!(
+                                "ui.{}() spacing must be a number, got {}",
+                                kind,
+                                lua_value_kind(&other)
+                            ));
+                        }
+                    };
+                    if kind == "row" {
+                        Ok(WidgetNode::Row { children, spacing })
+                    } else {
+                        Ok(WidgetNode::Column { children, spacing })
+                    }
+                }
+                "button" => {
+                    let label = coerce_text(
+                        t.get::<Value>("label").map_err(|e| e.to_string())?,
+                        "ui.button() label",
+                    )?;
+                    let action = coerce_text(
+                        t.get::<Value>("action").map_err(|e| e.to_string())?,
+                        "ui.button() action",
+                    )?;
+                    Ok(WidgetNode::Button { label, action })
+                }
+                "progress" => match t.get::<Value>("value").map_err(|e| e.to_string())? {
+                    Value::Nil => Ok(WidgetNode::Progress(0.0)),
+                    Value::Integer(i) => Ok(WidgetNode::Progress(i as f32)),
+                    Value::Number(n) => Ok(WidgetNode::Progress(n as f32)),
+                    other => Err(format!(
+                        "ui.progress() value must be a number, got {}",
+                        lua_value_kind(&other)
+                    )),
+                },
+                other => Err(format!("unknown ui node type {other:?}")),
+            }
+        }
+        _ => Ok(WidgetNode::Text(coerce_text(value.clone(), "ui node")?)),
+    }
+}
+
+/// Build an iced element from a node tree. Pure Rust over owned data —
+/// views call this per redraw while Lua only runs on its interval.
+fn build_node(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Option<&dyn Fn(String) -> Plant>,
+) -> Result<Element<'static, Plant>, String> {
+    match node {
+        WidgetNode::Text(content) => Ok(text(content.clone()).size(size.max(1.0)).into()),
+        WidgetNode::Icon(name) => match icon_bytes(name) {
+            Some(bytes) => Ok(lucide_iced::themed_icon(bytes, size.max(1.0))),
+            None => Ok(text(format!("{{icon:{name}}}")).size(size.max(1.0)).into()),
+        },
+        WidgetNode::Row { children, spacing } => {
+            let mut row = row![]
+                .spacing(spacing.max(0.0))
+                .align_y(iced::Alignment::Center)
+                .width(iced::Length::Shrink)
+                .height(iced::Length::Shrink);
+            for child in children {
+                row = row.push(build_node(child, size, button_msg)?);
+            }
+            Ok(row.into())
+        }
+        WidgetNode::Column { children, spacing } => {
+            let mut column = column![]
+                .spacing(spacing.max(0.0))
+                .align_x(iced::Alignment::Center)
+                .width(iced::Length::Shrink)
+                .height(iced::Length::Shrink);
+            for child in children {
+                column = column.push(build_node(child, size, button_msg)?);
+            }
+            Ok(column.into())
+        }
+        WidgetNode::Button { label, action } => {
+            let mut item = button(rich_text(label.clone(), size, 4.0))
+                .padding(6)
+                .style(theme::menu_button(theme::RADIUS));
+            if let Some(make_msg) = button_msg {
+                item = item.on_press(make_msg(action.clone()));
+            }
+            Ok(item.into())
+        }
+        WidgetNode::Progress(frac) => Ok(progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
+            .length(iced::Length::Fixed(120.0))
+            .into()),
+    }
 }
 
 /// Refresh the `sysinfo`/`gfxinfo` globals of one Lua state from live
@@ -495,7 +678,65 @@ fn new_widget_lua() -> mlua::Result<Lua> {
     for key in ["execute", "exit", "remove", "rename", "setlocale"] {
         os.set(key, Value::Nil)?;
     }
+    inject_ui(&lua)?;
     Ok(lua)
+}
+
+/// The `ui` constructors table, present in every widget state next to
+/// `sysinfo`/`gfxinfo`. Each call builds a plain description table —
+/// no iced objects cross into Lua; [`parse_node`] interprets them.
+fn inject_ui(lua: &Lua) -> mlua::Result<()> {
+    fn node(
+        lua: &Lua,
+        node_type: &str,
+        build: impl FnOnce(&mlua::Table) -> mlua::Result<()>,
+    ) -> mlua::Result<mlua::Table> {
+        let t = lua.create_table()?;
+        t.set("type", node_type)?;
+        build(&t)?;
+        Ok(t)
+    }
+    let ui = lua.create_table()?;
+    ui.set(
+        "text",
+        lua.create_function(|lua, text: Value| node(lua, "text", |t| t.set("text", text)))?,
+    )?;
+    ui.set(
+        "icon",
+        lua.create_function(|lua, name: Value| node(lua, "icon", |t| t.set("name", name)))?,
+    )?;
+    ui.set(
+        "row",
+        lua.create_function(|lua, (children, spacing): (Table, Value)| {
+            node(lua, "row", |t| {
+                t.set("children", children)?;
+                t.set("spacing", spacing)
+            })
+        })?,
+    )?;
+    ui.set(
+        "column",
+        lua.create_function(|lua, (children, spacing): (Table, Value)| {
+            node(lua, "column", |t| {
+                t.set("children", children)?;
+                t.set("spacing", spacing)
+            })
+        })?,
+    )?;
+    ui.set(
+        "button",
+        lua.create_function(|lua, (label, action): (Value, Value)| {
+            node(lua, "button", |t| {
+                t.set("label", label)?;
+                t.set("action", action)
+            })
+        })?,
+    )?;
+    ui.set(
+        "progress",
+        lua.create_function(|lua, value: Value| node(lua, "progress", |t| t.set("value", value)))?,
+    )?;
+    lua.globals().set("ui", ui)
 }
 
 /// Load a widget script into its state and verify it defines `render`.
@@ -703,6 +944,7 @@ impl Top {
         id: window::Id,
         widgets: &[WidgetDef],
         outputs: &HashMap<String, String>,
+        trees: &HashMap<String, WidgetNode>,
     ) -> Element<'_, Plant> {
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
@@ -713,6 +955,7 @@ impl Top {
                 self.local.widgets_at(pos),
                 widgets,
                 outputs,
+                trees,
                 gap,
                 horizontal,
             );
@@ -995,13 +1238,14 @@ impl Top {
         Ok(())
     }
 
-    /// Publish fresh system tables and call one widget's `render()`.
-    /// Errors are returned for once-per-message logging by the caller.
-    fn render_lua_widget(
+    /// Publish fresh system tables and call one widget's `render()`,
+    /// returning the raw value. Errors are returned for
+    /// once-per-message logging by the caller.
+    fn render_lua_value(
         plots: &mut Plots,
         def: &crate::config::WidgetDef,
         gpu: Option<f32>,
-    ) -> Result<String, String> {
+    ) -> Result<Value, String> {
         Self::sync_script_state(plots, def);
         Self::ensure_widget_lua(plots, def)?;
         let lua = plots
@@ -1009,7 +1253,43 @@ impl Top {
             .get(&def.name)
             .ok_or_else(|| "runtime missing".to_string())?;
         publish_system_tables(lua, &plots.sysinfo, gpu).map_err(|e| e.to_string())?;
-        call_lua_text(lua, "render")
+        call_lua_value(lua, "render")
+    }
+
+    /// Store one `render()` result: tables become [`WidgetNode`] trees,
+    /// scalars become cached text. Switching shapes clears the other
+    /// cache so nothing stale renders.
+    fn ingest_render_value(
+        plots: &mut Plots,
+        def: &crate::config::WidgetDef,
+        result: Result<Value, String>,
+    ) {
+        match result {
+            Ok(Value::Table(t)) => {
+                plots.widget_last_error.remove(&def.name);
+                plots.widget_outputs.remove(&def.name);
+                match parse_node(&Value::Table(t)) {
+                    Ok(node) => {
+                        plots.widget_trees.insert(def.name.clone(), node);
+                    }
+                    Err(e) => {
+                        plots.widget_trees.remove(&def.name);
+                        Self::note_widget_error(plots, &def.name, e);
+                    }
+                }
+            }
+            Ok(value) => {
+                plots.widget_last_error.remove(&def.name);
+                plots.widget_trees.remove(&def.name);
+                match coerce_text(value, "render()") {
+                    Ok(text) => {
+                        plots.widget_outputs.insert(def.name.clone(), text);
+                    }
+                    Err(e) => Self::note_widget_error(plots, &def.name, e),
+                }
+            }
+            Err(e) => Self::note_widget_error(plots, &def.name, e),
+        }
     }
 
     /// Drop a widget's runtime when its script file changed on disk, so
@@ -1035,6 +1315,7 @@ impl Top {
     pub(crate) fn init_widget_lua(plots: &mut Plots) {
         plots.widget_lua.clear();
         plots.widget_outputs.clear();
+        plots.widget_trees.clear();
         plots.widget_last_run.clear();
         plots.widget_last_error.clear();
         plots.widget_script_mtime.clear();
@@ -1045,12 +1326,8 @@ impl Top {
         let now = Instant::now();
         for def in &defs {
             plots.widget_last_run.insert(def.name.clone(), now);
-            match Self::render_lua_widget(plots, def, gpu) {
-                Ok(text) => {
-                    plots.widget_outputs.insert(def.name.clone(), text);
-                }
-                Err(e) => Self::note_widget_error(plots, &def.name, e),
-            }
+            let result = Self::render_lua_value(plots, def, gpu);
+            Self::ingest_render_value(plots, def, result);
         }
         Self::warn_unknown_slot_widgets(plots);
     }
@@ -1094,16 +1371,17 @@ impl Top {
                 continue;
             }
             plots.widget_last_run.insert(def.name.clone(), now);
-            match Self::render_lua_widget(plots, def, gpu) {
-                Ok(text) => {
-                    plots.widget_last_error.remove(&def.name);
-                    if plots.widget_outputs.get(&def.name) != Some(&text) {
-                        plots.widget_outputs.insert(def.name.clone(), text);
-                        changed = true;
-                    }
-                }
-                Err(e) => Self::note_widget_error(plots, &def.name, e),
-            }
+            let before = (
+                plots.widget_outputs.get(&def.name).cloned(),
+                plots.widget_trees.get(&def.name).cloned(),
+            );
+            let result = Self::render_lua_value(plots, def, gpu);
+            Self::ingest_render_value(plots, def, result);
+            let after = (
+                plots.widget_outputs.get(&def.name).cloned(),
+                plots.widget_trees.get(&def.name).cloned(),
+            );
+            changed |= before != after;
         }
         changed
     }
@@ -2100,5 +2378,100 @@ mod tests {
         let _ = rich_text("12%".to_string(), 13.0, 4.0);
         let _ = rich_text("{icon:cpu} 12%".to_string(), 13.0, 4.0);
         let _ = rich_text("{icon:nope}".to_string(), 13.0, 4.0);
+    }
+
+    #[test]
+    fn ui_constructors_build_description_tables() {
+        let lua = new_widget_lua().expect("sandbox");
+        let node: Table = lua
+            .load(r#"return ui.row({ ui.icon("cpu"), ui.text("42%") }, 8)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(node.get::<String>("type").expect("type"), "row".to_string());
+        assert_eq!(node.get::<f64>("spacing").expect("spacing"), 8.0);
+        let kids: Vec<Table> = node
+            .get::<Table>("children")
+            .expect("children")
+            .sequence_values()
+            .collect::<Result<_, _>>()
+            .expect("sequence");
+        assert_eq!(kids.len(), 2);
+        // Omitted spacing defaults at parse time, not construction.
+        let bare: Table = lua
+            .load(r#"return ui.column({ ui.progress(0.5) })"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&Value::Table(bare)).expect("parse"),
+            WidgetNode::Column {
+                children: vec![WidgetNode::Progress(0.5)],
+                spacing: 4.0,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_node_reads_full_trees_and_rejects_junk() {
+        let lua = new_widget_lua().expect("sandbox");
+        let value: Value = lua
+            .load(
+                r#"return ui.row({ ui.text("hi"), ui.button("go", "run"), 7, { type = "icon", name = "cpu" } })"#,
+            )
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Row {
+                children: vec![
+                    WidgetNode::Text("hi".to_string()),
+                    WidgetNode::Button {
+                        label: "go".to_string(),
+                        action: "run".to_string(),
+                    },
+                    WidgetNode::Text("7".to_string()),
+                    WidgetNode::Icon("cpu".to_string()),
+                ],
+                spacing: 4.0,
+            }
+        );
+        for bad in ["return {}", "return { type = 'nope' }"] {
+            let value: Value = lua.load(bad).eval().expect("eval");
+            assert!(parse_node(&value).is_err(), "rejects {bad}");
+        }
+        // Wrong-typed constructor args fail at eval time instead
+        // (missing ones default: action "" is inert).
+        assert!(lua.load("return ui.row('flat')").eval::<Value>().is_err());
+    }
+
+    #[test]
+    fn build_node_builds_every_primitive_without_a_renderer() {
+        let size = 13.0;
+        let no_msg: Option<&dyn Fn(String) -> Plant> = None;
+        for node in [
+            WidgetNode::Text("hi".to_string()),
+            WidgetNode::Icon("cpu".to_string()),
+            WidgetNode::Icon("typo".to_string()),
+            WidgetNode::Row {
+                children: vec![WidgetNode::Text("a".to_string())],
+                spacing: 2.0,
+            },
+            WidgetNode::Column {
+                children: vec![],
+                spacing: 2.0,
+            },
+            WidgetNode::Button {
+                label: "go".to_string(),
+                action: "run".to_string(),
+            },
+            WidgetNode::Progress(1.5),
+        ] {
+            let _ = build_node(&node, size, no_msg).expect("builds");
+        }
+        // Buttons carry their action into the message when asked.
+        let node = WidgetNode::Button {
+            label: "go".to_string(),
+            action: "run".to_string(),
+        };
+        let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
     }
 }

@@ -77,6 +77,7 @@ pub struct Plots {
     // tick). States are rebuilt on every widgets.toml hot-reload.
     pub(crate) widget_lua: HashMap<String, mlua::Lua>,
     pub(crate) widget_outputs: HashMap<String, String>,
+    pub(crate) widget_trees: HashMap<String, crate::app::layers::top::WidgetNode>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
     pub(crate) widget_last_error: HashMap<String, String>,
     // Script file mtimes per widget (live-reload on edit).
@@ -160,6 +161,7 @@ impl Plots {
             theme_regen_seq: 0,
             widget_lua: HashMap::new(),
             widget_outputs: HashMap::new(),
+            widget_trees: HashMap::new(),
             widget_last_run: HashMap::new(),
             widget_last_error: HashMap::new(),
             widget_script_mtime: HashMap::new(),
@@ -473,7 +475,7 @@ impl Plots {
             Some(PlotInfo::Top(_output)) => self
                 .tops
                 .get(&id)
-                .map(|t| t.view(id, &self.widgets, &self.widget_outputs))
+                .map(|t| t.view(id, &self.widgets, &self.widget_outputs, &self.widget_trees))
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Popup(_output)) => self
                 .popups

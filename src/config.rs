@@ -690,6 +690,15 @@ pub fn config_path() -> PathBuf {
 /// rows calling `on_action(action)`); otherwise `on_press()` runs as
 /// a bare click action and the cell re-renders after it. A popup with
 /// neither text nor items never opens.
+///
+/// `render()` may also return a composable node tree built with the
+/// `ui` constructors (present next to `sysinfo`/`gfxinfo`):
+/// `ui.text(s)`, `ui.icon(name)`, `ui.row({...} [, spacing])`,
+/// `ui.column({...} [, spacing])`, `ui.button(label, action)`,
+/// `ui.progress(0.0-1.0)`. Tables compose freely — e.g.
+/// `ui.row({ ui.icon("cpu"), ui.text("42%") })` — and refresh on the
+/// entry's interval like plain text. Cell buttons are visual only
+/// (clicks run the slot's own popup/`on_press()`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {
