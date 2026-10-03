@@ -689,7 +689,8 @@ pub fn config_path() -> PathBuf {
 /// `text`, `width`/`height`, and clickable `items` (`{ label, action }`
 /// rows calling `on_action(action)`); otherwise `on_press()` runs as
 /// a bare click action and the cell re-renders after it. A popup with
-/// neither text nor items never opens.
+/// neither text nor items never opens. Size without items is just
+/// `{ text = os.date("%A"), width = 300, height = 200 }`.
 ///
 /// `render()` may also return a composable node tree built with the
 /// `ui` constructors (present next to `sysinfo`/`gfxinfo`):
