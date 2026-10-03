@@ -1041,6 +1041,27 @@ impl Top {
                 Err(e) => Self::note_widget_error(plots, &def.name, e),
             }
         }
+        Self::warn_unknown_slot_widgets(plots);
+    }
+
+    /// Warn about slot names that resolve to no registry entry (typos
+    /// and commented-out defs render blank with no other trace).
+    /// Runs at startup and on every hot-reload, when configs change.
+    fn warn_unknown_slot_widgets(plots: &Plots) {
+        for (bar_id, top) in &plots.tops {
+            for (pos, slot) in top.local.widgets.iter().enumerate() {
+                for name in slot {
+                    if !TopLocal::is_empty_widget(name)
+                        && !plots.widgets.iter().any(|d| d.name == *name)
+                    {
+                        eprintln!(
+                            "riced: bar {bar_id:?} slot {} references unknown widget {name:?} (not in widgets.toml)",
+                            pos + 1,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Run every `render()` whose interval elapsed. Returns `true`
