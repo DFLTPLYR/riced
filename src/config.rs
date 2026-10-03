@@ -707,7 +707,9 @@ pub fn config_path() -> PathBuf {
 /// `ui` constructors (present next to `sysinfo`/`gfxinfo`):
 /// `ui.text(s)`, `ui.icon(name)`, `ui.row({...} [, spacing])`,
 /// `ui.column({...} [, spacing])`, `ui.button(label, action)`,
-/// `ui.progress(0.0-1.0)`. Tables compose freely — e.g.
+/// `ui.progress(0.0-1.0)`, `ui.spinner()` (loading ring for slow
+/// fetches — return it first, swap in cached data on later ticks).
+/// Tables compose freely — e.g.
 /// `ui.row({ ui.icon("cpu"), ui.text("42%") })` — and refresh on the
 /// entry's interval like plain text. Cell buttons are per-widget
 /// MouseAreas: clicking one calls that widget's `on_action(action)`
@@ -970,13 +972,19 @@ function popup()
             width = 300,
         }
     end
-    local ok, body = pcall(sys.exec, {
-        "curl", "-sS", "--max-time", "10",
-        "-H", "Authorization: Bearer " .. API_KEY, URL,
-    })
-    if not ok then
-        return { text = "cline: request failed", width = 300 }
+    -- Lazy load: first open returns a spinner instantly (curl blocks
+    -- the tick), caches the body in a global; the refresh tick swaps
+    -- in real rows once cached. Stale cache renders while refetching.
+    if not _usage then
+        return {
+            ui = ui.column({
+                ui.row({ ui.icon("bot"), ui.text("Cline Pass") }),
+                ui.row({ ui.spinner(), ui.text("fetching…") }),
+            }),
+            width = 300,
+        }
     end
+    local body = _usage
     if body:match('"error"') then
         return { text = "cline: unauthorized (bad key?)", width = 300 }
     end
@@ -993,6 +1001,25 @@ function popup()
         rows[#rows + 1] = ui.text("no usage fields parsed")
     end
     return { ui = ui.column(rows), width = 300 }
+end
+
+-- Background fetch on the render interval (globals persist): fills
+-- _usage once, refreshes hourly. popup() never blocks on curl.
+local _last = 0
+function render()
+    if API_KEY ~= "" and (not _usage or (os.time() - _last) > 3600) then
+        local ok, body = pcall(sys.exec, {
+            "curl", "-sS", "--max-time", "10",
+            "-H", "Authorization: Bearer " .. API_KEY, URL,
+        })
+        if ok then
+            _usage = body
+            _last = os.time()
+        elseif not _usage then
+            _usage = '{"error":"fetch failed"}'
+        end
+    end
+    return ui.icon("bot")
 end
 "#;
 

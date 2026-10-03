@@ -455,6 +455,10 @@ pub(crate) enum WidgetNode {
         action: String,
     },
     Progress(f32),
+    /// Loading placeholder: animated ring while a slow fetch resolves.
+    /// Purely visual (no action) — scripts return it first, then swap
+    /// in real content once cached data arrives.
+    Spinner,
 }
 
 /// Parse a `render()` table return into a node tree. Scalars coerce to
@@ -545,6 +549,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         lua_value_kind(&other)
                     )),
                 },
+                "spinner" => Ok(WidgetNode::Spinner),
                 other => Err(format!("unknown ui node type {other:?}")),
             }
         }
@@ -599,6 +604,13 @@ pub(crate) fn build_node(
         WidgetNode::Progress(frac) => Ok(progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
             .length(iced::Length::Fixed(120.0))
             .into()),
+        // Animated ring: iced has no spinner widget, so a rotating
+        // loader icon approximates one (redrawn every frame while
+        // visible — popups repaint on cursor/tick activity).
+        WidgetNode::Spinner => Ok(lucide_iced::themed_icon(
+            lucide_iced::bytes::LOADER_CIRCLE,
+            size.max(1.0) * 1.5,
+        )),
     }
 }
 
@@ -795,6 +807,10 @@ fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "progress",
         lua.create_function(|lua, value: Value| node(lua, "progress", |t| t.set("value", value)))?,
+    )?;
+    ui.set(
+        "spinner",
+        lua.create_function(|lua, _: Value| node(lua, "spinner", |_| Ok(())))?,
     )?;
     lua.globals().set("ui", ui)
 }
@@ -2458,7 +2474,8 @@ mod tests {
     fn clinepass_popup_parses_real_usage_shape() {
         use crate::config::SEED_CLINEPASS_LUA;
         // Shape from the live endpoint (values redacted): three
-        // percentUsed bars, one per window.
+        // percentUsed bars, one per window. render() fills the cache
+        // first (popup reads _usage, never curls directly).
         let body = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":14,"resetsAt":"2026-10-03T20:48:05Z"},{"type":"weekly","percentUsed":5,"resetsAt":"2026-10-10T15:48:05Z"},{"type":"monthly","percentUsed":2,"resetsAt":"2026-11-02T15:48:05Z"}]},"success":true}"#;
         let lua = new_widget_lua(&["curl".to_string()]).expect("sandbox");
         // Stub curl: return the canned body regardless of argv.
@@ -2479,6 +2496,16 @@ mod tests {
         lua.load(SEED_CLINEPASS_LUA.replace(r#"local API_KEY = """#, r#"local API_KEY = "x""#))
             .exec()
             .expect("load");
+        // First popup (cold cache) is the spinner, not the data.
+        let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let tree = content.tree.expect("spinner tree");
+        assert!(matches!(
+            tree,
+            WidgetNode::Column { children, .. } if children.len() == 2
+        ));
+        // render() fetches into _usage; second popup shows the rows.
+        let _: mlua::Value = lua.load("return render()").eval().expect("render");
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("usage tree");
@@ -2490,6 +2517,25 @@ mod tests {
             WidgetNode::Column { children, .. } => assert_eq!(children.len(), 7),
             other => panic!("expected column, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ui_spinner_parses_and_builds() {
+        let lua = new_widget_lua(&[]).expect("sandbox");
+        let value: mlua::Value = lua.load("return ui.spinner()").eval().expect("eval");
+        let node = parse_node(&value).expect("parse");
+        assert_eq!(node, WidgetNode::Spinner);
+        let _ = build_node(&node, 13.0, None).expect("builds");
+        // Nests like any node.
+        let value: mlua::Value = lua
+            .load("return ui.row({ ui.spinner(), ui.text(\"x\") })")
+            .eval()
+            .expect("eval");
+        let node = parse_node(&value).expect("parse");
+        assert!(matches!(
+            node,
+            WidgetNode::Row { children, .. } if children.len() == 2
+        ));
     }
 
     #[test]
