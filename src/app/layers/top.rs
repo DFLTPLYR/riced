@@ -485,7 +485,7 @@ pub(crate) enum WidgetNode {
 /// Parse a `render()` table return into a node tree. Scalars coerce to
 /// text like before; malformed structure is an error (logged
 /// once-per-message by the caller, cell renders empty).
-fn parse_node(value: &Value) -> Result<WidgetNode, String> {
+pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
     match value {
         Value::Table(t) => {
             let kind: String = match t.get::<Value>("type").map_err(|e| e.to_string())? {
@@ -579,7 +579,7 @@ fn parse_node(value: &Value) -> Result<WidgetNode, String> {
 
 /// Build an iced element from a node tree. Pure Rust over owned data —
 /// views call this per redraw while Lua only runs on its interval.
-fn build_node(
+pub(crate) fn build_node(
     node: &WidgetNode,
     size: f32,
     button_msg: Option<&dyn Fn(String) -> Plant>,
@@ -2369,6 +2369,7 @@ mod tests {
     #[test]
     fn lua_popup_content_parses_string_and_table_forms() {
         use crate::app::layers::Popup;
+        use crate::app::layers::top::WidgetNode;
         // Plain strings are just text with defaults.
         let lua = new_widget_lua().expect("sandbox");
         let value: Value = lua.load(r#"return "hi""#).eval().expect("eval");
@@ -2395,6 +2396,15 @@ mod tests {
             .eval()
             .expect("eval");
         assert!(Popup::parse_popup_content(value).is_err());
+        // A ui tree parses into the composed body.
+        let value: Value = lua
+            .load(r#"return { ui = ui.row({ ui.icon("cpu"), ui.text("x") }) }"#)
+            .eval()
+            .expect("eval");
+        let content = Popup::parse_popup_content(value).unwrap();
+        assert!(content.text.is_empty() && content.items.is_empty());
+        let tree = content.tree.expect("tree");
+        assert!(matches!(tree, WidgetNode::Row { .. }));
     }
 
     #[test]

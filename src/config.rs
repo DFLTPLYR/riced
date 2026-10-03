@@ -686,11 +686,12 @@ pub fn config_path() -> PathBuf {
 /// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
 /// Clicking a slot runs widget Lua too: `popup()` (when defined)
 /// toggles a menu with its return — either body text or a table with
-/// `text`, `width`/`height`, and clickable `items` (`{ label, action }`
-/// rows calling `on_action(action)`); otherwise `on_press()` runs as
-/// a bare click action and the cell re-renders after it. A popup with
-/// neither text nor items never opens. Size without items is just
-/// `{ text = os.date("%A"), width = 300, height = 200 }`.
+/// `text`, `width`/`height`, clickable `items` (`{ label, action }`
+/// rows calling `on_action(action)`), and a composed `ui` body (any
+/// `ui.*` tree, rendered above the items); otherwise `on_press()` runs
+/// as a bare click action and the cell re-renders after it. A popup
+/// with no text, tree, or items never opens. Size without items is
+/// just `{ text = os.date("%A"), width = 300, height = 200 }`.
 ///
 /// `render()` may also return a composable node tree built with the
 /// `ui` constructors (present next to `sysinfo`/`gfxinfo`):
@@ -789,7 +790,7 @@ function render()
 end
 
 function popup()
-    return os.date("%A, %d %B %Y")
+    return { ui = ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) }), width = 300 }
 end
 "#;
 
@@ -818,13 +819,20 @@ function render()
 end
 
 function popup()
-    local lines = "CPU  " .. string.format("%.1f%%", sysinfo.cpu_usage) .. "\n"
-        .. "Mem  " .. string.format("%.1f%%", sysinfo.mem_usage)
+    local cpu = string.format("%.1f%%", sysinfo.cpu_usage)
+    local mem = string.format("%.1f%%", sysinfo.mem_usage)
+    local lines = ui.column({
+        ui.row({ ui.icon("cpu"), ui.text("CPU  " .. cpu) }),
+        ui.row({ ui.icon("memory-stick"), ui.text("Mem  " .. mem) }),
+    })
     if details then
-        lines = lines .. "\nCores " .. tostring(sysinfo.cpu_count)
+        lines = ui.column({
+            lines,
+            ui.row({ ui.icon("cpu"), ui.text("Cores " .. tostring(sysinfo.cpu_count)) }),
+        })
     end
     return {
-        text = lines,
+        ui = lines,
         width = 300,
         items = {
             { label = details and "{icon:arrow-up} Less" or "{icon:arrow-down} More",

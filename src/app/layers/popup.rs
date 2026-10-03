@@ -1,7 +1,7 @@
 use super::background::Background;
 use super::top::{
-    Top, TopLocal, call_lua_text, call_lua_value, coerce_text, lua_has_func, lua_value_kind,
-    publish_system_tables, rich_text,
+    Top, TopLocal, WidgetNode, build_node, call_lua_text, call_lua_value, coerce_text,
+    lua_has_func, lua_value_kind, parse_node, publish_system_tables, rich_text,
 };
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
@@ -40,6 +40,8 @@ pub struct Popup {
     pub body: String,
     /// Last rendered clickable rows.
     pub items: Vec<PopupItem>,
+    /// Last rendered composed body (`ui` field).
+    pub tree: Option<WidgetNode>,
     /// Text size, from the widget def at open time.
     pub size: f32,
     /// Box size in px.
@@ -62,6 +64,8 @@ pub(crate) struct PopupContent {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub items: Vec<PopupItem>,
+    /// Composed body from the `ui` field (a `ui.*` tree).
+    pub tree: Option<WidgetNode>,
 }
 
 impl Popup {
@@ -70,9 +74,12 @@ impl Popup {
 
     /// Box size for popup content: explicit dimensions win (clamped
     /// into the output), otherwise width 280 and height from text
-    /// lines plus one row per item.
+    /// lines, one row per item, plus room for a composed tree.
     pub(crate) fn content_size(sw: f32, sh: f32, content: &PopupContent) -> (u32, u32) {
-        let rows = content.text.lines().count() as f32 + content.items.len() as f32;
+        let mut rows = content.text.lines().count() as f32 + content.items.len() as f32;
+        if content.tree.is_some() {
+            rows += 3.0;
+        }
         let auto_h = (44.0 + rows.max(1.0) * 24.0).clamp(80.0, 420.0);
         let w = content
             .width
@@ -88,8 +95,9 @@ impl Popup {
     }
 
     /// Parse a `popup()` return into content: a plain string is just
-    /// body text, a table carries `text`/`width`/`height`/`items`.
-    /// `items` is an array of `{ label, action }` tables.
+    /// body text, a table carries `text`/`width`/`height`/`items` plus
+    /// an optional `ui` tree (any `ui.*` constructor result) rendered
+    /// above the items.
     pub(crate) fn parse_popup_content(value: mlua::Value) -> Result<PopupContent, String> {
         use mlua::Value;
         match value {
@@ -111,6 +119,10 @@ impl Popup {
                 };
                 let width = number("width")?;
                 let height = number("height")?;
+                let tree = match t.get::<Value>("ui").map_err(|e| e.to_string())? {
+                    Value::Nil => None,
+                    other => Some(parse_node(&other)?),
+                };
                 let mut items = Vec::new();
                 match t.get::<Value>("items").map_err(|e| e.to_string())? {
                     Value::Nil => {}
@@ -142,6 +154,7 @@ impl Popup {
                     width,
                     height,
                     items,
+                    tree,
                 })
             }
             other => Ok(PopupContent {
@@ -302,8 +315,8 @@ impl Popup {
             },
             None => return None,
         };
-        // An empty menu (no text, no items) opens nothing.
-        if body.text.trim().is_empty() && body.items.is_empty() {
+        // An empty menu (no text, tree, or items) opens nothing.
+        if body.text.trim().is_empty() && body.items.is_empty() && body.tree.is_none() {
             return None;
         }
         let (_, _, sw, sh) = Background::available_rect(output, &plots.output_infos)?;
@@ -376,6 +389,7 @@ impl Popup {
                 widget: name,
                 body: body.text,
                 items: body.items,
+                tree: body.tree,
                 size: size_text,
                 w,
                 h,
@@ -395,6 +409,12 @@ impl Popup {
         let mut content = column![].spacing(4);
         if !self.body.trim().is_empty() {
             content = content.push(rich_text(self.body.clone(), self.size, 4.0));
+        }
+        if let Some(tree) = &self.tree {
+            // Trees failing to build were rejected at parse/refresh.
+            if let Ok(node) = build_node(tree, self.size, None) {
+                content = content.push(node);
+            }
         }
         for item in &self.items {
             let action = item.action.clone();
@@ -461,10 +481,13 @@ impl Popup {
             match content {
                 Some(content) => {
                     if let Some(popup) = plots.popups.get_mut(&pid)
-                        && (popup.body != content.text || popup.items != content.items)
+                        && (popup.body != content.text
+                            || popup.items != content.items
+                            || popup.tree != content.tree)
                     {
                         popup.body = content.text;
                         popup.items = content.items;
+                        popup.tree = content.tree;
                     }
                 }
                 None => cmds.push(Self::handle_dismiss(plots, pid)),
@@ -636,6 +659,12 @@ mod tests {
         };
         assert_eq!(Popup::content_size(1920.0, 1080.0, &custom), (500, 64));
         assert_eq!(Popup::content_size(200.0, 100.0, &custom), (200, 64));
+        // A composed tree reserves room even with no text or items.
+        let treed = PopupContent {
+            tree: Some(WidgetNode::Text("hi".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &treed), (280, 116));
     }
 
     #[test]
