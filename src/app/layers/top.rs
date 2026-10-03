@@ -273,8 +273,10 @@ impl From<&crate::config::TopConfig> for TopLocal {
 
 /// Lucide icon bytes by name (`{icon:cpu}` in widget text). Lookup is
 /// case-insensitive and ignores `-_ ` separators, so `memory-stick`,
-/// `memory_stick` and `MemoryStick` all work. Unknown names render as
-/// literal text so typos stay visible.
+/// `memory_stick` and `MemoryStick` all resolve. Covers the full
+/// Lucide set generated at build time (~1850 icons) plus short
+/// aliases (`mem`, `vol`, `up`...). Unknown names render as literal
+/// text so typos stay visible.
 fn icon_bytes(name: &str) -> Option<&'static [u8]> {
     use lucide_iced::bytes::*;
     let key: String = name
@@ -282,43 +284,59 @@ fn icon_bytes(name: &str) -> Option<&'static [u8]> {
         .filter(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
         .to_lowercase();
-    match key.as_str() {
-        "cpu" => Some(CPU),
-        "gpu" => Some(GPU),
-        "memory" | "memorystick" | "mem" | "ram" => Some(MEMORY_STICK),
-        "thermometer" | "temp" => Some(THERMOMETER),
-        "thermometersun" => Some(THERMOMETER_SUN),
-        "harddrive" | "disk" => Some(HARD_DRIVE),
-        "wifi" => Some(WIFI),
-        "wifioff" => Some(WIFI_OFF),
-        "signal" => Some(SIGNAL),
-        "network" => Some(NETWORK),
-        "battery" => Some(BATTERY),
-        "batterycharging" => Some(BATTERY_CHARGING),
-        "activity" => Some(ACTIVITY),
-        "gauge" => Some(GAUGE),
-        "chartline" | "chart" => Some(CHART_LINE),
-        "zap" => Some(ZAP),
-        "fan" => Some(FAN),
-        "monitor" => Some(MONITOR),
-        "volume2" | "volume" | "vol" => Some(VOLUME_2),
-        "volumex" | "mute" => Some(VOLUME_X),
-        "heart" => Some(HEART),
-        "heartpulse" => Some(HEART_PULSE),
-        "clock" => Some(CLOCK),
-        "calendar" => Some(CALENDAR),
-        "sun" => Some(SUN),
-        "moon" => Some(MOON),
-        "cloud" => Some(CLOUD),
-        "download" => Some(DOWNLOAD),
-        "upload" => Some(UPLOAD),
-        "arrowup" | "up" => Some(ARROW_UP),
-        "arrowdown" | "down" => Some(ARROW_DOWN),
-        "power" => Some(POWER),
-        "settings" => Some(SETTINGS),
-        "bell" => Some(BELL),
-        _ => None,
-    }
+    Some(match key.as_str() {
+        "bot" | "robot" => BOT,
+        "botmessage" | "botmessagesquare" => BOT_MESSAGE_SQUARE,
+        "botoff" => BOT_OFF,
+        "cpu" => CPU,
+        "gpu" => GPU,
+        "memory" | "memorystick" | "mem" | "ram" => MEMORY_STICK,
+        "thermometer" | "temp" => THERMOMETER,
+        "thermometersun" => THERMOMETER_SUN,
+        "harddrive" | "disk" => HARD_DRIVE,
+        "wifi" => WIFI,
+        "wifioff" => WIFI_OFF,
+        "signal" => SIGNAL,
+        "network" => NETWORK,
+        "battery" => BATTERY,
+        "batterycharging" => BATTERY_CHARGING,
+        "activity" => ACTIVITY,
+        "gauge" => GAUGE,
+        "chartline" | "chart" => CHART_LINE,
+        "zap" => ZAP,
+        "fan" => FAN,
+        "monitor" => MONITOR,
+        "volume2" | "volume" | "vol" => VOLUME_2,
+        "volumex" | "mute" => VOLUME_X,
+        "heart" => HEART,
+        "heartpulse" => HEART_PULSE,
+        "clock" => CLOCK,
+        "calendar" => CALENDAR,
+        "sun" => SUN,
+        "moon" => MOON,
+        "cloud" => CLOUD,
+        "download" => DOWNLOAD,
+        "upload" => UPLOAD,
+        "arrowup" | "up" => ARROW_UP,
+        "arrowdown" | "down" => ARROW_DOWN,
+        "power" => POWER,
+        "settings" => SETTINGS,
+        "bell" => BELL,
+        _ => return icon_bytes_generated(&key),
+    })
+}
+
+/// Fallback: full generated Lucide set (~1850 icons) via a sorted
+/// name table + binary search (no per-icon match arms, no startup
+/// map). Names are SNAKE_UPPER (`MEMORY_STICK`); the key is already
+/// normalized lowercase-alphanumeric. Regenerate
+/// `icon_table.rs` with the one-liner in its header when bumping
+/// lucide-iced.
+fn icon_bytes_generated(key: &str) -> Option<&'static [u8]> {
+    super::icon_table::ICON_TABLE
+        .binary_search_by(|(name, _)| name.cmp(&key))
+        .ok()
+        .map(|i| super::icon_table::ICON_TABLE[i].1)
 }
 
 /// One piece of widget text: plain text or an `{icon:name}` reference.
@@ -2355,6 +2373,11 @@ mod tests {
         assert!(icon_bytes("MemoryStick").is_some());
         assert!(icon_bytes("mem").is_some());
         assert!(icon_bytes("disk").is_some());
+        // Full set, not just the hand-match: generated fallback.
+        assert!(icon_bytes("bot").is_some());
+        assert!(icon_bytes("Bot").is_some());
+        assert!(icon_bytes("robot-vacuum").is_some());
+        assert!(icon_bytes("house").is_some());
         assert!(icon_bytes("nope").is_none());
         assert!(icon_bytes("").is_none());
     }
