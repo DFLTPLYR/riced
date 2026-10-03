@@ -684,6 +684,9 @@ pub fn config_path() -> PathBuf {
 /// when the GPU exposes nothing readable). Cell text may embed
 /// `{icon:name}` placeholders for theme-aware Lucide icons, e.g.
 /// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
+/// Clicking a slot runs widget Lua too: `popup()` (when defined)
+/// toggles a menu with its return text, otherwise `on_press()` runs
+/// as a bare click action and the cell re-renders after it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {
@@ -765,11 +768,15 @@ size = 13.0
 "#;
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
-/// Globals persist between `render()` calls; only `render()` is invoked.
+/// Globals persist between calls; clicking the cell toggles the date menu.
 const SEED_CLOCK_LUA: &str = r#"-- Clock widget: the returned string is the bar cell text.
--- Called every `interval` seconds.
+-- Called every `interval` seconds. Clicking toggles the date menu.
 function render()
     return os.date("%H:%M")
+end
+
+function popup()
+    return os.date("%A, %d %B %Y")
 end
 "#;
 

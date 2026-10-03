@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
-use super::layers::{Background, ContextMenu, SelectionRect, Setting, Top};
+use super::layers::{Background, ContextMenu, Popup, SelectionRect, Setting, Top};
 use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, SettingEvent, TopEvent};
 use crate::config::{Config, ConfigPatch};
 use iced_wayland_subscriber::OutputInfo;
@@ -44,6 +44,7 @@ fn throttled_graft(
 pub struct Plots {
     pub(crate) ids: HashMap<iced::window::Id, PlotInfo>,
     pub(crate) tops: HashMap<iced::window::Id, Top>,
+    pub(crate) popups: HashMap<iced::window::Id, Popup>,
     pub(crate) settings: HashMap<iced::window::Id, Setting>,
     pub(crate) backgrounds: HashMap<OutputId, Background>,
     pub(crate) background_ids: HashMap<OutputId, iced::window::Id>,
@@ -78,6 +79,8 @@ pub struct Plots {
     pub(crate) widget_outputs: HashMap<String, String>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
     pub(crate) widget_last_error: HashMap<String, String>,
+    // Script file mtimes per widget (live-reload on edit).
+    pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
     // Live system snapshot for the `sysinfo` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
     pub(crate) sysinfo: sysinfo::System,
@@ -111,6 +114,7 @@ pub(crate) enum PlotInfo {
     Setting,
     Background(OutputId),
     Top(OutputId),
+    Popup(OutputId),
 }
 
 impl Plots {
@@ -129,6 +133,7 @@ impl Plots {
         let mut plots = Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
+            popups: HashMap::new(),
             settings: HashMap::new(),
             backgrounds: HashMap::new(),
             background_ids: HashMap::new(),
@@ -157,6 +162,7 @@ impl Plots {
             widget_outputs: HashMap::new(),
             widget_last_run: HashMap::new(),
             widget_last_error: HashMap::new(),
+            widget_script_mtime: HashMap::new(),
             sysinfo,
         };
         // Render Lua widgets once so bars populate on the first frame
@@ -469,6 +475,11 @@ impl Plots {
                 .get(&id)
                 .map(|t| t.view(id, &self.widgets, &self.widget_outputs))
                 .unwrap_or_else(|| Space::new().into()),
+            Some(PlotInfo::Popup(_output)) => self
+                .popups
+                .get(&id)
+                .map(|p| p.view())
+                .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
         }
@@ -485,6 +496,10 @@ impl Plots {
                         PlotInfo::Top(_) => {
                             self.ids.remove(&id);
                             self.tops.remove(&id);
+                        }
+                        PlotInfo::Popup(_) => {
+                            self.ids.remove(&id);
+                            self.popups.remove(&id);
                         }
                         PlotInfo::Background(output) => {
                             self.ids.remove(&id);
@@ -648,6 +663,13 @@ impl Plots {
                         WindowAction::Close(wid),
                     )));
                 }
+                // popups live on the same output (delegated to Popup layer)
+                for wid in Popup::remove_for_output(&mut self.popups, &mut self.ids, output_id) {
+                    self.last_cursor.remove(&wid);
+                    cmds.push(iced_runtime::task::effect(Action::Window(
+                        WindowAction::Close(wid),
+                    )));
+                }
                 self.output_infos.remove(&output_id);
                 // clear global selection if it was on removed output (will hide via intersect check)
                 if cmds.is_empty() {
@@ -756,10 +778,21 @@ impl Plots {
             Plant::Config(ConfigEvent::WidgetsReloaded(defs)) => {
                 // `widgets.toml` changed under us: swap the live registry
                 // and rebuild Lua states (scripts may have changed too).
-                // Bars re-resolve slot names on the next redraw (Scope::All).
+                // Open menus reference dead states, so they close;
+                // bars re-resolve slot names on the next redraw (Scope::All).
                 self.widgets = defs;
                 Top::init_widget_lua(self);
-                Command::none()
+                let stale: Vec<iced::window::Id> = self.popups.keys().copied().collect();
+                if stale.is_empty() {
+                    Command::none()
+                } else {
+                    Command::batch(
+                        stale
+                            .into_iter()
+                            .map(|id| Popup::handle_dismiss(self, id))
+                            .collect::<Vec<_>>(),
+                    )
+                }
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
                 // Local-first single source of truth: mutate the live
@@ -893,7 +926,8 @@ impl Plots {
                 Top::handle_set_slot_spacing(self, id, value)
             }
             Plant::TopPlot(TopEvent::WidgetTick) => Top::handle_widget_tick(self),
-            Plant::TopPlot(TopEvent::WidgetsChanged) => Command::none(),
+            Plant::TopPlot(TopEvent::WidgetsChanged) => Popup::refresh_bodies(self),
+            Plant::TopPlot(TopEvent::PopupDismiss(id)) => Popup::handle_dismiss(self, id),
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
                 Top::handle_set_opacity(self, id, value)
             }
@@ -999,6 +1033,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::SetSlotPadding(..))
         | Plant::TopPlot(TopEvent::SetSlotSpacing(..))
         | Plant::TopPlot(TopEvent::WidgetsChanged)
+        | Plant::TopPlot(TopEvent::PopupDismiss(..))
         | Plant::TopPlot(TopEvent::SetOpacity(..))
         | Plant::TopPlot(TopEvent::SetFloating(..))
         | Plant::TopPlot(TopEvent::SetMarginTop(..))

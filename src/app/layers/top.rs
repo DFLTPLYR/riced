@@ -1,3 +1,4 @@
+use super::Popup;
 use super::background::Background;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::{Plant, TopEvent};
@@ -358,7 +359,7 @@ fn icon_segments(output: &str) -> Vec<Segment<'_>> {
 /// Lucide icons (they inherit the surrounding text color, so they
 /// follow the theme like text does). Plain text without placeholders
 /// renders as a single text element, exactly like before.
-fn rich_text(output: String, size: f32, spacing: f32) -> Element<'static, Plant> {
+pub(crate) fn rich_text(output: String, size: f32, spacing: f32) -> Element<'static, Plant> {
     let size = size.max(1.0);
     if !output.contains("{icon:") {
         return text(output).size(size).into();
@@ -448,7 +449,11 @@ fn lua_cell_text(
 /// `sysinfo.cpu_count`, `sysinfo.mem_used`/`mem_total` (bytes),
 /// `sysinfo.mem_usage` (%), and `gfxinfo.usage` (% or nil when the
 /// GPU exposes nothing readable).
-fn publish_system_tables(lua: &Lua, sys: &sysinfo::System, gpu: Option<f32>) -> mlua::Result<()> {
+pub(crate) fn publish_system_tables(
+    lua: &Lua,
+    sys: &sysinfo::System,
+    gpu: Option<f32>,
+) -> mlua::Result<()> {
     let globals = lua.globals();
     let info = lua.create_table()?;
     info.set("cpu_usage", sys.global_cpu_usage())?;
@@ -472,33 +477,6 @@ fn publish_system_tables(lua: &Lua, sys: &sysinfo::System, gpu: Option<f32>) -> 
     }
     globals.set("gfxinfo", gfx)?;
     Ok(())
-}
-
-/// GPU busy % from DRM sysfs (AMD + Intel expose `gpu_busy_percent`
-/// per card; NVIDIA needs NVML and reads as unavailable). Busiest
-/// card wins on multi-GPU setups.
-fn gpu_usage_percent() -> Option<f32> {
-    gpu_usage_in(std::path::Path::new("/sys/class/drm"))
-}
-
-fn gpu_usage_in(drm: &std::path::Path) -> Option<f32> {
-    std::fs::read_dir(drm)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.file_name().to_str().is_some_and(|name| {
-                name.strip_prefix("card").is_some_and(|rest| {
-                    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-                })
-            })
-        })
-        .filter_map(|entry| {
-            std::fs::read_to_string(entry.path().join("device/gpu_busy_percent")).ok()
-        })
-        .filter_map(|text| text.trim().parse::<f32>().ok())
-        .fold(None, |busiest: Option<f32>, usage| {
-            Some(busiest.map_or(usage, |peak| peak.max(usage)))
-        })
 }
 
 /// Sandboxed Lua state for one widget: string/table/math/os only, no
@@ -544,10 +522,11 @@ fn lua_value_kind(value: &Value) -> &'static str {
     }
 }
 
-/// Call a widget's `render()`, tolerantly coerced to text (numbers and
-/// booleans stringify, `nil` is empty). Anything else is an error.
-fn call_widget_render(lua: &Lua) -> Result<String, String> {
-    let render: Function = lua.globals().get("render").map_err(|e| e.to_string())?;
+/// Call a widget script function (`render`, `popup`, ...), tolerantly
+/// coerced to text (numbers and booleans stringify, `nil` is empty).
+/// Anything else is an error.
+pub(crate) fn call_lua_text(lua: &Lua, func: &str) -> Result<String, String> {
+    let render: Function = lua.globals().get(func).map_err(|e| e.to_string())?;
     match render.call::<Value>(()).map_err(|e| e.to_string())? {
         Value::String(s) => Ok(s.to_string_lossy()),
         Value::Integer(i) => Ok(i.to_string()),
@@ -555,10 +534,28 @@ fn call_widget_render(lua: &Lua) -> Result<String, String> {
         Value::Boolean(b) => Ok(b.to_string()),
         Value::Nil => Ok(String::new()),
         other => Err(format!(
-            "render() must return a string, got {}",
+            "{func}() must return a string, got {}",
             lua_value_kind(&other)
         )),
     }
+}
+
+/// Does a widget state define a callable global (`popup`, `on_press`)?
+/// Missing states and non-function globals read as absent, never an error.
+pub(crate) fn lua_has_func(states: &HashMap<String, mlua::Lua>, name: &str, func: &str) -> bool {
+    states.get(name).is_some_and(|lua| {
+        lua.globals()
+            .get::<Function>(func)
+            .map(|_| true)
+            .unwrap_or(false)
+    })
+}
+
+/// Run a widget's `on_press()` click action. The return value is ignored;
+/// scripts signal through globals that the next `render()` reads.
+fn call_lua_action(lua: &Lua) -> Result<(), String> {
+    let action: Function = lua.globals().get("on_press").map_err(|e| e.to_string())?;
+    action.call::<()>(()).map_err(|e| e.to_string())
 }
 
 impl Top {
@@ -953,7 +950,7 @@ impl Top {
     /// Log a widget error once per message (a broken 1s script must not
     /// flood the log every tick; fixing the file logs nothing new until
     /// it breaks differently).
-    fn note_widget_error(plots: &mut Plots, name: &str, err: String) {
+    pub(crate) fn note_widget_error(plots: &mut Plots, name: &str, err: String) {
         if plots
             .widget_last_error
             .get(name)
@@ -989,13 +986,31 @@ impl Top {
         def: &crate::config::WidgetDef,
         gpu: Option<f32>,
     ) -> Result<String, String> {
+        Self::sync_script_state(plots, def);
         Self::ensure_widget_lua(plots, def)?;
         let lua = plots
             .widget_lua
             .get(&def.name)
             .ok_or_else(|| "runtime missing".to_string())?;
         publish_system_tables(lua, &plots.sysinfo, gpu).map_err(|e| e.to_string())?;
-        call_widget_render(lua)
+        call_lua_text(lua, "render")
+    }
+
+    /// Drop a widget's runtime when its script file changed on disk, so
+    /// the next render reloads it (live widget development without
+    /// touching `widgets.toml`). Unreadable files keep the old state.
+    fn sync_script_state(plots: &mut Plots, def: &crate::config::WidgetDef) {
+        let path = Self::widget_script_path(def);
+        let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            return;
+        };
+        match plots.widget_script_mtime.get(&def.name) {
+            Some(known) if *known == mtime => {}
+            _ => {
+                plots.widget_lua.remove(&def.name);
+                plots.widget_script_mtime.insert(def.name.clone(), mtime);
+            }
+        }
     }
 
     /// (Re)build runtimes for every def and render once, so bars
@@ -1006,9 +1021,10 @@ impl Top {
         plots.widget_outputs.clear();
         plots.widget_last_run.clear();
         plots.widget_last_error.clear();
+        plots.widget_script_mtime.clear();
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
-        let gpu = gpu_usage_percent();
+        let gpu = Popup::gpu_usage_percent();
         let defs = plots.widgets.clone();
         let now = Instant::now();
         for def in &defs {
@@ -1028,7 +1044,7 @@ impl Top {
         let now = Instant::now();
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
-        let gpu = gpu_usage_percent();
+        let gpu = Popup::gpu_usage_percent();
         let defs = plots.widgets.clone();
         let mut changed = false;
         for def in &defs {
@@ -1265,6 +1281,16 @@ impl Top {
     pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
         plots.last_cursor.remove(&bar_id);
         plots.press_starts.remove(&bar_id);
+        let mut cmds = Vec::new();
+        // A bar going away takes its popup with it.
+        let popup_id = plots
+            .popups
+            .iter()
+            .find(|(_, p)| p.bar_id == bar_id)
+            .map(|(id, _)| *id);
+        if let Some(pid) = popup_id {
+            cmds.push(super::Popup::handle_dismiss(plots, pid));
+        }
         if let Some(top) = plots.tops.remove(&bar_id) {
             plots.ids.remove(&bar_id);
             if top.bar_index < plots.config.bar.len() {
@@ -1283,7 +1309,10 @@ impl Top {
         } else {
             plots.ids.remove(&bar_id);
         }
-        iced_runtime::task::effect(Action::Window(WindowAction::Close(bar_id)))
+        cmds.push(iced_runtime::task::effect(Action::Window(
+            WindowAction::Close(bar_id),
+        )));
+        Command::batch(cmds)
     }
 
     /// Push the bar's current size/exclusive/margins to its live window.
@@ -1362,6 +1391,8 @@ impl Top {
             return Command::none();
         }
         let start = plots.press_starts.remove(&id);
+        let clicked = button == Button::Left
+            && matches!(&start, Some(t) if t.elapsed() < Self::HOLD_THRESHOLD);
         match start {
             Some(t) if t.elapsed() >= Self::HOLD_THRESHOLD => {
                 println!("top hold {button:?} on {id:?} after {:?}", t.elapsed());
@@ -1374,7 +1405,146 @@ impl Top {
             // same-window release fires both PanelWindow and Graft paths.
             None => {}
         }
+        if clicked {
+            return Self::handle_slot_click(plots, id);
+        }
         Command::none()
+    }
+
+    /// Left-click on a bar under the hold threshold: resolve the slot
+    /// under the cursor and either toggle its widget popup or run its
+    /// `on_press()` action. A slot holding both prefers the popup.
+    pub(crate) fn handle_slot_click(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
+        let (output, top) = match plots.ids.get(&bar_id).copied() {
+            Some(PlotInfo::Top(o)) => match plots.tops.get(&bar_id).cloned() {
+                Some(t) => (o, t),
+                None => return Command::none(),
+            },
+            _ => return Command::none(),
+        };
+        let Some((_, _, sw, sh)) = Background::available_rect(output, &plots.output_infos) else {
+            return Command::none();
+        };
+        let horizontal = top.is_horizontal();
+        let (bw, bh) = top.local.px_size(sw, sh, horizontal);
+        let full_length = top.local.length_pct >= 100.0;
+        let (bx, by) = Popup::bar_origin(top.anchor(), bw as f32, bh as f32, sw, sh, full_length);
+        // Content rect: floating margins inset the painted cells.
+        let (pl, pt, pr, pb) = if top.local.floating {
+            let m = top.local.margins;
+            (
+                m.left.max(0) as f32,
+                m.top.max(0) as f32,
+                m.right.max(0) as f32,
+                m.bottom.max(0) as f32,
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+        let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
+        let cursor = plots
+            .last_cursor
+            .get(&bar_id)
+            .copied()
+            .map(|p| Point::new(p.x + bx, p.y + by));
+        let pos = cursor
+            .and_then(|p| {
+                Popup::slot_at_point(
+                    (bx + pl, by + pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
+                    n,
+                    gap,
+                    horizontal,
+                    p,
+                )
+            })
+            .or_else(|| {
+                // No cursor (or gap click): first slot holding a popup widget.
+                (0..n).find(|pos| {
+                    top.local
+                        .widgets_at(*pos)
+                        .iter()
+                        .any(|w| lua_has_func(&plots.widget_lua, w, "popup"))
+                })
+            });
+        let Some(pos) = pos else {
+            return Command::none();
+        };
+        // Toggle: a popup already open for this bar closes first; same
+        // slot means it was just a close.
+        let mut cmds = Vec::new();
+        if let Some(pid) = plots
+            .popups
+            .iter()
+            .find(|(_, p)| p.bar_id == bar_id)
+            .map(|(id, _)| *id)
+        {
+            let same = plots.popups.get(&pid).is_some_and(|p| p.slot == pos);
+            cmds.push(Popup::handle_dismiss(plots, pid));
+            if same {
+                return Command::batch(cmds);
+            }
+        }
+        let names = top.local.widgets_at(pos).to_vec();
+        // Anchor the menu at the click, falling back to the slot center.
+        let anchor = cursor.unwrap_or_else(|| {
+            Popup::slot_center(
+                (bx, by, bw as f32, bh as f32),
+                (pl, pt, pr, pb),
+                n,
+                gap,
+                horizontal,
+                pos,
+            )
+        });
+        if names
+            .iter()
+            .any(|w| lua_has_func(&plots.widget_lua, w, "popup"))
+        {
+            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos, anchor) {
+                cmds.push(cmd);
+            }
+            return if cmds.is_empty() {
+                Command::none()
+            } else {
+                Command::batch(cmds)
+            };
+        }
+        // No menu: run the first `on_press()` action in the slot, then
+        // re-render that widget (a toggle flips its next output).
+        if let Some(name) = names
+            .iter()
+            .find(|w| lua_has_func(&plots.widget_lua, w, "on_press"))
+            .cloned()
+        {
+            let gpu = Popup::gpu_usage_percent();
+            let outcome = match plots.widget_lua.get(&name) {
+                Some(lua) => {
+                    let acted = publish_system_tables(lua, &plots.sysinfo, gpu)
+                        .map_err(|e| e.to_string())
+                        .and_then(|()| call_lua_action(lua))
+                        .and_then(|()| call_lua_text(lua, "render"));
+                    Some(acted)
+                }
+                None => None,
+            };
+            match outcome {
+                Some(Ok(text)) => {
+                    plots.widget_last_error.remove(&name);
+                    if plots.widget_outputs.get(&name) != Some(&text) {
+                        plots.widget_outputs.insert(name, text);
+                        cmds.push(Command::done(Plant::TopPlot(TopEvent::WidgetsChanged)));
+                    }
+                }
+                Some(Err(e)) => Self::note_widget_error(plots, &name, e),
+                None => {}
+            }
+        }
+        if cmds.is_empty() {
+            Command::none()
+        } else {
+            Command::batch(cmds)
+        }
     }
 
     /// Cursor bookkeeping for Top windows — press/release come from PanelWindow.
@@ -1626,20 +1796,20 @@ mod tests {
     fn lua_sandbox_runs_render() {
         let lua = new_widget_lua().expect("sandbox");
         load_widget_script(&lua, "test", "function render() return 'hi' end").expect("load");
-        assert_eq!(call_widget_render(&lua).unwrap(), "hi");
+        assert_eq!(call_lua_text(&lua, "render").unwrap(), "hi");
     }
 
     #[test]
     fn lua_return_values_coerce_to_text() {
         let lua = new_widget_lua().expect("sandbox");
         load_widget_script(&lua, "test", "function render() return 42 end").expect("load");
-        assert_eq!(call_widget_render(&lua).unwrap(), "42");
+        assert_eq!(call_lua_text(&lua, "render").unwrap(), "42");
         load_widget_script(&lua, "test", "function render() return true end").expect("load");
-        assert_eq!(call_widget_render(&lua).unwrap(), "true");
+        assert_eq!(call_lua_text(&lua, "render").unwrap(), "true");
         load_widget_script(&lua, "test", "function render() return nil end").expect("load");
-        assert_eq!(call_widget_render(&lua).unwrap(), "");
+        assert_eq!(call_lua_text(&lua, "render").unwrap(), "");
         load_widget_script(&lua, "test", "function render() return {} end").expect("load");
-        assert!(call_widget_render(&lua).is_err());
+        assert!(call_lua_text(&lua, "render").is_err());
     }
 
     #[test]
@@ -1724,22 +1894,6 @@ mod tests {
     }
 
     #[test]
-    fn gpu_reader_picks_busiest_card() {
-        let dir = std::env::temp_dir().join(format!("riced-gpu-{}", std::process::id()));
-        let card0 = dir.join("card0/device");
-        let card1 = dir.join("card1/device");
-        let _ = std::fs::create_dir_all(&card0);
-        let _ = std::fs::create_dir_all(&card1);
-        // Connectors look like cards but are not all-digit suffixes.
-        let _ = std::fs::create_dir_all(dir.join("card0-DP-1"));
-        std::fs::write(card0.join("gpu_busy_percent"), "12\n").unwrap();
-        std::fs::write(card1.join("gpu_busy_percent"), "78\n").unwrap();
-        assert_eq!(gpu_usage_in(&dir), Some(78.0));
-        assert_eq!(gpu_usage_in(&dir.join("missing")), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn slot_gaps_clamp_to_range() {
         use crate::config::TopConfig;
         let cfg = TopConfig {
@@ -1789,7 +1943,7 @@ mod tests {
             let lua = new_widget_lua().expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
             publish_system_tables(&lua, &sys, None).expect("publish");
-            let out = call_widget_render(&lua).expect("render");
+            let out = call_lua_text(&lua, "render").expect("render");
             assert!(!out.is_empty(), "seed must render text");
             assert!(
                 !out.contains("{icon:"),
@@ -1807,6 +1961,37 @@ mod tests {
         assert_eq!(SlotAlign::Start.for_bar(false), (A::Center, A::Start));
         assert_eq!(SlotAlign::End.for_bar(false), (A::Center, A::End));
         assert_eq!(SlotAlign::Center.for_bar(false), (A::Center, A::Center));
+    }
+
+    #[test]
+    fn lua_popup_and_press_contract() {
+        // popup() renders the menu body.
+        let lua = new_widget_lua().expect("sandbox");
+        load_widget_script(
+            &lua,
+            "test",
+            "function render() return 'x' end\nfunction popup() return 'menu' end",
+        )
+        .expect("load");
+        assert_eq!(call_lua_text(&lua, "popup").unwrap(), "menu");
+        // on_press() mutates script state; the next render reflects it.
+        let lua = new_widget_lua().expect("sandbox");
+        load_widget_script(
+            &lua,
+            "test",
+            "flag = false\nfunction render() return flag and 1 or 0 end\nfunction on_press() flag = true end",
+        )
+        .expect("load");
+        call_lua_action(&lua).expect("action");
+        assert_eq!(call_lua_text(&lua, "render").unwrap(), "1");
+        // Missing functions are absent, never errors at lookup.
+        let mut states = HashMap::new();
+        states.insert("w".to_string(), new_widget_lua().expect("sandbox"));
+        load_widget_script(&states["w"], "w", "function render() return 'x' end").expect("load");
+        assert!(!lua_has_func(&states, "w", "popup"));
+        assert!(!lua_has_func(&states, "w", "on_press"));
+        assert!(!lua_has_func(&states, "missing", "render"));
+        assert!(call_lua_action(&states["w"]).is_err());
     }
 
     #[test]
