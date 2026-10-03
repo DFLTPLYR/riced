@@ -685,8 +685,11 @@ pub fn config_path() -> PathBuf {
 /// `{icon:name}` placeholders for theme-aware Lucide icons, e.g.
 /// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
 /// Clicking a slot runs widget Lua too: `popup()` (when defined)
-/// toggles a menu with its return text, otherwise `on_press()` runs
-/// as a bare click action and the cell re-renders after it.
+/// toggles a menu with its return — either body text or a table with
+/// `text`, `width`/`height`, and clickable `items` (`{ label, action }`
+/// rows calling `on_action(action)`); otherwise `on_press()` runs as
+/// a bare click action and the cell re-renders after it. A popup with
+/// neither text nor items never opens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetDef {
@@ -792,10 +795,35 @@ end
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
 const SEED_STATS_LUA: &str = r#"-- System stats: theme-aware icons plus live CPU/memory.
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
+-- Clicking toggles a menu with a details switch (custom size + action).
+local details = false
+
 function render()
     local cpu = string.format("%.0f", sysinfo.cpu_usage)
     local mem = string.format("%.0f", sysinfo.mem_usage)
     return "{icon:cpu} " .. cpu .. "%  {icon:memory-stick} " .. mem .. "%"
+end
+
+function popup()
+    local lines = "CPU  " .. string.format("%.1f%%", sysinfo.cpu_usage) .. "\n"
+        .. "Mem  " .. string.format("%.1f%%", sysinfo.mem_usage)
+    if details then
+        lines = lines .. "\nCores " .. tostring(sysinfo.cpu_count)
+    end
+    return {
+        text = lines,
+        width = 300,
+        items = {
+            { label = details and "{icon:arrow-up} Less" or "{icon:arrow-down} More",
+              action = "toggle" },
+        },
+    }
+end
+
+function on_action(name)
+    if name == "toggle" then
+        details = not details
+    end
 end
 "#;
 

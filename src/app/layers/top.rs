@@ -505,7 +505,7 @@ fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::Result<()> 
     Ok(())
 }
 
-fn lua_value_kind(value: &Value) -> &'static str {
+pub(crate) fn lua_value_kind(value: &Value) -> &'static str {
     match value {
         Value::Nil => "nil",
         Value::Boolean(_) => "boolean",
@@ -522,22 +522,33 @@ fn lua_value_kind(value: &Value) -> &'static str {
     }
 }
 
-/// Call a widget script function (`render`, `popup`, ...), tolerantly
-/// coerced to text (numbers and booleans stringify, `nil` is empty).
-/// Anything else is an error.
-pub(crate) fn call_lua_text(lua: &Lua, func: &str) -> Result<String, String> {
-    let render: Function = lua.globals().get(func).map_err(|e| e.to_string())?;
-    match render.call::<Value>(()).map_err(|e| e.to_string())? {
+/// Call a widget script function (`render`, `popup`, ...) and get the
+/// raw return value.
+pub(crate) fn call_lua_value(lua: &Lua, func: &str) -> Result<Value, String> {
+    let func_value: Function = lua.globals().get(func).map_err(|e| e.to_string())?;
+    func_value.call::<Value>(()).map_err(|e| e.to_string())
+}
+
+/// Coerce a Lua return value to cell text (numbers and booleans
+/// stringify, `nil` is empty). Anything else is an error naming `what`.
+pub(crate) fn coerce_text(value: Value, what: &str) -> Result<String, String> {
+    match value {
         Value::String(s) => Ok(s.to_string_lossy()),
         Value::Integer(i) => Ok(i.to_string()),
         Value::Number(n) => Ok(n.to_string()),
         Value::Boolean(b) => Ok(b.to_string()),
         Value::Nil => Ok(String::new()),
         other => Err(format!(
-            "{func}() must return a string, got {}",
+            "{what} must return a string, got {}",
             lua_value_kind(&other)
         )),
     }
+}
+
+/// Call a widget's `render()`, tolerantly coerced to text.
+pub(crate) fn call_lua_text(lua: &Lua, func: &str) -> Result<String, String> {
+    let value = call_lua_value(lua, func)?;
+    coerce_text(value, &format!("{func}()"))
 }
 
 /// Does a widget state define a callable global (`popup`, `on_press`)?
@@ -2035,6 +2046,52 @@ mod tests {
             Top::widget_script_path(&absolute),
             std::path::PathBuf::from("/tmp/abs.lua")
         );
+    }
+
+    #[test]
+    fn lua_popup_content_parses_string_and_table_forms() {
+        use crate::app::layers::Popup;
+        // Plain strings are just text with defaults.
+        let lua = new_widget_lua().expect("sandbox");
+        let value: Value = lua.load(r#"return "hi""#).eval().expect("eval");
+        let content = Popup::parse_popup_content(value).unwrap();
+        assert_eq!(content.text, "hi");
+        assert!(content.width.is_none() && content.items.is_empty());
+        // Tables carry text/size/items (scalars coerce like render).
+        let value: Value = lua
+            .load(
+                r#"return { text = "head", width = 300, height = 200,
+                    items = { { label = "a", action = "go" }, { label = 7, action = "n" } } }"#,
+            )
+            .eval()
+            .expect("eval");
+        let content = Popup::parse_popup_content(value).unwrap();
+        assert_eq!(content.text, "head");
+        assert_eq!((content.width, content.height), (Some(300.0), Some(200.0)));
+        assert_eq!(content.items.len(), 2);
+        assert_eq!(content.items[0].action, "go");
+        assert_eq!(content.items[1].label, "7");
+        // Malformed items are an error, not a silent empty menu.
+        let value: Value = lua
+            .load(r#"return { items = "nope" }"#)
+            .eval()
+            .expect("eval");
+        assert!(Popup::parse_popup_content(value).is_err());
+    }
+
+    #[test]
+    fn lua_on_action_receives_the_item_key() {
+        let lua = new_widget_lua().expect("sandbox");
+        load_widget_script(
+            &lua,
+            "test",
+            "seen = {}\nfunction render() return '' end\nfunction on_action(name) seen[#seen + 1] = name end",
+        )
+        .expect("load");
+        let on_action: Function = lua.globals().get("on_action").expect("fn");
+        on_action.call::<()>("toggle".to_string()).expect("call");
+        let seen: String = lua.load("return seen[1]").eval().expect("eval");
+        assert_eq!(seen, "toggle");
     }
 
     #[test]

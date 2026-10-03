@@ -92,6 +92,9 @@ pub enum TopEvent {
     WidgetTick,
     /// A Lua widget output moved: repaint so bars pick the new text up.
     WidgetsChanged,
+    /// Click a popup item: run the widget's `on_action()` with the item
+    /// key, then re-render menu and cell.
+    PopupSelect(Id, String),
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
     SetOpacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,

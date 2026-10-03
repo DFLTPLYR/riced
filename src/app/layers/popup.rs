@@ -1,5 +1,8 @@
 use super::background::Background;
-use super::top::{Top, TopLocal, call_lua_text, lua_has_func, publish_system_tables, rich_text};
+use super::top::{
+    Top, TopLocal, call_lua_text, call_lua_value, coerce_text, lua_has_func, lua_value_kind,
+    publish_system_tables, rich_text,
+};
 use crate::app::Plant;
 use crate::app::app::{PlotInfo, Plots};
 use crate::theme;
@@ -25,14 +28,18 @@ use std::collections::HashMap;
 /// clicks (menu-grab semantics).
 #[derive(Debug, Clone)]
 pub struct Popup {
+    /// Own window id (item clicks address their popup).
+    pub win_id: window::Id,
     /// Bar that spawned this popup (toggle handling).
     pub bar_id: window::Id,
     /// Slot index on that bar.
     pub slot: usize,
     /// Widget name whose `popup()` renders the body.
     pub widget: String,
-    /// Last rendered `popup()` body.
+    /// Last rendered `popup()` body text.
     pub body: String,
+    /// Last rendered clickable rows.
+    pub items: Vec<PopupItem>,
     /// Text size, from the widget def at open time.
     pub size: f32,
     /// Box size in px.
@@ -40,16 +47,108 @@ pub struct Popup {
     pub h: u32,
 }
 
+/// One clickable popup row: label plus the `on_action()` key sent on click.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PopupItem {
+    pub label: String,
+    pub action: String,
+}
+
+/// Parsed `popup()` return: body text, optional explicit size, and
+/// clickable rows. A plain string return is just the text.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PopupContent {
+    pub text: String,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub items: Vec<PopupItem>,
+}
+
 impl Popup {
     /// Menu box width in px (height derives from the body line count).
     pub(crate) const WIDTH: f32 = 280.0;
 
-    /// Box size for a body: fixed width, height from line count.
-    pub(crate) fn size_for(sw: f32, body: &str) -> (u32, u32) {
-        let w = sw.clamp(1.0, Self::WIDTH).round() as u32;
-        let lines = body.lines().count().max(1) as f32;
-        let h = (44.0 + lines * 22.0).clamp(80.0, 420.0).round() as u32;
+    /// Box size for popup content: explicit dimensions win (clamped
+    /// into the output), otherwise width 280 and height from text
+    /// lines plus one row per item.
+    pub(crate) fn content_size(sw: f32, sh: f32, content: &PopupContent) -> (u32, u32) {
+        let rows = content.text.lines().count() as f32 + content.items.len() as f32;
+        let auto_h = (44.0 + rows.max(1.0) * 24.0).clamp(80.0, 420.0);
+        let w = content
+            .width
+            .map(|w| w.clamp(80.0, sw))
+            .unwrap_or_else(|| sw.min(Self::WIDTH))
+            .round() as u32;
+        let h = content
+            .height
+            .map(|h| h.clamp(64.0, sh))
+            .unwrap_or(auto_h)
+            .round() as u32;
         (w.max(1), h.max(1))
+    }
+
+    /// Parse a `popup()` return into content: a plain string is just
+    /// body text, a table carries `text`/`width`/`height`/`items`.
+    /// `items` is an array of `{ label, action }` tables.
+    pub(crate) fn parse_popup_content(value: mlua::Value) -> Result<PopupContent, String> {
+        use mlua::Value;
+        match value {
+            Value::Table(t) => {
+                let text = match t.get::<Value>("text").map_err(|e| e.to_string())? {
+                    Value::Nil => String::new(),
+                    other => coerce_text(other, "popup().text")?,
+                };
+                let number = |key: &str| -> Result<Option<f32>, String> {
+                    match t.get::<Value>(key).map_err(|e| e.to_string())? {
+                        Value::Nil => Ok(None),
+                        Value::Integer(i) => Ok(Some(i as f32)),
+                        Value::Number(n) => Ok(Some(n as f32)),
+                        other => Err(format!(
+                            "popup().{key} must be a number, got {}",
+                            lua_value_kind(&other)
+                        )),
+                    }
+                };
+                let width = number("width")?;
+                let height = number("height")?;
+                let mut items = Vec::new();
+                match t.get::<Value>("items").map_err(|e| e.to_string())? {
+                    Value::Nil => {}
+                    Value::Table(list) => {
+                        for entry in list.sequence_values::<mlua::Table>() {
+                            let entry = entry.map_err(|e| e.to_string())?;
+                            let label =
+                                match entry.get::<Value>("label").map_err(|e| e.to_string())? {
+                                    Value::Nil => String::new(),
+                                    other => coerce_text(other, "popup() item label")?,
+                                };
+                            let action =
+                                match entry.get::<Value>("action").map_err(|e| e.to_string())? {
+                                    Value::Nil => String::new(),
+                                    other => coerce_text(other, "popup() item action")?,
+                                };
+                            items.push(PopupItem { label, action });
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "popup().items must be an array, got {}",
+                            lua_value_kind(&other)
+                        ));
+                    }
+                }
+                Ok(PopupContent {
+                    text,
+                    width,
+                    height,
+                    items,
+                })
+            }
+            other => Ok(PopupContent {
+                text: coerce_text(other, "popup()")?,
+                ..Default::default()
+            }),
+        }
     }
 
     /// Slot cell rect in bar-local px: `content` is the bar rect minus
@@ -194,8 +293,8 @@ impl Popup {
             .find(|w| lua_has_func(&plots.widget_lua, w, "popup"))?
             .clone();
         let body = match plots.widget_lua.get(&name) {
-            Some(lua) => match call_lua_text(lua, "popup") {
-                Ok(body) => body,
+            Some(lua) => match call_lua_value(lua, "popup").and_then(Self::parse_popup_content) {
+                Ok(content) => content,
                 Err(e) => {
                     Top::note_widget_error(plots, &name, e);
                     return None;
@@ -203,6 +302,10 @@ impl Popup {
             },
             None => return None,
         };
+        // An empty menu (no text, no items) opens nothing.
+        if body.text.trim().is_empty() && body.items.is_empty() {
+            return None;
+        }
         let (_, _, sw, sh) = Background::available_rect(output, &plots.output_infos)?;
         let horizontal = top.is_horizontal();
         let (bw, bh) = top.local.px_size(sw, sh, horizontal);
@@ -226,7 +329,7 @@ impl Popup {
             horizontal,
             pos,
         );
-        let (w, h) = Self::size_for(sw, &body);
+        let (w, h) = Self::content_size(sw, sh, &body);
         let size = PixelSize::try_px(w, h)?;
         let first_side = top.anchor() == Anchor::Top || top.anchor() == Anchor::Left;
         let anchor_at = Self::popup_anchor(
@@ -267,10 +370,12 @@ impl Popup {
         plots.popups.insert(
             win_id,
             Popup {
+                win_id,
                 bar_id,
                 slot: pos,
                 widget: name,
-                body,
+                body: body.text,
+                items: body.items,
                 size: size_text,
                 w,
                 h,
@@ -284,11 +389,28 @@ impl Popup {
     }
 
     pub fn view(&self) -> Element<'static, Plant> {
-        use iced::widget::container;
-        container(rich_text(self.body.clone(), self.size, 4.0))
+        use crate::app::TopEvent;
+        use iced::widget::{button, column, container};
+        let win_id = self.win_id;
+        let mut content = column![].spacing(4);
+        if !self.body.trim().is_empty() {
+            content = content.push(rich_text(self.body.clone(), self.size, 4.0));
+        }
+        for item in &self.items {
+            let action = item.action.clone();
+            content = content.push(
+                button(rich_text(item.label.clone(), self.size, 4.0))
+                    .width(Length::Fill)
+                    .padding(6)
+                    .on_press(Plant::TopPlot(TopEvent::PopupSelect(win_id, action)))
+                    .style(theme::menu_button(theme::RADIUS)),
+            );
+        }
+        container(content)
             .width(Length::Fixed(self.w as f32))
             .height(Length::Fixed(self.h as f32))
             .padding(12)
+            .clip(true)
             .style(theme::menu_box)
             .into()
     }
@@ -320,13 +442,14 @@ impl Popup {
         let gpu = Self::gpu_usage_percent();
         let mut cmds = Vec::new();
         for (pid, name) in open {
-            let body = match plots.widget_lua.get(&name) {
+            let content = match plots.widget_lua.get(&name) {
                 Some(lua) => {
                     match publish_system_tables(lua, &plots.sysinfo, gpu)
                         .map_err(|e| e.to_string())
-                        .and_then(|()| call_lua_text(lua, "popup"))
+                        .and_then(|()| call_lua_value(lua, "popup"))
+                        .and_then(Self::parse_popup_content)
                     {
-                        Ok(body) => Some(body),
+                        Ok(content) => Some(content),
                         Err(e) => {
                             Top::note_widget_error(plots, &name, e);
                             None
@@ -335,12 +458,13 @@ impl Popup {
                 }
                 None => None,
             };
-            match body {
-                Some(text) => {
-                    if plots.popups.get(&pid).is_some_and(|p| p.body != text)
-                        && let Some(popup) = plots.popups.get_mut(&pid)
+            match content {
+                Some(content) => {
+                    if let Some(popup) = plots.popups.get_mut(&pid)
+                        && (popup.body != content.text || popup.items != content.items)
                     {
-                        popup.body = text;
+                        popup.body = content.text;
+                        popup.items = content.items;
                     }
                 }
                 None => cmds.push(Self::handle_dismiss(plots, pid)),
@@ -351,6 +475,47 @@ impl Popup {
         } else {
             Command::batch(cmds)
         }
+    }
+
+    /// Click a popup item: run the widget's `on_action()` with the item
+    /// key, then re-render the menu and the cell (a toggle flips both).
+    /// Unknown popups are ignored.
+    pub(crate) fn handle_select(
+        plots: &mut Plots,
+        id: window::Id,
+        action: String,
+    ) -> Command<Plant> {
+        let Some(widget) = plots.popups.get(&id).map(|p| p.widget.clone()) else {
+            return Command::none();
+        };
+        let outcome = match plots.widget_lua.get(&widget) {
+            Some(lua) => {
+                let acted = publish_system_tables(lua, &plots.sysinfo, Self::gpu_usage_percent())
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        let on_action: mlua::Function =
+                            lua.globals().get("on_action").map_err(|e| e.to_string())?;
+                        on_action.call::<()>(action).map_err(|e| e.to_string())
+                    });
+                Some(acted)
+            }
+            None => None,
+        };
+        match outcome {
+            Some(Ok(())) => {
+                plots.widget_last_error.remove(&widget);
+                let refresh = Self::refresh_bodies(plots);
+                if let Some(lua) = plots.widget_lua.get(&widget)
+                    && let Ok(text) = call_lua_text(lua, "render")
+                {
+                    plots.widget_outputs.insert(widget, text);
+                }
+                return refresh;
+            }
+            Some(Err(e)) => Top::note_widget_error(plots, &widget, e),
+            None => {}
+        }
+        Command::none()
     }
 
     /// Remove all popups for `output_id` (mirrors `Top::remove_for_output`).
@@ -435,11 +600,42 @@ mod tests {
     }
 
     #[test]
-    fn popup_size_grows_with_body_lines() {
-        assert_eq!(Popup::size_for(1920.0, "one"), (280, 80));
-        assert_eq!(Popup::size_for(1920.0, "one\ntwo\nthree"), (280, 110));
-        // Narrow outputs shrink the box, never below 1px.
-        assert_eq!(Popup::size_for(200.0, "one"), (200, 80));
+    fn popup_size_defaults_and_honors_overrides() {
+        let plain = PopupContent {
+            text: "one".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &plain), (280, 80));
+        let tall = PopupContent {
+            text: "one\ntwo\nthree".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &tall), (280, 116));
+        // Items add rows; narrow outputs shrink the box.
+        let listed = PopupContent {
+            text: "head".to_string(),
+            items: vec![
+                PopupItem {
+                    label: "a".to_string(),
+                    action: "a".to_string(),
+                },
+                PopupItem {
+                    label: "b".to_string(),
+                    action: "b".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &listed), (280, 116));
+        assert_eq!(Popup::content_size(200.0, 1080.0, &plain), (200, 80));
+        // Explicit dimensions win, clamped into the output.
+        let custom = PopupContent {
+            width: Some(500.0),
+            height: Some(10.0),
+            ..Default::default()
+        };
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &custom), (500, 64));
+        assert_eq!(Popup::content_size(200.0, 100.0, &custom), (200, 64));
     }
 
     #[test]
