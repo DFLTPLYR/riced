@@ -127,6 +127,15 @@ fn default_darkmode() -> bool {
     true
 }
 
+/// Default `sys.exec` allowlist: compositor CLIs plus `jq` for
+/// parsing their JSON output in Lua.
+fn default_widget_exec_allow() -> Vec<String> {
+    ["hyprctl", "niri", "jq"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 fn default_variant() -> String {
     "content".to_string()
 }
@@ -678,10 +687,11 @@ pub fn config_path() -> PathBuf {
 /// ```
 /// Scripts run sandboxed (no `io`, no shell/file escapes) with globals
 /// persisting between calls. Besides the standard string/table/math
-/// libraries they see two live tables, refreshed before every due
-/// `render()`: `sysinfo` (`cpu_usage` %, `cpu_count`, `mem_used` /
-/// `mem_total` bytes, `mem_usage` %) and `gfxinfo` (`usage` % or nil
-/// when the GPU exposes nothing readable). Cell text may embed
+/// libraries they see three tables: `sysinfo`/`gfxinfo` (live system
+/// readings, refreshed before every due `render()`) and `sys`
+/// (`sys.exec(argv)` runs one allowlisted binary — argv array, never
+/// a shell string — and returns its stdout; the binary must be listed
+/// in the widget's `exec_allow`, default `hyprctl,niri,jq`). Cell text may embed
 /// `{icon:name}` placeholders for theme-aware Lucide icons, e.g.
 /// `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage) .. "%"`.
 /// Clicking a slot runs widget Lua too: `popup()` (when defined)
@@ -717,6 +727,11 @@ pub struct WidgetDef {
     /// Text size.
     #[serde(default = "default_widget_size")]
     pub size: f32,
+    /// Binaries this widget may run via `sys.exec(argv)` (matched on
+    /// the argv basename, e.g. `hyprctl`). Empty means none; the seed
+    /// default covers the compositor CLIs plus `jq`.
+    #[serde(default = "default_widget_exec_allow")]
+    pub exec_allow: Vec<String>,
 }
 
 impl Default for WidgetDef {
@@ -726,6 +741,7 @@ impl Default for WidgetDef {
             file: String::new(),
             interval: default_widget_interval(),
             size: default_widget_size(),
+            exec_allow: default_widget_exec_allow(),
         }
     }
 }
@@ -778,6 +794,14 @@ size = 13.0
 # name = "gpu"
 # file = "gpu.lua"
 # interval = 2.0
+# size = 13.0
+
+# Hyprland workspaces: polls hyprctl every 0.5s (the loop is the
+# interval), needs hyprctl in exec_allow (default on).
+# [[widget]]
+# name = "hypr"
+# file = "hypr.lua"
+# interval = 0.5
 # size = 13.0
 "#;
 
@@ -880,6 +904,39 @@ function render()
 end
 "#;
 
+/// Seed Hyprland workspaces: polls `hyprctl workspaces -j` every
+/// interval (the engine is the loop — no async in Lua) and renders
+/// one button per workspace. Clicks dispatch via `on_action`.
+/// Uncomment its `[[widget]]` entry in widgets.toml to use it.
+pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via sys.exec (argv array, never a shell).
+-- hyprctl must be in exec_allow (default on). jq parses the JSON so
+-- Lua never hand-rolls a parser: ids + active id, one per line.
+function render()
+    local ok, ids = pcall(sys.exec, { "hyprctl", "workspaces", "-j" })
+    if not ok then
+        return ui.text("--")
+    end
+    local ok2, active = pcall(sys.exec, { "hyprctl", "activeworkspace", "-j" })
+    local current = active and active:match('"id":%s*(%d+)') or nil
+    local cells = {}
+    for id in ids:gmatch('"id":%s*(%d+)') do
+        local label = id == current and ("[" .. id .. "]") or id
+        cells[#cells + 1] = ui.button(label, "ws:" .. id)
+    end
+    if #cells == 0 then
+        return ui.text("--")
+    end
+    return ui.row(cells)
+end
+
+function on_action(name)
+    local id = name:match("^ws:(%d+)$")
+    if id then
+        pcall(sys.exec, { "hyprctl", "dispatch", "workspace", id })
+    end
+end
+"#;
+
 /// `~/.config/riced/widgets.toml` (`$XDG_CONFIG_HOME` aware).
 pub fn widgets_path() -> PathBuf {
     dirs::config_dir()
@@ -930,6 +987,7 @@ impl WidgetsFile {
             ("cpu.lua", SEED_CPU_LUA),
             ("ram.lua", SEED_RAM_LUA),
             ("gpu.lua", SEED_GPU_LUA),
+            ("hypr.lua", SEED_HYPR_LUA),
         ] {
             Self::seed_script(dir, name, content);
         }
@@ -1524,6 +1582,7 @@ mod tests {
         assert!(dir.join("cpu.lua").is_file());
         assert!(dir.join("gpu.lua").is_file());
         assert!(dir.join("hello.lua").is_file());
+        assert!(dir.join("hypr.lua").is_file());
         assert!(dir.join("ram.lua").is_file());
         assert!(dir.join("stats.lua").is_file());
         // A user script is never overwritten by a re-seed.

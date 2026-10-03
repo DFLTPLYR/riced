@@ -664,8 +664,9 @@ pub(crate) fn publish_system_tables(
 
 /// Sandboxed Lua state for one widget: string/table/math/os only, no
 /// `io`, no `require`, no shell or file escapes from `os`. `print`
-/// stays so scripts can log to the daemon output.
-fn new_widget_lua() -> mlua::Result<Lua> {
+/// stays so scripts can log to the daemon output. `allow` is the
+/// widget's `exec_allow` list, baked into the `sys.exec` closure.
+fn new_widget_lua(allow: &[String]) -> mlua::Result<Lua> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::OS,
         LuaOptions::default(),
@@ -679,7 +680,91 @@ fn new_widget_lua() -> mlua::Result<Lua> {
         os.set(key, Value::Nil)?;
     }
     inject_ui(&lua)?;
+    inject_sys(&lua, allow)?;
     Ok(lua)
+}
+
+/// The `sys` table: `sys.exec(argv)` runs one allowlisted binary
+/// (argv array, matched on basename — never a shell string) and
+/// returns its stdout. Timeouts at 2s, stdout capped at 64KB, nonzero
+/// exits surface stderr in the error. A hung compositor socket can't
+/// wedge the widget tick; a denied binary errors the same way.
+fn inject_sys(lua: &Lua, allow: &[String]) -> mlua::Result<()> {
+    use std::time::Duration;
+    let allow: std::collections::HashSet<String> = allow.iter().cloned().collect();
+    let sys = lua.create_table()?;
+    sys.set(
+        "exec",
+        lua.create_function(move |_, argv: Vec<String>| {
+            if argv.is_empty() {
+                return Err(mlua::Error::RuntimeError("sys.exec needs argv".to_string()));
+            }
+            // Basename of argv[0], no directories: "./hyprctl",
+            // "/usr/bin/hyprctl", and "hyprctl" all match "hyprctl".
+            let base = argv[0].rsplit('/').next().unwrap_or(&argv[0]);
+            if !allow.contains(base) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "sys.exec: {base:?} not in exec_allow"
+                )));
+            }
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]);
+            // No stdin/shell: argv goes straight to execvp.
+            let mut child = cmd
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| mlua::Error::RuntimeError(format!("sys.exec spawn: {e}")))?;
+            // Poll-wait so the 2s timeout actually kills hangs.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let mut out = Vec::new();
+                        if let Some(mut stdout) = child.stdout.take() {
+                            use std::io::Read;
+                            stdout.read_to_end(&mut out).map_err(|e| {
+                                mlua::Error::RuntimeError(format!("sys.exec read: {e}"))
+                            })?;
+                        }
+                        out.truncate(64 * 1024);
+                        if !status.success() {
+                            let mut err = Vec::new();
+                            if let Some(mut stderr) = child.stderr.take() {
+                                use std::io::Read;
+                                let _ = stderr.read_to_end(&mut err);
+                            }
+                            err.truncate(512);
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "sys.exec {:?} exited {status}: {}",
+                                argv,
+                                String::from_utf8_lossy(&err).trim()
+                            )));
+                        }
+                        return String::from_utf8(out).map_err(|e| {
+                            mlua::Error::RuntimeError(format!("sys.exec: non-utf8 stdout: {e}"))
+                        });
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() > deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(mlua::Error::RuntimeError(
+                                "sys.exec timed out after 2s".to_string(),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => {
+                        return Err(mlua::Error::RuntimeError(format!("sys.exec wait: {e}")));
+                    }
+                }
+            }
+        })?,
+    )?;
+    lua.globals().set("sys", sys)?;
+    Ok(())
 }
 
 /// The `ui` constructors table, present in every widget state next to
@@ -1223,18 +1308,26 @@ impl Top {
 
     /// Ensure a sandboxed runtime for one Lua def (load + `render`
     /// check). Retried on later ticks while missing, so fixing the
-    /// file recovers without a restart.
+    /// file recovers without a restart. Rebuilds when `exec_allow`
+    /// changed, so editing the allowlist takes effect live.
     fn ensure_widget_lua(plots: &mut Plots, def: &crate::config::WidgetDef) -> Result<(), String> {
-        if plots.widget_lua.contains_key(&def.name) {
+        let stale_allow = plots
+            .widget_exec_allow
+            .get(&def.name)
+            .is_none_or(|known| *known != def.exec_allow);
+        if plots.widget_lua.contains_key(&def.name) && !stale_allow {
             return Ok(());
         }
         let path = Self::widget_script_path(def);
         let source = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let lua = new_widget_lua().map_err(|e| e.to_string())?;
+        let lua = new_widget_lua(&def.exec_allow).map_err(|e| e.to_string())?;
         load_widget_script(&lua, &def.name, &source)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         plots.widget_lua.insert(def.name.clone(), lua);
+        plots
+            .widget_exec_allow
+            .insert(def.name.clone(), def.exec_allow.clone());
         Ok(())
     }
 
@@ -1314,6 +1407,7 @@ impl Top {
     /// `widgets.toml` hot-reload (which clears the old states).
     pub(crate) fn init_widget_lua(plots: &mut Plots) {
         plots.widget_lua.clear();
+        plots.widget_exec_allow.clear();
         plots.widget_outputs.clear();
         plots.widget_trees.clear();
         plots.widget_last_run.clear();
@@ -2101,14 +2195,14 @@ mod tests {
 
     #[test]
     fn lua_sandbox_runs_render() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         load_widget_script(&lua, "test", "function render() return 'hi' end").expect("load");
         assert_eq!(call_lua_text(&lua, "render").unwrap(), "hi");
     }
 
     #[test]
     fn lua_return_values_coerce_to_text() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         load_widget_script(&lua, "test", "function render() return 42 end").expect("load");
         assert_eq!(call_lua_text(&lua, "render").unwrap(), "42");
         load_widget_script(&lua, "test", "function render() return true end").expect("load");
@@ -2121,17 +2215,57 @@ mod tests {
 
     #[test]
     fn lua_missing_render_is_rejected() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         assert!(load_widget_script(&lua, "test", "x = 1").is_err());
     }
 
     #[test]
     fn lua_sandbox_blocks_escapes_but_keeps_time() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         let execute: Value = lua.load("return os.execute").eval().expect("eval");
         assert!(matches!(execute, Value::Nil));
         let hour: String = lua.load("return os.date('%H')").eval().expect("eval");
         assert_eq!(hour.len(), 2);
+    }
+
+    #[test]
+    fn sys_exec_runs_allowlisted_argv_without_shell() {
+        // Absolute echo path as real argv, no shell: stdout returns,
+        // and shell metacharacters pass through literal (no ; chaining).
+        let echo = echo_path();
+        let allow = vec!["echo".to_string()];
+        let lua = new_widget_lua(&allow).expect("sandbox");
+        let script = format!(r#"return sys.exec({{ "{echo}", "hi; rm -rf /" }})"#);
+        let out: String = lua.load(&script).eval().expect("eval");
+        assert_eq!(out.trim(), "hi; rm -rf /");
+    }
+
+    #[test]
+    fn sys_exec_denies_binaries_outside_allowlist() {
+        let lua = new_widget_lua(&[]).expect("sandbox");
+        let err = lua
+            .load(r#"return sys.exec({ "echo", "hi" })"#)
+            .eval::<String>()
+            .expect_err("denied");
+        assert!(err.to_string().contains("not in exec_allow"), "{err}");
+        // Basename matching: a path smuggling "echo" still works only
+        // when its basename is allowed.
+        let echo = echo_path();
+        let lua = new_widget_lua(&["echo".to_string()]).expect("sandbox");
+        let script = format!(r#"return sys.exec({{ "{echo}", "ok" }})"#);
+        let out: String = lua.load(&script).eval().expect("eval");
+        assert_eq!(out.trim(), "ok");
+    }
+
+    /// Absolute echo for sys.exec tests (PATH-less test envs can't
+    /// resolve bare names; prod widgets should use bare names).
+    #[cfg(test)]
+    fn echo_path() -> &'static str {
+        if std::path::Path::new("/bin/echo").exists() {
+            "/bin/echo"
+        } else {
+            "/run/current-system/sw/bin/echo"
+        }
     }
 
     #[test]
@@ -2184,7 +2318,7 @@ mod tests {
 
     #[test]
     fn system_tables_expose_cpu_memory_and_gpu() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
         sys.refresh_memory();
@@ -2257,7 +2391,7 @@ mod tests {
         sys.refresh_cpu_usage();
         sys.refresh_memory();
         for source in [SEED_CPU_LUA, SEED_RAM_LUA, SEED_GPU_LUA] {
-            let lua = new_widget_lua().expect("sandbox");
+            let lua = new_widget_lua(&[]).expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
             publish_system_tables(&lua, &sys, None).expect("publish");
             let value = call_lua_value(&lua, "render").expect("render");
@@ -2267,6 +2401,8 @@ mod tests {
     }
 
     /// Seeds render through the full pipeline: parse plus build.
+    /// The hypr seed is excluded — it needs a compositor socket; its
+    /// contract is covered by sys_exec_* tests with stub binaries.
     #[test]
     fn seed_scripts_parse_and_build() {
         use crate::config::{
@@ -2284,7 +2420,7 @@ mod tests {
             SEED_RAM_LUA,
             SEED_GPU_LUA,
         ] {
-            let lua = new_widget_lua().expect("sandbox");
+            let lua = new_widget_lua(&[]).expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
             publish_system_tables(&lua, &sys, None).expect("publish");
             let value = call_lua_value(&lua, "render").expect("render");
@@ -2307,7 +2443,7 @@ mod tests {
     #[test]
     fn lua_popup_and_press_contract() {
         // popup() renders the menu body.
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         load_widget_script(
             &lua,
             "test",
@@ -2316,7 +2452,7 @@ mod tests {
         .expect("load");
         assert_eq!(call_lua_text(&lua, "popup").unwrap(), "menu");
         // on_press() mutates script state; the next render reflects it.
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         load_widget_script(
             &lua,
             "test",
@@ -2327,7 +2463,7 @@ mod tests {
         assert_eq!(call_lua_text(&lua, "render").unwrap(), "1");
         // Missing functions are absent, never errors at lookup.
         let mut states = HashMap::new();
-        states.insert("w".to_string(), new_widget_lua().expect("sandbox"));
+        states.insert("w".to_string(), new_widget_lua(&[]).expect("sandbox"));
         load_widget_script(&states["w"], "w", "function render() return 'x' end").expect("load");
         assert!(!lua_has_func(&states, "w", "popup"));
         assert!(!lua_has_func(&states, "w", "on_press"));
@@ -2371,7 +2507,7 @@ mod tests {
         use crate::app::layers::Popup;
         use crate::app::layers::top::WidgetNode;
         // Plain strings are just text with defaults.
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         let value: Value = lua.load(r#"return "hi""#).eval().expect("eval");
         let content = Popup::parse_popup_content(value).unwrap();
         assert_eq!(content.text, "hi");
@@ -2409,7 +2545,7 @@ mod tests {
 
     #[test]
     fn lua_on_action_receives_the_item_key() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         load_widget_script(
             &lua,
             "test",
@@ -2432,7 +2568,7 @@ mod tests {
 
     #[test]
     fn ui_constructors_build_description_tables() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         let node: Table = lua
             .load(r#"return ui.row({ ui.icon("cpu"), ui.text("42%") }, 8)"#)
             .eval()
@@ -2462,7 +2598,7 @@ mod tests {
 
     #[test]
     fn parse_node_reads_full_trees_and_rejects_junk() {
-        let lua = new_widget_lua().expect("sandbox");
+        let lua = new_widget_lua(&[]).expect("sandbox");
         let value: Value = lua
             .load(
                 r#"return ui.row({ ui.text("hi"), ui.button("go", "run"), 7, { type = "icon", name = "cpu" } })"#,
