@@ -107,7 +107,8 @@ impl Setting {
                 rule::vertical(2),
                 scrollable(self.content(id, plots))
                     .width(Length::FillPortion(8))
-                    .height(Length::Fill),
+                    .height(Length::Fill)
+                    .spacing(8),
             ]
             .spacing(12)
             .padding(16),
@@ -1030,7 +1031,7 @@ impl Setting {
         let mut cmds = Vec::with_capacity(to_close.len());
         for id in to_close {
             plots.last_cursor.remove(&id);
-            plots.press_starts.remove(&id);
+            plots.press_targets.remove(&id);
             cmds.push(iced_runtime::task::effect(Action::Window(
                 WindowAction::Close(id),
             )));
