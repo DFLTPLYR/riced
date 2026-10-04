@@ -1052,8 +1052,11 @@ function popup()
     for kind, pct in body:gmatch('"type"%s*:%s*"([%w_%-]+)"%s*,%s*"percentUsed"%s*:%s*(%d+)') do
         local p = tonumber(pct) or 0
         local label = kind:gsub("_", " ")
-        rows[#rows + 1] = ui.text(label .. "  " .. p .. "%")
-        rows[#rows + 1] = ui.progress(p / 100)
+        rows[#rows + 1] = ui.row({
+            ui.text(label):width(80),
+            ui.progress(p / 100):height(8):width("fill"),
+            ui.text(p .. "%"):width(20),
+        })
     end
     if #rows == 1 then
         rows[#rows + 1] = ui.text("no usage fields parsed")

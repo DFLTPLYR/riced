@@ -2782,10 +2782,17 @@ mod tests {
         let tree = content.tree.expect("usage tree");
         let built = build_node(&tree, 13.0, None).expect("builds");
         let _ = built;
-        // Three progress bars' worth of structure: header + 3 labels
-        // + 3 bars = column of 7.
+        // One row per window: header + 3 label/bar/pct rows.
         match tree {
-            WidgetNode::Column { children, .. } => assert_eq!(children.len(), 7),
+            WidgetNode::Column { children, .. } => {
+                assert_eq!(children.len(), 4);
+                for row in &children[1..] {
+                    assert!(matches!(
+                        row,
+                        WidgetNode::Row { children, .. } if children.len() == 3
+                    ));
+                }
+            }
             other => panic!("expected column, got {other:?}"),
         }
     }
