@@ -605,8 +605,8 @@ pub(crate) enum WidgetNode {
     /// Label plus `on_action()` key. In cells each button is a
     /// per-widget MouseArea (`CellAction` carries the owner, so clicks
     /// route to that widget's `on_action` — never the slot-wide
-    /// popup/`on_press` fallback). In popups buttons render inert
-    /// (popup clicks go through item rows + `PopupSelect`).
+    /// popup/`on_press` fallback). In popups buttons route like `items`
+    /// rows (`PopupSelect` carries the popup, same `on_action` key).
     Button {
         label: String,
         action: String,
@@ -3706,6 +3706,17 @@ mod tests {
         assert!(content.text.is_empty() && content.items.is_empty());
         let tree = content.tree.expect("tree");
         assert!(matches!(tree, WidgetNode::Row { .. }));
+        // A ui.button inside the body keeps its key (routes like an
+        // item row once the popup view wires it up).
+        let value: Value = lua
+            .load(r#"return { ui = ui.button("Reboot", "reboot") }"#)
+            .eval()
+            .expect("eval");
+        let content = Popup::parse_popup_content(value).unwrap();
+        assert!(matches!(
+            content.tree,
+            Some(WidgetNode::Button { action, .. }) if action == "reboot"
+        ));
     }
 
     #[test]

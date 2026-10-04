@@ -448,7 +448,10 @@ impl Popup {
         }
         if let Some(tree) = &self.tree {
             // Trees failing to build were rejected at parse/refresh.
-            if let Ok(node) = build_node(tree, self.size, None) {
+            // Buttons route like item rows: the click carries this
+            // popup, so `on_action` receives the key.
+            let msg = move |action: String| Plant::TopPlot(TopEvent::PopupSelect(win_id, action));
+            if let Ok(node) = build_node(tree, self.size, Some(&msg)) {
                 content = content.push(node);
             }
         }

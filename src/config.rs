@@ -775,7 +775,10 @@ pub fn config_path() -> PathBuf {
 /// menu with its return — either body text or a table with `text`,
 /// `width`/`height`, clickable `items` (`{ label, action }` rows
 /// calling `on_action(action)`), and a composed `ui` body (any `ui.*`
-/// tree, rendered above the items); otherwise `on_press()` runs as a
+/// tree, rendered above the items). `ui.button`s inside the body work
+/// exactly like `items` rows (same `on_action` key); `items` remains
+/// the shorthand for uniform full-width menu rows. Otherwise
+/// `on_press()` runs as a
 /// bare click action and the cell re-renders after it. A popup with no
 /// text, tree, or items never opens. Size without items is just
 /// `{ text = os.date("%A"), width = 300, height = 200 }`. Clicks are
