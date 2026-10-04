@@ -61,8 +61,12 @@ pub struct Plots {
     pub(crate) output_infos: HashMap<OutputId, OutputInfo>,
     // context menu state (global, like Background contextMenu)
     pub(crate) context_menu: Option<ContextMenu>,
-    // press start per window for hold detection (Top hold, shared via PanelWindow)
-    pub(crate) press_starts: HashMap<iced::window::Id, Instant>,
+    // press target per bar window for click matching: (slot, widget
+    // or gap-None, press time). Presses on a widget area record the
+    // widget; gap presses record None; releases act only on a matching
+    // target, so bubbled outer releases never double-fire widget clicks.
+    // `usize::MAX` slot marks a press whose slot couldn't be resolved.
+    pub(crate) press_targets: HashMap<iced::window::Id, (usize, Option<String>, Instant)>,
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
@@ -152,7 +156,7 @@ impl Plots {
             fade_rect: None,
             fade_start: None,
             context_menu: None,
-            press_starts: HashMap::new(),
+            press_targets: HashMap::new(),
             config,
             config_mtime,
             widgets,
@@ -519,7 +523,7 @@ impl Plots {
         match message {
             Plant::Uproot(id) => {
                 self.last_cursor.remove(&id);
-                self.press_starts.remove(&id);
+                self.press_targets.remove(&id);
                 let mut closed_last_panel = false;
                 if let Some(info) = self.ids.get(&id).copied() {
                     match info {
@@ -578,7 +582,7 @@ impl Plots {
                 // sentinel Top cleanup (delegated to Top layer)
                 for sentinel_id in Top::cleanup_sentinels(&mut self.tops, &mut self.ids) {
                     self.last_cursor.remove(&sentinel_id);
-                    self.press_starts.remove(&sentinel_id);
+                    self.press_targets.remove(&sentinel_id);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(sentinel_id),
                     )));
@@ -688,7 +692,7 @@ impl Plots {
                 // remove all tops for this output (delegated to Top layer)
                 for wid in Top::remove_for_output(&mut self.tops, &mut self.ids, output_id) {
                     self.last_cursor.remove(&wid);
-                    self.press_starts.remove(&wid);
+                    self.press_targets.remove(&wid);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(wid),
                     )));
@@ -731,7 +735,7 @@ impl Plots {
                     ))
                 ) {
                     let _ = Background::handle_left_release(self);
-                    self.press_starts.remove(&id);
+                    self.press_targets.remove(&id);
                     return Command::none();
                 }
                 match self.id_info(id) {
@@ -935,6 +939,12 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
+            Plant::TopPlot(TopEvent::WidgetPressed(id, pos, widget)) => {
+                Top::handle_widget_press(self, id, pos, widget)
+            }
+            Plant::TopPlot(TopEvent::WidgetReleased(id, pos, widget)) => {
+                Top::handle_widget_release(self, id, pos, widget)
+            }
             Plant::TopPlot(TopEvent::Remove(id)) => Top::handle_remove(self, id),
             Plant::TopPlot(TopEvent::SetLength(id, value)) => {
                 Top::handle_set_length(self, id, value)
@@ -1058,11 +1068,15 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // Lua-widget timer only runs due scripts (repaint goes through
         // WidgetsChanged when an output actually moved).
         Plant::TopPlot(TopEvent::WidgetTick) => Scope::None,
+        Plant::TopPlot(TopEvent::WidgetPressed(..)) => Scope::None,
         // Animation frames repaint while a list transition runs (the
         // 16ms subscription only exists while motions are active).
         Plant::TopPlot(TopEvent::WidgetAnim) => Scope::All,
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
+        // Widget press only records; the release repaints (popup open,
+        // action refresh) like a slot click does.
+        | Plant::TopPlot(TopEvent::WidgetReleased(..))
         | Plant::TopPlot(TopEvent::Remove(..))
         | Plant::TopPlot(TopEvent::SetLength(..))
         | Plant::TopPlot(TopEvent::SetThickness(..))

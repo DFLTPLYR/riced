@@ -63,6 +63,14 @@ pub enum TopEvent {
     Sow,
     Pressed(Id, Button),
     Released(Id, Button),
+    /// Left press on one widget (renderer hit-tested per-widget mouse
+    /// area): records the press target so the matching release — and
+    /// only it — dispatches the click. Bubbled outer releases ignore
+    /// widget targets (their own handler owns the click).
+    WidgetPressed(Id, usize, String),
+    /// Left release on one widget: clicks only when the press target
+    /// matches (same bar/slot/widget, under the hold threshold).
+    WidgetReleased(Id, usize, String),
     /// Remove the bar: close its window, drop tracking, and delete its
     /// `[[bar]]` entry so it stays gone after restart.
     Remove(Id),

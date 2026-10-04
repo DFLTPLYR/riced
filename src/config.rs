@@ -775,7 +775,13 @@ pub fn config_path() -> PathBuf {
 /// tree, rendered above the items); otherwise `on_press()` runs as a
 /// bare click action and the cell re-renders after it. A popup with no
 /// text, tree, or items never opens. Size without items is just
-/// `{ text = os.date("%A"), width = 300, height = 200 }`.
+/// `{ text = os.date("%A"), width = 300, height = 200 }`. Clicks are
+/// hit-tested per widget (each cell widget owns a mouse area), so
+/// every widget in a slot gets its own popup/`on_press` calls.
+/// Presses record their target and only the matching release acts,
+/// which also keeps inner `ui.button` clicks from double-firing the
+/// widget. Gap clicks fall back to the slot (first popup, else first
+/// `on_press`).
 ///
 /// ```lua
 /// function popup()

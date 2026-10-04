@@ -288,23 +288,31 @@ impl Popup {
         }
     }
 
-    /// Open a popup for the first `popup()`-capable widget in a slot,
-    /// anchored to the slot rect with the menu growing off the bar edge
+    /// Open a popup for a slot's `popup()`-capable widget, anchored
+    /// to the slot rect with the menu growing off the bar edge
     /// (flipped/slid into view by the compositor on overflow).
-    /// Returns `None` when nothing in the slot can pop up.
+    /// `prefer` selects which widget when the caller hit-tested one
+    /// (per-widget mouse areas); otherwise the first capable widget
+    /// wins. Returns `None` when nothing in the slot can pop up.
     pub(crate) fn open_for(
         plots: &mut Plots,
         bar_id: window::Id,
         output: OutputId,
         pos: usize,
         cursor: Option<(f32, f32)>,
+        prefer: Option<&str>,
     ) -> Option<Command<Plant>> {
         let top = plots.tops.get(&bar_id)?.clone();
         let names: Vec<String> = top.local.widgets_at(pos).to_vec();
-        let name = names
+        let capable: Vec<String> = names
             .iter()
-            .find(|w| lua_has_func(&plots.widget_lua, w, "popup"))?
-            .clone();
+            .filter(|w| lua_has_func(&plots.widget_lua, w, "popup"))
+            .cloned()
+            .collect();
+        let name = prefer
+            .filter(|p| capable.iter().any(|w| w == p))
+            .map(str::to_string)
+            .or_else(|| capable.into_iter().next())?;
         let body = match plots.widget_lua.get(&name) {
             Some(lua) => match call_lua_value(lua, "popup").and_then(Self::parse_popup_content) {
                 Ok(content) => content,

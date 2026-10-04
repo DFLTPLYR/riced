@@ -361,10 +361,14 @@ fn empty_slot() -> Element<'static, Plant> {
 
 /// Render one slot's widgets side by side along the bar axis
 /// (`none`/unknown names are skipped; no entries = empty cell).
+/// Every widget gets its own mouse area (renderer hit-testing), so
+/// clicks carry the exact widget — no slot-granularity guessing.
 /// Top-level rows/columns get enter/exit transitions on direct
 /// button children (see [`super::anim`]); anything else builds plain.
 #[allow(clippy::too_many_arguments)]
 fn render_slot_widgets(
+    bar_id: window::Id,
+    pos: usize,
     names: &[String],
     defs: &[WidgetDef],
     outputs: &HashMap<String, String>,
@@ -372,17 +376,32 @@ fn render_slot_widgets(
     gap: f32,
     horizontal: bool,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    item_anims: &HashMap<
-        (String, String),
-        aura_anim::core::runtime::Motion<super::anim::ItemSlide>,
-    >,
+    item_anims: &super::anim::ItemMotions,
     item_ghosts: &super::anim::ItemGhosts,
 ) -> Element<'static, Plant> {
+    use iced::widget::mouse_area;
     let mut items = Vec::new();
     for name in names {
         if TopLocal::is_empty_widget(name) {
             continue;
         }
+        // Per-widget click target: press records (slot, widget), the
+        // matching release dispatches. Inner `ui.button`s capture
+        // their own presses, so they never double-fire the widget.
+        let area = |el: Element<'static, Plant>, name: &str| -> Element<'static, Plant> {
+            mouse_area(el)
+                .on_press(Plant::TopPlot(TopEvent::WidgetPressed(
+                    bar_id,
+                    pos,
+                    name.to_string(),
+                )))
+                .on_release(Plant::TopPlot(TopEvent::WidgetReleased(
+                    bar_id,
+                    pos,
+                    name.to_string(),
+                )))
+                .into()
+        };
         if let Some(node) = trees.get(name) {
             let size = defs
                 .iter()
@@ -427,10 +446,10 @@ fn render_slot_widgets(
                 _ => build_node(node, size, Some(&msg)),
             };
             if let Ok(item) = built {
-                items.push(item);
+                items.push(area(item, name));
             }
         } else if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
-            items.push(rich_text(output, size, gap));
+            items.push(area(rich_text(output, size, gap), name));
         }
     }
     if items.is_empty() {
@@ -475,10 +494,7 @@ fn build_anim_list(
     size: f32,
     button_msg: &dyn Fn(String) -> Plant,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    item_anims: &HashMap<
-        (String, String),
-        aura_anim::core::runtime::Motion<super::anim::ItemSlide>,
-    >,
+    item_anims: &super::anim::ItemMotions,
     ghosts: &[super::anim::GhostItem],
     horizontal: bool,
 ) -> Result<Element<'static, Plant>, String> {
@@ -1445,6 +1461,8 @@ impl Top {
         let horizontal = self.is_horizontal();
         let cell = |pos: usize| -> Element<'_, Plant> {
             let body: Element<'_, Plant> = render_slot_widgets(
+                id,
+                pos,
                 self.local.widgets_at(pos),
                 widgets,
                 outputs,
@@ -1538,12 +1556,91 @@ impl Top {
         if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }
-        // Stamp the press: release compares against HOLD_THRESHOLD to
-        // tell clicks (popup/on_press) from holds (nothing, for now).
-        if button == Button::Left {
-            plots.press_starts.insert(id, Instant::now());
+        // Outer presses only arrive from gaps (widget areas capture
+        // their own). Record a gap target so the matching release runs
+        // the slot fallback; unresolvable slots clear stale targets.
+        // Non-left buttons never click: drop any target.
+        if button != Button::Left {
+            plots.press_targets.remove(&id);
+            return Command::none();
+        }
+        match Self::cursor_slot(plots, id) {
+            Some(pos) => {
+                plots.press_targets.insert(id, (pos, None, Instant::now()));
+            }
+            None => {
+                plots.press_targets.remove(&id);
+            }
         }
         Command::none()
+    }
+
+    /// Left press on one widget's own mouse area: record the widget
+    /// target. The matching release — and only it — dispatches.
+    pub(crate) fn handle_widget_press(
+        plots: &mut Plots,
+        bar_id: window::Id,
+        pos: usize,
+        widget: String,
+    ) -> Command<Plant> {
+        if !matches!(plots.id_info(bar_id), Some(PlotInfo::Top(_))) {
+            return Command::none();
+        }
+        plots
+            .press_targets
+            .insert(bar_id, (pos, Some(widget), Instant::now()));
+        Command::none()
+    }
+
+    /// Slot under the last known cursor, if any.
+    /// Shared by press recording (releases match against the recorded
+    /// target instead of re-resolving).
+    fn cursor_slot(plots: &Plots, bar_id: window::Id) -> Option<usize> {
+        let top = plots.tops.get(&bar_id)?.clone();
+        let output = match plots.ids.get(&bar_id).copied() {
+            Some(PlotInfo::Top(o)) => o,
+            _ => return None,
+        };
+        let (_, _, sw, sh) = Background::available_rect(output, &plots.output_infos)?;
+        let horizontal = top.is_horizontal();
+        let (bw, bh) = top.local.px_size(sw, sh, horizontal);
+        let (pl, pt, pr, pb) = if top.local.floating {
+            let m = top.local.margins;
+            (
+                m.left.max(0) as f32,
+                m.top.max(0) as f32,
+                m.right.max(0) as f32,
+                m.bottom.max(0) as f32,
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
+        let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
+        plots.last_cursor.get(&bar_id).copied().and_then(|p| {
+            Popup::slot_at_point(
+                (pl, pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
+                n,
+                gap,
+                horizontal,
+                p,
+            )
+        })
+    }
+
+    /// Whether a release completes the recorded press as a click: same
+    /// slot and widget (gap releases carry `None`), left button, under
+    /// the hold threshold. Pure for testing.
+    fn release_matches_press(
+        target: Option<(usize, Option<String>, Instant)>,
+        pos: usize,
+        widget: Option<&str>,
+        button: Button,
+        now: Instant,
+    ) -> bool {
+        button == Button::Left
+            && matches!(target, Some((p, ref w, t))
+                if p == pos && w.as_deref() == widget && now.duration_since(t) < Self::HOLD_THRESHOLD)
     }
 
     /// Size/float/margin edits apply live to the layer window every tick, so
@@ -2166,7 +2263,7 @@ impl Top {
     /// immediately) so it stays gone after restart.
     pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
         plots.last_cursor.remove(&bar_id);
-        plots.press_starts.remove(&bar_id);
+        plots.press_targets.remove(&bar_id);
         let mut cmds = Vec::new();
         // A bar going away takes its popup with it.
         let popup_id = plots
@@ -2276,15 +2373,39 @@ impl Top {
         if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }
-        let start = plots.press_starts.remove(&id);
-        let clicked = button == Button::Left
-            && matches!(&start, Some(t) if t.elapsed() < Self::HOLD_THRESHOLD);
-        // Silent either way: the global Graft release safety net in
-        // update can clear the press first when release lands on another
-        // window, and a same-window release fires both PanelWindow and
-        // Graft paths. Only clicks act (slot popup/on_press below).
-        if clicked {
+        // Outer releases bubble up from everywhere, including widget
+        // areas that already dispatched their own click: only a
+        // recorded *gap* target acts here (the slot fallback below).
+        // Anything else is either a widget click (handled) or stale.
+        let target = plots.press_targets.remove(&id);
+        // Silent: the global Graft release safety net in update can
+        // clear the press first when release lands on another window,
+        // and a same-window release fires both PanelWindow and Graft
+        // paths. Only matched gap clicks act.
+        let gap_clicked = button == Button::Left
+            && matches!(target, Some((_, None, t)) if Instant::now().duration_since(t) < Self::HOLD_THRESHOLD);
+        if gap_clicked {
             return Self::handle_slot_click(plots, id);
+        }
+        Command::none()
+    }
+
+    /// Release on one widget's own mouse area: clicks only when the
+    /// press target matches (same slot/widget, under hold). A press
+    /// captured by an inner `ui.button` records no target, so cell
+    /// buttons never also trigger the widget click.
+    pub(crate) fn handle_widget_release(
+        plots: &mut Plots,
+        bar_id: window::Id,
+        pos: usize,
+        widget: String,
+    ) -> Command<Plant> {
+        if !matches!(plots.id_info(bar_id), Some(PlotInfo::Top(_))) {
+            return Command::none();
+        }
+        let target = plots.press_targets.remove(&bar_id);
+        if Self::release_matches_press(target, pos, Some(&widget), Button::Left, Instant::now()) {
+            return Self::handle_widget_click(plots, bar_id, pos, &widget);
         }
         Command::none()
     }
@@ -2344,7 +2465,8 @@ impl Top {
             return Command::none();
         };
         // Toggle: a popup already open for this bar closes first; same
-        // slot means it was just a close.
+        // slot means it was just a close (per-widget clicks handle
+        // their own toggles via `handle_widget_click`).
         let mut cmds = Vec::new();
         if let Some(pid) = plots
             .popups
@@ -2359,20 +2481,88 @@ impl Top {
             }
         }
         let names = top.local.widgets_at(pos).to_vec();
+        cmds.push(Self::handle_slot_fallback(
+            plots,
+            bar_id,
+            output,
+            pos,
+            &names,
+            cursor.map(|p| (p.x, p.y)),
+        ));
+        if cmds.is_empty() {
+            return Command::none();
+        }
+        Command::batch(cmds)
+    }
+
+    /// Click on one widget's own mouse area (renderer hit-tested, so
+    /// every widget in a slot gets its own calls): toggle its popup,
+    /// run its `on_press()`, or fall back to the slot when it defines
+    /// neither. A popup open for another widget is replaced.
+    pub(crate) fn handle_widget_click(
+        plots: &mut Plots,
+        bar_id: window::Id,
+        pos: usize,
+        widget: &str,
+    ) -> Command<Plant> {
+        let output = match plots.ids.get(&bar_id).copied() {
+            Some(PlotInfo::Top(o)) => o,
+            _ => return Command::none(),
+        };
+        let cursor = plots.last_cursor.get(&bar_id).copied().map(|p| (p.x, p.y));
+        let mut cmds = Vec::new();
+        if let Some(pid) = plots
+            .popups
+            .iter()
+            .find(|(_, p)| p.bar_id == bar_id)
+            .map(|(id, _)| *id)
+        {
+            let same_widget = plots.popups.get(&pid).is_some_and(|p| p.widget == widget);
+            cmds.push(Popup::handle_dismiss(plots, pid));
+            if same_widget {
+                return Command::batch(cmds);
+            }
+        }
+        if lua_has_func(&plots.widget_lua, widget, "popup") {
+            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos, cursor, Some(widget)) {
+                cmds.push(cmd);
+            }
+        } else if lua_has_func(&plots.widget_lua, widget, "on_press") {
+            cmds.push(Self::run_on_press(plots, widget));
+        } else {
+            let names = plots
+                .tops
+                .get(&bar_id)
+                .map(|t| t.local.widgets_at(pos).to_vec())
+                .unwrap_or_default();
+            cmds.push(Self::handle_slot_fallback(
+                plots, bar_id, output, pos, &names, cursor,
+            ));
+        }
+        if cmds.is_empty() {
+            return Command::none();
+        }
+        Command::batch(cmds)
+    }
+
+    /// Slot fallback for gap clicks and action-less widgets: open the
+    /// first popup in the slot, else run the first `on_press()`.
+    fn handle_slot_fallback(
+        plots: &mut Plots,
+        bar_id: window::Id,
+        output: OutputId,
+        pos: usize,
+        names: &[String],
+        cursor: Option<(f32, f32)>,
+    ) -> Command<Plant> {
         if names
             .iter()
             .any(|w| lua_has_func(&plots.widget_lua, w, "popup"))
         {
-            if let Some(cmd) =
-                Popup::open_for(plots, bar_id, output, pos, cursor.map(|p| (p.x, p.y)))
-            {
-                cmds.push(cmd);
+            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos, cursor, None) {
+                return cmd;
             }
-            return if cmds.is_empty() {
-                Command::none()
-            } else {
-                Command::batch(cmds)
-            };
+            return Command::none();
         }
         // No menu: run the first `on_press()` action in the slot, then
         // re-render that widget (a toggle flips its next output).
@@ -2381,33 +2571,36 @@ impl Top {
             .find(|w| lua_has_func(&plots.widget_lua, w, "on_press"))
             .cloned()
         {
-            let gpu = Popup::gpu_usage_percent();
-            let outcome = match plots.widget_lua.get(&name) {
-                Some(lua) => {
-                    let acted = publish_system_tables(lua, &plots.sysinfo, gpu)
-                        .map_err(|e| e.to_string())
-                        .and_then(|()| call_lua_action(lua));
-                    Some(acted)
-                }
-                None => None,
-            };
-            match outcome {
-                Some(Ok(())) => {
-                    if let Some(def) = plots.widgets.iter().find(|d| d.name == name).cloned()
-                        && Self::refresh_widget(plots, &def, gpu)
-                    {
-                        cmds.push(Command::done(Plant::TopPlot(TopEvent::WidgetsChanged)));
-                    }
-                }
-                Some(Err(e)) => Self::note_widget_error(plots, &name, e),
-                None => {}
+            return Self::run_on_press(plots, &name);
+        }
+        Command::none()
+    }
+
+    /// Run one widget's `on_press()` click action, then re-render it
+    /// (a toggle flips its next output). Errors log once-per-message.
+    fn run_on_press(plots: &mut Plots, name: &str) -> Command<Plant> {
+        let gpu = Popup::gpu_usage_percent();
+        let outcome = match plots.widget_lua.get(name) {
+            Some(lua) => {
+                let acted = publish_system_tables(lua, &plots.sysinfo, gpu)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| call_lua_action(lua));
+                Some(acted)
             }
+            None => None,
+        };
+        match outcome {
+            Some(Ok(())) => {
+                if let Some(def) = plots.widgets.iter().find(|d| d.name == name).cloned()
+                    && Self::refresh_widget(plots, &def, gpu)
+                {
+                    return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
+                }
+            }
+            Some(Err(e)) => Self::note_widget_error(plots, name, e),
+            None => {}
         }
-        if cmds.is_empty() {
-            Command::none()
-        } else {
-            Command::batch(cmds)
-        }
+        Command::none()
     }
 
     /// Cursor bookkeeping for Top windows — press/release come from PanelWindow.
@@ -2733,6 +2926,80 @@ mod tests {
         );
         // Unknown names never read the cache.
         assert_eq!(lua_cell_text("nope", &defs, &outputs), None);
+    }
+
+    #[test]
+    fn release_matches_press_pairs_clicks() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let target = |pos: usize, widget: Option<&str>, age_ms: u64| {
+            Some((
+                pos,
+                widget.map(str::to_string),
+                now - Duration::from_millis(age_ms),
+            ))
+        };
+        // Same slot+widget, left, under hold: click.
+        assert!(Top::release_matches_press(
+            target(1, Some("clock"), 10),
+            1,
+            Some("clock"),
+            Button::Left,
+            now
+        ));
+        // Widget mismatch (dragged off, or bubbled outer release after
+        // a widget click): no double-fire.
+        assert!(!Top::release_matches_press(
+            target(1, Some("clock"), 10),
+            1,
+            Some("stats"),
+            Button::Left,
+            now
+        ));
+        // Widget release never answers a gap press and vice versa.
+        assert!(!Top::release_matches_press(
+            target(1, None, 10),
+            1,
+            Some("clock"),
+            Button::Left,
+            now
+        ));
+        assert!(!Top::release_matches_press(
+            target(1, Some("clock"), 10),
+            1,
+            None,
+            Button::Left,
+            now
+        ));
+        // Slot mismatch, hold expiry, non-left, and stale targets: none.
+        assert!(!Top::release_matches_press(
+            target(1, None, 10),
+            2,
+            None,
+            Button::Left,
+            now
+        ));
+        assert!(!Top::release_matches_press(
+            target(1, None, 900),
+            1,
+            None,
+            Button::Left,
+            now
+        ));
+        assert!(!Top::release_matches_press(
+            target(1, None, 10),
+            1,
+            None,
+            Button::Right,
+            now
+        ));
+        assert!(!Top::release_matches_press(
+            None,
+            1,
+            None,
+            Button::Left,
+            now
+        ));
     }
 
     #[test]
