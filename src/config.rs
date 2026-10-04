@@ -734,17 +734,26 @@ pub fn config_path() -> PathBuf {
 ///
 /// ```lua
 /// ui.progress(p / 100):width(200):height(12)
+/// ui.progress(p / 100):width("fill")
 /// ui.text("hi"):size(14):height(20)
-/// ui.row({...}):spacing(8)
+/// ui.row({...}):spacing(8):width("fill")
 /// ui.button("go", "run"):width(120):height(36):padding(4)
 /// ```
 ///
-/// Setters per type: `text` → `:size()`, `:height()`; `row`/`column`
-/// → `:spacing()`; `button` → `:width()`, `:height()`, `:padding()`;
-/// `progress` → `:width()` (same as the second constructor arg),
-/// `:height()` (bar thickness = iced `girth`). Calling a setter the
-/// type doesn't own (e.g. `:width()` on text) fails at eval — typos
-/// stay visible. Wrong-typed values error at parse naming the field.
+/// Sizes are numbers (px, backward-compat), `"fill"`, or `"shrink"`
+/// (any case). Unset sizes mean `Shrink` — except progress width,
+/// which stays `Fixed(120)` — so old scripts render identically.
+/// Note: `Fill` only expands when the parent offers space; inside the
+/// bar's shrink-wrapped cells it looks like a no-op and pays off in
+/// popups and nested rows/columns.
+///
+/// Setters per type: `text` → `:size()`, `:width()`, `:height()`;
+/// `row`/`column` → `:spacing()`, `:width()`, `:height()`; `button` →
+/// `:width()`, `:height()`, `:padding()`; `progress` → `:width()`
+/// (same as the second constructor arg), `:height()` (bar thickness =
+/// iced `girth`). Calling a setter the type doesn't own (e.g.
+/// `:padding()` on progress) fails at eval — typos stay visible.
+/// Wrong-typed values error at parse naming the field.
 ///
 /// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
 ///

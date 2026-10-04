@@ -692,6 +692,7 @@ mod tests {
             tree: Some(WidgetNode::Text {
                 content: "hi".to_string(),
                 size: None,
+                width: None,
                 height: None,
             }),
             ..Default::default()
