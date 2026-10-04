@@ -727,6 +727,25 @@ pub fn config_path() -> PathBuf {
 /// - `ui.spinner()`: loading ring for slow fetches — return it first,
 ///   swap in cached data on later ticks (see clinepass seed).
 ///
+/// ## Chaining (iced-spelled setters)
+///
+/// Every node type carries its own setters, so Lua reads like iced
+/// builders — each setter writes its field and returns the node:
+///
+/// ```lua
+/// ui.progress(p / 100):width(200)
+/// ui.text("hi"):size(14)
+/// ui.row({...}):spacing(8)
+/// ui.button("go", "run"):width(120):padding(4)
+/// ```
+///
+/// Setters per type: `text` → `:size()`; `row`/`column` →
+/// `:spacing()`; `button` → `:width()`, `:padding()`; `progress` →
+/// `:width()` (same as the second constructor arg). Calling a setter
+/// the type doesn't own (e.g. `:width()` on text) fails at eval —
+/// typos stay visible. Wrong-typed values error at parse naming the
+/// field.
+///
 /// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
 ///
 /// Clicking a slot runs widget Lua: `popup()` (when defined) toggles a

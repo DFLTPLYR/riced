@@ -689,7 +689,10 @@ mod tests {
         assert_eq!(Popup::content_size(200.0, 100.0, &custom), (200, 64));
         // A composed tree reserves room even with no text or items.
         let treed = PopupContent {
-            tree: Some(WidgetNode::Text("hi".to_string())),
+            tree: Some(WidgetNode::Text {
+                content: "hi".to_string(),
+                size: None,
+            }),
             ..Default::default()
         };
         assert_eq!(Popup::content_size(1920.0, 1080.0, &treed), (280, 116));

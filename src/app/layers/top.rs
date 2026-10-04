@@ -437,7 +437,10 @@ fn lua_cell_text(
 /// match arm below).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WidgetNode {
-    Text(String),
+    Text {
+        content: String,
+        size: Option<f32>,
+    },
     Icon(String),
     Row {
         children: Vec<WidgetNode>,
@@ -455,6 +458,8 @@ pub(crate) enum WidgetNode {
     Button {
         label: String,
         action: String,
+        width: Option<f32>,
+        padding: Option<f32>,
     },
     Progress {
         value: f32,
@@ -464,6 +469,24 @@ pub(crate) enum WidgetNode {
     /// Purely visual (no action) — scripts return it first, then swap
     /// in real content once cached data arrives.
     Spinner,
+}
+
+/// Optional numeric field from a node table. Unset reads as nil —
+/// but so do the chainable setter *methods* (same namespace: `t.size`
+/// is the setter function until `:size(v)` overwrites it), so
+/// functions read as unset too. Real numbers pass; anything else
+/// (strings, tables) errors naming the field. Both constructor args
+/// and chained setters share this path.
+fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
+    match t.get::<Value>(field).map_err(|e| e.to_string())? {
+        Value::Nil | Value::Function(_) => Ok(None),
+        Value::Integer(i) => Ok(Some(i as f32)),
+        Value::Number(n) => Ok(Some(n as f32)),
+        other => Err(format!(
+            "{what} {field} must be a number, got {}",
+            lua_value_kind(&other)
+        )),
+    }
 }
 
 /// Parse a `render()` table return into a node tree. Scalars coerce to
@@ -485,10 +508,14 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 }
             };
             match kind.as_str() {
-                "text" => Ok(WidgetNode::Text(coerce_text(
-                    t.get::<Value>("text").map_err(|e| e.to_string())?,
-                    "ui.text()",
-                )?)),
+                "text" => Ok(WidgetNode::Text {
+                    content: coerce_text(
+                        t.get::<Value>("text").map_err(|e| e.to_string())?,
+                        "ui.text()",
+                    )?,
+                    // Chained :size(14) overrides the widget default.
+                    size: opt_number(t, "size", "ui.text()")?,
+                }),
                 "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
                     Value::String(s) => Ok(WidgetNode::Icon(s.to_string_lossy())),
                     Value::Nil => Err("ui.icon() needs a name".to_string()),
@@ -517,7 +544,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         }
                     };
                     let spacing = match t.get::<Value>("spacing").map_err(|e| e.to_string())? {
-                        Value::Nil => 4.0,
+                        Value::Nil | Value::Function(_) => 4.0,
                         Value::Integer(i) => i as f32,
                         Value::Number(n) => n as f32,
                         other => {
@@ -543,7 +570,12 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         t.get::<Value>("action").map_err(|e| e.to_string())?,
                         "ui.button() action",
                     )?;
-                    Ok(WidgetNode::Button { label, action })
+                    Ok(WidgetNode::Button {
+                        label,
+                        action,
+                        width: opt_number(t, "width", "ui.button()")?,
+                        padding: opt_number(t, "padding", "ui.button()")?,
+                    })
                 }
                 "progress" => {
                     let value = match t.get::<Value>("value").map_err(|e| e.to_string())? {
@@ -557,8 +589,11 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                             ));
                         }
                     };
+                    // Width via constructor arg or :width() chain. Unset
+                    // reads as the setter *function* (same namespace via
+                    // __index) — treat functions as unset, not an error.
                     let width = match t.get::<Value>("width").map_err(|e| e.to_string())? {
-                        Value::Nil => 120.0,
+                        Value::Nil | Value::Function(_) => 120.0,
                         Value::Integer(i) => i as f32,
                         Value::Number(n) => n as f32,
                         other => {
@@ -574,7 +609,10 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 other => Err(format!("unknown ui node type {other:?}")),
             }
         }
-        _ => Ok(WidgetNode::Text(coerce_text(value.clone(), "ui node")?)),
+        _ => Ok(WidgetNode::Text {
+            content: coerce_text(value.clone(), "ui node")?,
+            size: None,
+        }),
     }
 }
 
@@ -586,7 +624,10 @@ pub(crate) fn build_node(
     button_msg: Option<&dyn Fn(String) -> Plant>,
 ) -> Result<Element<'static, Plant>, String> {
     match node {
-        WidgetNode::Text(content) => Ok(text(content.clone()).size(size.max(1.0)).into()),
+        WidgetNode::Text { content, size: own } => {
+            let s = own.unwrap_or(size).max(1.0);
+            Ok(text(content.clone()).size(s).into())
+        }
         WidgetNode::Icon(name) => match icon_bytes(name) {
             Some(bytes) => Ok(lucide_iced::themed_icon(bytes, size.max(1.0))),
             None => Ok(text(format!("{{icon:{name}}}")).size(size.max(1.0)).into()),
@@ -613,10 +654,18 @@ pub(crate) fn build_node(
             }
             Ok(column.into())
         }
-        WidgetNode::Button { label, action } => {
+        WidgetNode::Button {
+            label,
+            action,
+            width,
+            padding,
+        } => {
             let mut item = button(rich_text(label.clone(), size, 4.0))
-                .padding(6)
+                .padding(padding.unwrap_or(6.0).max(0.0))
                 .style(theme::menu_button(theme::RADIUS));
+            if let Some(w) = width {
+                item = item.width(iced::Length::Fixed(w.max(20.0)));
+            }
             if let Some(make_msg) = button_msg {
                 item = item.on_press(make_msg(action.clone()));
             }
@@ -694,39 +743,125 @@ fn new_widget_lua() -> mlua::Result<Lua> {
 /// The `ui` constructors table, present in every widget state next to
 /// `sysinfo`/`gfxinfo`. Each call builds a plain description table —
 /// no iced objects cross into Lua; [`parse_node`] interprets them.
+///
+/// Every node type gets its own metatable with iced-spelled chainable
+/// setters, so Lua reads like iced builders: `ui.progress(0.5)`
+/// `:width(200)`, `ui.text("hi"):size(14)`, `ui.row({...})`
+/// `:spacing(8)`, `ui.button("go", "run"):width(120):padding(4)`.
+/// Each setter writes its field and returns the node. Calling a
+/// setter the node type doesn't own (e.g. `:width()` on text) is a
+/// Lua error naming the type — typos stay visible. Setter names never
+/// collide with parsed fields: setters live on the metatable while
+/// real data (`t.width`) reads raw first.
 fn inject_ui(lua: &Lua) -> mlua::Result<()> {
+    /// One setter: `node:name(v)` writes field, returns node.
+    /// NOTE: the type gate below is near-dead — method lookup via
+    /// __index fails first for foreign setters (nil method = eval
+    /// error before the closure runs). Kept as defense in depth for
+    /// shared metatables (button+progress share `:width`).
+    fn setter(lua: &Lua, field: &str, types: &'static [&'static str]) -> mlua::Result<Function> {
+        let key = field.to_string();
+        lua.create_function(move |_, (node, v): (Table, Value)| {
+            let kind: String = node.get("type")?;
+            if !types.contains(&kind.as_str()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "ui {kind} has no :{key}() setter"
+                )));
+            }
+            node.set(key.clone(), v)?;
+            Ok(node)
+        })
+    }
+    /// Metatable for one node type: methods table as `__index`.
+    /// NOTE: pre-seeding fields as nil does NOT shadow __index (Lua
+    /// treats nil slots as absent), so setter names and field names
+    /// share one namespace by necessity. Parse therefore reads via a
+    /// helper that skips functions: real numbers pass, unset-or-method
+    /// reads as nil (unset). `opt_number` below implements this.
+    fn mt_for(lua: &Lua, methods: &[(&str, Function)]) -> mlua::Result<Table> {
+        let mt = lua.create_table()?;
+        let index = lua.create_table()?;
+        for (name, f) in methods {
+            index.set(*name, f.clone())?;
+        }
+        mt.set("__index", index)?;
+        Ok(mt)
+    }
     fn node(
         lua: &Lua,
         node_type: &str,
+        mt: Table,
         build: impl FnOnce(&mlua::Table) -> mlua::Result<()>,
     ) -> mlua::Result<mlua::Table> {
         let t = lua.create_table()?;
         t.set("type", node_type)?;
         build(&t)?;
+        t.set_metatable(Some(mt))?;
         Ok(t)
     }
+    // One metatable per setter shape (shared across types that allow
+    // the same setters).
+    let mt_text = mt_for(lua, &[("size", setter(lua, "size", &["text"])?)])?;
+    let mt_rowcol = mt_for(
+        lua,
+        &[("spacing", setter(lua, "spacing", &["row", "column"])?)],
+    )?;
+    let mt_button = mt_for(
+        lua,
+        &[
+            ("width", setter(lua, "width", &["button", "progress"])?),
+            ("padding", setter(lua, "padding", &["button"])?),
+        ],
+    )?;
+    let mt_progress = mt_for(
+        lua,
+        &[("width", setter(lua, "width", &["button", "progress"])?)],
+    )?;
+    let mt_bare = mt_for(lua, &[])?;
+    lua.globals().set("_riced_ui_mt_text", mt_text.clone())?;
+    lua.globals()
+        .set("_riced_ui_mt_rowcol", mt_rowcol.clone())?;
+    lua.globals()
+        .set("_riced_ui_mt_button", mt_button.clone())?;
+    lua.globals()
+        .set("_riced_ui_mt_progress", mt_progress.clone())?;
+    lua.globals().set("_riced_ui_mt_bare", mt_bare.clone())?;
+    // Move clones into the constructor closures (mlua closures are
+    // 'static): each captures only its own metatable.
+    let (mt_text_c, mt_bare_c, mt_rowcol_c, mt_button_c, mt_progress_c) = (
+        mt_text.clone(),
+        mt_bare.clone(),
+        mt_rowcol.clone(),
+        mt_button.clone(),
+        mt_progress.clone(),
+    );
     let ui = lua.create_table()?;
     ui.set(
         "text",
-        lua.create_function(|lua, text: Value| node(lua, "text", |t| t.set("text", text)))?,
+        lua.create_function(move |lua, text: Value| {
+            node(lua, "text", mt_text_c.clone(), |t| t.set("text", text))
+        })?,
     )?;
     ui.set(
         "icon",
-        lua.create_function(|lua, name: Value| node(lua, "icon", |t| t.set("name", name)))?,
+        lua.create_function(move |lua, name: Value| {
+            node(lua, "icon", mt_bare_c.clone(), |t| t.set("name", name))
+        })?,
     )?;
     ui.set(
         "row",
-        lua.create_function(|lua, (children, spacing): (Table, Value)| {
-            node(lua, "row", |t| {
+        lua.create_function(move |lua, (children, spacing): (Table, Value)| {
+            node(lua, "row", mt_rowcol_c.clone(), |t| {
                 t.set("children", children)?;
                 t.set("spacing", spacing)
             })
         })?,
     )?;
+    let mt_rowcol_c2 = mt_rowcol.clone();
     ui.set(
         "column",
-        lua.create_function(|lua, (children, spacing): (Table, Value)| {
-            node(lua, "column", |t| {
+        lua.create_function(move |lua, (children, spacing): (Table, Value)| {
+            node(lua, "column", mt_rowcol_c2.clone(), |t| {
                 t.set("children", children)?;
                 t.set("spacing", spacing)
             })
@@ -734,8 +869,8 @@ fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     )?;
     ui.set(
         "button",
-        lua.create_function(|lua, (label, action): (Value, Value)| {
-            node(lua, "button", |t| {
+        lua.create_function(move |lua, (label, action): (Value, Value)| {
+            node(lua, "button", mt_button_c.clone(), |t| {
                 t.set("label", label)?;
                 t.set("action", action)
             })
@@ -743,16 +878,19 @@ fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     )?;
     ui.set(
         "progress",
-        lua.create_function(|lua, (value, width): (Value, Value)| {
-            node(lua, "progress", |t| {
+        lua.create_function(move |lua, (value, width): (Value, Value)| {
+            node(lua, "progress", mt_progress_c.clone(), |t| {
                 t.set("value", value)?;
                 t.set("width", width)
             })
         })?,
     )?;
+    let mt_bare_c2 = mt_bare.clone();
     ui.set(
         "spinner",
-        lua.create_function(|lua, _: Value| node(lua, "spinner", |_| Ok(())))?,
+        lua.create_function(move |lua, _: Value| {
+            node(lua, "spinner", mt_bare_c2.clone(), |_| Ok(()))
+        })?,
     )?;
     lua.globals().set("ui", ui)
 }
@@ -2484,6 +2622,84 @@ mod tests {
     }
 
     #[test]
+    fn ui_with_chains_like_iced_builders() {
+        // Iced-spelled setters: node:width(v) sets + returns self.
+        // Wrong-type calls error loudly at eval, naming the type.
+        let lua = new_widget_lua().expect("sandbox");
+        let value: mlua::Value = lua
+            .load(r#"return ui.progress(0.5):width(200)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: 200.0
+            }
+        );
+        let value: mlua::Value = lua
+            .load(r#"return ui.text("hi"):size(14)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Text {
+                content: "hi".to_string(),
+                size: Some(14.0),
+            }
+        );
+        // Multi-chain + nesting.
+        let value: mlua::Value = lua
+            .load(r#"return ui.button("go", "run"):width(120):padding(4)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Button {
+                label: "go".to_string(),
+                action: "run".to_string(),
+                width: Some(120.0),
+                padding: Some(4.0),
+            }
+        );
+        // Chained setter AFTER a failing pcall in the same state:
+        // setmetatable caching means the metatable must survive
+        // error paths (regression probe).
+        let value: mlua::Value = lua
+            .load(r#"return ui.row({ ui.text("x") }):spacing(8)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Row {
+                children: vec![WidgetNode::Text {
+                    content: "x".to_string(),
+                    size: None,
+                }],
+                spacing: 8.0,
+            }
+        );
+        // Wrong-type call errors at eval, naming the type. Uses a
+        // pcall-contained failures don't poison the state (probed).
+        // NOTE: the raw method-miss error surfaces here, not the
+        // setter message — the setter never runs (method nil at
+        // lookup). assert(not ok) inside proves it errored.
+        let ok: bool = lua
+            .load(
+                r#"local ok, _ = pcall(function() return ui.text("hi"):width(200) end) return ok"#,
+            )
+            .eval()
+            .expect("eval");
+        assert!(!ok, "width on text must fail");
+        // Wrong-typed chain value errors at parse with the field name.
+        let value: mlua::Value = lua
+            .load(r#"return ui.progress(0.5):width("wide")"#)
+            .eval()
+            .expect("eval");
+        assert!(parse_node(&value).is_err());
+    }
+
+    #[test]
     fn slot_align_rides_the_long_axis() {
         use iced::Alignment as A;
         assert_eq!(SlotAlign::Start.for_bar(true), (A::Start, A::Center));
@@ -2688,12 +2904,20 @@ mod tests {
             parse_node(&value).expect("parse"),
             WidgetNode::Row {
                 children: vec![
-                    WidgetNode::Text("hi".to_string()),
+                    WidgetNode::Text {
+                        content: "hi".to_string(),
+                        size: None,
+                    },
                     WidgetNode::Button {
                         label: "go".to_string(),
                         action: "run".to_string(),
+                        width: None,
+                        padding: None,
                     },
-                    WidgetNode::Text("7".to_string()),
+                    WidgetNode::Text {
+                        content: "7".to_string(),
+                        size: None,
+                    },
                     WidgetNode::Icon("cpu".to_string()),
                 ],
                 spacing: 4.0,
@@ -2713,11 +2937,17 @@ mod tests {
         let size = 13.0;
         let no_msg: Option<&dyn Fn(String) -> Plant> = None;
         for node in [
-            WidgetNode::Text("hi".to_string()),
+            WidgetNode::Text {
+                content: "hi".to_string(),
+                size: None,
+            },
             WidgetNode::Icon("cpu".to_string()),
             WidgetNode::Icon("typo".to_string()),
             WidgetNode::Row {
-                children: vec![WidgetNode::Text("a".to_string())],
+                children: vec![WidgetNode::Text {
+                    content: "a".to_string(),
+                    size: None,
+                }],
                 spacing: 2.0,
             },
             WidgetNode::Column {
@@ -2727,6 +2957,8 @@ mod tests {
             WidgetNode::Button {
                 label: "go".to_string(),
                 action: "run".to_string(),
+                width: None,
+                padding: None,
             },
             WidgetNode::Progress {
                 value: 1.5,
@@ -2739,6 +2971,8 @@ mod tests {
         let node = WidgetNode::Button {
             label: "go".to_string(),
             action: "run".to_string(),
+            width: None,
+            padding: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
     }
