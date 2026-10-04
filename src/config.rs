@@ -733,18 +733,18 @@ pub fn config_path() -> PathBuf {
 /// builders — each setter writes its field and returns the node:
 ///
 /// ```lua
-/// ui.progress(p / 100):width(200)
-/// ui.text("hi"):size(14)
+/// ui.progress(p / 100):width(200):height(12)
+/// ui.text("hi"):size(14):height(20)
 /// ui.row({...}):spacing(8)
-/// ui.button("go", "run"):width(120):padding(4)
+/// ui.button("go", "run"):width(120):height(36):padding(4)
 /// ```
 ///
-/// Setters per type: `text` → `:size()`; `row`/`column` →
-/// `:spacing()`; `button` → `:width()`, `:padding()`; `progress` →
-/// `:width()` (same as the second constructor arg). Calling a setter
-/// the type doesn't own (e.g. `:width()` on text) fails at eval —
-/// typos stay visible. Wrong-typed values error at parse naming the
-/// field.
+/// Setters per type: `text` → `:size()`, `:height()`; `row`/`column`
+/// → `:spacing()`; `button` → `:width()`, `:height()`, `:padding()`;
+/// `progress` → `:width()` (same as the second constructor arg),
+/// `:height()` (bar thickness = iced `girth`). Calling a setter the
+/// type doesn't own (e.g. `:width()` on text) fails at eval — typos
+/// stay visible. Wrong-typed values error at parse naming the field.
 ///
 /// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
 ///

@@ -440,6 +440,7 @@ pub(crate) enum WidgetNode {
     Text {
         content: String,
         size: Option<f32>,
+        height: Option<f32>,
     },
     Icon(String),
     Row {
@@ -459,11 +460,13 @@ pub(crate) enum WidgetNode {
         label: String,
         action: String,
         width: Option<f32>,
+        height: Option<f32>,
         padding: Option<f32>,
     },
     Progress {
         value: f32,
         width: f32,
+        height: Option<f32>,
     },
     /// Loading placeholder: animated ring while a slow fetch resolves.
     /// Purely visual (no action) — scripts return it first, then swap
@@ -515,6 +518,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                     )?,
                     // Chained :size(14) overrides the widget default.
                     size: opt_number(t, "size", "ui.text()")?,
+                    height: opt_number(t, "height", "ui.text()")?,
                 }),
                 "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
                     Value::String(s) => Ok(WidgetNode::Icon(s.to_string_lossy())),
@@ -574,6 +578,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         label,
                         action,
                         width: opt_number(t, "width", "ui.button()")?,
+                        height: opt_number(t, "height", "ui.button()")?,
                         padding: opt_number(t, "padding", "ui.button()")?,
                     })
                 }
@@ -603,7 +608,11 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                             ));
                         }
                     };
-                    Ok(WidgetNode::Progress { value, width })
+                    Ok(WidgetNode::Progress {
+                        value,
+                        width,
+                        height: opt_number(t, "height", "ui.progress()")?,
+                    })
                 }
                 "spinner" => Ok(WidgetNode::Spinner),
                 other => Err(format!("unknown ui node type {other:?}")),
@@ -612,6 +621,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
         _ => Ok(WidgetNode::Text {
             content: coerce_text(value.clone(), "ui node")?,
             size: None,
+            height: None,
         }),
     }
 }
@@ -624,9 +634,17 @@ pub(crate) fn build_node(
     button_msg: Option<&dyn Fn(String) -> Plant>,
 ) -> Result<Element<'static, Plant>, String> {
     match node {
-        WidgetNode::Text { content, size: own } => {
+        WidgetNode::Text {
+            content,
+            size: own,
+            height,
+        } => {
             let s = own.unwrap_or(size).max(1.0);
-            Ok(text(content.clone()).size(s).into())
+            let mut t = text(content.clone()).size(s);
+            if let Some(h) = height {
+                t = t.height(iced::Length::Fixed(h.max(1.0)));
+            }
+            Ok(t.into())
         }
         WidgetNode::Icon(name) => match icon_bytes(name) {
             Some(bytes) => Ok(lucide_iced::themed_icon(bytes, size.max(1.0))),
@@ -658,6 +676,7 @@ pub(crate) fn build_node(
             label,
             action,
             width,
+            height,
             padding,
         } => {
             let mut item = button(rich_text(label.clone(), size, 4.0))
@@ -666,14 +685,29 @@ pub(crate) fn build_node(
             if let Some(w) = width {
                 item = item.width(iced::Length::Fixed(w.max(20.0)));
             }
+            if let Some(h) = height {
+                item = item.height(iced::Length::Fixed(h.max(1.0)));
+            }
             if let Some(make_msg) = button_msg {
                 item = item.on_press(make_msg(action.clone()));
             }
             Ok(item.into())
         }
-        WidgetNode::Progress { value, width } => Ok(progress_bar(0.0..=1.0, value.clamp(0.0, 1.0))
-            .length(iced::Length::Fixed(width.max(20.0)))
-            .into()),
+        WidgetNode::Progress {
+            value,
+            width,
+            height,
+        } => {
+            // iced's progress_bar has length + girth (thickness), no
+            // height: :height() maps to girth so Lua stays iced-spelled
+            // in intent (vertical size) if not in method name.
+            let mut bar = progress_bar(0.0..=1.0, value.clamp(0.0, 1.0))
+                .length(iced::Length::Fixed(width.max(20.0)));
+            if let Some(h) = height {
+                bar = bar.girth(iced::Length::Fixed(h.max(1.0)));
+            }
+            Ok(bar.into())
+        }
         // Animated ring: iced has no spinner widget, so a rotating
         // loader icon approximates one (redrawn every frame while
         // visible — popups repaint on cursor/tick activity).
@@ -746,7 +780,7 @@ fn new_widget_lua() -> mlua::Result<Lua> {
 ///
 /// Every node type gets its own metatable with iced-spelled chainable
 /// setters, so Lua reads like iced builders: `ui.progress(0.5)`
-/// `:width(200)`, `ui.text("hi"):size(14)`, `ui.row({...})`
+/// `:width(200):height(12)`, `ui.text("hi"):size(14)`, `ui.row({...})`
 /// `:spacing(8)`, `ui.button("go", "run"):width(120):padding(4)`.
 /// Each setter writes its field and returns the node. Calling a
 /// setter the node type doesn't own (e.g. `:width()` on text) is a
@@ -801,7 +835,16 @@ fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     }
     // One metatable per setter shape (shared across types that allow
     // the same setters).
-    let mt_text = mt_for(lua, &[("size", setter(lua, "size", &["text"])?)])?;
+    let mt_text = mt_for(
+        lua,
+        &[
+            ("size", setter(lua, "size", &["text"])?),
+            (
+                "height",
+                setter(lua, "height", &["text", "button", "progress"])?,
+            ),
+        ],
+    )?;
     let mt_rowcol = mt_for(
         lua,
         &[("spacing", setter(lua, "spacing", &["row", "column"])?)],
@@ -810,12 +853,22 @@ fn inject_ui(lua: &Lua) -> mlua::Result<()> {
         lua,
         &[
             ("width", setter(lua, "width", &["button", "progress"])?),
+            (
+                "height",
+                setter(lua, "height", &["text", "button", "progress"])?,
+            ),
             ("padding", setter(lua, "padding", &["button"])?),
         ],
     )?;
     let mt_progress = mt_for(
         lua,
-        &[("width", setter(lua, "width", &["button", "progress"])?)],
+        &[
+            ("width", setter(lua, "width", &["button", "progress"])?),
+            (
+                "height",
+                setter(lua, "height", &["text", "button", "progress"])?,
+            ),
+        ],
     )?;
     let mt_bare = mt_for(lua, &[])?;
     lua.globals().set("_riced_ui_mt_text", mt_text.clone())?;
@@ -2634,7 +2687,8 @@ mod tests {
             parse_node(&value).expect("parse"),
             WidgetNode::Progress {
                 value: 0.5,
-                width: 200.0
+                width: 200.0,
+                height: None,
             }
         );
         let value: mlua::Value = lua
@@ -2646,6 +2700,7 @@ mod tests {
             WidgetNode::Text {
                 content: "hi".to_string(),
                 size: Some(14.0),
+                height: None,
             }
         );
         // Multi-chain + nesting.
@@ -2659,6 +2714,7 @@ mod tests {
                 label: "go".to_string(),
                 action: "run".to_string(),
                 width: Some(120.0),
+                height: None,
                 padding: Some(4.0),
             }
         );
@@ -2675,6 +2731,7 @@ mod tests {
                 children: vec![WidgetNode::Text {
                     content: "x".to_string(),
                     size: None,
+                    height: None,
                 }],
                 spacing: 8.0,
             }
@@ -2697,6 +2754,41 @@ mod tests {
             .eval()
             .expect("eval");
         assert!(parse_node(&value).is_err());
+        // :height() on all three height-bearing types.
+        let value: mlua::Value = lua
+            .load(r#"return ui.progress(0.5):width(200):height(12)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: 200.0,
+                height: Some(12.0),
+            }
+        );
+        let value: mlua::Value = lua
+            .load(r#"return ui.button("go", "run"):height(36)"#)
+            .eval()
+            .expect("eval");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Button {
+                height: Some(_),
+                ..
+            }
+        ));
+        let value: mlua::Value = lua
+            .load(r#"return ui.text("hi"):height(20)"#)
+            .eval()
+            .expect("eval");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Text {
+                height: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2867,7 +2959,8 @@ mod tests {
             WidgetNode::Column {
                 children: vec![WidgetNode::Progress {
                     value: 0.5,
-                    width: 120.0
+                    width: 120.0,
+                    height: None,
                 }],
                 spacing: 4.0,
             }
@@ -2881,7 +2974,8 @@ mod tests {
             parse_node(&Value::Table(wide)).expect("parse"),
             WidgetNode::Progress {
                 value: 0.5,
-                width: 200.0
+                width: 200.0,
+                height: None,
             }
         );
         let bad: Table = lua
@@ -2907,16 +3001,19 @@ mod tests {
                     WidgetNode::Text {
                         content: "hi".to_string(),
                         size: None,
+                        height: None,
                     },
                     WidgetNode::Button {
                         label: "go".to_string(),
                         action: "run".to_string(),
                         width: None,
+                        height: None,
                         padding: None,
                     },
                     WidgetNode::Text {
                         content: "7".to_string(),
                         size: None,
+                        height: None,
                     },
                     WidgetNode::Icon("cpu".to_string()),
                 ],
@@ -2940,6 +3037,7 @@ mod tests {
             WidgetNode::Text {
                 content: "hi".to_string(),
                 size: None,
+                height: None,
             },
             WidgetNode::Icon("cpu".to_string()),
             WidgetNode::Icon("typo".to_string()),
@@ -2947,6 +3045,7 @@ mod tests {
                 children: vec![WidgetNode::Text {
                     content: "a".to_string(),
                     size: None,
+                    height: None,
                 }],
                 spacing: 2.0,
             },
@@ -2958,11 +3057,13 @@ mod tests {
                 label: "go".to_string(),
                 action: "run".to_string(),
                 width: None,
+                height: None,
                 padding: None,
             },
             WidgetNode::Progress {
                 value: 1.5,
                 width: 120.0,
+                height: None,
             },
         ] {
             let _ = build_node(&node, size, no_msg).expect("builds");
@@ -2972,6 +3073,7 @@ mod tests {
             label: "go".to_string(),
             action: "run".to_string(),
             width: None,
+            height: None,
             padding: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
