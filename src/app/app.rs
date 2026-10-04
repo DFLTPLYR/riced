@@ -80,6 +80,15 @@ pub struct Plots {
     pub(crate) widget_last_error: HashMap<String, String>,
     // Script file mtimes per widget (live-reload on edit).
     pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
+    // ListView-style enter/exit transitions for `ui` button rows
+    // (see layers::anim): one aura runtime shared by all windows,
+    // motions keyed by (widget, action), ghosts for removed items.
+    pub(crate) anim_runtime: crate::app::layers::anim::AnimRuntime,
+    pub(crate) item_anims: HashMap<
+        (String, String),
+        aura_anim::core::runtime::Motion<crate::app::layers::anim::ItemSlide>,
+    >,
+    pub(crate) item_ghosts: HashMap<String, Vec<crate::app::layers::anim::GhostItem>>,
     // Live system snapshot for the `sysinfo` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
     pub(crate) sysinfo: sysinfo::System,
@@ -162,6 +171,9 @@ impl Plots {
             widget_last_run: HashMap::new(),
             widget_last_error: HashMap::new(),
             widget_script_mtime: HashMap::new(),
+            anim_runtime: crate::app::layers::anim::AnimRuntime::default(),
+            item_anims: HashMap::new(),
+            item_ghosts: HashMap::new(),
             sysinfo,
         };
         // Render Lua widgets once so bars populate on the first frame
@@ -431,6 +443,15 @@ impl Plots {
             iced::time::every(Duration::from_millis(250)).map(|_| Plant::IpcPoll),
         ];
 
+        // List enter/exit transitions tick at 60fps only while a
+        // motion is active (aura runtime idles to zero wakeups).
+        if self.anim_runtime.has_active() {
+            subs.push(
+                iced::time::every(Duration::from_millis(16))
+                    .map(|_| Plant::TopPlot(TopEvent::WidgetAnim)),
+            );
+        }
+
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
         // QML Behavior InOutQuad on opacity (over the animation speed) needs
         // 60fps ticks only while fading
@@ -472,7 +493,17 @@ impl Plots {
             Some(PlotInfo::Top(_output)) => self
                 .tops
                 .get(&id)
-                .map(|t| t.view(id, &self.widgets, &self.widget_outputs, &self.widget_trees))
+                .map(|t| {
+                    t.view(
+                        id,
+                        &self.widgets,
+                        &self.widget_outputs,
+                        &self.widget_trees,
+                        &self.anim_runtime,
+                        &self.item_anims,
+                        &self.item_ghosts,
+                    )
+                })
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Popup(_output)) => self
                 .popups
@@ -925,6 +956,7 @@ impl Plots {
                 Top::handle_set_slot_spacing(self, id, value)
             }
             Plant::TopPlot(TopEvent::WidgetTick) => Top::handle_widget_tick(self),
+            Plant::TopPlot(TopEvent::WidgetAnim) => Top::handle_anim_frame(self),
             Plant::TopPlot(TopEvent::WidgetsChanged) => Popup::refresh_bodies(self),
             Plant::TopPlot(TopEvent::PopupSelect(id, action)) => {
                 Popup::handle_select(self, id, action)
@@ -1026,6 +1058,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // Lua-widget timer only runs due scripts (repaint goes through
         // WidgetsChanged when an output actually moved).
         Plant::TopPlot(TopEvent::WidgetTick) => Scope::None,
+        // Animation frames repaint while a list transition runs (the
+        // 16ms subscription only exists while motions are active).
+        Plant::TopPlot(TopEvent::WidgetAnim) => Scope::All,
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
         | Plant::TopPlot(TopEvent::Remove(..))

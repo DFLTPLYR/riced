@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod background;
 pub mod popup;
 pub mod setting;

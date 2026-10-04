@@ -755,6 +755,17 @@ pub fn config_path() -> PathBuf {
 /// `:padding()` on progress) fails at eval — typos stay visible.
 /// Wrong-typed values error at parse naming the field.
 ///
+/// ## List transitions (QML-`ListView` add/remove)
+///
+/// Direct `ui.button` children of a cell's top-level row/column
+/// animate on add/remove (keyed by `action`, driven by aura-anim):
+/// entering items slide in, removed items linger as inert ghosts
+/// sliding out, then leave. Label-only edits on the same key swap
+/// instantly. First paint settles with no animation; durations follow
+/// the global animation speed. Geometric slides only — iced offers no
+/// opacity widget, and surviving siblings reflow instantly (no
+/// `displaced`). Popup trees stay static for now.
+///
 /// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
 ///
 /// Clicking a slot runs widget Lua: `popup()` (when defined) toggles a
@@ -981,7 +992,8 @@ end
 pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (native shell).
 -- Polls hyprctl every interval (the engine is the loop). Shows only
 -- workspaces on the focused output; buttons are labeled by relative
--- position (1..N), not workspace id.
+-- position (1..N), not workspace id. Enter/exit transitions are
+-- automatic: the row's buttons animate on add/remove, keyed by action.
 function render()
     local ids_h = io.popen("hyprctl workspaces -j 2>/dev/null")
     if not ids_h then

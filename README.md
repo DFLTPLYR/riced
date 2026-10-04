@@ -114,6 +114,9 @@ end
   that widget's `on_action(key)` directly; popup rows do the same.
 - **Slow fetches**: return `ui.spinner()` first, fill a global in
   `render()`, show cached rows after (see `clinepass.lua`).
+- **List transitions**: top-level row/column `ui.button`s animate on
+  add/remove (slide, keyed by action, animation-speed duration).
+  Label edits swap instantly; first paint settles with no animation.
 
 Full contract with shapes and edge cases lives on `WidgetDef` in
 `src/config.rs` (the `/// Widgets:` doc block).

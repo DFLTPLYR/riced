@@ -90,6 +90,10 @@ pub enum TopEvent {
     /// elapsed. Never repaints by itself — emits `WidgetsChanged` when
     /// an output moved.
     WidgetTick,
+    /// 16ms animation frame: advances the aura-anim runtime for list
+    /// enter/exit transitions and sweeps settled ghosts. Only
+    /// subscribed while a motion is active (repaint via Scope::All).
+    WidgetAnim,
     /// A Lua widget output moved: repaint so bars pick the new text up.
     WidgetsChanged,
     /// Click a popup item: run the widget's `on_action()` with the item

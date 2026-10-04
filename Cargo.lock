@@ -398,6 +398,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "aura-anim"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aed3d5a5e59efd11f0670413e6c645a30c47fdcae0d2530bf6c24bfe199d10c"
+dependencies = [
+ "aura-anim-core",
+ "aura-anim-iced",
+]
+
+[[package]]
+name = "aura-anim-core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ef9dee7dc2b9decf858d2facc2f07bc1c9547cd9ee8798095f2620c212eda6"
+dependencies = [
+ "aura-anim-macros",
+ "iced_core",
+ "lilt",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "aura-anim-iced"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89beef6edf8a687b8479f870ee01273a420c1330a10270f650ad73c1aa85fef8"
+dependencies = [
+ "aura-anim-core",
+ "iced",
+]
+
+[[package]]
+name = "aura-anim-macros"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c28f521f0f9c8a2943bdac01f2a63de2cc7dad9cbfd3406bfde804c783348b8"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3962,6 +4006,7 @@ dependencies = [
 name = "riced"
 version = "0.1.0"
 dependencies = [
+ "aura-anim",
  "bytes",
  "clap",
  "dirs",

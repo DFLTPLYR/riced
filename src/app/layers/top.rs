@@ -361,6 +361,9 @@ fn empty_slot() -> Element<'static, Plant> {
 
 /// Render one slot's widgets side by side along the bar axis
 /// (`none`/unknown names are skipped; no entries = empty cell).
+/// Top-level rows/columns get enter/exit transitions on direct
+/// button children (see [`super::anim`]); anything else builds plain.
+#[allow(clippy::too_many_arguments)]
 fn render_slot_widgets(
     names: &[String],
     defs: &[WidgetDef],
@@ -368,6 +371,12 @@ fn render_slot_widgets(
     trees: &HashMap<String, WidgetNode>,
     gap: f32,
     horizontal: bool,
+    anim_runtime: &aura_anim::core::runtime::MotionRuntime,
+    item_anims: &HashMap<
+        (String, String),
+        aura_anim::core::runtime::Motion<super::anim::ItemSlide>,
+    >,
+    item_ghosts: &super::anim::ItemGhosts,
 ) -> Element<'static, Plant> {
     let mut items = Vec::new();
     for name in names {
@@ -386,7 +395,38 @@ fn render_slot_widgets(
             let widget = name.clone();
             let msg =
                 move |action: String| Plant::TopPlot(TopEvent::CellAction(widget.clone(), action));
-            if let Ok(item) = build_node(node, size, Some(&msg)) {
+            let built = match node {
+                WidgetNode::Row {
+                    children,
+                    spacing,
+                    width,
+                    height,
+                }
+                | WidgetNode::Column {
+                    children,
+                    spacing,
+                    width,
+                    height,
+                } => {
+                    let is_row = matches!(node, WidgetNode::Row { .. });
+                    build_anim_list(
+                        name,
+                        children,
+                        *spacing,
+                        width.clone(),
+                        height.clone(),
+                        is_row,
+                        size,
+                        &msg,
+                        anim_runtime,
+                        item_anims,
+                        item_ghosts.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                        horizontal,
+                    )
+                }
+                _ => build_node(node, size, Some(&msg)),
+            };
+            if let Ok(item) = built {
                 items.push(item);
             }
         } else if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
@@ -416,6 +456,96 @@ fn render_slot_widgets(
             column = column.push(item);
         }
         column.into()
+    }
+}
+
+/// Build a top-level row/column with enter/exit transitions: direct
+/// button children (keyed by action) slide from their motion pad;
+/// retained ghosts render inert at their old indices. Live build
+/// failures skip the widget (mirrors plain `build_node` strictness);
+/// ghost build failures skip just that ghost.
+#[allow(clippy::too_many_arguments)]
+fn build_anim_list(
+    widget: &str,
+    children: &[WidgetNode],
+    spacing: f32,
+    width: NodeLength,
+    height: NodeLength,
+    is_row: bool,
+    size: f32,
+    button_msg: &dyn Fn(String) -> Plant,
+    anim_runtime: &aura_anim::core::runtime::MotionRuntime,
+    item_anims: &HashMap<
+        (String, String),
+        aura_anim::core::runtime::Motion<super::anim::ItemSlide>,
+    >,
+    ghosts: &[super::anim::GhostItem],
+    horizontal: bool,
+) -> Result<Element<'static, Plant>, String> {
+    let pad_of = |key: &str| -> f32 {
+        item_anims
+            .get(&(widget.to_string(), key.to_string()))
+            .and_then(|m| m.value(anim_runtime).ok())
+            .map(|v| v.pad)
+            .unwrap_or(0.0)
+    };
+    let wrap = |el: Element<'static, Plant>, pad: f32| -> Element<'static, Plant> {
+        if pad <= 0.01 {
+            return el;
+        }
+        let mut p = iced::Padding::ZERO;
+        if horizontal {
+            p.left = pad;
+        } else {
+            p.top = pad;
+        }
+        container(el).padding(p).into()
+    };
+    let mut items = Vec::new();
+    for child in children {
+        let el = build_node(child, size, Some(button_msg))?;
+        let pad = match child {
+            WidgetNode::Button { action, .. } => pad_of(action),
+            _ => 0.0,
+        };
+        items.push(wrap(el, pad));
+    }
+    // Ghosts at their old indices (clamped: batch removals shift).
+    let mut ordered: Vec<&super::anim::GhostItem> = ghosts.iter().collect();
+    ordered.sort_by_key(|g| g.index);
+    for ghost in ordered {
+        let Ok(el) = build_node(&ghost.node, size, None) else {
+            continue;
+        };
+        let at = ghost.index.min(items.len());
+        items.push(wrap(el, pad_of(&ghost.key)));
+        // Move the just-pushed ghost into place.
+        let last = items.len() - 1;
+        if at < last {
+            let el = items.remove(last);
+            items.insert(at, el);
+        }
+    }
+    if is_row {
+        let mut row = row![]
+            .spacing(spacing.max(0.0))
+            .align_y(iced::Alignment::Center)
+            .width(width.iced())
+            .height(height.iced());
+        for item in items {
+            row = row.push(item);
+        }
+        Ok(row.into())
+    } else {
+        let mut column = column![]
+            .spacing(spacing.max(0.0))
+            .align_x(iced::Alignment::Center)
+            .width(width.iced())
+            .height(height.iced());
+        for item in items {
+            column = column.push(item);
+        }
+        Ok(column.into())
     }
 }
 
@@ -491,7 +621,7 @@ pub(crate) enum NodeLength {
 }
 
 impl NodeLength {
-    fn iced(self) -> iced::Length {
+    pub(crate) fn iced(self) -> iced::Length {
         match self {
             Self::Fill => iced::Length::Fill,
             Self::Shrink => iced::Length::Shrink,
@@ -1298,12 +1428,16 @@ impl Top {
         (id, settings)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &self,
         id: window::Id,
         widgets: &[WidgetDef],
         outputs: &HashMap<String, String>,
         trees: &HashMap<String, WidgetNode>,
+        anim_runtime: &aura_anim::core::runtime::MotionRuntime,
+        item_anims: &super::anim::ItemMotions,
+        item_ghosts: &super::anim::ItemGhosts,
     ) -> Element<'_, Plant> {
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
@@ -1317,6 +1451,9 @@ impl Top {
                 trees,
                 gap,
                 horizontal,
+                anim_runtime,
+                item_anims,
+                item_ghosts,
             );
             let (align_x, align_y) = self.local.align_at(pos).for_bar(horizontal);
             container(body)
@@ -1632,6 +1769,19 @@ impl Top {
                 plots.widget_outputs.remove(&def.name);
                 match parse_node(&Value::Table(t)) {
                     Ok(node) => {
+                        // Diff button lists for enter/exit transitions
+                        // before replacing the cached tree.
+                        let old = plots.widget_trees.get(&def.name).cloned();
+                        let duration = plots.config.animation.speed.duration();
+                        super::anim::sync_list_anims(
+                            &mut plots.anim_runtime,
+                            &mut plots.item_anims,
+                            &mut plots.item_ghosts,
+                            &def.name,
+                            old.as_ref(),
+                            &node,
+                            duration,
+                        );
                         plots.widget_trees.insert(def.name.clone(), node);
                     }
                     Err(e) => {
@@ -1681,6 +1831,10 @@ impl Top {
         plots.widget_last_run.clear();
         plots.widget_last_error.clear();
         plots.widget_script_mtime.clear();
+        // Fresh Lua states mean fresh lists: drop in-flight transitions
+        // so the first post-reload paint settles instantly.
+        plots.item_anims.clear();
+        plots.item_ghosts.clear();
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
         let gpu = Popup::gpu_usage_percent();
@@ -1765,6 +1919,19 @@ impl Top {
         if Self::run_due_widgets(plots) {
             return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
         }
+        Command::none()
+    }
+
+    /// Advance list enter/exit transitions (`TopEvent::WidgetAnim`):
+    /// ticks the aura runtime and sweeps settled motions + ghosts.
+    /// Repaint comes from the `Scope::All` redraw scope, not here.
+    pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
+        super::anim::sweep_anims(
+            &mut plots.anim_runtime,
+            &mut plots.item_anims,
+            &mut plots.item_ghosts,
+            Instant::now(),
+        );
         Command::none()
     }
 
@@ -3400,5 +3567,82 @@ mod tests {
             padding: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
+    }
+
+    #[test]
+    fn build_anim_list_merges_live_and_ghosts() {
+        use crate::app::layers::anim::{ENTER_OFFSET, GhostItem, ItemMotions, ItemSlide};
+        use aura_anim::core::runtime::MotionRuntime;
+        // Live row like the hypr seed renders: two buttons, the first
+        // mid-enter, plus one exiting ghost at index 1.
+        let children = vec![
+            WidgetNode::Button {
+                label: "1".to_string(),
+                action: "ws:1".to_string(),
+                width: None,
+                height: None,
+                padding: None,
+            },
+            WidgetNode::Button {
+                label: "[2]".to_string(),
+                action: "ws:2".to_string(),
+                width: None,
+                height: None,
+                padding: None,
+            },
+        ];
+        let mut rt = MotionRuntime::new();
+        let timing = aura_anim::core::timing::Timing::ease_out(Duration::from_millis(150));
+        let mut motions: ItemMotions = HashMap::new();
+        for (key, pad) in [("ws:1", ENTER_OFFSET), ("ws:9", 0.0)] {
+            let m = rt.motion_with(ItemSlide { pad }, timing);
+            let target = if key == "ws:1" { 0.0 } else { ENTER_OFFSET };
+            let _ = m.transition_to(ItemSlide { pad: target }, &mut rt);
+            motions.insert(("hypr".to_string(), key.to_string()), m);
+        }
+        let ghosts = vec![GhostItem {
+            index: 1,
+            key: "ws:9".to_string(),
+            node: WidgetNode::Button {
+                label: "9".to_string(),
+                action: "ws:9".to_string(),
+                width: None,
+                height: None,
+                padding: None,
+            },
+        }];
+        let msg = |_: String| Plant::Tend;
+        // Live + ghost merge builds (ghost renders inert).
+        let _ = build_anim_list(
+            "hypr",
+            &children,
+            4.0,
+            NodeLength::Shrink,
+            NodeLength::Shrink,
+            true,
+            13.0,
+            &msg,
+            &rt,
+            &motions,
+            &ghosts,
+            true,
+        )
+        .expect("builds");
+        // Vertical bars pad the top instead of the left: same build.
+        let _ = build_anim_list(
+            "hypr",
+            &children,
+            4.0,
+            NodeLength::Shrink,
+            NodeLength::Shrink,
+            false,
+            13.0,
+            &msg,
+            &rt,
+            &motions,
+            &ghosts,
+            false,
+        )
+        .expect("builds");
     }
 }
