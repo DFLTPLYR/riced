@@ -304,15 +304,43 @@ impl Popup {
     ) -> Option<Command<Plant>> {
         let top = plots.tops.get(&bar_id)?.clone();
         let names: Vec<String> = top.local.widgets_at(pos).to_vec();
-        let capable: Vec<String> = names
+        let mut capable: Vec<String> = names
             .iter()
             .filter(|w| lua_has_func(&plots.widget_lua, w, "popup"))
             .cloned()
             .collect();
+        // Slow path: the file may have changed since the cached state
+        // was built (popup paths don't tick like `render()` does) —
+        // sync candidate defs and re-check, so a newly added `popup()`
+        // opens on the first click after saving.
+        if capable.is_empty() || prefer.is_some_and(|p| !capable.iter().any(|w| w == p)) {
+            for w in &names {
+                if let Some(def) = plots.widgets.iter().find(|d| d.name == *w).cloned() {
+                    Top::sync_script_state(plots, &def);
+                    // Errors surface below when the chosen widget fails
+                    // to load; other candidates just stay unusable.
+                    let _ = Top::ensure_widget_lua(plots, &def);
+                }
+            }
+            capable = names
+                .iter()
+                .filter(|w| lua_has_func(&plots.widget_lua, w, "popup"))
+                .cloned()
+                .collect();
+        }
         let name = prefer
             .filter(|p| capable.iter().any(|w| w == p))
             .map(str::to_string)
             .or_else(|| capable.into_iter().next())?;
+        // Fresh state for the chosen widget: edits apply on open, not
+        // on the widget's next (maybe 60s) render tick.
+        if let Some(def) = plots.widgets.iter().find(|d| d.name == name).cloned() {
+            Top::sync_script_state(plots, &def);
+            if let Err(e) = Top::ensure_widget_lua(plots, &def) {
+                Top::note_widget_error(plots, &name, e);
+                return None;
+            }
+        }
         let body = match plots.widget_lua.get(&name) {
             Some(lua) => match call_lua_value(lua, "popup").and_then(Self::parse_popup_content) {
                 Ok(content) => content,
@@ -453,8 +481,10 @@ impl Popup {
     }
 
     /// Re-render open popup bodies with live data (called when widget
-    /// outputs move, so menus tick too). Bodies that break keep their
-    /// last good text; popups whose runtime vanished are dismissed.
+    /// outputs move, so menus tick too). Each body re-syncs its script
+    /// first, so `popup()` edits apply without waiting out the
+    /// widget's render interval. Bodies that break keep their last good
+    /// content; popups whose widget left `widgets.toml` are dismissed.
     /// Returns close commands for dismissals (possibly none).
     pub(crate) fn refresh_bodies(plots: &mut Plots) -> Command<Plant> {
         let open: Vec<(window::Id, String)> = plots
@@ -470,21 +500,35 @@ impl Popup {
         let gpu = Self::gpu_usage_percent();
         let mut cmds = Vec::new();
         for (pid, name) in open {
-            let content = match plots.widget_lua.get(&name) {
-                Some(lua) => {
-                    match publish_system_tables(lua, &plots.sysinfo, gpu)
-                        .map_err(|e| e.to_string())
-                        .and_then(|()| call_lua_value(lua, "popup"))
-                        .and_then(Self::parse_popup_content)
-                    {
-                        Ok(content) => Some(content),
-                        Err(e) => {
-                            Top::note_widget_error(plots, &name, e);
-                            None
+            // Gone from the config: dismiss. Anything else keeps its
+            // last good body on error (a typo mid-save must not close
+            // the menu you're editing).
+            let Some(def) = plots.widgets.iter().find(|d| d.name == name).cloned() else {
+                cmds.push(Self::handle_dismiss(plots, pid));
+                continue;
+            };
+            Top::sync_script_state(plots, &def);
+            let content = match Top::ensure_widget_lua(plots, &def) {
+                Err(e) => {
+                    Top::note_widget_error(plots, &name, e);
+                    continue;
+                }
+                Ok(()) => match plots.widget_lua.get(&name) {
+                    Some(lua) => {
+                        match publish_system_tables(lua, &plots.sysinfo, gpu)
+                            .map_err(|e| e.to_string())
+                            .and_then(|()| call_lua_value(lua, "popup"))
+                            .and_then(Self::parse_popup_content)
+                        {
+                            Ok(content) => Some(content),
+                            Err(e) => {
+                                Top::note_widget_error(plots, &name, e);
+                                continue;
+                            }
                         }
                     }
-                }
-                None => None,
+                    None => continue,
+                },
             };
             match content {
                 Some(content) => {
@@ -540,6 +584,16 @@ impl Popup {
         let Some(widget) = plots.popups.get(&id).map(|p| p.widget.clone()) else {
             return Command::none();
         };
+        // Fresh handler for the click: an edited `on_action()` applies
+        // immediately (in-memory toggle state resets on reload, same
+        // as editing any widget script).
+        if let Some(def) = plots.widgets.iter().find(|d| d.name == widget).cloned() {
+            Top::sync_script_state(plots, &def);
+            if let Err(e) = Top::ensure_widget_lua(plots, &def) {
+                Top::note_widget_error(plots, &widget, e);
+                return Command::none();
+            }
+        }
         let outcome = match plots.widget_lua.get(&widget) {
             Some(lua) => {
                 let acted = publish_system_tables(lua, &plots.sysinfo, Self::gpu_usage_percent())

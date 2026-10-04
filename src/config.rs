@@ -675,7 +675,10 @@ pub fn config_path() -> PathBuf {
 /// `interval` seconds (clamped to >= 0.25) the engine publishes fresh
 /// `sysinfo`/`gfxinfo` tables and calls `render()`; when the output
 /// (text or tree) differs from the last tick, the bar repaints. Editing
-/// the `.lua` file reloads it live (mtime watch); editing
+/// the `.lua` file reloads it live (mtime watch) — including
+/// `popup()`/`on_action()`: opening a menu always uses the saved
+/// file, and an open menu refreshes within a tick of saving (broken
+/// edits keep the last good menu and log once); editing
 /// `widgets.toml` rebuilds all states. Errors log once per message,
 /// never per tick.
 ///

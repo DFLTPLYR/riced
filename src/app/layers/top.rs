@@ -1820,7 +1820,10 @@ impl Top {
     /// Ensure a sandboxed runtime for one Lua def (load + `render`
     /// check). Retried on later ticks while missing, so fixing the
     /// file recovers without a restart.
-    fn ensure_widget_lua(plots: &mut Plots, def: &crate::config::WidgetDef) -> Result<(), String> {
+    pub(crate) fn ensure_widget_lua(
+        plots: &mut Plots,
+        def: &crate::config::WidgetDef,
+    ) -> Result<(), String> {
         if plots.widget_lua.contains_key(&def.name) {
             return Ok(());
         }
@@ -1904,16 +1907,20 @@ impl Top {
     /// Drop a widget's runtime when its script file changed on disk, so
     /// the next render reloads it (live widget development without
     /// touching `widgets.toml`). Unreadable files keep the old state.
-    fn sync_script_state(plots: &mut Plots, def: &crate::config::WidgetDef) {
+    /// Returns true when the runtime was dropped (callers force a
+    /// refresh: reloaded content may differ even if `render()` output
+    /// doesn't, e.g. `popup()` edits on a slow-interval widget).
+    pub(crate) fn sync_script_state(plots: &mut Plots, def: &crate::config::WidgetDef) -> bool {
         let path = Self::widget_script_path(def);
         let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
-            return;
+            return false;
         };
         match plots.widget_script_mtime.get(&def.name) {
-            Some(known) if *known == mtime => {}
+            Some(known) if *known == mtime => false,
             _ => {
                 plots.widget_lua.remove(&def.name);
                 plots.widget_script_mtime.insert(def.name.clone(), mtime);
+                true
             }
         }
     }
@@ -1980,11 +1987,18 @@ impl Top {
                 .widget_last_run
                 .get(&def.name)
                 .is_none_or(|t| now.duration_since(*t) >= Duration::from_secs_f32(interval));
-            if !due {
+            // Open popups bypass the render interval: a script edit
+            // must refresh the menu now, not on the next (maybe 60s)
+            // tick. `sync` drops the stale runtime; the refresh below
+            // reloads it, and `changed` forces the repaint + body pass
+            // even when `render()` output is identical.
+            let live_popup = plots.popups.values().any(|p| p.widget == def.name)
+                && Self::sync_script_state(plots, def);
+            if !due && !live_popup {
                 continue;
             }
             plots.widget_last_run.insert(def.name.clone(), now);
-            changed |= Self::refresh_widget(plots, def, gpu);
+            changed |= Self::refresh_widget(plots, def, gpu) | live_popup;
         }
         changed
     }
