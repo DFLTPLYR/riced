@@ -2769,6 +2769,7 @@ mod tests {
         assert!(icon_bytes("Bot").is_some());
         assert!(icon_bytes("robot-vacuum").is_some());
         assert!(icon_bytes("house").is_some());
+        assert!(icon_bytes("power").is_some());
         assert!(icon_bytes("nope").is_none());
         assert!(icon_bytes("").is_none());
     }
@@ -2863,7 +2864,7 @@ mod tests {
     fn seed_scripts_parse_and_build() {
         use crate::config::{
             SEED_CLINEPASS_LUA, SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA,
-            SEED_RAM_LUA, SEED_STATS_LUA,
+            SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA,
         };
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
@@ -2876,6 +2877,7 @@ mod tests {
             SEED_RAM_LUA,
             SEED_GPU_LUA,
             SEED_CLINEPASS_LUA,
+            SEED_SYSTEM_LUA,
         ] {
             let lua = new_widget_lua().expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
@@ -2890,6 +2892,48 @@ mod tests {
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         assert!(content.tree.is_some());
+        // System seed: power cell plus a four-row session menu.
+        let lua = new_widget_lua().expect("sandbox");
+        load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
+        let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        assert_eq!(content.items.len(), 4);
+        assert!(content.items.iter().all(|i| !i.action.is_empty()));
+    }
+
+    #[test]
+    fn system_seed_whitelists_systemctl_actions() {
+        use crate::config::SEED_SYSTEM_LUA;
+        // Record os.execute calls instead of running systemctl.
+        let lua = new_widget_lua().expect("sandbox");
+        let os: mlua::Table = lua.globals().get("os").expect("os");
+        os.set(
+            "execute",
+            lua.create_function(|lua, cmd: String| {
+                let seen: mlua::Table = lua.globals().get("_seen").expect("seen");
+                seen.set(seen.len().unwrap_or(0) + 1, cmd)?;
+                Ok(true)
+            })
+            .expect("exec"),
+        )
+        .expect("set execute");
+        lua.globals()
+            .set("_seen", lua.create_table().expect("table"))
+            .expect("seen");
+        load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
+        let _: mlua::Value = lua
+            .load(r#"return on_action("suspend")"#)
+            .eval()
+            .expect("action");
+        // A hostile key never reaches the shell.
+        let _: mlua::Value = lua
+            .load(r#"return on_action("x; rm -rf ~")"#)
+            .eval()
+            .expect("action");
+        let seen: mlua::Table = lua.globals().get("_seen").expect("seen");
+        assert_eq!(seen.len().unwrap_or(0), 1);
+        let first: String = seen.get(1).expect("first");
+        assert_eq!(first, "systemctl suspend");
     }
 
     #[test]

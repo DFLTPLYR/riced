@@ -881,6 +881,14 @@ size = 13.0
 # file = "clinepass.lua"
 # interval = 300.0
 # size = 13.0
+
+# Session menu: power cell, systemctl popup (suspend, hibernate,
+# reboot, power off). Static render, no polling needed.
+# [[widget]]
+# name = "system"
+# file = "system.lua"
+# interval = 60.0
+# size = 13.0
 "#;
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
@@ -979,6 +987,38 @@ function render()
         return ui.text("--")
     end
     return ui.text(string.format("%.0f%%", usage))
+end
+"#;
+
+/// Seed session menu: power-icon cell, popup with suspend /
+/// poweroff / hibernate / reboot rows dispatching `systemctl`.
+/// `on_action` whitelists the four keys (never interpolates a raw
+/// key into shell). Uncomment its `[[widget]]` entry in widgets.toml
+/// to use it.
+pub(crate) const SEED_SYSTEM_LUA: &str = r#"-- Session menu: power cell, systemctl popup (native shell).
+-- Uncomment its [[widget]] entry in widgets.toml to use it.
+function render()
+    return ui.icon("power")
+end
+
+function popup()
+    return {
+        ui = ui.row({ ui.icon("power"), ui.text("Session") }),
+        width = 220,
+        items = {
+            { label = "Suspend", action = "suspend" },
+            { label = "Hibernate", action = "hibernate" },
+            { label = "Reboot", action = "reboot" },
+            { label = "Power off", action = "poweroff" },
+        },
+    }
+end
+
+function on_action(name)
+    local allowed = { suspend = true, hibernate = true, reboot = true, poweroff = true }
+    if allowed[name] then
+        os.execute("systemctl " .. name)
+    end
 end
 "#;
 
@@ -1171,6 +1211,7 @@ impl WidgetsFile {
             ("gpu.lua", SEED_GPU_LUA),
             ("hypr.lua", SEED_HYPR_LUA),
             ("clinepass.lua", SEED_CLINEPASS_LUA),
+            ("system.lua", SEED_SYSTEM_LUA),
         ] {
             Self::seed_script(dir, name, content);
         }
@@ -1767,6 +1808,7 @@ mod tests {
         assert!(dir.join("hello.lua").is_file());
         assert!(dir.join("hypr.lua").is_file());
         assert!(dir.join("clinepass.lua").is_file());
+        assert!(dir.join("system.lua").is_file());
         assert!(dir.join("ram.lua").is_file());
         assert!(dir.join("stats.lua").is_file());
         // A user script is never overwritten by a re-seed.
