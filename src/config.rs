@@ -723,7 +723,7 @@ pub fn config_path() -> PathBuf {
 /// - `ui.button(label, action)`: per-widget MouseArea — clicking calls
 ///   that widget's `on_action(action)` directly (missing `on_action`
 ///   is a silent no-op), never the slot popup/`on_press` fallback.
-/// - `ui.progress(0.0-1.0)`: bar (clamped).
+/// - `ui.progress(0.0-1.0 [, width])`: bar, clamped, 120px default.
 /// - `ui.spinner()`: loading ring for slow fetches — return it first,
 ///   swap in cached data on later ticks (see clinepass seed).
 ///

@@ -456,7 +456,10 @@ pub(crate) enum WidgetNode {
         label: String,
         action: String,
     },
-    Progress(f32),
+    Progress {
+        value: f32,
+        width: f32,
+    },
     /// Loading placeholder: animated ring while a slow fetch resolves.
     /// Purely visual (no action) — scripts return it first, then swap
     /// in real content once cached data arrives.
@@ -542,15 +545,31 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                     )?;
                     Ok(WidgetNode::Button { label, action })
                 }
-                "progress" => match t.get::<Value>("value").map_err(|e| e.to_string())? {
-                    Value::Nil => Ok(WidgetNode::Progress(0.0)),
-                    Value::Integer(i) => Ok(WidgetNode::Progress(i as f32)),
-                    Value::Number(n) => Ok(WidgetNode::Progress(n as f32)),
-                    other => Err(format!(
-                        "ui.progress() value must be a number, got {}",
-                        lua_value_kind(&other)
-                    )),
-                },
+                "progress" => {
+                    let value = match t.get::<Value>("value").map_err(|e| e.to_string())? {
+                        Value::Nil => 0.0,
+                        Value::Integer(i) => i as f32,
+                        Value::Number(n) => n as f32,
+                        other => {
+                            return Err(format!(
+                                "ui.progress() value must be a number, got {}",
+                                lua_value_kind(&other)
+                            ));
+                        }
+                    };
+                    let width = match t.get::<Value>("width").map_err(|e| e.to_string())? {
+                        Value::Nil => 120.0,
+                        Value::Integer(i) => i as f32,
+                        Value::Number(n) => n as f32,
+                        other => {
+                            return Err(format!(
+                                "ui.progress() width must be a number, got {}",
+                                lua_value_kind(&other)
+                            ));
+                        }
+                    };
+                    Ok(WidgetNode::Progress { value, width })
+                }
                 "spinner" => Ok(WidgetNode::Spinner),
                 other => Err(format!("unknown ui node type {other:?}")),
             }
@@ -603,8 +622,8 @@ pub(crate) fn build_node(
             }
             Ok(item.into())
         }
-        WidgetNode::Progress(frac) => Ok(progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
-            .length(iced::Length::Fixed(120.0))
+        WidgetNode::Progress { value, width } => Ok(progress_bar(0.0..=1.0, value.clamp(0.0, 1.0))
+            .length(iced::Length::Fixed(width.max(20.0)))
             .into()),
         // Animated ring: iced has no spinner widget, so a rotating
         // loader icon approximates one (redrawn every frame while
@@ -724,7 +743,12 @@ fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     )?;
     ui.set(
         "progress",
-        lua.create_function(|lua, value: Value| node(lua, "progress", |t| t.set("value", value)))?,
+        lua.create_function(|lua, (value, width): (Value, Value)| {
+            node(lua, "progress", |t| {
+                t.set("value", value)?;
+                t.set("width", width)
+            })
+        })?,
     )?;
     ui.set(
         "spinner",
@@ -2625,10 +2649,30 @@ mod tests {
         assert_eq!(
             parse_node(&Value::Table(bare)).expect("parse"),
             WidgetNode::Column {
-                children: vec![WidgetNode::Progress(0.5)],
+                children: vec![WidgetNode::Progress {
+                    value: 0.5,
+                    width: 120.0
+                }],
                 spacing: 4.0,
             }
         );
+        // Optional width second arg; malformed width errors.
+        let wide: Table = lua
+            .load(r#"return ui.progress(0.5, 200)"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(
+            parse_node(&Value::Table(wide)).expect("parse"),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: 200.0
+            }
+        );
+        let bad: Table = lua
+            .load(r#"return ui.progress(0.5, 'wide')"#)
+            .eval()
+            .expect("eval");
+        assert!(parse_node(&Value::Table(bad)).is_err());
     }
 
     #[test]
@@ -2684,7 +2728,10 @@ mod tests {
                 label: "go".to_string(),
                 action: "run".to_string(),
             },
-            WidgetNode::Progress(1.5),
+            WidgetNode::Progress {
+                value: 1.5,
+                width: 120.0,
+            },
         ] {
             let _ = build_node(&node, size, no_msg).expect("builds");
         }
