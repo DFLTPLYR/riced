@@ -973,10 +973,15 @@ end
 
 /// Seed Hyprland workspaces: polls `hyprctl workspaces -j` every
 /// interval (the engine is the loop — no async in Lua) and renders
-/// one button per workspace. Clicks dispatch via `on_action`.
+/// one button per workspace **on the focused output only**. Buttons
+/// use the relative position in that output's list (`1..N`), not the
+/// global workspace id; a `_ws_ids` global maps positions back to
+/// ids for dispatch. Clicks dispatch via `on_action`.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
 pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (native shell).
--- Polls hyprctl every interval (the engine is the loop).
+-- Polls hyprctl every interval (the engine is the loop). Shows only
+-- workspaces on the focused output; buttons are labeled by relative
+-- position (1..N), not workspace id.
 function render()
     local ids_h = io.popen("hyprctl workspaces -j 2>/dev/null")
     if not ids_h then
@@ -987,11 +992,22 @@ function render()
     local active_h = io.popen("hyprctl activeworkspace -j 2>/dev/null")
     local active = active_h and active_h:read("*a") or nil
     if active_h then active_h:close() end
-    local current = active and active:match('"id":%s*(%d+)') or nil
+    -- Focused output (nil when the query fails -> show everything).
+    local output = active and active:match('"monitor"%s*:%s*"([^"]+)"') or nil
+    local current = active and active:match('"id"%s*:%s*(%d+)') or nil
     local cells = {}
-    for id in ids:gmatch('"id":%s*(%d+)') do
-        local label = id == current and ("[" .. id .. "]") or id
-        cells[#cells + 1] = ui.button(label, "ws:" .. id)
+    _ws_ids = {}
+    local pos = 0
+    -- Pair each workspace id with its monitor ([%s%S] spans the
+    -- pretty-printed JSON newlines). "monitorID" can't collide: the
+    -- pattern requires the closing quote after monitor.
+    for id, mon in ids:gmatch('"id"%s*:%s*(%d+)[%s%S]-"monitor"%s*:%s*"([^"]+)"') do
+        if (not output) or mon == output then
+            pos = pos + 1
+            _ws_ids[pos] = id
+            local label = (id == current) and ("[" .. pos .. "]") or tostring(pos)
+            cells[#cells + 1] = ui.button(label, "ws:" .. pos)
+        end
     end
     if #cells == 0 then
         return ui.text("--")
@@ -1000,7 +1016,8 @@ function render()
 end
 
 function on_action(name)
-    local id = name:match("^ws:(%d+)$")
+    local idx = name:match("^ws:(%d+)$")
+    local id = idx and _ws_ids and _ws_ids[tonumber(idx)]
     if id then
         os.execute("hyprctl dispatch workspace " .. id .. " >/dev/null 2>&1")
     end

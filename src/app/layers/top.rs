@@ -2798,6 +2798,89 @@ mod tests {
     }
 
     #[test]
+    fn hypr_seed_shows_output_local_workspaces_by_position() {
+        use crate::config::SEED_HYPR_LUA;
+        // Ids 3 (DP-1), 4 (HDMI-1), 5 (DP-1); focused is 5 on DP-1.
+        // Positions must be 1..2 over DP-1 only — never raw ids.
+        let workspaces = r#"[{"id":3,"name":"3","monitor":"DP-1","monitorID":0,"windows":1},{"id":4,"name":"4","monitor":"HDMI-1","monitorID":1,"windows":0},{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}]"#;
+        let active = r#"{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}"#;
+        let lua = new_widget_lua().expect("sandbox");
+        // Stub io.popen by command (method-call read form).
+        let io: mlua::Table = lua.globals().get("io").expect("io");
+        let (ws, act) = (workspaces.to_string(), active.to_string());
+        io.set(
+            "popen",
+            lua.create_function(move |lua, cmd: String| {
+                let body = if cmd.contains("activeworkspace") {
+                    act.clone()
+                } else {
+                    ws.clone()
+                };
+                let h = lua.create_table().expect("handle");
+                h.set(
+                    "read",
+                    lua.create_function(move |_, (_h, _m): (mlua::Value, mlua::Value)| {
+                        Ok(body.clone())
+                    })
+                    .expect("read"),
+                )
+                .expect("set read");
+                h.set(
+                    "close",
+                    lua.create_function(|_, _: mlua::Value| Ok(true))
+                        .expect("close"),
+                )
+                .expect("set close");
+                Ok(h)
+            })
+            .expect("popen"),
+        )
+        .expect("set popen");
+        // Record dispatches instead of spawning hyprctl.
+        let os: mlua::Table = lua.globals().get("os").expect("os");
+        os.set(
+            "execute",
+            lua.create_function(|lua, cmd: String| {
+                lua.globals().set("_dispatched", cmd)?;
+                Ok(true)
+            })
+            .expect("exec"),
+        )
+        .expect("set execute");
+        load_widget_script(&lua, "hypr", SEED_HYPR_LUA).expect("load");
+        let value: mlua::Value = lua.load("return render()").eval().expect("render");
+        let node = parse_node(&value).expect("parse");
+        match node {
+            WidgetNode::Row { children, .. } => {
+                assert_eq!(children.len(), 2);
+                match &children[0] {
+                    WidgetNode::Button { label, action, .. } => {
+                        assert_eq!((label.as_str(), action.as_str()), ("1", "ws:1"));
+                    }
+                    other => panic!("expected button, got {other:?}"),
+                }
+                match &children[1] {
+                    WidgetNode::Button { label, action, .. } => {
+                        assert_eq!((label.as_str(), action.as_str()), ("[2]", "ws:2"));
+                    }
+                    other => panic!("expected button, got {other:?}"),
+                }
+            }
+            other => panic!("expected row, got {other:?}"),
+        }
+        // Position 1 maps back to workspace id 3 (not "workspace 1").
+        let _: mlua::Value = lua
+            .load(r#"return on_action("ws:1")"#)
+            .eval()
+            .expect("action");
+        let dispatched: String = lua.load("return _dispatched").eval().expect("dispatched");
+        assert!(
+            dispatched.contains("workspace 3"),
+            "dispatches mapped id, got {dispatched:?}"
+        );
+    }
+
+    #[test]
     fn ui_spinner_parses_and_builds() {
         let lua = new_widget_lua().expect("sandbox");
         let value: mlua::Value = lua.load("return ui.spinner()").eval().expect("eval");
