@@ -2875,7 +2875,7 @@ mod tests {
             .expect("action");
         let dispatched: String = lua.load("return _dispatched").eval().expect("dispatched");
         assert!(
-            dispatched.contains("workspace 3"),
+            dispatched.contains("workspace = 3"),
             "dispatches mapped id, got {dispatched:?}"
         );
     }

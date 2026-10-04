@@ -1019,7 +1019,7 @@ function on_action(name)
     local idx = name:match("^ws:(%d+)$")
     local id = idx and _ws_ids and _ws_ids[tonumber(idx)]
     if id then
-        os.execute("hyprctl dispatch workspace " .. id .. " >/dev/null 2>&1")
+        os.execute("hyprctl dispatch 'hl.dsp.focus({workspace = " .. id .. "})' >/dev/null 2>&1")
     end
 end
 "#;
