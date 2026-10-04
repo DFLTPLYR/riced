@@ -480,14 +480,35 @@ impl Popup {
             };
             match content {
                 Some(content) => {
+                    // Recompute the box: explicit width/height may have
+                    // changed (e.g. 300 -> 200), and the window keeps its
+                    // creation size unless told otherwise.
+                    let output = plots.ids.get(&pid).and_then(|info| match info {
+                        PlotInfo::Popup(o) => plots.output_infos.get(o).map(|_| *o),
+                        _ => None,
+                    });
+                    let (nw, nh) = match output {
+                        Some(o) => match Background::available_rect(o, &plots.output_infos) {
+                            Some((_, _, sw, sh)) => Self::content_size(sw, sh, &content),
+                            None => Self::content_size(1920.0, 1080.0, &content),
+                        },
+                        None => Self::content_size(1920.0, 1080.0, &content),
+                    };
                     if let Some(popup) = plots.popups.get_mut(&pid)
                         && (popup.body != content.text
                             || popup.items != content.items
-                            || popup.tree != content.tree)
+                            || popup.tree != content.tree
+                            || popup.w != nw
+                            || popup.h != nh)
                     {
                         popup.body = content.text;
                         popup.items = content.items;
                         popup.tree = content.tree;
+                        popup.w = nw;
+                        popup.h = nh;
+                        cmds.push(iced_runtime::task::effect(Action::Window(
+                            WindowAction::Resize(pid, iced::Size::new(nw as f32, nh as f32)),
+                        )));
                     }
                 }
                 None => cmds.push(Self::handle_dismiss(plots, pid)),
