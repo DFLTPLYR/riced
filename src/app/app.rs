@@ -74,9 +74,6 @@ pub struct Plots {
     // run tick, and last error (errors log only on change, never per
     // tick). States are rebuilt on every widgets.toml hot-reload.
     pub(crate) widget_lua: HashMap<String, mlua::Lua>,
-    // Basenames each widget runtime was built with (stale allowlists
-    // rebuild on next render via ensure_widget_lua).
-    pub(crate) widget_exec_allow: HashMap<String, Vec<String>>,
     pub(crate) widget_outputs: HashMap<String, String>,
     pub(crate) widget_trees: HashMap<String, crate::app::layers::top::WidgetNode>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
@@ -160,7 +157,6 @@ impl Plots {
             theme_regen_running: false,
             theme_regen_seq: 0,
             widget_lua: HashMap::new(),
-            widget_exec_allow: HashMap::new(),
             widget_outputs: HashMap::new(),
             widget_trees: HashMap::new(),
             widget_last_run: HashMap::new(),

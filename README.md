@@ -86,7 +86,6 @@ name = "clock"
 file = "clock.lua"
 interval = 1.0  # seconds between render() calls (>= 0.25)
 size = 13.0
-exec_allow = ["hyprctl"]  # default: hyprctl,niri,jq,curl
 ```
 
 ```lua
@@ -103,11 +102,11 @@ end
   (use them as the cache). `render()` re-runs every `interval`;
   output changes repaint. `.lua` edits hot-reload, `widgets.toml`
   edits rebuild all states, errors log once per message.
-- **Sandbox**: string/table/math/os only — no `io`/`require`, no
-  `os.execute`. The way out is `sys.exec({"binary", "args..."})`
-  (argv array, never a shell string; binary must be in `exec_allow`;
-  2s timeout, 64KB cap).
-- **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil), `sys.exec`,
+- **Shell**: string/table/math/os/io with native shell —
+  `os.execute(cmd)` runs, `io.popen(cmd):read("*a")` captures stdout.
+  No allowlist (`;` chains work; owner-accepted risk). `os.exit` /
+  `os.remove` / `os.rename` and `require` stay blocked.
+- **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil),
   `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`).
 - **Clicks**: `popup()` toggles a menu (`text`/`width`/`height`/

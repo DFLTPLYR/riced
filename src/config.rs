@@ -127,15 +127,6 @@ fn default_darkmode() -> bool {
     true
 }
 
-/// Default `sys.exec` allowlist: compositor CLIs plus `jq`/`curl`
-/// for querying JSON APIs from Lua widgets.
-fn default_widget_exec_allow() -> Vec<String> {
-    ["hyprctl", "niri", "jq", "curl"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-}
-
 fn default_variant() -> String {
     "content".to_string()
 }
@@ -669,7 +660,6 @@ pub fn config_path() -> PathBuf {
 /// file = "clock.lua" # relative to the widgets dir
 /// interval = 1.0   # seconds between render() calls
 /// size = 13.0
-/// exec_allow = ["hyprctl"] # binaries for sys.exec (default: hyprctl,niri,jq,curl)
 ///
 /// [[widget]]
 /// name = "hello"
@@ -691,12 +681,10 @@ pub fn config_path() -> PathBuf {
 ///
 /// ## Sandbox
 ///
-/// Scripts see string/table/math/os only — no `io`, no `require`, and
-/// `os.execute`/`os.exit`/`os.remove`/`os.rename` are nil'd. The only
-/// way out is `sys.exec(argv)`: an argv array (never a shell string)
-/// running one binary from the widget's `exec_allow` list (matched on
-/// basename), 2s timeout, 64KB stdout cap. `"; rm -rf /"` passes
-/// through as a literal argument — there is no shell to escape from.
+/// Scripts see string/table/math/os/io — no `require`, and
+/// `os.exit`/`os.remove`/`os.rename` are nil'd. `os.execute` and
+/// `io.popen` are live native shell (owner-accepted risk: no
+/// allowlist, `;` chains work, `rm -rf ~` needs no sudo).
 /// `print()` stays for daemon-log debugging.
 ///
 /// ## Globals
@@ -704,8 +692,9 @@ pub fn config_path() -> PathBuf {
 /// - `sysinfo`: `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total`
 ///   (bytes), `mem_usage` (%). Refreshed before every due `render()`.
 /// - `gfxinfo`: `usage` (% or nil when the GPU exposes nothing).
-/// - `sys.exec(argv)`: stdout string on success, Lua error otherwise
-///   (wrap slow calls in `pcall`; cache in a global, refresh hourly).
+/// - `os.execute(cmd)` / `io.popen(cmd)`: native shell. Capture
+///   stdout with `io.popen(cmd):read("*a")`; wrap slow calls in
+///   `pcall`, cache in a global, refresh hourly.
 /// - `ui.*`: composable node constructors (below). Cell text may also
 ///   embed `{icon:name}` placeholders for theme-aware Lucide icons,
 ///   e.g. `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage)`.
@@ -775,11 +764,6 @@ pub struct WidgetDef {
     /// Text size.
     #[serde(default = "default_widget_size")]
     pub size: f32,
-    /// Binaries this widget may run via `sys.exec(argv)` (matched on
-    /// the argv basename, e.g. `hyprctl`). Empty means none; the seed
-    /// default covers the compositor CLIs plus `jq`.
-    #[serde(default = "default_widget_exec_allow")]
-    pub exec_allow: Vec<String>,
 }
 
 impl Default for WidgetDef {
@@ -789,7 +773,6 @@ impl Default for WidgetDef {
             file: String::new(),
             interval: default_widget_interval(),
             size: default_widget_size(),
-            exec_allow: default_widget_exec_allow(),
         }
     }
 }
@@ -845,7 +828,7 @@ size = 13.0
 # size = 13.0
 
 # Hyprland workspaces: polls hyprctl every 0.5s (the loop is the
-# interval), needs hyprctl in exec_allow (default on).
+# interval) via io.popen.
 # [[widget]]
 # name = "hypr"
 # file = "hypr.lua"
@@ -964,15 +947,18 @@ end
 /// interval (the engine is the loop — no async in Lua) and renders
 /// one button per workspace. Clicks dispatch via `on_action`.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via sys.exec (argv array, never a shell).
--- hyprctl must be in exec_allow (default on). jq parses the JSON so
--- Lua never hand-rolls a parser: ids + active id, one per line.
+pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (native shell).
+-- Polls hyprctl every interval (the engine is the loop).
 function render()
-    local ok, ids = pcall(sys.exec, { "hyprctl", "workspaces", "-j" })
-    if not ok then
+    local ids_h = io.popen("hyprctl workspaces -j 2>/dev/null")
+    if not ids_h then
         return ui.text("--")
     end
-    local ok2, active = pcall(sys.exec, { "hyprctl", "activeworkspace", "-j" })
+    local ids = ids_h:read("*a") or ""
+    ids_h:close()
+    local active_h = io.popen("hyprctl activeworkspace -j 2>/dev/null")
+    local active = active_h and active_h:read("*a") or nil
+    if active_h then active_h:close() end
     local current = active and active:match('"id":%s*(%d+)') or nil
     local cells = {}
     for id in ids:gmatch('"id":%s*(%d+)') do
@@ -988,7 +974,7 @@ end
 function on_action(name)
     local id = name:match("^ws:(%d+)$")
     if id then
-        pcall(sys.exec, { "hyprctl", "dispatch", "workspace", id })
+        os.execute("hyprctl dispatch workspace " .. id .. " >/dev/null 2>&1")
     end
 end
 "#;
@@ -996,8 +982,8 @@ end
 /// Seed Cline Pass usage: robot icon cell, popup with quota rows.
 /// Paste the API key into `API_KEY` below (no input widget exists —
 /// the file hot-reloads on save). Blank key renders a connect hint.
-pub(crate) const SEED_CLINEPASS_LUA: &str = r#"-- Cline Pass usage via api.cline.bot (argv array, never a shell).
--- curl must be in exec_allow (default on). Paste your key below.
+pub(crate) const SEED_CLINEPASS_LUA: &str = r#"-- Cline Pass usage via io.popen (native shell).
+-- Paste your key below (file hot-reloads on save).
 local API_KEY = ""
 
 local URL = "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
@@ -1052,13 +1038,19 @@ end
 local _last = 0
 function render()
     if API_KEY ~= "" and (not _usage or (os.time() - _last) > 3600) then
-        local ok, body = pcall(sys.exec, {
-            "curl", "-sS", "--max-time", "10",
-            "-H", "Authorization: Bearer " .. API_KEY, URL,
-        })
-        if ok then
-            _usage = body
-            _last = os.time()
+        local h = io.popen(
+            "curl -sS --max-time 10 -H 'Authorization: Bearer " .. API_KEY .. "' " .. URL
+                .. " 2>/dev/null"
+        )
+        if h then
+            local body = h:read("*a") or ""
+            h:close()
+            if body ~= "" then
+                _usage = body
+                _last = os.time()
+            elseif not _usage then
+                _usage = '{"error":"fetch failed"}'
+            end
         elseif not _usage then
             _usage = '{"error":"fetch failed"}'
         end
@@ -1700,11 +1692,6 @@ mod tests {
         // Sparse entry defaults the rest.
         assert_eq!(file.widget[1].interval, 1.0);
         assert_eq!(file.widget[1].size, 13.0);
-        // exec_allow defaults to the compositor/API list; explicit wins.
-        assert_eq!(file.widget[1].exec_allow, default_widget_exec_allow());
-        let custom: WidgetsFile =
-            toml::from_str("[[widget]]\nname = \"x\"\nexec_allow = [\"hyprctl\"]\n").unwrap();
-        assert_eq!(custom.widget[0].exec_allow, vec!["hyprctl".to_string()]);
     }
 
     #[test]
