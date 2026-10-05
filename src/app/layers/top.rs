@@ -2032,8 +2032,7 @@ impl Top {
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
         plots.anim_runtime.tick_at(Instant::now());
         plots.list_trans.sweep(&mut plots.anim_runtime);
-        super::notification::sweep_noti_anims(plots);
-        Command::none()
+        super::notification::sweep_noti_anims(plots)
     }
 
     /// Click a cell button: run the owning widget's `on_action(key)`
@@ -3899,7 +3898,6 @@ mod tests {
     fn build_anim_list_merges_live_and_ghosts() {
         use crate::app::layers::anim::TransSet;
         use aura_anim::core::runtime::MotionRuntime;
-        use aura_anim::core::timing::Timing;
         // Live row like the hypr seed renders: two buttons, the first
         // mid-enter, plus one exiting ghost at index 1.
         let children = vec![
@@ -3919,13 +3917,18 @@ mod tests {
             },
         ];
         let mut rt = MotionRuntime::new();
-        let timing = Timing::ease_out(Duration::from_millis(150));
+        let duration = Duration::from_millis(150);
         let mut set: TransSet<(String, String)> = TransSet::default();
         // First button mid-enter, plus one exiting ghost at index 1.
-        set.enter(&mut rt, timing, ("hypr".to_string(), "ws:1".to_string()));
+        set.enter(
+            &mut rt,
+            duration,
+            ("hypr".to_string(), "ws:1".to_string()),
+            false,
+        );
         set.retire(
             &mut rt,
-            timing,
+            duration,
             ("hypr".to_string(), "ws:9".to_string()),
             1,
             WidgetNode::Button {

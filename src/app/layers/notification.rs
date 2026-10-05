@@ -22,7 +22,6 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::app::{NotifyEvent, Plant};
 use crate::config::NotificationConfig;
 use crate::theme;
-use aura_anim::core::timing::Timing;
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_exwlshell::reexport::{
@@ -254,15 +253,11 @@ impl Notification {
     }
 }
 
-/// Slide timing for notification cards (shared animation speed).
-fn noti_timing(plots: &Plots) -> Timing {
-    Timing::ease_out(plots.config.animation.speed.duration())
-}
-
 /// Retire one notification into a ghost on the shared transition set:
-/// drop it from the queue but keep its tree, sliding out from its
-/// current pad (mid-enter dismissals retarget smoothly instead of
-/// jumping). Returns false when the id was already gone.
+/// drop it from the queue but keep its tree, fading/sliding out from
+/// its current values (mid-enter dismissals retarget smoothly instead
+/// of jumping). Survivors below the removed index glide up one slot
+/// (`displaced`). Returns false when the id was already gone.
 fn retire_noti(plots: &mut Plots, id: u32) -> bool {
     let order = visible_order(&plots.notifications);
     let Some(pos) = order.iter().position(|(nid, _)| *nid == id) else {
@@ -274,10 +269,27 @@ fn retire_noti(plots: &mut Plots, id: u32) -> bool {
     let fallback = plots.notifications.iter().find(|n| n.id == id);
     let node = cached.unwrap_or_else(|| default_tree(fallback));
     plots.notifications.retain(|n| n.id != id);
-    let timing = noti_timing(plots);
+    let duration = plots.config.animation.speed.duration();
     plots
         .notif_trans
-        .retire(&mut plots.anim_runtime, timing, (output, id), pos, node);
+        .retire(&mut plots.anim_runtime, duration, (output, id), pos, node);
+    // Survivors below the hole glide up one card slot (displaced):
+    // nudge each by key — swept (already-settled) survivors have no
+    // entry, and `nudge_one` recreates their motion at the offset.
+    let survivors: Vec<u32> = plots
+        .notifications
+        .iter()
+        .filter(|n| n.output == Some(output))
+        .map(|n| n.id)
+        .collect();
+    for sid in survivors {
+        plots.notif_trans.nudge_one(
+            &mut plots.anim_runtime,
+            duration,
+            (output, sid),
+            CARD_H + 20.0 + CARD_GAP,
+        );
+    }
     true
 }
 
@@ -300,9 +312,33 @@ fn visible_order(notifications: &VecDeque<Notification>) -> Vec<(u32, OutputId)>
 }
 
 /// Drop settled notification exits (called from the shared 16ms
-/// animation loop after it ticks the runtime).
-pub(crate) fn sweep_noti_anims(plots: &mut Plots) {
+/// animation loop after it ticks the runtime). Nudged survivors also
+/// glide home here — the second half of the `displaced` pair started
+/// in [`retire_noti`]. Returns per-output input-region pushes for
+/// outputs whose ghost set changed: without this the compositor mask
+/// keeps covering a dismissed card's old rect (dead, unclickable
+/// zone) until the next arrival/dismiss re-pushes it.
+pub(crate) fn sweep_noti_anims(plots: &mut Plots) -> Command<Plant> {
+    plots.notif_trans.settle_nudged(&mut plots.anim_runtime);
+    let before: std::collections::HashMap<OutputId, usize> = plots
+        .notif_windows
+        .keys()
+        .copied()
+        .map(|o| (o, plots.notif_trans.ghosts_for(|(go, _)| *go == o).len()))
+        .collect();
     plots.notif_trans.sweep(&mut plots.anim_runtime);
+    let mut cmds = Vec::new();
+    for output in plots.notif_windows.keys().copied().collect::<Vec<_>>() {
+        let after = plots.notif_trans.ghosts_for(|(go, _)| *go == output).len();
+        if before.get(&output).copied().unwrap_or(0) != after {
+            cmds.push(Notification::push_input_region(plots, output));
+        }
+    }
+    if cmds.is_empty() {
+        Command::none()
+    } else {
+        Command::batch(cmds)
+    }
 }
 
 /// Default card tree: title + up-to-three body lines + one button
@@ -364,7 +400,6 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
     use iced::widget::{column, container, mouse_area, scrollable};
     let cfg = &plots.config.notifications;
     let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
-    let from_bottom = cfg.position.starts_with("bottom");
     struct Card {
         id: u32,
         node: WidgetNode,
@@ -401,9 +436,9 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
     }
     let mut stack = column![].spacing(CARD_GAP);
     for card in &cards {
-        let pad = plots
+        let motion = plots
             .notif_trans
-            .pad(&plots.anim_runtime, &(output, card.id));
+            .motion_of(&plots.anim_runtime, &(output, card.id));
         // Live buttons invoke actions; ghosts (and build failures
         // falling back to the default tree) stay inert.
         let msg = |action: String| {
@@ -423,25 +458,27 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
             )
             .expect("default tree builds")
         });
-        let (top_extra, bottom_extra) = if from_bottom { (0.0, pad) } else { (pad, 0.0) };
-        let chrome = container(body)
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(CARD_H))
-            .padding(iced::Padding {
-                top: 10.0 + top_extra,
-                right: 10.0,
-                bottom: 10.0 + bottom_extra,
-                left: 10.0,
-            })
-            .clip(true)
-            .style(theme::menu_box);
-        // Skip the wrapper when settled (fewer layout nodes).
+        // QML-style motion: `x` slides the card horizontally (enter
+        // from the anchored side, exit toward -x), `opacity` fades it,
+        // `y` glides survivors toward their new slot (displaced). The
+        // overlay transform draws the card shifted without disturbing
+        // layout; the style alpha fades chrome + text together.
+        let chrome = super::motion::faded(
+            container(body)
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(CARD_H))
+                .padding(10.0)
+                .clip(true)
+                .style(theme::menu_box),
+            motion.opacity,
+        );
+        let el: Element<'_, Plant> = super::motion::shifted(chrome, motion.x, motion.y, card.live);
         let el: Element<'_, Plant> = if card.live {
-            mouse_area(chrome)
+            mouse_area(el)
                 .on_press(Plant::Notify(NotifyEvent::Dismissed(card.id)))
                 .into()
         } else {
-            chrome.into()
+            el
         };
         stack = stack.push(el);
     }
@@ -587,11 +624,13 @@ impl Notification {
         if let Some(stored) = plots.notifications.iter().find(|n| n.id == id).cloned() {
             render_noti(plots, &stored);
         }
-        // Fresh card slides in on the shared transition set.
-        let timing = Timing::ease_out(plots.config.animation.speed.duration());
+        // Fresh card fades/slides in on the shared transition set
+        // (direction follows the anchored corner).
+        let from_bottom = plots.config.notifications.position.starts_with("bottom");
+        let duration = plots.config.animation.speed.duration();
         plots
             .notif_trans
-            .enter(&mut plots.anim_runtime, timing, (output, id));
+            .enter(&mut plots.anim_runtime, duration, (output, id), from_bottom);
         Self::reconcile(plots, output)
     }
 
@@ -1033,16 +1072,17 @@ mod tests {
     #[test]
     fn notification_transitions_share_the_generic_set() {
         use super::super::anim::{ENTER_OFFSET, TransSet};
-        use aura_anim::core::{runtime::MotionRuntime, timing::Timing};
+        use aura_anim::core::runtime::MotionRuntime;
         // Same TransSet machine as widget rows, keyed (output, id).
         let mut rt = MotionRuntime::new();
-        let timing = Timing::ease_out(Duration::from_millis(150));
+        let duration = Duration::from_millis(150);
         let mut set: TransSet<(OutputId, u32)> = TransSet::default();
-        set.enter(&mut rt, timing, (OutputId(1), 7));
-        assert_eq!(set.pad(&rt, &(OutputId(1), 7)), ENTER_OFFSET);
+        set.enter(&mut rt, duration, (OutputId(1), 7), false);
+        let start = set.motion_of(&rt, &(OutputId(1), 7));
+        assert_eq!((start.x, start.opacity), (ENTER_OFFSET, 0.0));
         set.retire(
             &mut rt,
-            timing,
+            duration,
             (OutputId(1), 7),
             0,
             WidgetNode::Text {
@@ -1054,10 +1094,10 @@ mod tests {
         );
         assert_eq!(set.ghosts_for(|(o, _)| *o == OutputId(1)).len(), 1);
         // Other outputs untouched by scope clearing.
-        set.enter(&mut rt, timing, (OutputId(2), 9));
+        set.enter(&mut rt, duration, (OutputId(2), 9), false);
         set.clear_scope(&mut rt, |(o, _)| *o == OutputId(1));
         assert!(set.ghosts_for(|_| true).is_empty());
-        assert!(set.pad(&rt, &(OutputId(2), 9)) > 0.0);
+        assert!(set.motion_of(&rt, &(OutputId(2), 9)).x > 0.0);
     }
 
     #[test]

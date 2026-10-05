@@ -1,5 +1,6 @@
 pub mod anim;
 pub mod background;
+pub mod motion;
 pub mod notification;
 pub mod popup;
 pub mod setting;
