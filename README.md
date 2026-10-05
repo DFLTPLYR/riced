@@ -121,6 +121,34 @@ end
 Full contract with shapes and edge cases lives on `WidgetDef` in
 `src/config.rs` (the `/// Widgets:` doc block).
 
+## Notifications
+
+D-Bus freedesktop server (mako replacement) plus internal events,
+rendered per output — mouse output by default, pinnable by name:
+
+```toml
+[notifications]
+enabled = true
+output = "mouse"  # or "DP-1" to pin
+position = "top-right"
+timeout_ms = 5000
+max_visible = 3
+```
+
+- **Sources**: any D-Bus client (`notify-send` works once riced owns
+  the bus name; yields silently to mako/dunst if one runs), plus
+  internal events — config/widgets parse errors, template failures,
+  theme-regen results (critical ones persist until clicked).
+- **Lua layout**: `widgets/notifications.lua` defines
+  `render(n)` over `{ id, app, title, body, icon, urgency }` with the
+  full `ui.*` set; edits re-render visible cards on save, and deleting
+  the file restores the built-in card. Policy (timeout, position, cap)
+  stays in TOML.
+- **Behavior**: one layer window per showing output (closed when
+  empty), newest first, click a card to dismiss, expiries swept on a
+  250ms tick that only runs while the queue is non-empty. Actions and
+  image hints are later stages (v1 claims `body` only).
+
 ## Configuration
 
 `src/main.rs:24` `LayerShellSettings`:

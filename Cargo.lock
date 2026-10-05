@@ -4030,6 +4030,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "wayland-client",
+ "zbus",
 ]
 
 [[package]]

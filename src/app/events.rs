@@ -143,6 +143,24 @@ pub enum BackgroundEvent {
     WallpaperPicked(Option<String>),
 }
 
+/// Notification lifecycle for the Lua-configured notification layer
+/// (D-Bus server + internal events). Payloads are plain data: the
+/// layer resolves output, windows, and expiry from them.
+#[derive(Debug, Clone)]
+pub enum NotifyEvent {
+    /// A notification arrived (D-Bus, internal event, or test source).
+    Arrived(crate::app::layers::notification::Notification),
+    /// Dismiss one notification now (click, timeout sweep, D-Bus close,
+    /// or output removal). Unknown ids are ignored.
+    Dismissed(u32),
+    /// 250ms expiry sweep tick, gated on a non-empty queue like
+    /// `WidgetTick` (never repaints by itself).
+    Tick,
+    /// D-Bus server is up (carries nothing — the subscription owns the
+    /// connection; used for logging once).
+    DBusUp,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SettingEvent {
     Select(Id, crate::app::layers::SettingPage),
@@ -176,6 +194,8 @@ pub enum Plant {
     TopPlot(TopEvent),
     BackgroundPlot(BackgroundEvent),
     SettingPlot(SettingEvent),
+    // Notifications (D-Bus server + internal events)
+    Notify(NotifyEvent),
     // Config
     Config(ConfigEvent),
 }

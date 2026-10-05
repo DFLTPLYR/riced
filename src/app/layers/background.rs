@@ -296,6 +296,19 @@ impl Background {
         position: Point,
     ) -> Command<Plant> {
         plots.last_cursor.insert(id, position);
+        // Background windows are fullscreen at the output origin, so
+        // this translates exactly: the single global cursor used for
+        // mouse-output placement (notifications, popups). Moves over
+        // bars/popups leave the last desktop position, which is the
+        // right output in practice.
+        if matches!(plots.ids.get(&id), Some(PlotInfo::Background(_))) {
+            plots.last_cursor_global = Some(Self::to_global(
+                id,
+                position,
+                &plots.ids,
+                &plots.output_infos,
+            ));
+        }
         if plots.selection_rect.selecting {
             if let Some(sp) = plots.selection_rect.start_point {
                 let gp = Self::to_global(id, position, &plots.ids, &plots.output_infos);

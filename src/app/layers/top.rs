@@ -985,7 +985,9 @@ pub(crate) fn publish_system_tables(
 /// shell (`os.execute`, `io.popen` live — owner-accepted risk, no
 /// allowlist). `os.exit`/`os.remove`/`os.rename` stay nil'd, as do
 /// `dofile`/`loadfile`/`require`. `print` stays for daemon logs.
-fn new_widget_lua() -> mlua::Result<Lua> {
+///
+/// Shared with the notification renderer (same sandbox, separate state).
+pub(crate) fn new_widget_lua() -> mlua::Result<Lua> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::OS | StdLib::IO,
         LuaOptions::default(),
@@ -1015,7 +1017,10 @@ fn new_widget_lua() -> mlua::Result<Lua> {
 /// Lua error naming the type — typos stay visible. Setter names never
 /// collide with parsed fields: setters live on the metatable while
 /// real data (`t.width`) reads raw first.
-fn inject_ui(lua: &Lua) -> mlua::Result<()> {
+///
+/// Shared with the notification renderer (same constructors, same
+/// sandbox, separate Lua state).
+pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     /// One setter: `node:name(v)` writes field, returns node.
     /// NOTE: the type gate below is near-dead — method lookup via
     /// __index fails first for foreign setters (nil method = eval

@@ -1,3 +1,4 @@
+use iced::futures::Stream;
 use iced::widget::Space;
 use iced::widget::image::Handle;
 use iced::{Element, Event, Point, Task as Command};
@@ -12,8 +13,8 @@ use std::time::{Duration, Instant};
 use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
-use super::layers::{Background, ContextMenu, Popup, SelectionRect, Setting, Top};
-use super::{BackgroundEvent, ConfigEvent, LandEvent, Plant, SettingEvent, TopEvent};
+use super::layers::{Background, ContextMenu, Notification, Popup, SelectionRect, Setting, Top};
+use super::{BackgroundEvent, ConfigEvent, LandEvent, NotifyEvent, Plant, SettingEvent, TopEvent};
 use crate::config::{Config, ConfigPatch};
 use iced_wayland_subscriber::OutputInfo;
 
@@ -119,6 +120,24 @@ pub struct Plots {
     pub(crate) theme_regen_dirty: bool,
     pub(crate) theme_regen_running: bool,
     pub(crate) theme_regen_seq: u64,
+    // Notification layer (D-Bus server + internal events): queued
+    // plain-data notifications, one layer window per showing output,
+    // last-known global cursor for mouse-output placement.
+    pub(crate) notifications: std::collections::VecDeque<crate::app::layers::Notification>,
+    pub(crate) notif_windows: HashMap<OutputId, iced::window::Id>,
+    pub(crate) notif_sizes: HashMap<OutputId, u32>,
+    pub(crate) notif_next_id: u32,
+    pub(crate) last_cursor_global: Option<Point>,
+    // Notification Lua renderer (`notifications.lua`): separate state
+    // from widgets, same sandbox + constructors. Trees cached per id
+    // (rendered update-side, never per frame).
+    pub(crate) notify_lua: Option<mlua::Lua>,
+    pub(crate) notify_mtime: Option<std::time::SystemTime>,
+    pub(crate) notify_last_error: Option<String>,
+    pub(crate) notif_trees: HashMap<u32, crate::app::layers::top::WidgetNode>,
+    // Last mirrored TOML parse failure (`source: message`); a repeat of
+    // the same message notifies only once.
+    pub(crate) config_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,6 +146,7 @@ pub(crate) enum PlotInfo {
     Background(OutputId),
     Top(OutputId),
     Popup(OutputId),
+    Notification(OutputId),
 }
 
 impl Plots {
@@ -169,6 +189,16 @@ impl Plots {
             theme_regen_dirty: false,
             theme_regen_running: false,
             theme_regen_seq: 0,
+            notifications: std::collections::VecDeque::new(),
+            notif_windows: HashMap::new(),
+            notif_sizes: HashMap::new(),
+            notif_next_id: 1,
+            last_cursor_global: None,
+            notify_lua: None,
+            notify_mtime: None,
+            notify_last_error: None,
+            notif_trees: HashMap::new(),
+            config_last_error: None,
             widget_lua: HashMap::new(),
             widget_outputs: HashMap::new(),
             widget_trees: HashMap::new(),
@@ -456,6 +486,25 @@ impl Plots {
             );
         }
 
+        // Notification expiry sweep, gated on a non-empty queue like
+        // WidgetTick (repaint on expiry comes from Scope::All below).
+        if !self.notifications.is_empty() {
+            subs.push(
+                iced::time::every(Duration::from_millis(250))
+                    .map(|_| Plant::Notify(NotifyEvent::Tick)),
+            );
+        }
+
+        // D-Bus notification server: the configured default timeout
+        // rides the subscription identity, so editing it restarts the
+        // server (re-requests the bus name).
+        if self.config.notifications.enabled {
+            subs.push(iced::Subscription::run_with(
+                self.config.notifications.timeout_ms,
+                Self::notif_stream,
+            ));
+        }
+
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
         // QML Behavior InOutQuad on opacity (over the animation speed) needs
         // 60fps ticks only while fading
@@ -476,6 +525,16 @@ impl Plots {
         }
 
         iced::Subscription::batch(subs)
+    }
+
+    /// D-Bus server stream builder (bare fn pointer for
+    /// `Subscription::run_with` identity; boxed so no input lifetime
+    /// leaks into the higher-ranked signature).
+    fn notif_stream(default_ms: &u64) -> std::pin::Pin<Box<dyn Stream<Item = Plant> + Send>> {
+        let ms = *default_ms;
+        Box::pin(iced::stream::channel(16, async move |tx| {
+            crate::notify::serve(tx, ms).await;
+        }))
     }
 
     pub fn title(&self, id: iced::window::Id) -> Option<String> {
@@ -514,9 +573,30 @@ impl Plots {
                 .get(&id)
                 .map(|p| p.view())
                 .unwrap_or_else(|| Space::new().into()),
+            Some(PlotInfo::Notification(output)) => super::layers::notification::view(self, output),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
         }
+    }
+
+    /// Mirror a fresh TOML parse failure as a critical notification
+    /// (once per distinct message). No-op when nothing new failed.
+    fn notify_parse_error(&mut self) -> Command<Plant> {
+        let Some((source, msg)) = crate::config::take_parse_error() else {
+            return Command::none();
+        };
+        let key = format!("{source}: {msg}");
+        if self.config_last_error.as_deref() == Some(&key) {
+            return Command::none();
+        }
+        self.config_last_error = Some(key);
+        let n = Notification::internal(
+            &self.config.notifications,
+            &format!("{source} parse error"),
+            msg,
+            2,
+        );
+        Notification::handle_arrived(self, n)
     }
 
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
@@ -534,6 +614,10 @@ impl Plots {
                         PlotInfo::Popup(_) => {
                             self.ids.remove(&id);
                             self.popups.remove(&id);
+                        }
+                        PlotInfo::Notification(output) => {
+                            self.ids.remove(&id);
+                            let _ = Notification::remove_for_output(self, output);
                         }
                         PlotInfo::Background(output) => {
                             self.ids.remove(&id);
@@ -704,6 +788,8 @@ impl Plots {
                         WindowAction::Close(wid),
                     )));
                 }
+                // notification stacks are transient: drop, don't migrate.
+                cmds.push(Notification::remove_for_output(self, output_id));
                 self.output_infos.remove(&output_id);
                 // clear global selection if it was on removed output (will hide via intersect check)
                 if cmds.is_empty() {
@@ -771,7 +857,10 @@ impl Plots {
                 if let Some((cfg, mtime)) = Config::poll(&self.config_mtime) {
                     self.config_mtime = mtime;
                     self.theme_mtime = crate::theme::poll(&cfg.theme, &None).unwrap_or(None);
-                    return Command::done(Plant::Config(ConfigEvent::ConfigReloaded(cfg)));
+                    return Command::batch(vec![
+                        Command::done(Plant::Config(ConfigEvent::ConfigReloaded(cfg))),
+                        self.notify_parse_error(),
+                    ]);
                 }
                 // Theme files hot-reload on the same tick: re-emit the live
                 // config so every view repaints with the new palette. The
@@ -786,9 +875,12 @@ impl Plots {
                 // defs repaint every bar on the next frame.
                 if let Some((defs, mtime)) = crate::config::WidgetsFile::poll(&self.widgets_mtime) {
                     self.widgets_mtime = mtime;
-                    return Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(defs)));
+                    return Command::batch(vec![
+                        Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(defs))),
+                        self.notify_parse_error(),
+                    ]);
                 }
-                Command::none()
+                self.notify_parse_error()
             }
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
                 // The file changed under us (external edit, or a theme file
@@ -911,7 +1003,16 @@ impl Plots {
                 for err in &errors {
                     eprintln!("riced: template: {err}");
                 }
-                Command::none()
+                if errors.is_empty() {
+                    return Command::none();
+                }
+                let n = Notification::internal(
+                    &self.config.notifications,
+                    "Templates failed",
+                    errors.join("\n"),
+                    2,
+                );
+                Notification::handle_arrived(self, n)
             }
             Plant::Config(ConfigEvent::RegenTimer(seq)) => {
                 // Stale timers (superseded by a later arm, or already
@@ -923,19 +1024,35 @@ impl Plots {
             }
             Plant::Config(ConfigEvent::ThemeRegenerated(errors)) => {
                 self.theme_regen_running = false;
-                if errors.is_empty() {
+                // The completion itself is the notification (success or
+                // failure); edits landing mid-flight chain a follow-up.
+                let regen_cmd = if errors.is_empty() {
                     println!("riced: dynamic theme regenerated");
+                    let n = Notification::internal(
+                        &self.config.notifications,
+                        "Theme regenerated",
+                        "dynamic.json applied".to_string(),
+                        1,
+                    );
+                    Notification::handle_arrived(self, n)
                 } else {
                     for err in &errors {
                         eprintln!("riced: dynamic theme: {err}");
                     }
-                }
+                    let n = Notification::internal(
+                        &self.config.notifications,
+                        "Theme regen failed",
+                        errors.join("\n"),
+                        2,
+                    );
+                    Notification::handle_arrived(self, n)
+                };
                 // Edits that landed mid-flight re-dirty the flag; chain one
                 // follow-up regen instead of dropping them.
                 if self.theme_regen_dirty {
-                    return self.arm_regen_theme();
+                    return Command::batch(vec![regen_cmd, self.arm_regen_theme()]);
                 }
-                Command::none()
+                regen_cmd
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
@@ -973,6 +1090,13 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::CellAction(widget, action)) => {
                 Top::handle_cell_action(self, widget, action)
+            }
+            Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, n),
+            Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
+            Plant::Notify(NotifyEvent::Tick) => Notification::handle_tick(self),
+            Plant::Notify(NotifyEvent::DBusUp) => {
+                eprintln!("riced: notifications: D-Bus server up");
+                Command::none()
             }
             Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
                 Top::handle_set_opacity(self, id, value)
@@ -1068,6 +1192,13 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // Lua-widget timer only runs due scripts (repaint goes through
         // WidgetsChanged when an output actually moved).
         Plant::TopPlot(TopEvent::WidgetTick) => Scope::None,
+        // Notification arrivals/dismissals repaint (transient layer);
+        // the gated 250ms sweep tick repaints too (short-lived), the
+        // D-Bus-up note never does.
+        Plant::Notify(NotifyEvent::Arrived(_))
+        | Plant::Notify(NotifyEvent::Dismissed(_))
+        | Plant::Notify(NotifyEvent::Tick) => Scope::All,
+        Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
         Plant::TopPlot(TopEvent::WidgetPressed(..)) => Scope::None,
         // Animation frames repaint while a list transition runs (the
         // 16ms subscription only exists while motions are active).

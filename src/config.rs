@@ -83,6 +83,7 @@ pub struct Config {
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
     pub animation: AnimationConfig,
+    pub notifications: NotificationConfig,
     /// Bar presets as a direct array (`[[bar]]`), no redundant key name.
     #[serde(default)]
     pub bar: Vec<TopConfig>,
@@ -113,6 +114,9 @@ defs! {
     default_widget_interval: f32 = 1.0,
     default_slot_padding: f32 = 0.0,
     default_slot_spacing: f32 = 4.0,
+    default_notification_timeout_ms: u64 = 5000,
+    default_notification_max_visible: u32 = 3,
+    default_notification_width: f32 = 360.0,
 }
 
 fn default_bar_anchor() -> String {
@@ -129,6 +133,53 @@ fn default_darkmode() -> bool {
 
 fn default_variant() -> String {
     "content".to_string()
+}
+
+fn default_notification_output() -> String {
+    "mouse".to_string()
+}
+
+fn default_notification_position() -> String {
+    "top-right".to_string()
+}
+
+/// Notification layer (`[notifications]`): D-Bus freedesktop server +
+/// internal events, rendered per output (mouse output by default).
+/// ```toml
+/// [notifications]
+/// enabled = true
+/// output = "mouse"  # or an output name like "DP-1" to pin it
+/// position = "top-right"  # top-right | top-left | bottom-right | bottom-left
+/// timeout_ms = 5000
+/// max_visible = 3
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationConfig {
+    pub enabled: bool,
+    #[serde(default = "default_notification_output")]
+    pub output: String,
+    #[serde(default = "default_notification_position")]
+    pub position: String,
+    #[serde(default = "default_notification_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_notification_max_visible")]
+    pub max_visible: u32,
+    #[serde(default = "default_notification_width")]
+    pub width: f32,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            output: default_notification_output(),
+            position: default_notification_position(),
+            timeout_ms: default_notification_timeout_ms(),
+            max_visible: default_notification_max_visible(),
+            width: default_notification_width(),
+        }
+    }
 }
 
 /// Global animation speed, applied to every animated transition
@@ -1034,6 +1085,24 @@ function on_action(name)
 end
 "#;
 
+/// Seed notification renderer: `render(n)` layouts one notification
+/// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
+/// visible cards re-render on save; delete the file to restore the
+/// built-in layout.
+pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency }.
+-- urgency: 0 low, 1 normal, 2 critical. Edit live, cards re-render on save.
+function render(n)
+    local head = n.app ~= "" and (n.app .. " — " .. n.title) or n.title
+    if n.urgency >= 2 then
+        head = "! " .. head
+    end
+    return ui.column({
+        ui.row({ ui.icon("bell"), ui.text(head):size(14) }),
+        ui.text(n.body),
+    })
+end
+"#;
+
 /// Seed Hyprland workspaces: polls `hyprctl workspaces -j` every
 /// interval (the engine is the loop — no async in Lua) and renders
 /// one button per workspace **on the focused output only**. Buttons
@@ -1193,6 +1262,7 @@ impl WidgetsFile {
             Ok(file) => file.widget,
             Err(e) => {
                 eprintln!("widgets: parse error, no widgets: {e}");
+                note_parse_error("widgets", &e);
                 Vec::new()
             }
         }
@@ -1224,6 +1294,7 @@ impl WidgetsFile {
             ("hypr.lua", SEED_HYPR_LUA),
             ("clinepass.lua", SEED_CLINEPASS_LUA),
             ("system.lua", SEED_SYSTEM_LUA),
+            ("notifications.lua", SEED_NOTIFICATIONS_LUA),
         ] {
             Self::seed_script(dir, name, content);
         }
@@ -1276,11 +1347,30 @@ fn read_mtime(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Latest TOML parse failure (`source`, `message`), set alongside the
+/// `eprintln!` at both parse sites. The daemon takes it on `ConfigTick`
+/// and mirrors fresh failures as critical notifications (take-once, so
+/// one bad save notifies once, not every tick). Process-global like the
+/// cursor/throttle statics; tests never touch it.
+static LAST_PARSE_ERROR: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Take a pending parse failure, if any.
+pub(crate) fn take_parse_error() -> Option<(String, String)> {
+    LAST_PARSE_ERROR.lock().ok()?.take()
+}
+
+fn note_parse_error(source: &str, err: &impl std::fmt::Display) {
+    if let Ok(mut slot) = LAST_PARSE_ERROR.lock() {
+        *slot = Some((source.to_string(), err.to_string()));
+    }
+}
+
 fn parse(content: &str) -> Config {
     match toml::from_str(content) {
         Ok(cfg) => migrate_legacy_top(cfg),
         Err(e) => {
             eprintln!("config: parse error, keeping defaults: {e}");
+            note_parse_error("config", &e);
             Config::default()
         }
     }
@@ -1821,6 +1911,7 @@ mod tests {
         assert!(dir.join("hypr.lua").is_file());
         assert!(dir.join("clinepass.lua").is_file());
         assert!(dir.join("system.lua").is_file());
+        assert!(dir.join("notifications.lua").is_file());
         assert!(dir.join("ram.lua").is_file());
         assert!(dir.join("stats.lua").is_file());
         // A user script is never overwritten by a re-seed.
@@ -1888,6 +1979,25 @@ mod tests {
             AnimationSpeed::Medium.duration(),
             Duration::from_millis(150)
         );
+    }
+
+    #[test]
+    fn notifications_section_defaults_and_parses() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.notifications.enabled);
+        assert_eq!(empty.notifications.output, "mouse");
+        assert_eq!(empty.notifications.position, "top-right");
+        assert_eq!(empty.notifications.timeout_ms, 5000);
+        assert_eq!(empty.notifications.max_visible, 3);
+        let cfg: Config = toml::from_str(
+            "[notifications]\nenabled = false\noutput = \"DP-1\"\nposition = \"bottom-left\"\ntimeout_ms = 8000\nmax_visible = 5\n",
+        )
+        .unwrap();
+        assert!(!cfg.notifications.enabled);
+        assert_eq!(cfg.notifications.output, "DP-1");
+        assert_eq!(cfg.notifications.position, "bottom-left");
+        assert_eq!(cfg.notifications.timeout_ms, 8000);
+        assert_eq!(cfg.notifications.max_visible, 5);
     }
 
     #[test]

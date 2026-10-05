@@ -7,6 +7,7 @@ mod colorgen;
 mod components;
 mod composables;
 mod config;
+mod notify;
 mod theme;
 
 use app::{Plots, redraw_scope};
