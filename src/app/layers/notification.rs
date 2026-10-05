@@ -27,7 +27,7 @@ use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, KeyboardInteractivity, Layer, LayerSize, NewLayerShellSettings,
-    OutputOption,
+    OutputOption, WlRegion,
 };
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
@@ -682,7 +682,9 @@ impl Notification {
     /// drop mappings when empty. Ghosts keep the window alive until
     /// their exit settles. Height follows the output (listview), so
     /// arrivals and dismissals never resize — only output geometry
-    /// changes do (see [`Self::reapply_for_output`]).
+    /// changes do (see [`Self::reapply_for_output`]). Every path that
+    /// changes the stack also re-pushes the input region so only card
+    /// rects stay clickable (see [`Self::push_input_region`]).
     fn reconcile(plots: &mut Plots, output: OutputId) -> Command<Plant> {
         let cfg = plots.config.notifications.clone();
         let live = plots
@@ -701,7 +703,8 @@ impl Notification {
                 let h = window_height_for_output(output_height(plots, output));
                 let cmd = Self::ensure_window(plots, output, &cfg);
                 plots.notif_sizes.insert(output, h);
-                cmd.unwrap_or_else(Command::none)
+                let open = cmd.unwrap_or_else(Command::none);
+                Command::batch(vec![open, Self::push_input_region(plots, output)])
             }
             Some(id) => {
                 if visible == 0 {
@@ -712,15 +715,18 @@ impl Notification {
                 }
                 let h = window_height_for_output(output_height(plots, output));
                 if plots.notif_sizes.get(&output).copied() == Some(h) {
-                    return Command::none();
+                    return Self::push_input_region(plots, output);
                 }
                 plots.notif_sizes.insert(output, h);
                 let (anchor, _) = placement(&cfg);
-                Command::done(Plant::LayoutChange {
-                    id,
-                    anchor,
-                    size: LayerSize::px(cfg.width.max(200.0) as u32, h),
-                })
+                Command::batch(vec![
+                    Command::done(Plant::LayoutChange {
+                        id,
+                        anchor,
+                        size: LayerSize::px(cfg.width.max(200.0) as u32, h),
+                    }),
+                    Self::push_input_region(plots, output),
+                ])
             }
         }
     }
@@ -743,6 +749,60 @@ impl Notification {
             id,
             anchor,
             size: LayerSize::px(cfg.width.max(200.0) as u32, h),
+        })
+    }
+
+    /// Card rects for the compositor input region (Quickshell-mask
+    /// equivalent): one `(x, y, w, h)` per visible card, in window
+    /// coords. Everything outside these rects clicks through — the
+    /// tall listview window never swallows background clicks. Y
+    /// offsets mirror the `view` stack (pad + chrome + gap); the
+    /// scroll offset is unknown here, so cards past the viewport map
+    /// to their unscrolled position (harmless: still inside the
+    /// window, still clickable area).
+    pub(crate) fn input_rects(plots: &Plots, output: OutputId) -> Vec<(i32, i32, i32, i32)> {
+        let count = visible_order(&plots.notifications)
+            .into_iter()
+            .filter(|(_, o)| *o == output)
+            .count()
+            + plots.notif_trans.ghosts_for(|(o, _)| *o == output).len();
+        let cfg = &plots.config.notifications;
+        let width = cfg.width.max(200.0);
+        let mut rects = Vec::with_capacity(count);
+        let mut y = 0.0f32;
+        for _ in 0..count {
+            // Settled chrome height: padding 10 + body 100 + gap 8.
+            // In-flight pads only shift cards within the window; the
+            // rect union still covers them.
+            rects.push((
+                0,
+                y.round() as i32,
+                width.round() as i32,
+                (CARD_H + 20.0).round() as i32,
+            ));
+            y += CARD_H + 20.0 + CARD_GAP;
+        }
+        rects
+    }
+
+    /// Push [`input_rects`] to the compositor for `output`'s window
+    /// (no-op when no window is showing). Called on every reconcile
+    /// path that changes the stack so the mask tracks arrivals,
+    /// dismissals, and ghost exits. The runtime clears the region
+    /// first (`subtract` of the whole surface), so only the card
+    /// rects stay clickable — everything else passes through.
+    pub(crate) fn push_input_region(plots: &Plots, output: OutputId) -> Command<Plant> {
+        let Some(id) = plots.notif_windows.get(&output).copied() else {
+            return Command::none();
+        };
+        let rects = Self::input_rects(plots, output);
+        Command::done(Plant::SetInputRegion {
+            id,
+            callback: iced_exwlshell::actions::ActionCallback::new(move |region: &WlRegion| {
+                for (x, y, w, h) in &rects {
+                    region.add(*x, *y, *w, *h);
+                }
+            }),
         })
     }
 
@@ -854,6 +914,30 @@ mod tests {
             window_height_for_output(10.0)
         );
         assert_eq!(window_height_for_output(10.0), window_height(1));
+    }
+
+    #[test]
+    fn input_rects_cover_each_card_and_nothing_else() {
+        use crate::app::Plots;
+        use iced_wayland_subscriber::shell::channel;
+        let (_tx, rx) = channel();
+        let mut plots = Plots::new(rx);
+        // Empty stack: no rects, fully click-through.
+        assert!(Notification::input_rects(&plots, OutputId(1)).is_empty());
+        // Two cards on output 1, one on output 2.
+        for (id, output) in [(1, OutputId(1)), (2, OutputId(1)), (3, OutputId(2))] {
+            let mut n = noti(id, 0, Some(5_000), 1);
+            n.output = Some(output);
+            plots.notifications.push_back(n);
+        }
+        let rects = Notification::input_rects(&plots, OutputId(1));
+        assert_eq!(rects.len(), 2);
+        let w = plots.config.notifications.width.max(200.0).round() as i32;
+        let card = (CARD_H + 20.0).round() as i32;
+        assert_eq!(rects[0], (0, 0, w, card));
+        assert_eq!(rects[1], (0, card + CARD_GAP as i32, w, card));
+        // Output 2 sees only its own card.
+        assert_eq!(Notification::input_rects(&plots, OutputId(2)).len(), 1);
     }
 
     #[test]
