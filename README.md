@@ -133,7 +133,6 @@ enabled = true
 output = "mouse"  # or "DP-1" to pin
 position = "top-right"
 timeout_ms = 5000
-max_visible = 3
 ```
 
 - **Sources**: any D-Bus client (`notify-send` works once riced owns
@@ -147,7 +146,9 @@ max_visible = 3
   visible cards on save, and deleting the file restores the built-in
   card. Policy (timeout, position, cap) stays in TOML.
 - **Behavior**: one layer window per showing output (closed when
-  empty), newest first, click a card to dismiss, expiries swept on a
+  empty), spanning the full output height like a listview — the whole
+  stack shows newest-first and scrolls, no cap (`max_visible` in old
+  configs is ignored). Click a card to dismiss, expiries swept on a
   250ms tick that only runs while the queue is non-empty. Actions are
   live: the built-in card renders one button per action, and button
   clicks emit `ActionInvoked` back over D-Bus (then dismiss with

@@ -749,9 +749,12 @@ impl Plots {
                 if geom_changed {
                     // `%` bar sizes resolve against this geometry: re-push
                     // every bar's px size so nothing goes stale, plus heals.
+                    // Notification windows span the output height, so they
+                    // re-push too.
                     Command::batch(vec![
                         Self::repaint_burst(),
                         Top::reapply_for_output(self, output_id),
+                        Notification::reapply_for_output(self, output_id),
                     ])
                 } else {
                     Command::none()

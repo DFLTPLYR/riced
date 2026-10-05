@@ -1,8 +1,10 @@
 //! Lua-configured notification layer (D-Bus server + internal events).
 //!
 //! One layer-shell window per output that currently shows anything
-//! (usually just the mouse output). Each window renders that output's
-//! stack newest-first; windows close when their stack empties.
+//! (usually just the mouse output). Each window spans the full output
+//! height and renders that output's whole stack newest-first in a
+//! scrollable (listview, no cap); windows close when their stack
+//! empties.
 //! Bodies render from `notifications.lua`, falling back to
 //! [`default_tree`] when the script is missing or broken.
 //!
@@ -38,6 +40,9 @@ use std::time::{Duration, Instant};
 const CARD_H: f32 = 100.0;
 const CARD_GAP: f32 = 8.0;
 const WINDOW_PAD: f32 = 16.0;
+/// Corner margin left at each anchored edge (matches `placement`'s
+/// `M`): the window spans the full output height minus both margins.
+const WINDOW_MARGIN: f32 = 16.0;
 
 /// One notification: plain data in, layout out. `timeout` of `None`
 /// persists until clicked (critical urgency).
@@ -178,7 +183,7 @@ pub(crate) fn resolve_output(plots: &Plots, cfg: &NotificationConfig) -> Option<
 fn placement(cfg: &NotificationConfig) -> (Anchor, (i32, i32, i32, i32)) {
     // Margin order is (top, right, bottom, left); only the two edges
     // facing the corner get the offset.
-    const M: i32 = 16;
+    const M: i32 = WINDOW_MARGIN as i32;
     match cfg.position.as_str() {
         "top-left" => (Anchor::Top | Anchor::Left, (M, 0, 0, M)),
         "bottom-right" => (Anchor::Bottom | Anchor::Right, (0, M, M, 0)),
@@ -187,16 +192,37 @@ fn placement(cfg: &NotificationConfig) -> (Anchor, (i32, i32, i32, i32)) {
     }
 }
 
-/// Estimated window height for `visible` cards.
+/// Estimated window height for `visible` cards (floor for the
+/// output-height window when geometry is unknown or tiny).
 pub(crate) fn window_height(visible: usize) -> u32 {
     (WINDOW_PAD + visible.max(1) as f32 * (CARD_H + CARD_GAP)).round() as u32
 }
 
+/// Listview window height: the full output height minus both corner
+/// margins, so the whole stack shows (scrolling) instead of capping
+/// at `max_visible`. Never smaller than one card.
+pub(crate) fn window_height_for_output(output_h: f32) -> u32 {
+    (output_h - 2.0 * WINDOW_MARGIN)
+        .max(window_height(1) as f32)
+        .round() as u32
+}
+
+/// Output height behind `output` (full geometry, ignores bars),
+/// falling back to HD when the compositor hasn't reported it yet.
+fn output_height(plots: &Plots, output: OutputId) -> f32 {
+    plots
+        .output_infos
+        .get(&output)
+        .map(|info| Background::output_geometry(info).3)
+        .unwrap_or(1080.0)
+}
+
 impl Notification {
     /// Open (or reuse) the layer window for `output` and show this
-    /// stack on it. Windows are per output; the view slices the
-    /// newest `max_visible` on top. Returns the spawn command when a
-    /// window was created (`None` on reuse — the repaint covers it).
+    /// stack on it. Windows are per output and span the full output
+    /// height (listview: the whole stack scrolls); the view slices
+    /// nothing. Returns the spawn command when a window was created
+    /// (`None` on reuse — the repaint covers it).
     pub(crate) fn ensure_window(
         plots: &mut Plots,
         output: OutputId,
@@ -207,18 +233,13 @@ impl Notification {
         }
         let id = window::Id::unique();
         let (anchor, margin) = placement(cfg);
-        let visible = plots
-            .notifications
-            .iter()
-            .filter(|n| n.output == Some(output))
-            .count();
         let settings = NewLayerShellSettings {
             anchor,
             layer: Layer::Overlay,
             exclusive_zone: None,
             size: LayerSize::px(
                 cfg.width.max(200.0) as u32,
-                window_height(visible.min(cfg.max_visible.max(1) as usize)),
+                window_height_for_output(output_height(plots, output)),
             ),
             output_option: OutputOption::GlobalName(output.0),
             margin: Some(margin),
@@ -243,8 +264,7 @@ fn noti_timing(plots: &Plots) -> Timing {
 /// current pad (mid-enter dismissals retarget smoothly instead of
 /// jumping). Returns false when the id was already gone.
 fn retire_noti(plots: &mut Plots, id: u32) -> bool {
-    let cap = plots.config.notifications.max_visible.max(1) as usize;
-    let order = visible_order(&plots.notifications, cap);
+    let order = visible_order(&plots.notifications);
     let Some(pos) = order.iter().position(|(nid, _)| *nid == id) else {
         plots.notif_trees.remove(&id);
         return false;
@@ -261,9 +281,10 @@ fn retire_noti(plots: &mut Plots, id: u32) -> bool {
     true
 }
 
-/// Visible `(id, output)` in newest-first, per-output-capped view
-/// order — the single ordering both view and retire share.
-fn visible_order(notifications: &VecDeque<Notification>, cap: usize) -> Vec<(u32, OutputId)> {
+/// Visible `(id, output)` in newest-first, per-output view order —
+/// the single ordering both view and retire share. Uncapped: the
+/// window spans the output height and the stack scrolls.
+fn visible_order(notifications: &VecDeque<Notification>) -> Vec<(u32, OutputId)> {
     let mut by_output: std::collections::HashMap<OutputId, Vec<u32>> = Default::default();
     for n in notifications {
         if let Some(output) = n.output {
@@ -273,7 +294,7 @@ fn visible_order(notifications: &VecDeque<Notification>, cap: usize) -> Vec<(u32
     let mut ordered = Vec::new();
     for (output, mut ids) in by_output {
         ids.reverse();
-        ordered.extend(ids.into_iter().take(cap).map(|id| (id, output)));
+        ordered.extend(ids.into_iter().map(|id| (id, output)));
     }
     ordered
 }
@@ -331,15 +352,16 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
     }
 }
 
-/// Stack view for one output's window: live cards newest-first and
-/// capped, ghosts merged at their old indices. Bodies come from cached
+/// Stack view for one output's window: all live cards newest-first
+/// plus ghosts merged at their old indices, in a scrollable the
+/// height of the output. Bodies come from cached
 /// `notifications.lua` trees, falling back to [`default_tree`] when
 /// the script is missing or broken. Cards slide from the anchored edge
 /// (down for top corners, up for bottom ones). Action buttons route to
 /// `on_action`-style `Invoke` messages; the rest of a live card is one
 /// dismiss area while ghosts stay inert.
 pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
-    use iced::widget::{column, container, mouse_area};
+    use iced::widget::{column, container, mouse_area, scrollable};
     let cfg = &plots.config.notifications;
     let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
     let from_bottom = cfg.position.starts_with("bottom");
@@ -348,8 +370,7 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
         node: WidgetNode,
         live: bool,
     }
-    let cap = plots.config.notifications.max_visible.max(1) as usize;
-    let mut cards: Vec<Card> = visible_order(&plots.notifications, cap)
+    let mut cards: Vec<Card> = visible_order(&plots.notifications)
         .into_iter()
         .filter(|(_, o)| *o == output)
         .map(|(id, _)| {
@@ -424,7 +445,10 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
         };
         stack = stack.push(el);
     }
-    stack.into()
+    scrollable(stack)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// Script file for the Lua renderer, next to the widget scripts
@@ -654,19 +678,18 @@ impl Notification {
         }
     }
 
-    /// Make the window match the stack: open when non-empty, resize on
-    /// count change, close + drop mappings when empty. Ghosts keep the
-    /// window alive until their exit settles; height counts live
-    /// (capped) plus ghosts so exits never clip.
+    /// Make the window match the stack: open when non-empty, close +
+    /// drop mappings when empty. Ghosts keep the window alive until
+    /// their exit settles. Height follows the output (listview), so
+    /// arrivals and dismissals never resize — only output geometry
+    /// changes do (see [`Self::reapply_for_output`]).
     fn reconcile(plots: &mut Plots, output: OutputId) -> Command<Plant> {
         let cfg = plots.config.notifications.clone();
-        let cap = cfg.max_visible.max(1) as usize;
         let live = plots
             .notifications
             .iter()
             .filter(|n| n.output == Some(output))
-            .count()
-            .min(cap);
+            .count();
         let ghosts = plots.notif_trans.ghosts_for(|(o, _)| *o == output).len();
         let visible = live + ghosts;
         match plots.notif_windows.get(&output).copied() {
@@ -675,7 +698,7 @@ impl Notification {
                     return Command::none();
                 }
                 // ensure_window registers mappings; record its size.
-                let h = window_height(visible);
+                let h = window_height_for_output(output_height(plots, output));
                 let cmd = Self::ensure_window(plots, output, &cfg);
                 plots.notif_sizes.insert(output, h);
                 cmd.unwrap_or_else(Command::none)
@@ -687,7 +710,7 @@ impl Notification {
                     plots.ids.remove(&id);
                     return iced_runtime::task::effect(Action::Window(WindowAction::Close(id)));
                 }
-                let h = window_height(visible);
+                let h = window_height_for_output(output_height(plots, output));
                 if plots.notif_sizes.get(&output).copied() == Some(h) {
                     return Command::none();
                 }
@@ -700,6 +723,27 @@ impl Notification {
                 })
             }
         }
+    }
+
+    /// Re-push the output-height window size after a geometry change
+    /// (mirrors `Top::reapply_for_output`). No-op when no window is
+    /// showing on the output or the height didn't move.
+    pub(crate) fn reapply_for_output(plots: &mut Plots, output: OutputId) -> Command<Plant> {
+        let Some(id) = plots.notif_windows.get(&output).copied() else {
+            return Command::none();
+        };
+        let cfg = plots.config.notifications.clone();
+        let h = window_height_for_output(output_height(plots, output));
+        if plots.notif_sizes.get(&output).copied() == Some(h) {
+            return Command::none();
+        }
+        plots.notif_sizes.insert(output, h);
+        let (anchor, _) = placement(&cfg);
+        Command::done(Plant::LayoutChange {
+            id,
+            anchor,
+            size: LayerSize::px(cfg.width.max(200.0) as u32, h),
+        })
     }
 
     /// Drop one output's windows + notifications (compositor close or
@@ -801,6 +845,18 @@ mod tests {
     }
 
     #[test]
+    fn window_height_for_output_spans_minus_margins() {
+        // 1080p output minus both 16px corner margins.
+        assert_eq!(window_height_for_output(1080.0), 1048);
+        // Tiny/unknown geometry never collapses below one card.
+        assert_eq!(
+            window_height_for_output(0.0),
+            window_height_for_output(10.0)
+        );
+        assert_eq!(window_height_for_output(10.0), window_height(1));
+    }
+
+    #[test]
     fn placement_covers_all_corners() {
         for (pos, anchor) in [
             ("top-right", Anchor::Top | Anchor::Right),
@@ -846,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_order_is_newest_first_capped_per_output() {
+    fn visible_order_is_newest_first_per_output() {
         let mk = |id: u32, output: Option<OutputId>| Notification {
             id,
             output,
@@ -863,16 +919,31 @@ mod tests {
             mk(1, Some(OutputId(1))),
             mk(2, Some(OutputId(1))),
             mk(3, Some(OutputId(1))),
-            mk(4, Some(OutputId(2))),
-            mk(5, None),
+            mk(4, Some(OutputId(1))),
+            mk(5, Some(OutputId(2))),
+            mk(6, None),
         ]);
-        // Newest first, capped per output, unplaced excluded.
-        let mut order = visible_order(&queue, 2);
+        // Newest first, uncapped (the window scrolls), unplaced excluded.
+        let mut order = visible_order(&queue);
         order.sort();
         assert_eq!(
             order,
-            vec![(2, OutputId(1)), (3, OutputId(1)), (4, OutputId(2))]
+            vec![
+                (1, OutputId(1)),
+                (2, OutputId(1)),
+                (3, OutputId(1)),
+                (4, OutputId(1)),
+                (5, OutputId(2)),
+            ]
         );
+        // Within one output the newest id sorts last after the sort,
+        // but insertion order is newest-first: check directly.
+        let out1: Vec<u32> = visible_order(&queue)
+            .into_iter()
+            .filter(|(_, o)| *o == OutputId(1))
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(out1, vec![4, 3, 2, 1]);
     }
 
     #[test]

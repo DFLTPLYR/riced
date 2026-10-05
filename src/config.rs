@@ -145,13 +145,14 @@ fn default_notification_position() -> String {
 
 /// Notification layer (`[notifications]`): D-Bus freedesktop server +
 /// internal events, rendered per output (mouse output by default).
+/// The window spans the full output height and the stack scrolls —
+/// `max_visible` is legacy and ignored.
 /// ```toml
 /// [notifications]
 /// enabled = true
 /// output = "mouse"  # or an output name like "DP-1" to pin it
 /// position = "top-right"  # top-right | top-left | bottom-right | bottom-left
 /// timeout_ms = 5000
-/// max_visible = 3
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -163,6 +164,8 @@ pub struct NotificationConfig {
     pub position: String,
     #[serde(default = "default_notification_timeout_ms")]
     pub timeout_ms: u64,
+    /// Legacy cap, ignored: the window spans the output height and the
+    /// whole stack scrolls. Kept so old configs still parse.
     #[serde(default = "default_notification_max_visible")]
     pub max_visible: u32,
     #[serde(default = "default_notification_width")]
