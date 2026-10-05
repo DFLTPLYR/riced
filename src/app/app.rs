@@ -14,7 +14,10 @@ use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
 use super::layers::{Background, ContextMenu, Notification, Popup, SelectionRect, Setting, Top};
-use super::{BackgroundEvent, ConfigEvent, LandEvent, NotifyEvent, Plant, SettingEvent, TopEvent};
+use super::{
+    BackgroundEvent, BarEvent, ConfigEvent, Corner, Edge, LandEvent, NotifyEvent, Plant,
+    SettingEvent, StyleEvent, TopEvent, WidgetEvent,
+};
 use crate::config::{Config, ConfigPatch};
 use iced_wayland_subscriber::OutputInfo;
 
@@ -481,12 +484,13 @@ impl Plots {
         if self.anim_runtime.has_active() {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
-                    .map(|_| Plant::TopPlot(TopEvent::WidgetAnim)),
+                    .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Anim))),
             );
         }
 
         // Notification expiry sweep, gated on a non-empty queue like
-        // WidgetTick (repaint on expiry comes from Scope::All below).
+        // Widget(WidgetEvent::Tick) (repaint on expiry comes from
+        // Scope::All below).
         if !self.notifications.is_empty() {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
@@ -519,7 +523,7 @@ impl Plots {
         if !self.widgets.is_empty() {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
-                    .map(|_| Plant::TopPlot(TopEvent::WidgetTick)),
+                    .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Tick))),
             );
         }
 
@@ -1057,41 +1061,67 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
-            Plant::TopPlot(TopEvent::WidgetPressed(id, pos, widget)) => {
-                Top::handle_widget_press(self, id, pos, widget)
-            }
-            Plant::TopPlot(TopEvent::WidgetReleased(id, pos, widget)) => {
-                Top::handle_widget_release(self, id, pos, widget)
-            }
+            Plant::TopPlot(TopEvent::Widget(event)) => match event {
+                WidgetEvent::Pressed(id, pos, widget) => {
+                    Top::handle_widget_press(self, id, pos, widget)
+                }
+                WidgetEvent::Released(id, pos, widget) => {
+                    Top::handle_widget_release(self, id, pos, widget)
+                }
+                WidgetEvent::Tick => Top::handle_widget_tick(self),
+                WidgetEvent::Anim => Top::handle_anim_frame(self),
+                WidgetEvent::Changed => Popup::refresh_bodies(self),
+                WidgetEvent::PopupSelect(id, action) => Popup::handle_select(self, id, action),
+                WidgetEvent::CellAction(widget, action) => {
+                    Top::handle_cell_action(self, widget, action)
+                }
+                // Widget-domain alias of `BarEvent::SlotWidget`: same handler.
+                WidgetEvent::SetSlotWidget(id, pos, widget, enabled) => {
+                    Top::handle_set_slot_widget(self, id, pos, widget, enabled)
+                }
+            },
+            Plant::TopPlot(TopEvent::Bar(event)) => match event {
+                BarEvent::Length(id, value) => Top::handle_set_length(self, id, value),
+                BarEvent::Thickness(id, value) => Top::handle_set_thickness(self, id, value),
+                BarEvent::Slots(id, value) => Top::handle_set_slots(self, id, value),
+                BarEvent::SlotAlign(id, pos, align) => {
+                    Top::handle_set_slot_align(self, id, pos, align)
+                }
+                BarEvent::SlotWidget(id, pos, widget, enabled) => {
+                    Top::handle_set_slot_widget(self, id, pos, widget, enabled)
+                }
+                BarEvent::SlotPadding(id, value) => Top::handle_set_slot_padding(self, id, value),
+                BarEvent::SlotSpacing(id, value) => Top::handle_set_slot_spacing(self, id, value),
+            },
+            Plant::TopPlot(TopEvent::Style(event)) => match event {
+                StyleEvent::Opacity(id, value) => Top::handle_set_opacity(self, id, value),
+                StyleEvent::Floating(id, value) => Top::handle_set_floating(self, id, value),
+                StyleEvent::Margin(id, Edge::Top, value) => {
+                    Top::handle_set_margin_top(self, id, value)
+                }
+                StyleEvent::Margin(id, Edge::Right, value) => {
+                    Top::handle_set_margin_right(self, id, value)
+                }
+                StyleEvent::Margin(id, Edge::Bottom, value) => {
+                    Top::handle_set_margin_bottom(self, id, value)
+                }
+                StyleEvent::Margin(id, Edge::Left, value) => {
+                    Top::handle_set_margin_left(self, id, value)
+                }
+                StyleEvent::Radius(id, Corner::TopLeft, value) => {
+                    Top::handle_set_radius_tl(self, id, value)
+                }
+                StyleEvent::Radius(id, Corner::TopRight, value) => {
+                    Top::handle_set_radius_tr(self, id, value)
+                }
+                StyleEvent::Radius(id, Corner::BottomLeft, value) => {
+                    Top::handle_set_radius_bl(self, id, value)
+                }
+                StyleEvent::Radius(id, Corner::BottomRight, value) => {
+                    Top::handle_set_radius_br(self, id, value)
+                }
+            },
             Plant::TopPlot(TopEvent::Remove(id)) => Top::handle_remove(self, id),
-            Plant::TopPlot(TopEvent::SetLength(id, value)) => {
-                Top::handle_set_length(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetThickness(id, value)) => {
-                Top::handle_set_thickness(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetSlots(id, value)) => Top::handle_set_slots(self, id, value),
-            Plant::TopPlot(TopEvent::SetSlotAlign(id, pos, align)) => {
-                Top::handle_set_slot_align(self, id, pos, align)
-            }
-            Plant::TopPlot(TopEvent::SetSlotWidget(id, pos, widget, enabled)) => {
-                Top::handle_set_slot_widget(self, id, pos, widget, enabled)
-            }
-            Plant::TopPlot(TopEvent::SetSlotPadding(id, value)) => {
-                Top::handle_set_slot_padding(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetSlotSpacing(id, value)) => {
-                Top::handle_set_slot_spacing(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::WidgetTick) => Top::handle_widget_tick(self),
-            Plant::TopPlot(TopEvent::WidgetAnim) => Top::handle_anim_frame(self),
-            Plant::TopPlot(TopEvent::WidgetsChanged) => Popup::refresh_bodies(self),
-            Plant::TopPlot(TopEvent::PopupSelect(id, action)) => {
-                Popup::handle_select(self, id, action)
-            }
-            Plant::TopPlot(TopEvent::CellAction(widget, action)) => {
-                Top::handle_cell_action(self, widget, action)
-            }
             Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, n),
             Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
             Plant::Notify(NotifyEvent::PeerClosed(id)) => {
@@ -1104,36 +1134,6 @@ impl Plots {
             Plant::Notify(NotifyEvent::DBusUp) => {
                 eprintln!("riced: notifications: D-Bus server up");
                 Command::none()
-            }
-            Plant::TopPlot(TopEvent::SetOpacity(id, value)) => {
-                Top::handle_set_opacity(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetFloating(id, value)) => {
-                Top::handle_set_floating(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetMarginTop(id, value)) => {
-                Top::handle_set_margin_top(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetMarginRight(id, value)) => {
-                Top::handle_set_margin_right(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetMarginBottom(id, value)) => {
-                Top::handle_set_margin_bottom(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetMarginLeft(id, value)) => {
-                Top::handle_set_margin_left(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetRadiusTl(id, value)) => {
-                Top::handle_set_radius_tl(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetRadiusTr(id, value)) => {
-                Top::handle_set_radius_tr(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetRadiusBl(id, value)) => {
-                Top::handle_set_radius_bl(self, id, value)
-            }
-            Plant::TopPlot(TopEvent::SetRadiusBr(id, value)) => {
-                Top::handle_set_radius_br(self, id, value)
             }
             Plant::SettingPlot(SettingEvent::Select(id, page)) => {
                 Setting::handle_select(self, id, page)
@@ -1197,8 +1197,8 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::BackgroundPlot(BackgroundEvent::PickWallpaper)
         | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(None)) => Scope::None,
         // Lua-widget timer only runs due scripts (repaint goes through
-        // WidgetsChanged when an output actually moved).
-        Plant::TopPlot(TopEvent::WidgetTick) => Scope::None,
+        // Widget(Changed) when an output actually moved).
+        Plant::TopPlot(TopEvent::Widget(WidgetEvent::Tick)) => Scope::None,
         // Notification arrivals/dismissals repaint (transient layer);
         // the gated 250ms sweep tick repaints too (short-lived), the
         // D-Bus-up note never does.
@@ -1208,37 +1208,17 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
         Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
-        Plant::TopPlot(TopEvent::WidgetPressed(..)) => Scope::None,
-        // Animation frames repaint while a list transition runs (the
-        // 16ms subscription only exists while motions are active).
-        Plant::TopPlot(TopEvent::WidgetAnim) => Scope::All,
+        // Widget press only records; every other widget event repaints
+        // (animation frames while a motion runs, releases opening a
+        // popup, actions refreshing tiles, changed outputs).
+        Plant::TopPlot(TopEvent::Widget(WidgetEvent::Pressed(..))) => Scope::None,
+        Plant::TopPlot(TopEvent::Widget(_))
+        | Plant::TopPlot(TopEvent::Bar(_))
+        | Plant::TopPlot(TopEvent::Style(_))
         | Plant::TopPlot(TopEvent::Pressed(..))
         | Plant::TopPlot(TopEvent::Released(..))
-        // Widget press only records; the release repaints (popup open,
-        // action refresh) like a slot click does.
-        | Plant::TopPlot(TopEvent::WidgetReleased(..))
-        | Plant::TopPlot(TopEvent::Remove(..))
-        | Plant::TopPlot(TopEvent::SetLength(..))
-        | Plant::TopPlot(TopEvent::SetThickness(..))
-        | Plant::TopPlot(TopEvent::SetSlots(..))
-        | Plant::TopPlot(TopEvent::SetSlotAlign(..))
-        | Plant::TopPlot(TopEvent::SetSlotWidget(..))
-        | Plant::TopPlot(TopEvent::SetSlotPadding(..))
-        | Plant::TopPlot(TopEvent::SetSlotSpacing(..))
-        | Plant::TopPlot(TopEvent::WidgetsChanged)
-        | Plant::TopPlot(TopEvent::PopupSelect(..))
-        | Plant::TopPlot(TopEvent::CellAction(..))
-        | Plant::TopPlot(TopEvent::SetOpacity(..))
-        | Plant::TopPlot(TopEvent::SetFloating(..))
-        | Plant::TopPlot(TopEvent::SetMarginTop(..))
-        | Plant::TopPlot(TopEvent::SetMarginRight(..))
-        | Plant::TopPlot(TopEvent::SetMarginBottom(..))
-        | Plant::TopPlot(TopEvent::SetMarginLeft(..))
-        | Plant::TopPlot(TopEvent::SetRadiusTl(..))
-        | Plant::TopPlot(TopEvent::SetRadiusTr(..))
-        | Plant::TopPlot(TopEvent::SetRadiusBl(..))
-        | Plant::TopPlot(TopEvent::SetRadiusBr(..))
-        | Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
+        | Plant::TopPlot(TopEvent::Remove(..)) => Scope::All,
+        Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
         // CursorMoved is handled via throttled background tick; no direct redraw to avoid flood
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
         // ConfigTick is a cheap mtime check — redraw only on actual reload.

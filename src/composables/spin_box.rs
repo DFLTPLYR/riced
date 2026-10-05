@@ -21,7 +21,7 @@ use std::ops::RangeInclusive;
 ///         0.0..=256.0,
 ///         1.0,
 ///         0,
-///         move |v| Plant::TopPlot(TopEvent::SetMarginTop(wid, v as i32)),
+///         move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Margin(wid, Edge::Top, v as i32))),
 ///     )
 ///     .width(Length::FillPortion(2)),
 /// ]

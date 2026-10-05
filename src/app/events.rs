@@ -56,54 +56,52 @@ pub enum ConfigEvent {
     WidgetsReloaded(Vec<crate::config::WidgetDef>),
 }
 
+/// Top-level bar/shell event routing enum. Kept small: raw input and
+/// lifecycle stay flat, everything domain-specific lives in the nested
+/// [`WidgetEvent`] / [`BarEvent`] / [`StyleEvent`] enums.
+#[derive(Debug, Clone)]
+pub enum TopEvent {
+    // Lifecycle
+    /// Spawn a bar on the closest edge to the context-menu cursor.
+    Sow,
+    /// Remove the bar: close its window, drop tracking, and delete its
+    /// `[[bar]]` entry so it stays gone after restart.
+    Remove(Id),
+
+    // Raw input
+    Pressed(Id, Button),
+    Released(Id, Button),
+
+    // Domain events
+    Widget(WidgetEvent),
+    Bar(BarEvent),
+    Style(StyleEvent),
+}
+
+/// Widget-domain events: per-widget input, the Lua timer/animation
+/// frames, popup/action dispatch, and slot-widget edits.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
-pub enum TopEvent {
-    Sow,
-    Pressed(Id, Button),
-    Released(Id, Button),
+pub enum WidgetEvent {
     /// Left press on one widget (renderer hit-tested per-widget mouse
     /// area): records the press target so the matching release — and
     /// only it — dispatches the click. Bubbled outer releases ignore
     /// widget targets (their own handler owns the click).
-    WidgetPressed(Id, usize, String),
+    Pressed(Id, usize, String),
     /// Left release on one widget: clicks only when the press target
     /// matches (same bar/slot/widget, under the hold threshold).
-    WidgetReleased(Id, usize, String),
-    /// Remove the bar: close its window, drop tracking, and delete its
-    /// `[[bar]]` entry so it stays gone after restart.
-    Remove(Id),
-    /// Bar length as % of the output long axis (1–100): applied live.
-    SetLength(Id, f32),
-    /// Bar thickness in px (1–thin output axis): applied live.
-    SetThickness(Id, f32),
-    /// Grid cells along the long axis (columns when horizontal, rows when
-    /// vertical): applied live, persisted.
-    SetSlots(Id, u32),
-    /// Child alignment of one slot (position, not label): applied live,
-    /// persisted to the bar's `[[bar]] aligns` entry.
-    SetSlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
-    /// Widget of one slot by `widgets.toml` name (position, not
-    /// label): checked appends the name, unchecked removes it. Applied
-    /// live, persisted to the bar's `[[bar]] widgets` entry.
-    SetSlotWidget(Id, usize, String, bool),
-    /// Inset inside every slot cell (px): applied live, persisted to
-    /// the bar's `[[bar]] slot_padding` entry.
-    SetSlotPadding(Id, f32),
-    /// Gap between slot cells and icon/text segments (px): applied
-    /// live, persisted to the bar's `[[bar]] slot_spacing` entry.
-    SetSlotSpacing(Id, f32),
+    Released(Id, usize, String),
     /// 250ms Lua-widget timer: re-runs every `render()` whose interval
-    /// elapsed. Never repaints by itself — emits `WidgetsChanged` when
-    /// an output moved.
-    WidgetTick,
+    /// elapsed. Never repaints by itself — emits `Changed` when an
+    /// output moved.
+    Tick,
     /// 16ms animation frame: advances the aura-anim runtime for list
     /// enter/exit transitions and sweeps settled ghosts. Only
     /// subscribed while a motion is active (repaint via Scope::All).
-    WidgetAnim,
+    Anim,
     /// A Lua widget output moved: repaint so bars pick the new text up.
-    WidgetsChanged,
+    Changed,
     /// Click a popup item: run the widget's `on_action()` with the item
     /// key, then re-render menu and cell.
     PopupSelect(Id, String),
@@ -111,21 +109,74 @@ pub enum TopEvent {
     /// owning widget's `on_action()` with the button key, then
     /// re-render that widget (a toggle flips its next output).
     CellAction(String, String),
+    /// Widget of one slot by `widgets.toml` name (position, not
+    /// label): checked appends the name, unchecked removes it. Applied
+    /// live, persisted. Accepted here as a widget-domain alias of
+    /// [`BarEvent::SlotWidget`]; both route to the same handler.
+    SetSlotWidget(Id, usize, String, bool),
+}
+
+/// Bar/layout configuration events: geometry and per-slot layout,
+/// applied live and persisted.
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+#[allow(dead_code)]
+pub enum BarEvent {
+    /// Bar length as % of the output long axis (1–100): applied live.
+    Length(Id, f32),
+    /// Bar thickness in px (1–thin output axis): applied live.
+    Thickness(Id, f32),
+    /// Grid cells along the long axis (columns when horizontal, rows when
+    /// vertical): applied live, persisted.
+    Slots(Id, u32),
+    /// Child alignment of one slot (position, not label): applied live,
+    /// persisted to the bar's `[[bar]] aligns` entry.
+    SlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
+    /// Widget of one slot by `widgets.toml` name (position, not
+    /// label): checked appends the name, unchecked removes it. Applied
+    /// live, persisted to the bar's `[[bar]] widgets` entry.
+    SlotWidget(Id, usize, String, bool),
+    /// Inset inside every slot cell (px): applied live, persisted to
+    /// the bar's `[[bar]] slot_padding` entry.
+    SlotPadding(Id, f32),
+    /// Gap between slot cells and icon/text segments (px): applied
+    /// live, persisted to the bar's `[[bar]] slot_spacing` entry.
+    SlotSpacing(Id, f32),
+}
+
+/// Visual/appearance configuration events, applied live where possible
+/// and persisted.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum StyleEvent {
     /// Backdrop opacity preset (0.0/0.25/0.5/0.75/1.0): single commit.
-    SetOpacity(Id, f32),
+    Opacity(Id, f32),
     /// Floating look: inset the backdrop with margins (view-live padding,
     /// exclusive zone kept): applied live.
-    SetFloating(Id, bool),
-    /// Content inset in px, floating look only (view-live padding).
-    SetMarginTop(Id, i32),
-    SetMarginRight(Id, i32),
-    SetMarginBottom(Id, i32),
-    SetMarginLeft(Id, i32),
+    Floating(Id, bool),
+    /// Content inset in px on one edge, floating look only (view-live
+    /// padding).
+    Margin(Id, Edge, i32),
     /// Per-corner rounding in px (view-live).
-    SetRadiusTl(Id, f32),
-    SetRadiusTr(Id, f32),
-    SetRadiusBl(Id, f32),
-    SetRadiusBr(Id, f32),
+    Radius(Id, Corner, f32),
+}
+
+/// Bar content edge for [`StyleEvent::Margin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// Bar corner for [`StyleEvent::Radius`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +211,7 @@ pub enum NotifyEvent {
     /// then dismiss like a click. Unknown ids/keys are ignored.
     Invoke(u32, String),
     /// 250ms expiry sweep tick, gated on a non-empty queue like
-    /// `WidgetTick` (never repaints by itself).
+    /// `WidgetEvent::Tick` (never repaints by itself).
     Tick,
     /// D-Bus server is up (carries nothing — the subscription owns the
     /// connection; used for logging once).

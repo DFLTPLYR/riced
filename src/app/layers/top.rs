@@ -1,7 +1,7 @@
 use super::Popup;
 use super::background::Background;
 use crate::app::app::{PlotInfo, Plots};
-use crate::app::{Plant, TopEvent};
+use crate::app::{Plant, TopEvent, WidgetEvent};
 use crate::composables::panel_window::top_window;
 use crate::config::WidgetDef;
 use crate::theme;
@@ -389,16 +389,16 @@ fn render_slot_widgets(
         // their own presses, so they never double-fire the widget.
         let area = |el: Element<'static, Plant>, name: &str| -> Element<'static, Plant> {
             mouse_area(el)
-                .on_press(Plant::TopPlot(TopEvent::WidgetPressed(
+                .on_press(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Pressed(
                     bar_id,
                     pos,
                     name.to_string(),
-                )))
-                .on_release(Plant::TopPlot(TopEvent::WidgetReleased(
+                ))))
+                .on_release(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Released(
                     bar_id,
                     pos,
                     name.to_string(),
-                )))
+                ))))
                 .into()
         };
         if let Some(node) = trees.get(name) {
@@ -411,8 +411,12 @@ fn render_slot_widgets(
             // Buttons arm a per-widget MouseArea: the click carries the
             // owning widget, so on_action routes back to its own state.
             let widget = name.clone();
-            let msg =
-                move |action: String| Plant::TopPlot(TopEvent::CellAction(widget.clone(), action));
+            let msg = move |action: String| {
+                Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(
+                    widget.clone(),
+                    action,
+                )))
+            };
             let built = match node {
                 WidgetNode::Row {
                     children,
@@ -1701,7 +1705,7 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
-    /// Set one slot's child alignment (`TopEvent::SetSlotAlign`): single
+    /// Set one slot's child alignment (`TopEvent::Bar(BarEvent::SlotAlign)`): single
     /// commit per press (preset buttons, not a drag stream).
     pub(crate) fn handle_set_slot_align(
         plots: &mut Plots,
@@ -1720,7 +1724,7 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
-    /// Check/uncheck one slot widget (`TopEvent::SetSlotWidget`):
+    /// Check/uncheck one slot widget (`TopEvent::Bar(BarEvent::SlotWidget)`):
     /// checking appends the name (no duplicates, `none` never stored),
     /// unchecking removes it. Single commit per toggle.
     pub(crate) fn handle_set_slot_widget(
@@ -1748,7 +1752,7 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
-    /// Set the slot cell padding (`TopEvent::SetSlotPadding`): single
+    /// Set the slot cell padding (`TopEvent::Bar(BarEvent::SlotPadding)`): single
     /// commit per press (slider, not a drag stream — still coalesced).
     pub(crate) fn handle_set_slot_padding(
         plots: &mut Plots,
@@ -1763,7 +1767,7 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
-    /// Set the slot gaps (`TopEvent::SetSlotSpacing`): single commit per
+    /// Set the slot gaps (`TopEvent::Bar(BarEvent::SlotSpacing)`): single commit per
     /// press, like padding.
     pub(crate) fn handle_set_slot_spacing(
         plots: &mut Plots,
@@ -2016,16 +2020,16 @@ impl Top {
         before != after
     }
 
-    /// Re-render due Lua widgets (`TopEvent::WidgetTick`): emits
-    /// `WidgetsChanged` only when an output moved (which repaints).
+    /// Re-render due Lua widgets (`TopEvent::Widget(WidgetEvent::Tick)`):
+    /// emits `Widget(Changed)` only when an output moved (which repaints).
     pub(crate) fn handle_widget_tick(plots: &mut Plots) -> Command<Plant> {
         if Self::run_due_widgets(plots) {
-            return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
+            return Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed)));
         }
         Command::none()
     }
 
-    /// Advance list enter/exit transitions (`TopEvent::WidgetAnim`):
+    /// Advance list enter/exit transitions (`TopEvent::Widget(WidgetEvent::Anim)`):
     /// ticks the shared aura runtime once, then sweeps the widget and
     /// notification transition sets. Repaint comes from the `Scope::All`
     /// redraw scope, not here.
@@ -2056,7 +2060,7 @@ impl Top {
                 if let Some(def) = plots.widgets.iter().find(|d| d.name == widget).cloned()
                     && Self::refresh_widget(plots, &def, gpu)
                 {
-                    return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
+                    return Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed)));
                 }
             }
             Some(Err(e)) => Self::note_widget_error(plots, &widget, e),
@@ -2597,7 +2601,7 @@ impl Top {
                 if let Some(def) = plots.widgets.iter().find(|d| d.name == name).cloned()
                     && Self::refresh_widget(plots, &def, gpu)
                 {
-                    return Command::done(Plant::TopPlot(TopEvent::WidgetsChanged));
+                    return Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed)));
                 }
             }
             Some(Err(e)) => Self::note_widget_error(plots, name, e),

@@ -3,7 +3,7 @@ use super::top::{SlotAlign, TopLocal};
 use crate::app::ConfigEvent;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
-use crate::app::{Plant, TopEvent};
+use crate::app::{BarEvent, Corner, Edge, Plant, StyleEvent, TopEvent};
 use crate::components::display_map::{MapLayer, MapView, images_layer, outputs_layer};
 use crate::composables::spin_box::spin_box;
 use crate::config::{AnimationSpeed, BackgroundImage, ConfigPatch};
@@ -345,7 +345,7 @@ impl Setting {
                 length as f64,
                 1.0..=100.0,
                 1.0,
-                move |v| Plant::TopPlot(TopEvent::SetLength(wid, v as f32)),
+                move |v| Plant::TopPlot(TopEvent::Bar(BarEvent::Length(wid, v as f32))),
                 None,
             ));
             col = col.push(plant_slider_row(
@@ -353,7 +353,7 @@ impl Setting {
                 thickness as f64,
                 1.0..=thick_max,
                 1.0,
-                move |v| Plant::TopPlot(TopEvent::SetThickness(wid, v as f32)),
+                move |v| Plant::TopPlot(TopEvent::Bar(BarEvent::Thickness(wid, v as f32))),
                 None,
             ));
             // Opacity presets (0/25/50/75/100): one commit per press, no
@@ -366,7 +366,9 @@ impl Setting {
                     let label = format!("{:.0}", step * 100.0);
                     presets = presets.push(
                         button(text(label).size(12).color(theme::text()))
-                            .on_press(Plant::TopPlot(TopEvent::SetOpacity(wid, step)))
+                            .on_press(Plant::TopPlot(TopEvent::Style(StyleEvent::Opacity(
+                                wid, step,
+                            ))))
                             .padding(6)
                             .style(theme::nav_button(current == step)),
                     );
@@ -388,7 +390,7 @@ impl Setting {
                         1.0..=TopLocal::MAX_SLOTS as f64,
                         1.0,
                         0,
-                        move |v| Plant::TopPlot(TopEvent::SetSlots(wid, v as u32)),
+                        move |v| Plant::TopPlot(TopEvent::Bar(BarEvent::Slots(wid, v as u32))),
                     )
                     .width(Length::Fixed(120.0)),
                 ]
@@ -404,7 +406,7 @@ impl Setting {
                 slot_padding as f64,
                 0.0..=32.0,
                 1.0,
-                move |v| Plant::TopPlot(TopEvent::SetSlotPadding(wid, v as f32)),
+                move |v| Plant::TopPlot(TopEvent::Bar(BarEvent::SlotPadding(wid, v as f32))),
                 None,
             ));
             col = col.push(plant_slider_row(
@@ -412,7 +414,7 @@ impl Setting {
                 slot_spacing as f64,
                 0.0..=32.0,
                 1.0,
-                move |v| Plant::TopPlot(TopEvent::SetSlotSpacing(wid, v as f32)),
+                move |v| Plant::TopPlot(TopEvent::Bar(BarEvent::SlotSpacing(wid, v as f32))),
                 None,
             ));
             // Per-slot child alignment: picker row of slots, then
@@ -441,7 +443,9 @@ impl Setting {
                 for align in [SlotAlign::Start, SlotAlign::Center, SlotAlign::End] {
                     presets = presets.push(
                         button(text(align.as_str()).size(12).color(theme::text()))
-                            .on_press(Plant::TopPlot(TopEvent::SetSlotAlign(wid, sel, align)))
+                            .on_press(Plant::TopPlot(TopEvent::Bar(BarEvent::SlotAlign(
+                                wid, sel, align,
+                            ))))
                             .padding(6)
                             .style(theme::nav_button(current == align)),
                     );
@@ -460,7 +464,12 @@ impl Setting {
                     let name = stale.clone();
                     list = list.push(Checkbox::new(true).label(format!("{name} ?")).on_toggle(
                         move |on| {
-                            Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, name.clone(), on))
+                            Plant::TopPlot(TopEvent::Bar(BarEvent::SlotWidget(
+                                wid,
+                                sel,
+                                name.clone(),
+                                on,
+                            )))
                         },
                     ));
                 }
@@ -469,7 +478,12 @@ impl Setting {
                     let checked = current.iter().any(|w| w == &name);
                     list = list.push(Checkbox::new(checked).label(name.clone()).on_toggle(
                         move |on| {
-                            Plant::TopPlot(TopEvent::SetSlotWidget(wid, sel, name.clone(), on))
+                            Plant::TopPlot(TopEvent::Bar(BarEvent::SlotWidget(
+                                wid,
+                                sel,
+                                name.clone(),
+                                on,
+                            )))
                         },
                     ));
                 }
@@ -480,7 +494,9 @@ impl Setting {
             col = col.push(
                 Checkbox::new(top.local.floating)
                     .label("Floating look (inset content, reserved space kept)")
-                    .on_toggle(move |v| Plant::TopPlot(TopEvent::SetFloating(wid, v))),
+                    .on_toggle(move |v| {
+                        Plant::TopPlot(TopEvent::Style(StyleEvent::Floating(wid, v)))
+                    }),
             );
 
             if top.local.floating {
@@ -491,7 +507,11 @@ impl Setting {
                         0.0..=256.0,
                         1.0,
                         0,
-                        move |v| Plant::TopPlot(TopEvent::SetMarginTop(wid, v as i32)),
+                        move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Margin(
+                            wid,
+                            Edge::Top,
+                            v as i32
+                        ))),
                     )
                     .width(Length::Fixed(120.0)),
                 ]
@@ -503,7 +523,11 @@ impl Setting {
                         0.0..=256.0,
                         1.0,
                         0,
-                        move |v| Plant::TopPlot(TopEvent::SetMarginRight(wid, v as i32)),
+                        move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Margin(
+                            wid,
+                            Edge::Right,
+                            v as i32
+                        ))),
                     )
                     .width(Length::Fixed(120.0)),
                 ]
@@ -515,7 +539,11 @@ impl Setting {
                         0.0..=256.0,
                         1.0,
                         0,
-                        move |v| Plant::TopPlot(TopEvent::SetMarginLeft(wid, v as i32)),
+                        move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Margin(
+                            wid,
+                            Edge::Left,
+                            v as i32
+                        ))),
                     )
                     .width(Length::Fixed(120.0)),
                 ]
@@ -527,7 +555,11 @@ impl Setting {
                         0.0..=256.0,
                         1.0,
                         0,
-                        move |v| Plant::TopPlot(TopEvent::SetMarginBottom(wid, v as i32)),
+                        move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Margin(
+                            wid,
+                            Edge::Bottom,
+                            v as i32
+                        ))),
                     )
                     .width(Length::Fixed(120.0)),
                 ]
@@ -547,7 +579,11 @@ impl Setting {
                     top.local.radius.top_left as f64,
                     0.0..=32.0,
                     1.0,
-                    move |v| Plant::TopPlot(TopEvent::SetRadiusTl(wid, v as f32)),
+                    move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Radius(
+                        wid,
+                        Corner::TopLeft,
+                        v as f32
+                    ))),
                     None,
                 ),
                 plant_slider_row(
@@ -555,7 +591,11 @@ impl Setting {
                     top.local.radius.top_right as f64,
                     0.0..=32.0,
                     1.0,
-                    move |v| Plant::TopPlot(TopEvent::SetRadiusTr(wid, v as f32)),
+                    move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Radius(
+                        wid,
+                        Corner::TopRight,
+                        v as f32
+                    ))),
                     None,
                 )
             ]
@@ -566,7 +606,11 @@ impl Setting {
                     top.local.radius.bottom_left as f64,
                     0.0..=32.0,
                     1.0,
-                    move |v| Plant::TopPlot(TopEvent::SetRadiusBl(wid, v as f32)),
+                    move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Radius(
+                        wid,
+                        Corner::BottomLeft,
+                        v as f32
+                    ))),
                     None,
                 ),
                 plant_slider_row(
@@ -574,7 +618,11 @@ impl Setting {
                     top.local.radius.bottom_right as f64,
                     0.0..=32.0,
                     1.0,
-                    move |v| Plant::TopPlot(TopEvent::SetRadiusBr(wid, v as f32)),
+                    move |v| Plant::TopPlot(TopEvent::Style(StyleEvent::Radius(
+                        wid,
+                        Corner::BottomRight,
+                        v as f32
+                    ))),
                     None,
                 )
             ]

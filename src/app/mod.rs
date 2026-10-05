@@ -5,5 +5,6 @@ pub mod layers;
 
 pub use app::{Plots, redraw_scope};
 pub use events::{
-    BackgroundEvent, ConfigEvent, LandEvent, NotifyEvent, Plant, SettingEvent, TopEvent,
+    BackgroundEvent, BarEvent, ConfigEvent, Corner, Edge, LandEvent, NotifyEvent, Plant,
+    SettingEvent, StyleEvent, TopEvent, WidgetEvent,
 };

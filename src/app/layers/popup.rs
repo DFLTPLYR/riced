@@ -4,7 +4,7 @@ use super::top::{
     lua_value_kind, parse_node, publish_system_tables, rich_text,
 };
 use crate::app::app::{PlotInfo, Plots};
-use crate::app::{Plant, TopEvent};
+use crate::app::{Plant, TopEvent, WidgetEvent};
 use crate::theme;
 use iced::window;
 use iced::{Element, Length, Point, Task as Command};
@@ -450,7 +450,9 @@ impl Popup {
             // Trees failing to build were rejected at parse/refresh.
             // Buttons route like item rows: the click carries this
             // popup, so `on_action` receives the key.
-            let msg = move |action: String| Plant::TopPlot(TopEvent::PopupSelect(win_id, action));
+            let msg = move |action: String| {
+                Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(win_id, action)))
+            };
             if let Ok(node) = build_node(tree, self.size, Some(&msg)) {
                 content = content.push(node);
             }
@@ -461,7 +463,9 @@ impl Popup {
                 button(rich_text(item.label.clone(), self.size, 4.0))
                     .width(Length::Fill)
                     .padding(6)
-                    .on_press(Plant::TopPlot(TopEvent::PopupSelect(win_id, action)))
+                    .on_press(Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(
+                        win_id, action,
+                    ))))
                     .style(theme::menu_button(theme::RADIUS)),
             );
         }
@@ -622,7 +626,7 @@ impl Popup {
                     if Top::refresh_widget(plots, &def, gpu) {
                         return Command::batch(vec![
                             refresh,
-                            Command::done(Plant::TopPlot(TopEvent::WidgetsChanged)),
+                            Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed))),
                         ]);
                     }
                 }
