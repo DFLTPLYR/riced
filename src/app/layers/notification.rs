@@ -3,20 +3,24 @@
 //! One layer-shell window per output that currently shows anything
 //! (usually just the mouse output). Each window renders that output's
 //! stack newest-first; windows close when their stack empties.
-//! Bodies render from `notifications.lua` once Stage 3 lands — until
-//! then, [`default_card`] draws a title + up-to-three body lines.
+//! Bodies render from `notifications.lua`, falling back to
+//! [`default_tree`] when the script is missing or broken.
 //!
-//! Placement honors `[notifications] output`: `"mouse"` resolves the
-//! output under the last-known global cursor (or the compositor's
-//! `LastOutput` equivalent via `OutputOption`), any other value pins
-//! by output name (`OutputInfo.name`, e.g. `"DP-1"`).
+//! Cards animate on the shared [`crate::app::layers::anim::TransSet`]
+//! machine keyed `(output, id)`: arrivals slide in from the anchored
+//! edge, dismissals linger as inert ghosts sliding out. Placement
+//! honors `[notifications] output`: `"mouse"` resolves the output
+//! under the last-known global cursor (or the compositor's `LastOutput`
+//! equivalent via `OutputOption`), any other value pins by output name
+//! (`OutputInfo.name`, e.g. `"DP-1"`).
 
 use super::background::Background;
-use super::top::{WidgetNode, build_node, inject_ui, new_widget_lua, parse_node};
+use super::top::{NodeLength, WidgetNode, build_node, inject_ui, new_widget_lua, parse_node};
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::{NotifyEvent, Plant};
 use crate::config::NotificationConfig;
 use crate::theme;
+use aura_anim::core::timing::Timing;
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_exwlshell::reexport::{
@@ -130,11 +134,6 @@ pub(crate) fn output_at(geoms: &[OutputGeom], point: iced::Point) -> Option<Outp
     })
 }
 
-/// Pure: drop expired entries in place.
-pub(crate) fn sweep_expired(queue: &mut VecDeque<Notification>, now: Instant) {
-    queue.retain(|n| !n.expired(now));
-}
-
 /// Insert, replacing the same id in place (D-Bus `replaces_id`).
 pub(crate) fn enqueue(queue: &mut VecDeque<Notification>, item: Notification) {
     if let Some(slot) = queue.iter_mut().find(|n| n.id == item.id) {
@@ -229,54 +228,165 @@ impl Notification {
     }
 }
 
-/// Default card (Stage 1): title + up-to-three body lines. Stage 3
-/// replaces the body with `notifications.lua` output.
-fn default_card(n: &Notification, width: f32) -> Element<'static, Plant> {
-    use iced::widget::{column, container, mouse_area, text};
-    let mut lines = column![text(n.title.clone()).size(14.0)].spacing(2);
-    for line in n.body.lines().take(3) {
-        lines = lines.push(text(line.to_string()).size(12.0));
-    }
-    let card = container(lines)
-        .width(Length::Fixed(width))
-        .height(Length::Fixed(CARD_H))
-        .padding(10)
-        .clip(true)
-        .style(theme::menu_box);
-    mouse_area(card)
-        .on_press(Plant::Notify(NotifyEvent::Dismissed(n.id)))
-        .into()
+/// Slide timing for notification cards (shared animation speed).
+fn noti_timing(plots: &Plots) -> Timing {
+    Timing::ease_out(plots.config.animation.speed.duration())
 }
 
-/// Stack view for one output's window: newest first, capped. Bodies
-/// come from cached `notifications.lua` trees, falling back to
-/// [`default_card`] when the script is missing or broken. v1 has no
-/// actions: the whole card is one dismiss area.
+/// Retire one notification into a ghost on the shared transition set:
+/// drop it from the queue but keep its tree, sliding out from its
+/// current pad (mid-enter dismissals retarget smoothly instead of
+/// jumping). Returns false when the id was already gone.
+fn retire_noti(plots: &mut Plots, id: u32) -> bool {
+    let cap = plots.config.notifications.max_visible.max(1) as usize;
+    let order = visible_order(&plots.notifications, cap);
+    let Some(pos) = order.iter().position(|(nid, _)| *nid == id) else {
+        plots.notif_trees.remove(&id);
+        return false;
+    };
+    let output = order[pos].1;
+    let cached = plots.notif_trees.remove(&id);
+    let fallback = plots.notifications.iter().find(|n| n.id == id);
+    let node = cached.unwrap_or_else(|| default_tree(fallback));
+    plots.notifications.retain(|n| n.id != id);
+    let timing = noti_timing(plots);
+    plots
+        .notif_trans
+        .retire(&mut plots.anim_runtime, timing, (output, id), pos, node);
+    true
+}
+
+/// Visible `(id, output)` in newest-first, per-output-capped view
+/// order — the single ordering both view and retire share.
+fn visible_order(notifications: &VecDeque<Notification>, cap: usize) -> Vec<(u32, OutputId)> {
+    let mut by_output: std::collections::HashMap<OutputId, Vec<u32>> = Default::default();
+    for n in notifications {
+        if let Some(output) = n.output {
+            by_output.entry(output).or_default().push(n.id);
+        }
+    }
+    let mut ordered = Vec::new();
+    for (output, mut ids) in by_output {
+        ids.reverse();
+        ordered.extend(ids.into_iter().take(cap).map(|id| (id, output)));
+    }
+    ordered
+}
+
+/// Drop settled notification exits (called from the shared 16ms
+/// animation loop after it ticks the runtime).
+pub(crate) fn sweep_noti_anims(plots: &mut Plots) {
+    plots.notif_trans.sweep(&mut plots.anim_runtime);
+}
+
+/// Default card tree: title + up-to-three body lines. Used when
+/// `notifications.lua` is missing/broken — and as ghost content, so
+/// every visible card (live or ghost) is always a `WidgetNode`.
+fn default_tree(n: Option<&Notification>) -> WidgetNode {
+    let (title, body) = n
+        .map(|n| (n.title.clone(), n.body.clone()))
+        .unwrap_or_default();
+    let mut children = vec![WidgetNode::Text {
+        content: title,
+        size: Some(14.0),
+        width: None,
+        height: None,
+    }];
+    for line in body.lines().take(3) {
+        children.push(WidgetNode::Text {
+            content: line.to_string(),
+            size: Some(12.0),
+            width: None,
+            height: None,
+        });
+    }
+    WidgetNode::Column {
+        children,
+        spacing: 2.0,
+        width: NodeLength::Shrink,
+        height: NodeLength::Shrink,
+    }
+}
+
+/// Stack view for one output's window: live cards newest-first and
+/// capped, ghosts merged at their old indices. Bodies come from cached
+/// `notifications.lua` trees, falling back to [`default_tree`] when
+/// the script is missing or broken. Cards slide from the anchored edge
+/// (down for top corners, up for bottom ones); v1 has no actions, so
+/// the whole live card is one dismiss area while ghosts stay inert.
 pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
     use iced::widget::{column, container, mouse_area};
     let cfg = &plots.config.notifications;
     let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
-    let mut stack = column![].spacing(CARD_GAP);
-    for n in plots
-        .notifications
-        .iter()
-        .filter(|n| n.output == Some(output))
-        .rev()
-        .take(cfg.max_visible.max(1) as usize)
-    {
-        let body: Element<'_, Plant> = match plots.notif_trees.get(&n.id) {
-            Some(tree) => build_node(tree, 13.0, None).unwrap_or_else(|_| default_card(n, width)),
-            None => default_card(n, width),
+    let from_bottom = cfg.position.starts_with("bottom");
+    struct Card {
+        id: u32,
+        node: WidgetNode,
+        live: bool,
+    }
+    let cap = plots.config.notifications.max_visible.max(1) as usize;
+    let mut cards: Vec<Card> = visible_order(&plots.notifications, cap)
+        .into_iter()
+        .filter(|(_, o)| *o == output)
+        .map(|(id, _)| {
+            let node =
+                plots.notif_trees.get(&id).cloned().unwrap_or_else(|| {
+                    default_tree(plots.notifications.iter().find(|n| n.id == id))
+                });
+            Card {
+                id,
+                node,
+                live: true,
+            }
+        })
+        .collect();
+    for ghost in plots.notif_trans.ghosts_for(|(o, _)| *o == output) {
+        let at = ghost.index.min(cards.len());
+        let card = Card {
+            id: ghost.key.1,
+            node: ghost.node.clone(),
+            live: false,
         };
-        let card = container(body)
+        cards.push(card);
+        let last = cards.len() - 1;
+        if at < last {
+            let card = cards.remove(last);
+            cards.insert(at, card);
+        }
+    }
+    let mut stack = column![].spacing(CARD_GAP);
+    for card in &cards {
+        let pad = plots
+            .notif_trans
+            .pad(&plots.anim_runtime, &(output, card.id));
+        let body: Element<'_, Plant> = build_node(&card.node, 13.0, None).unwrap_or_else(|_| {
+            build_node(
+                &default_tree(plots.notifications.iter().find(|n| n.id == card.id)),
+                13.0,
+                None,
+            )
+            .expect("default tree builds")
+        });
+        let (top_extra, bottom_extra) = if from_bottom { (0.0, pad) } else { (pad, 0.0) };
+        let chrome = container(body)
             .width(Length::Fixed(width))
             .height(Length::Fixed(CARD_H))
-            .padding(10)
+            .padding(iced::Padding {
+                top: 10.0 + top_extra,
+                right: 10.0,
+                bottom: 10.0 + bottom_extra,
+                left: 10.0,
+            })
             .clip(true)
             .style(theme::menu_box);
-        let el: Element<'_, Plant> = mouse_area(card)
-            .on_press(Plant::Notify(NotifyEvent::Dismissed(n.id)))
-            .into();
+        // Skip the wrapper when settled (fewer layout nodes).
+        let el: Element<'_, Plant> = if card.live {
+            mouse_area(chrome)
+                .on_press(Plant::Notify(NotifyEvent::Dismissed(card.id)))
+                .into()
+        } else {
+            chrome.into()
+        };
         stack = stack.push(el);
     }
     stack.into()
@@ -284,7 +394,7 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
 
 /// Script file for the Lua renderer, next to the widget scripts
 /// (`~/.config/riced/widgets/notifications.lua`). Never overwritten
-/// once seeded; missing file falls back to [`default_card`].
+/// once seeded; missing file falls back to [`default_tree`].
 pub(crate) fn script_path() -> std::path::PathBuf {
     crate::config::widgets_dir().join("notifications.lua")
 }
@@ -327,7 +437,7 @@ fn ensure_notify_lua(plots: &mut Plots) -> Result<(), String> {
 }
 
 /// Render one notification through `render(n)` and cache the tree.
-/// Missing/broken scripts fall back to [`default_card`] (and clear
+/// Missing/broken scripts fall back to [`default_tree`] (and clear
 /// any stale cached tree); errors log once per message.
 pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
     if let Err(e) = ensure_notify_lua(plots) {
@@ -401,21 +511,23 @@ impl Notification {
         if let Some(stored) = plots.notifications.iter().find(|n| n.id == id).cloned() {
             render_noti(plots, &stored);
         }
+        // Fresh card slides in on the shared transition set.
+        let timing = Timing::ease_out(plots.config.animation.speed.duration());
+        plots
+            .notif_trans
+            .enter(&mut plots.anim_runtime, timing, (output, id));
         Self::reconcile(plots, output)
     }
 
     /// Dismiss by id (click, D-Bus close, sweep). Unknown ids are ignored.
     pub(crate) fn handle_dismissed(plots: &mut Plots, id: u32) -> Command<Plant> {
-        let before = plots.notifications.len();
-        plots.notifications.retain(|n| n.id != id);
-        plots.notif_trees.remove(&id);
-        if plots.notifications.len() == before {
+        if !retire_noti(plots, id) {
             return Command::none();
         }
         Self::reconcile_all(plots)
     }
 
-    /// Expiry sweep tick (+ script hot-reload while visible): drop
+    /// Expiry sweep tick (+ script hot-reload while visible): retire
     /// timed-out notifications, close emptied windows. Repaint comes
     /// from the `Scope::All` redraw scope.
     pub(crate) fn handle_tick(plots: &mut Plots) -> Command<Plant> {
@@ -423,18 +535,17 @@ impl Notification {
             render_all_notis(plots);
         }
         let now = Instant::now();
-        let before = plots.notifications.len();
-        sweep_expired(&mut plots.notifications, now);
-        for gone in plots
-            .notif_trees
-            .keys()
-            .filter(|id| !plots.notifications.iter().any(|n| &n.id == *id))
-            .copied()
+        let mut retired = false;
+        for id in plots
+            .notifications
+            .iter()
+            .filter(|n| n.expired(now))
+            .map(|n| n.id)
             .collect::<Vec<_>>()
         {
-            plots.notif_trees.remove(&gone);
+            retired |= retire_noti(plots, id);
         }
-        if plots.notifications.len() == before {
+        if !retired {
             return Command::none();
         }
         Self::reconcile_all(plots)
@@ -455,15 +566,20 @@ impl Notification {
     }
 
     /// Make the window match the stack: open when non-empty, resize on
-    /// count change, close + drop mappings when empty.
+    /// count change, close + drop mappings when empty. Ghosts keep the
+    /// window alive until their exit settles; height counts live
+    /// (capped) plus ghosts so exits never clip.
     fn reconcile(plots: &mut Plots, output: OutputId) -> Command<Plant> {
         let cfg = plots.config.notifications.clone();
-        let visible = plots
+        let cap = cfg.max_visible.max(1) as usize;
+        let live = plots
             .notifications
             .iter()
             .filter(|n| n.output == Some(output))
             .count()
-            .min(cfg.max_visible.max(1) as usize);
+            .min(cap);
+        let ghosts = plots.notif_trans.ghosts_for(|(o, _)| *o == output).len();
+        let visible = live + ghosts;
         match plots.notif_windows.get(&output).copied() {
             None => {
                 if visible == 0 {
@@ -512,6 +628,11 @@ impl Notification {
         let live: std::collections::HashSet<u32> =
             plots.notifications.iter().map(|n| n.id).collect();
         plots.notif_trees.retain(|id, _| live.contains(id));
+        // Output gone: settle its transitions instantly (no window left
+        // to animate in).
+        plots
+            .notif_trans
+            .clear_scope(&mut plots.anim_runtime, |(o, _)| *o == output);
         if cmds.is_empty() {
             Command::none()
         } else {
@@ -563,16 +684,12 @@ mod tests {
     }
 
     #[test]
-    fn sweep_expired_keeps_fresh_and_critical() {
-        let mut q = VecDeque::from([
-            noti(1, 10_000, Some(5_000), 1), // stale normal
-            noti(2, 1_000, Some(5_000), 1),  // fresh normal
-            noti(3, 60_000, None, 2),        // critical persists
-            noti(4, 10_000, Some(5_000), 0), // stale low
-        ]);
-        sweep_expired(&mut q, Instant::now());
-        let ids: Vec<u32> = q.iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec![2, 3]);
+    fn expiry_honours_timeout_and_critical_persist() {
+        let now = Instant::now();
+        assert!(noti(1, 10_000, Some(5_000), 1).expired(now)); // stale normal
+        assert!(!noti(2, 1_000, Some(5_000), 1).expired(now)); // fresh normal
+        assert!(!noti(3, 60_000, None, 2).expired(now)); // critical persists
+        assert!(noti(4, 10_000, Some(5_000), 0).expired(now)); // stale low
     }
 
     #[test]
@@ -636,5 +753,74 @@ mod tests {
         table2.set("urgency", 2).expect("set");
         let value: mlua::Value = render.call(table2).expect("call");
         assert!(parse_node(&value).is_ok());
+    }
+
+    #[test]
+    fn visible_order_is_newest_first_capped_per_output() {
+        let mk = |id: u32, output: Option<OutputId>| Notification {
+            id,
+            output,
+            app: String::new(),
+            title: String::new(),
+            body: String::new(),
+            icon: String::new(),
+            urgency: 1,
+            received_at: Instant::now(),
+            timeout: Some(Duration::from_secs(5)),
+        };
+        let queue = VecDeque::from([
+            mk(1, Some(OutputId(1))),
+            mk(2, Some(OutputId(1))),
+            mk(3, Some(OutputId(1))),
+            mk(4, Some(OutputId(2))),
+            mk(5, None),
+        ]);
+        // Newest first, capped per output, unplaced excluded.
+        let mut order = visible_order(&queue, 2);
+        order.sort();
+        assert_eq!(
+            order,
+            vec![(2, OutputId(1)), (3, OutputId(1)), (4, OutputId(2))]
+        );
+    }
+
+    #[test]
+    fn notification_transitions_share_the_generic_set() {
+        use super::super::anim::{ENTER_OFFSET, TransSet};
+        use aura_anim::core::{runtime::MotionRuntime, timing::Timing};
+        // Same TransSet machine as widget rows, keyed (output, id).
+        let mut rt = MotionRuntime::new();
+        let timing = Timing::ease_out(Duration::from_millis(150));
+        let mut set: TransSet<(OutputId, u32)> = TransSet::default();
+        set.enter(&mut rt, timing, (OutputId(1), 7));
+        assert_eq!(set.pad(&rt, &(OutputId(1), 7)), ENTER_OFFSET);
+        set.retire(
+            &mut rt,
+            timing,
+            (OutputId(1), 7),
+            0,
+            WidgetNode::Text {
+                content: "hi".to_string(),
+                size: None,
+                width: None,
+                height: None,
+            },
+        );
+        assert_eq!(set.ghosts_for(|(o, _)| *o == OutputId(1)).len(), 1);
+        // Other outputs untouched by scope clearing.
+        set.enter(&mut rt, timing, (OutputId(2), 9));
+        set.clear_scope(&mut rt, |(o, _)| *o == OutputId(1));
+        assert!(set.ghosts_for(|_| true).is_empty());
+        assert!(set.pad(&rt, &(OutputId(2), 9)) > 0.0);
+    }
+
+    #[test]
+    fn default_tree_renders_title_and_body_lines() {
+        let n = noti(1, 0, Some(5_000), 1);
+        let tree = default_tree(Some(&n));
+        assert!(matches!(tree, WidgetNode::Column { .. }));
+        let _ = tree;
+        let empty = default_tree(None);
+        assert!(matches!(empty, WidgetNode::Column { .. }));
     }
 }

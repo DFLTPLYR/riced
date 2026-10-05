@@ -85,15 +85,14 @@ pub struct Plots {
     pub(crate) widget_last_error: HashMap<String, String>,
     // Script file mtimes per widget (live-reload on edit).
     pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
-    // ListView-style enter/exit transitions for `ui` button rows
-    // (see layers::anim): one aura runtime shared by all windows,
-    // motions keyed by (widget, action), ghosts for removed items.
+    // ListView-style enter/exit transitions (see layers::anim): one
+    // aura runtime shared by all surfaces, one transition set per
+    // list family — widget cell rows keyed (widget, action),
+    // notification stacks keyed (output, id).
     pub(crate) anim_runtime: crate::app::layers::anim::AnimRuntime,
-    pub(crate) item_anims: HashMap<
-        (String, String),
-        aura_anim::core::runtime::Motion<crate::app::layers::anim::ItemSlide>,
-    >,
-    pub(crate) item_ghosts: HashMap<String, Vec<crate::app::layers::anim::GhostItem>>,
+    pub(crate) list_trans: crate::app::layers::anim::TransSet<(String, String)>,
+    pub(crate) notif_trans:
+        crate::app::layers::anim::TransSet<(iced_wayland_subscriber::OutputId, u32)>,
     // Live system snapshot for the `sysinfo` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
     pub(crate) sysinfo: sysinfo::System,
@@ -206,8 +205,8 @@ impl Plots {
             widget_last_error: HashMap::new(),
             widget_script_mtime: HashMap::new(),
             anim_runtime: crate::app::layers::anim::AnimRuntime::default(),
-            item_anims: HashMap::new(),
-            item_ghosts: HashMap::new(),
+            list_trans: Default::default(),
+            notif_trans: Default::default(),
             sysinfo,
         };
         // Render Lua widgets once so bars populate on the first frame
@@ -563,8 +562,7 @@ impl Plots {
                         &self.widget_outputs,
                         &self.widget_trees,
                         &self.anim_runtime,
-                        &self.item_anims,
-                        &self.item_ghosts,
+                        &self.list_trans,
                     )
                 })
                 .unwrap_or_else(|| Space::new().into()),

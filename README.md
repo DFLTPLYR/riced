@@ -116,7 +116,8 @@ end
   `render()`, show cached rows after (see `clinepass.lua`).
 - **List transitions**: top-level row/column `ui.button`s animate on
   add/remove (slide, keyed by action, animation-speed duration).
-  Label edits swap instantly; first paint settles with no animation.
+  Notification cards share the same machine, keyed by id. Label edits
+  swap instantly; first paint settles with no animation.
 
 Full contract with shapes and edge cases lives on `WidgetDef` in
 `src/config.rs` (the `/// Widgets:` doc block).

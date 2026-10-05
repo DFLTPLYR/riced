@@ -376,8 +376,7 @@ fn render_slot_widgets(
     gap: f32,
     horizontal: bool,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    item_anims: &super::anim::ItemMotions,
-    item_ghosts: &super::anim::ItemGhosts,
+    list_trans: &super::anim::TransSet<(String, String)>,
 ) -> Element<'static, Plant> {
     use iced::widget::mouse_area;
     let mut items = Vec::new();
@@ -438,8 +437,7 @@ fn render_slot_widgets(
                         size,
                         &msg,
                         anim_runtime,
-                        item_anims,
-                        item_ghosts.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                        list_trans,
                         horizontal,
                     )
                 }
@@ -494,16 +492,11 @@ fn build_anim_list(
     size: f32,
     button_msg: &dyn Fn(String) -> Plant,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    item_anims: &super::anim::ItemMotions,
-    ghosts: &[super::anim::GhostItem],
+    trans: &super::anim::TransSet<(String, String)>,
     horizontal: bool,
 ) -> Result<Element<'static, Plant>, String> {
-    let pad_of = |key: &str| -> f32 {
-        item_anims
-            .get(&(widget.to_string(), key.to_string()))
-            .and_then(|m| m.value(anim_runtime).ok())
-            .map(|v| v.pad)
-            .unwrap_or(0.0)
+    let pad_of = |action: &str| -> f32 {
+        trans.pad(anim_runtime, &(widget.to_string(), action.to_string()))
     };
     let wrap = |el: Element<'static, Plant>, pad: f32| -> Element<'static, Plant> {
         if pad <= 0.01 {
@@ -527,14 +520,12 @@ fn build_anim_list(
         items.push(wrap(el, pad));
     }
     // Ghosts at their old indices (clamped: batch removals shift).
-    let mut ordered: Vec<&super::anim::GhostItem> = ghosts.iter().collect();
-    ordered.sort_by_key(|g| g.index);
-    for ghost in ordered {
+    for ghost in trans.ghosts_for(|(w, _)| w == widget) {
         let Ok(el) = build_node(&ghost.node, size, None) else {
             continue;
         };
         let at = ghost.index.min(items.len());
-        items.push(wrap(el, pad_of(&ghost.key)));
+        items.push(wrap(el, trans.pad(anim_runtime, &ghost.key)));
         // Move the just-pushed ghost into place.
         let last = items.len() - 1;
         if at < last {
@@ -1457,8 +1448,7 @@ impl Top {
         outputs: &HashMap<String, String>,
         trees: &HashMap<String, WidgetNode>,
         anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-        item_anims: &super::anim::ItemMotions,
-        item_ghosts: &super::anim::ItemGhosts,
+        list_trans: &super::anim::TransSet<(String, String)>,
     ) -> Element<'_, Plant> {
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
@@ -1475,8 +1465,7 @@ impl Top {
                 gap,
                 horizontal,
                 anim_runtime,
-                item_anims,
-                item_ghosts,
+                list_trans,
             );
             let (align_x, align_y) = self.local.align_at(pos).for_bar(horizontal);
             container(body)
@@ -1879,9 +1868,8 @@ impl Top {
                         let old = plots.widget_trees.get(&def.name).cloned();
                         let duration = plots.config.animation.speed.duration();
                         super::anim::sync_list_anims(
+                            &mut plots.list_trans,
                             &mut plots.anim_runtime,
-                            &mut plots.item_anims,
-                            &mut plots.item_ghosts,
                             &def.name,
                             old.as_ref(),
                             &node,
@@ -1942,8 +1930,7 @@ impl Top {
         plots.widget_script_mtime.clear();
         // Fresh Lua states mean fresh lists: drop in-flight transitions
         // so the first post-reload paint settles instantly.
-        plots.item_anims.clear();
-        plots.item_ghosts.clear();
+        plots.list_trans.clear_all(&mut plots.anim_runtime);
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
         let gpu = Popup::gpu_usage_percent();
@@ -2039,15 +2026,13 @@ impl Top {
     }
 
     /// Advance list enter/exit transitions (`TopEvent::WidgetAnim`):
-    /// ticks the aura runtime and sweeps settled motions + ghosts.
-    /// Repaint comes from the `Scope::All` redraw scope, not here.
+    /// ticks the shared aura runtime once, then sweeps the widget and
+    /// notification transition sets. Repaint comes from the `Scope::All`
+    /// redraw scope, not here.
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
-        super::anim::sweep_anims(
-            &mut plots.anim_runtime,
-            &mut plots.item_anims,
-            &mut plots.item_ghosts,
-            Instant::now(),
-        );
+        plots.anim_runtime.tick_at(Instant::now());
+        plots.list_trans.sweep(&mut plots.anim_runtime);
+        super::notification::sweep_noti_anims(plots);
         Command::none()
     }
 
@@ -3912,8 +3897,9 @@ mod tests {
 
     #[test]
     fn build_anim_list_merges_live_and_ghosts() {
-        use crate::app::layers::anim::{ENTER_OFFSET, GhostItem, ItemMotions, ItemSlide};
+        use crate::app::layers::anim::TransSet;
         use aura_anim::core::runtime::MotionRuntime;
+        use aura_anim::core::timing::Timing;
         // Live row like the hypr seed renders: two buttons, the first
         // mid-enter, plus one exiting ghost at index 1.
         let children = vec![
@@ -3933,25 +3919,23 @@ mod tests {
             },
         ];
         let mut rt = MotionRuntime::new();
-        let timing = aura_anim::core::timing::Timing::ease_out(Duration::from_millis(150));
-        let mut motions: ItemMotions = HashMap::new();
-        for (key, pad) in [("ws:1", ENTER_OFFSET), ("ws:9", 0.0)] {
-            let m = rt.motion_with(ItemSlide { pad }, timing);
-            let target = if key == "ws:1" { 0.0 } else { ENTER_OFFSET };
-            let _ = m.transition_to(ItemSlide { pad: target }, &mut rt);
-            motions.insert(("hypr".to_string(), key.to_string()), m);
-        }
-        let ghosts = vec![GhostItem {
-            index: 1,
-            key: "ws:9".to_string(),
-            node: WidgetNode::Button {
+        let timing = Timing::ease_out(Duration::from_millis(150));
+        let mut set: TransSet<(String, String)> = TransSet::default();
+        // First button mid-enter, plus one exiting ghost at index 1.
+        set.enter(&mut rt, timing, ("hypr".to_string(), "ws:1".to_string()));
+        set.retire(
+            &mut rt,
+            timing,
+            ("hypr".to_string(), "ws:9".to_string()),
+            1,
+            WidgetNode::Button {
                 label: "9".to_string(),
                 action: "ws:9".to_string(),
                 width: None,
                 height: None,
                 padding: None,
             },
-        }];
+        );
         let msg = |_: String| Plant::Tend;
         // Live + ghost merge builds (ghost renders inert).
         let _ = build_anim_list(
@@ -3964,8 +3948,7 @@ mod tests {
             13.0,
             &msg,
             &rt,
-            &motions,
-            &ghosts,
+            &set,
             true,
         )
         .expect("builds");
@@ -3980,8 +3963,7 @@ mod tests {
             13.0,
             &msg,
             &rt,
-            &motions,
-            &ghosts,
+            &set,
             false,
         )
         .expect("builds");

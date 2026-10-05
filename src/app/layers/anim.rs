@@ -1,12 +1,14 @@
-//! QML-`ListView`-style enter/exit transitions for `ui` button rows.
+//! QML-`ListView`-style enter/exit transitions for every surface.
 //!
 //! iced has no `ListView` with `onAdded`/`onRemove` delegates, so this
-//! module implements the same semantics by hand on top of
-//! [`aura_anim`](https://crates.io/crates/aura-anim):
+//! module implements the same semantics once, generically, on top of
+//! [`aura_anim`](https://crates.io/crates/aura-anim) — widget cell rows,
+//! notification stacks, and any future panel list all share it:
 //!
-//! - Items are keyed by button `action` (the only stable identity a
-//!   `ui` tree offers). Label-only changes on the same key swap
-//!   instantly — like QML, transitions fire on add/remove, not edits.
+//! - Items are keyed by whatever stably identifies them: button
+//!   `action` pairs for widget rows, `(output, id)` for notifications.
+//!   Label-only changes on the same key swap instantly — like QML,
+//!   transitions fire on add/remove, not edits.
 //! - Added keys slide in from `ENTER_OFFSET` px leading padding.
 //! - Removed keys are retained as inert ghosts at their old index and
 //!   slide out, then swept once their motion completes.
@@ -25,7 +27,8 @@ use aura_anim::core::{
 };
 use std::collections::HashMap;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::hash::Hash;
+use std::time::Duration;
 
 use super::top::WidgetNode;
 
@@ -65,18 +68,130 @@ pub(crate) struct ItemSlide {
     pub pad: f32,
 }
 
-/// Live enter/exit motions keyed by (widget, button action).
-pub(crate) type ItemMotions = HashMap<(String, String), Motion<ItemSlide>>;
-/// Retained removed items per widget, rendered inert until settled.
-pub(crate) type ItemGhosts = HashMap<String, Vec<GhostItem>>;
+/// One keyed enter/exit transition set shared by every animated list
+/// in the shell: widget cell rows key it `(widget, action)`,
+/// notification stacks `(output, id)`, panel lists whatever identifies
+/// their rows. Callers own diffing/placement; this owns motions.
+#[derive(Debug)]
+pub(crate) struct TransSet<K> {
+    motions: HashMap<K, Motion<ItemSlide>>,
+    ghosts: Vec<Ghost<K>>,
+}
+
+impl<K> Default for TransSet<K> {
+    fn default() -> Self {
+        Self {
+            motions: HashMap::new(),
+            ghosts: Vec::new(),
+        }
+    }
+}
 
 /// A removed-but-still-visible item: last-known node plus its list
 /// index, rendered inert (no clicks) until the exit motion settles.
 #[derive(Debug, Clone)]
-pub(crate) struct GhostItem {
+pub(crate) struct Ghost<K> {
+    pub key: K,
     pub index: usize,
-    pub key: String,
     pub node: WidgetNode,
+}
+
+impl<K: Eq + Hash + Clone> TransSet<K> {
+    /// Fresh key slides in from `ENTER_OFFSET`; a re-added mid-exit
+    /// key flips its live motion home and drops its ghost.
+    pub fn enter(&mut self, runtime: &mut MotionRuntime, timing: Timing, key: K) {
+        match self.motions.get(&key) {
+            Some(m) => {
+                let _ = m.transition_to(ItemSlide { pad: 0.0 }, runtime);
+            }
+            None => {
+                let m = runtime.motion_with(ItemSlide { pad: ENTER_OFFSET }, timing);
+                let _ = m.transition_to(ItemSlide { pad: 0.0 }, runtime);
+                self.motions.insert(key.clone(), m);
+            }
+        }
+        self.ghosts.retain(|g| g.key != key);
+    }
+
+    /// Removed key becomes an inert ghost at `index`, sliding out from
+    /// its current pad (mid-enter dismissals retarget smoothly instead
+    /// of jumping).
+    pub fn retire(
+        &mut self,
+        runtime: &mut MotionRuntime,
+        timing: Timing,
+        key: K,
+        index: usize,
+        node: WidgetNode,
+    ) {
+        match self.motions.get(&key) {
+            Some(m) => {
+                let _ = m.transition_to(ItemSlide { pad: ENTER_OFFSET }, runtime);
+            }
+            None => {
+                let m = runtime.motion_with(ItemSlide { pad: 0.0 }, timing);
+                let _ = m.transition_to(ItemSlide { pad: ENTER_OFFSET }, runtime);
+                self.motions.insert(key.clone(), m);
+            }
+        }
+        self.ghosts.retain(|g| g.key != key);
+        self.ghosts.push(Ghost { key, index, node });
+        self.ghosts.sort_by_key(|g| g.index);
+    }
+
+    /// Instant-settle one key (restart paths): motion and ghost gone.
+    pub fn drop_key(&mut self, runtime: &mut MotionRuntime, key: &K) {
+        if let Some(m) = self.motions.remove(key) {
+            let _ = runtime.remove(m);
+        }
+        self.ghosts.retain(|g| &g.key != key);
+    }
+
+    /// Instant-settle every key (reloads): frees all runtime slots.
+    pub fn clear_all(&mut self, runtime: &mut MotionRuntime) {
+        self.clear_scope(runtime, |_| true);
+    }
+
+    /// Instant-settle every key matching `pred` (widget scope, output
+    /// scope, shape flips, reloads).
+    pub fn clear_scope(&mut self, runtime: &mut MotionRuntime, pred: impl Fn(&K) -> bool) {
+        let dead: Vec<K> = self.motions.keys().filter(|k| pred(k)).cloned().collect();
+        for key in dead {
+            self.drop_key(runtime, &key);
+        }
+    }
+
+    /// Drop settled motions (freeing their runtime slots) and orphan
+    /// ghosts. The caller ticks the runtime once first; returns
+    /// whether anything still animates.
+    pub fn sweep(&mut self, runtime: &mut MotionRuntime) -> bool {
+        let dead: Vec<K> = self
+            .motions
+            .iter()
+            .filter(|(_, m)| m.is_completed(runtime).unwrap_or(true))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in dead {
+            self.drop_key(runtime, &key);
+        }
+        !self.motions.is_empty()
+    }
+
+    /// Current pad for a key; `0.0` when settled or absent.
+    pub fn pad(&self, runtime: &MotionRuntime, key: &K) -> f32 {
+        self.motions
+            .get(key)
+            .and_then(|m| m.value(runtime).ok())
+            .map(|v| v.pad)
+            .unwrap_or(0.0)
+    }
+
+    /// Ghosts matching `pred`, in index order, for merging into a view.
+    pub fn ghosts_for(&self, pred: impl Fn(&K) -> bool) -> Vec<&Ghost<K>> {
+        let mut out: Vec<&Ghost<K>> = self.ghosts.iter().filter(|g| pred(&g.key)).collect();
+        out.sort_by_key(|g| g.index);
+        out
+    }
 }
 
 /// Keyed diff of one button list: keys present in `new` but not `old`
@@ -110,15 +225,13 @@ pub(crate) fn button_children(node: &WidgetNode) -> Vec<(String, WidgetNode)> {
 
 /// Reconcile one widget's list animations after a re-render: `old` is
 /// the previous tree (`None` on first paint — everything settles),
-/// `new` the fresh one. Entering keys slide from `ENTER_OFFSET`;
-/// removed keys become inert ghosts sliding out. Unchanged keys are
-/// untouched (in-flight motions keep running). Non-list trees clear
-/// the widget's entries.
-#[allow(clippy::too_many_arguments)]
+/// `new` the fresh one. Thin wrapper translating tree diffs into
+/// [`TransSet`] enter/retire calls keyed `(widget, action)`.
+/// Unchanged keys are untouched (in-flight motions keep running).
+/// Non-list trees clear the widget's entries.
 pub(crate) fn sync_list_anims(
+    set: &mut TransSet<(String, String)>,
     runtime: &mut MotionRuntime,
-    motions: &mut ItemMotions,
-    ghosts: &mut ItemGhosts,
     widget: &str,
     old: Option<&WidgetNode>,
     new: &WidgetNode,
@@ -129,8 +242,7 @@ pub(crate) fn sync_list_anims(
     let Some(old_node) = old else {
         // First paint (or shape flip into a list): settle instantly.
         // Absent entries read as pad 0, so just clear stale state.
-        motions.retain(|(w, _), _| w != widget);
-        ghosts.remove(widget);
+        set.clear_scope(runtime, |(w, _)| w == widget);
         return;
     };
     let old_kids = button_children(old_node);
@@ -140,90 +252,26 @@ pub(crate) fn sync_list_anims(
     let old_is_list = matches!(old_node, WidgetNode::Row { .. } | WidgetNode::Column { .. });
     let new_is_list = matches!(new, WidgetNode::Row { .. } | WidgetNode::Column { .. });
     if !(old_is_list && new_is_list) {
-        motions.retain(|(w, _), _| w != widget);
-        ghosts.remove(widget);
+        set.clear_scope(runtime, |(w, _)| w == widget);
         return;
     }
     let (added, removed) = diff_keys(&old_keys, &new_keys);
     let by_key: HashMap<&str, &WidgetNode> =
         old_kids.iter().map(|(k, n)| (k.as_str(), n)).collect();
     for key in added {
-        let id = (widget.to_string(), key.clone());
-        match motions.get(&id) {
-            // Re-added mid-exit: retarget the live motion home.
-            Some(m) => {
-                let _ = m.transition_to(ItemSlide { pad: 0.0 }, runtime);
-            }
-            None => {
-                let m = runtime.motion_with(ItemSlide { pad: ENTER_OFFSET }, timing);
-                let _ = m.transition_to(ItemSlide { pad: 0.0 }, runtime);
-                motions.insert(id, m);
-            }
-        }
-        // No longer a ghost.
-        if let Some(list) = ghosts.get_mut(widget) {
-            list.retain(|g| g.key != key);
-        }
-        if ghosts.get(widget).is_some_and(Vec::is_empty) {
-            ghosts.remove(widget);
-        }
+        set.enter(runtime, timing, (widget.to_string(), key));
     }
     for (index, key) in removed {
-        let id = (widget.to_string(), key.clone());
-        let node = by_key
-            .get(key.as_str())
-            .cloned()
-            .cloned()
-            .unwrap_or(WidgetNode::Text {
-                content: String::new(),
-                size: None,
-                width: None,
-                height: None,
-            });
-        match motions.get(&id) {
-            Some(m) => {
-                let _ = m.transition_to(ItemSlide { pad: ENTER_OFFSET }, runtime);
-            }
-            None => {
-                let m = runtime.motion_with(ItemSlide { pad: 0.0 }, timing);
-                let _ = m.transition_to(ItemSlide { pad: ENTER_OFFSET }, runtime);
-                motions.insert(id, m);
-            }
-        }
-        let list = ghosts.entry(widget.to_string()).or_default();
-        if !list.iter().any(|g| g.key == key) {
-            list.push(GhostItem { index, key, node });
-            list.sort_by_key(|g| g.index);
+        if let Some(node) = by_key.get(key.as_str()) {
+            set.retire(
+                runtime,
+                timing,
+                (widget.to_string(), key),
+                index,
+                (*node).clone(),
+            );
         }
     }
-}
-
-/// Advance the runtime and drop settled entries: completed motions
-/// leave the map (pad reads as 0 when absent) and ghosts without a
-/// live motion are gone. Returns whether anything is still animating.
-pub(crate) fn sweep_anims(
-    runtime: &mut MotionRuntime,
-    motions: &mut ItemMotions,
-    ghosts: &mut ItemGhosts,
-    now: Instant,
-) -> bool {
-    runtime.tick_at(now);
-    let mut dead = Vec::new();
-    for (id, m) in motions.iter() {
-        if m.is_completed(runtime).unwrap_or(true) {
-            dead.push(id.clone());
-        }
-    }
-    for id in dead {
-        if let Some(m) = motions.remove(&id) {
-            let _ = runtime.remove(m);
-        }
-    }
-    ghosts.retain(|widget, list| {
-        list.retain(|g| motions.contains_key(&(widget.clone(), g.key.clone())));
-        !list.is_empty()
-    });
-    !motions.is_empty()
 }
 
 #[cfg(test)]
@@ -250,151 +298,90 @@ mod tests {
         }
     }
 
-    fn harness() -> (MotionRuntime, ItemMotions, ItemGhosts) {
-        (MotionRuntime::new(), HashMap::new(), HashMap::new())
+    fn timing() -> Timing {
+        Timing::ease_out(Duration::from_millis(150))
     }
 
-    #[test]
-    fn diff_keys_reports_added_and_removed_with_index() {
-        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let new = vec!["b".to_string(), "d".to_string()];
-        let (added, removed) = diff_keys(&old, &new);
-        assert_eq!(added, vec!["d".to_string()]);
-        assert_eq!(removed, vec![(0, "a".to_string()), (2, "c".to_string())]);
-        // Reorder alone is neither add nor remove.
-        let (added, removed) = diff_keys(
-            &["b".to_string(), "d".to_string()],
-            &["d".to_string(), "b".to_string()],
-        );
-        assert!(added.is_empty() && removed.is_empty());
+    fn harness() -> (MotionRuntime, TransSet<(String, String)>) {
+        (MotionRuntime::new(), TransSet::default())
+    }
+
+    fn wkey(w: &str, a: &str) -> (String, String) {
+        (w.to_string(), a.to_string())
     }
 
     #[test]
     fn entering_keys_slide_home_and_settle() {
-        let (mut rt, mut motions, mut ghosts) = harness();
-        let dur = Duration::from_millis(150);
-        let old = row(&["a"]);
-        let new = row(&["a", "b"]);
-        sync_list_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            "w",
-            Some(&old),
-            &new,
-            dur,
-        );
-        // New key animates; old key untouched (no entry = settled).
-        assert_eq!(motions.len(), 1);
-        assert!(motions.contains_key(&("w".to_string(), "b".to_string())));
-        assert!(!ghosts.contains_key("w"));
-        let m = motions[&("w".to_string(), "b".to_string())];
-        assert_eq!(m.value(&rt).unwrap().pad, ENTER_OFFSET);
+        let (mut rt, mut set) = harness();
+        set.enter(&mut rt, timing(), wkey("w", "b"));
+        assert_eq!(set.pad(&rt, &wkey("w", "b")), ENTER_OFFSET);
+        // Unknown keys read settled.
+        assert_eq!(set.pad(&rt, &wkey("w", "a")), 0.0);
         rt.tick(Duration::from_millis(75));
-        let mid = m.value(&rt).unwrap().pad;
+        let mid = set.pad(&rt, &wkey("w", "b"));
         assert!(mid > 0.0 && mid < ENTER_OFFSET, "mid {mid}");
         rt.tick(Duration::from_millis(200));
-        assert!(m.is_completed(&rt).unwrap());
         // Sweep drops settled entries (pad reads as 0 when absent).
-        assert!(!sweep_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            Instant::now()
-        ));
-        assert!(motions.is_empty());
+        assert!(!set.sweep(&mut rt));
+        assert_eq!(set.pad(&rt, &wkey("w", "b")), 0.0);
     }
 
     #[test]
     fn removed_keys_become_inert_ghosts_then_leave() {
-        let (mut rt, mut motions, mut ghosts) = harness();
-        let dur = Duration::from_millis(150);
-        let old = row(&["a", "b", "c"]);
-        let new = row(&["a", "c"]);
-        sync_list_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            "w",
-            Some(&old),
-            &new,
-            dur,
-        );
-        let list = ghosts.get("w").expect("ghost retained");
-        assert_eq!(list.len(), 1);
-        assert_eq!((list[0].index, list[0].key.as_str()), (1, "b"));
-        assert!(matches!(list[0].node, WidgetNode::Button { .. }));
+        let (mut rt, mut set) = harness();
+        set.retire(&mut rt, timing(), wkey("w", "b"), 1, btn("b"));
+        let ghosts = set.ghosts_for(|(w, _)| w == "w");
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!((ghosts[0].index, ghosts[0].key.1.as_str()), (1, "b"));
+        assert!(matches!(ghosts[0].node, WidgetNode::Button { .. }));
         // Exit runs 0 -> offset.
-        let m = motions[&("w".to_string(), "b".to_string())];
-        assert_eq!(m.value(&rt).unwrap().pad, 0.0);
+        assert_eq!(set.pad(&rt, &wkey("w", "b")), 0.0);
         rt.tick(Duration::from_millis(300));
-        assert!(!sweep_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            Instant::now()
-        ));
-        assert!(!ghosts.contains_key("w"));
-    }
-
-    #[test]
-    fn first_paint_and_shape_flips_settle_instantly() {
-        let (mut rt, mut motions, mut ghosts) = harness();
-        let dur = Duration::from_millis(150);
-        // No old tree: everything settles, nothing animates.
-        sync_list_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            "w",
-            None,
-            &row(&["a", "b"]),
-            dur,
-        );
-        assert!(motions.is_empty() && !ghosts.contains_key("w"));
-        // List -> text: stale entries cleared.
-        sync_list_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            "w",
-            Some(&row(&["a"])),
-            &WidgetNode::Text {
-                content: "x".to_string(),
-                size: None,
-                width: None,
-                height: None,
-            },
-            dur,
-        );
-        assert!(motions.is_empty() && !ghosts.contains_key("w"));
+        assert!(!set.sweep(&mut rt));
+        assert!(set.ghosts_for(|(w, _)| w == "w").is_empty());
     }
 
     #[test]
     fn readded_mid_exit_ghost_flips_home() {
-        let (mut rt, mut motions, mut ghosts) = harness();
-        let dur = Duration::from_millis(150);
-        sync_list_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            "w",
-            Some(&row(&["a", "b"])),
-            &row(&["a"]),
-            dur,
-        );
-        assert!(ghosts.contains_key("w"));
+        let (mut rt, mut set) = harness();
+        set.retire(&mut rt, timing(), wkey("w", "b"), 0, btn("b"));
+        assert_eq!(set.ghosts_for(|_| true).len(), 1);
         // Re-add before the exit settles: ghost gone, motion retargets.
-        sync_list_anims(
-            &mut rt,
-            &mut motions,
-            &mut ghosts,
-            "w",
-            Some(&row(&["a"])),
-            &row(&["a", "b"]),
-            dur,
-        );
-        assert!(!ghosts.contains_key("w"));
-        assert!(motions.contains_key(&("w".to_string(), "b".to_string())));
+        set.enter(&mut rt, timing(), wkey("w", "b"));
+        assert!(set.ghosts_for(|_| true).is_empty());
+        rt.tick(Duration::from_millis(300));
+        assert!(!set.sweep(&mut rt));
+    }
+
+    #[test]
+    fn clear_scope_settles_one_scope_only() {
+        let (mut rt, mut set) = harness();
+        set.enter(&mut rt, timing(), wkey("w1", "a"));
+        set.enter(&mut rt, timing(), wkey("w2", "a"));
+        set.retire(&mut rt, timing(), wkey("w2", "b"), 0, btn("b"));
+        set.clear_scope(&mut rt, |(w, _)| w == "w1");
+        assert_eq!(set.pad(&rt, &wkey("w1", "a")), 0.0);
+        // Other scopes untouched.
+        assert!(set.pad(&rt, &wkey("w2", "a")) > 0.0);
+        assert_eq!(set.ghosts_for(|(w, _)| w == "w2").len(), 1);
+    }
+
+    #[test]
+    fn sync_list_anims_diffs_old_and_new_trees() {
+        let (mut rt, mut set) = harness();
+        let dur = Duration::from_millis(150);
+        let old = row(&["a", "b", "c"]);
+        let new = row(&["a", "c", "d"]);
+        sync_list_anims(&mut set, &mut rt, "w", Some(&old), &new, dur);
+        // Added key enters; removed key ghosts at its old index.
+        assert!(set.pad(&rt, &wkey("w", "d")) > 0.0);
+        assert_eq!(set.pad(&rt, &wkey("w", "a")), 0.0);
+        let ghosts = set.ghosts_for(|(w, _)| w == "w");
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!((ghosts[0].index, ghosts[0].key.1.as_str()), (1, "b"));
+        // First paint and shape flips settle instantly.
+        sync_list_anims(&mut set, &mut rt, "w", None, &row(&["x"]), dur);
+        assert_eq!(set.pad(&rt, &wkey("w", "d")), 0.0);
+        assert!(set.ghosts_for(|_| true).is_empty());
     }
 }
