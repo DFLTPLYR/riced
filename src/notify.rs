@@ -1,4 +1,4 @@
-//! D-Bus freedesktop Notifications server (mako replacement, v1).
+//! D-Bus freedesktop Notifications server (mako replacement).
 //!
 //! Lives in an iced subscription stream: owns the session-bus
 //! connection for the app lifetime and forwards arrivals/closes as
@@ -6,19 +6,78 @@
 //! running) or no bus exists, it logs once and the future ends — the
 //! shell runs fine without D-Bus.
 //!
-//! v1 claims `body` only. `actions` are accepted and ignored (claiming
-//! them would break clients that wait for `ActionInvoked`); buttons
-//! and image hints are later stages.
+//! Claims `body` + `actions`. Action clicks and local dismissals emit
+//! `ActionInvoked` / `NotificationClosed` back over the stored
+//! connection (see [`emit_action_invoked`], [`emit_closed`).
 
 use crate::app::{NotifyEvent, Plant};
-use iced::futures::channel::mpsc;
+use iced::{Task as Command, futures::channel::mpsc};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicU32, Ordering},
+};
 use zbus::{interface, object_server::SignalEmitter};
 
 /// Hard ceiling for client-requested timeouts (5 minutes); larger
 /// values clamp. `<= 0` means server default.
 const MAX_TIMEOUT_MS: u64 = 300_000;
+
+/// Live bus connection for emitting `ActionInvoked` /
+/// `NotificationClosed` from message handlers (which can't await).
+/// Set once by [`serve`]; `None` when the server never came up.
+static DBUS_CONN: LazyLock<Mutex<Option<zbus::Connection>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Emit `ActionInvoked(id, key)` as a fire-and-forget command.
+pub(crate) fn emit_action_invoked(id: u32, key: String) -> Command<Plant> {
+    Command::perform(
+        async move {
+            if let Some(conn) = DBUS_CONN.lock().ok().and_then(|c| c.clone()) {
+                let _ = conn
+                    .emit_signal(
+                        None::<()>,
+                        "/org/freedesktop/Notifications",
+                        "org.freedesktop.Notifications",
+                        "ActionInvoked",
+                        &(id, key),
+                    )
+                    .await;
+            }
+            Plant::Tend
+        },
+        |m| m,
+    )
+}
+
+/// Emit `NotificationClosed(id, reason)` as a fire-and-forget command.
+/// Reasons: 1 expired, 2 dismissed by user, 3 closed by peer call.
+pub(crate) fn emit_closed(id: u32, reason: u32) -> Command<Plant> {
+    Command::perform(
+        async move {
+            if let Some(conn) = DBUS_CONN.lock().ok().and_then(|c| c.clone()) {
+                let _ = conn
+                    .emit_signal(
+                        None::<()>,
+                        "/org/freedesktop/Notifications",
+                        "org.freedesktop.Notifications",
+                        "NotificationClosed",
+                        &(id, reason),
+                    )
+                    .await;
+            }
+            Plant::Tend
+        },
+        |m| m,
+    )
+}
+
+/// D-Bus `actions` array is flat `[key, label, ...]`; pair it up,
+/// dropping a dangling tail.
+fn parse_actions(flat: Vec<String>) -> Vec<(String, String)> {
+    flat.chunks_exact(2)
+        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .collect()
+}
 
 struct Server {
     tx: mpsc::Sender<Plant>,
@@ -44,7 +103,7 @@ impl Server {
         app_icon: String,
         summary: String,
         body: String,
-        _actions: Vec<String>,
+        actions: Vec<String>,
         hints: HashMap<String, zbus::zvariant::OwnedValue>,
         expire_timeout: i32,
     ) -> zbus::fdo::Result<u32> {
@@ -63,6 +122,7 @@ impl Server {
                     icon: app_icon,
                     title: summary,
                     body,
+                    actions: parse_actions(actions),
                     urgency: urgency_of(&hints),
                     timeout_ms,
                 },
@@ -79,16 +139,18 @@ impl Server {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         id: u32,
     ) -> zbus::fdo::Result<()> {
+        // Peer-initiated close: the signal below is the acknowledgment,
+        // so forward a silent drop (no second signal from the app).
         let _ = self
             .tx
             .clone()
-            .try_send(Plant::Notify(NotifyEvent::Dismissed(id)));
+            .try_send(Plant::Notify(NotifyEvent::PeerClosed(id)));
         emitter.notification_closed(id, 3).await?;
         Ok(())
     }
 
     fn get_capabilities(&self) -> Vec<String> {
-        vec!["body".to_string()]
+        vec!["body".to_string(), "actions".to_string()]
     }
 
     fn get_server_information(&self) -> (String, String, String, String) {
@@ -123,7 +185,14 @@ pub async fn serve(mut tx: mpsc::Sender<Plant>, default_ms: u64) {
         .and_then(|b| b.serve_at("/org/freedesktop/Notifications", server));
     let _conn = match built {
         Ok(b) => match b.build().await {
-            Ok(conn) => conn,
+            Ok(conn) => {
+                // Stash for fire-and-forget signal emission from message
+                // handlers (which can't await). Best effort only.
+                if let Ok(mut slot) = DBUS_CONN.lock() {
+                    *slot = Some(conn.clone());
+                }
+                conn
+            }
             Err(e) => {
                 eprintln!("riced: notifications: D-Bus unavailable ({e}), continuing without it");
                 return;
@@ -140,4 +209,27 @@ pub async fn serve(mut tx: mpsc::Sender<Plant>, default_ms: u64) {
     // Park: the connection serves for the app lifetime. Dropping (on
     // shutdown) releases the name.
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_actions_pairs_keys_and_labels() {
+        assert!(parse_actions(vec![]).is_empty());
+        assert_eq!(
+            parse_actions(vec!["default".to_string(), "Activate".to_string()]),
+            vec![("default".to_string(), "Activate".to_string())]
+        );
+        // Dangling tail is dropped, never half-paired.
+        assert_eq!(
+            parse_actions(vec![
+                "a".to_string(),
+                "A".to_string(),
+                "dangling".to_string()
+            ]),
+            vec![("a".to_string(), "A".to_string())]
+        );
+    }
 }

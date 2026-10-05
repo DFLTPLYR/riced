@@ -153,6 +153,12 @@ pub enum NotifyEvent {
     /// Dismiss one notification now (click, timeout sweep, D-Bus close,
     /// or output removal). Unknown ids are ignored.
     Dismissed(u32),
+    /// Peer asked to close (D-Bus `CloseNotification`): drop silently,
+    /// the `NotificationClosed` signal already went out on the bus.
+    PeerClosed(u32),
+    /// An action button fired: emit `ActionInvoked` for valid keys,
+    /// then dismiss like a click. Unknown ids/keys are ignored.
+    Invoke(u32, String),
     /// 250ms expiry sweep tick, gated on a non-empty queue like
     /// `WidgetTick` (never repaints by itself).
     Tick,

@@ -141,14 +141,18 @@ max_visible = 3
   internal events — config/widgets parse errors, template failures,
   theme-regen results (critical ones persist until clicked).
 - **Lua layout**: `widgets/notifications.lua` defines
-  `render(n)` over `{ id, app, title, body, icon, urgency }` with the
-  full `ui.*` set; edits re-render visible cards on save, and deleting
-  the file restores the built-in card. Policy (timeout, position, cap)
-  stays in TOML.
+  `render(n)` over `{ id, app, title, body, icon, urgency, actions }`
+  (`actions` is a 1-based array of `{ key, label }` tables, empty when
+  the sender offers none) with the full `ui.*` set; edits re-render
+  visible cards on save, and deleting the file restores the built-in
+  card. Policy (timeout, position, cap) stays in TOML.
 - **Behavior**: one layer window per showing output (closed when
   empty), newest first, click a card to dismiss, expiries swept on a
-  250ms tick that only runs while the queue is non-empty. Actions and
-  image hints are later stages (v1 claims `body` only).
+  250ms tick that only runs while the queue is non-empty. Actions are
+  live: the built-in card renders one button per action, and button
+  clicks emit `ActionInvoked` back over D-Bus (then dismiss with
+  reason "invoked"); capability `actions` is claimed alongside `body`.
+  Image hints stay a later stage.
 
 ## Configuration
 

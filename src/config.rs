@@ -1092,8 +1092,10 @@ end
 /// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
 /// visible cards re-render on save; delete the file to restore the
 /// built-in layout.
-pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency }.
--- urgency: 0 low, 1 normal, 2 critical. Edit live, cards re-render on save.
+pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency, actions }.
+-- urgency: 0 low, 1 normal, 2 critical. actions: 1-based array of
+-- { key, label } (empty when the sender offers none). Edit live,
+-- cards re-render on save.
 function render(n)
     local head = n.app ~= "" and (n.app .. " — " .. n.title) or n.title
     if n.urgency >= 2 then

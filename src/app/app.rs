@@ -1091,6 +1091,12 @@ impl Plots {
             }
             Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, n),
             Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
+            Plant::Notify(NotifyEvent::PeerClosed(id)) => {
+                Notification::handle_peer_closed(self, id)
+            }
+            Plant::Notify(NotifyEvent::Invoke(id, key)) => {
+                Notification::handle_invoke(self, id, key)
+            }
             Plant::Notify(NotifyEvent::Tick) => Notification::handle_tick(self),
             Plant::Notify(NotifyEvent::DBusUp) => {
                 eprintln!("riced: notifications: D-Bus server up");
@@ -1195,6 +1201,8 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // D-Bus-up note never does.
         Plant::Notify(NotifyEvent::Arrived(_))
         | Plant::Notify(NotifyEvent::Dismissed(_))
+        | Plant::Notify(NotifyEvent::PeerClosed(_))
+        | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
         Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
         Plant::TopPlot(TopEvent::WidgetPressed(..)) => Scope::None,

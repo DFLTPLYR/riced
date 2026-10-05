@@ -53,6 +53,8 @@ pub struct Notification {
     pub urgency: u8,
     pub received_at: Instant,
     pub timeout: Option<Duration>,
+    /// Action `(key, label)` pairs from the D-Bus `actions` array.
+    pub actions: Vec<(String, String)>,
 }
 
 /// One output's geometry for hit-testing: `(id, (x, y, w, h))`.
@@ -65,6 +67,7 @@ pub(crate) struct Incoming {
     pub icon: String,
     pub title: String,
     pub body: String,
+    pub actions: Vec<(String, String)>,
     pub urgency: u8,
     /// Client-requested timeout; `None` means server default.
     pub timeout_ms: Option<u64>,
@@ -100,6 +103,7 @@ impl Notification {
             urgency: urgency.min(2),
             received_at: Instant::now(),
             timeout,
+            actions: Vec::new(),
         }
     }
 
@@ -123,6 +127,7 @@ impl Notification {
             urgency: incoming.urgency.min(2),
             received_at: Instant::now(),
             timeout,
+            actions: incoming.actions,
         }
     }
 }
@@ -279,12 +284,13 @@ pub(crate) fn sweep_noti_anims(plots: &mut Plots) {
     plots.notif_trans.sweep(&mut plots.anim_runtime);
 }
 
-/// Default card tree: title + up-to-three body lines. Used when
-/// `notifications.lua` is missing/broken — and as ghost content, so
-/// every visible card (live or ghost) is always a `WidgetNode`.
+/// Default card tree: title + up-to-three body lines + one button
+/// row per action. Used when `notifications.lua` is missing/broken —
+/// and as ghost content, so every visible card (live or ghost) is
+/// always a `WidgetNode`.
 fn default_tree(n: Option<&Notification>) -> WidgetNode {
-    let (title, body) = n
-        .map(|n| (n.title.clone(), n.body.clone()))
+    let (title, body, actions) = n
+        .map(|n| (n.title.clone(), n.body.clone(), n.actions.clone()))
         .unwrap_or_default();
     let mut children = vec![WidgetNode::Text {
         content: title,
@@ -300,6 +306,23 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
             height: None,
         });
     }
+    if !actions.is_empty() {
+        children.push(WidgetNode::Row {
+            children: actions
+                .into_iter()
+                .map(|(key, label)| WidgetNode::Button {
+                    label,
+                    action: key,
+                    width: None,
+                    height: None,
+                    padding: None,
+                })
+                .collect(),
+            spacing: 4.0,
+            width: NodeLength::Shrink,
+            height: NodeLength::Shrink,
+        });
+    }
     WidgetNode::Column {
         children,
         spacing: 2.0,
@@ -312,8 +335,9 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
 /// capped, ghosts merged at their old indices. Bodies come from cached
 /// `notifications.lua` trees, falling back to [`default_tree`] when
 /// the script is missing or broken. Cards slide from the anchored edge
-/// (down for top corners, up for bottom ones); v1 has no actions, so
-/// the whole live card is one dismiss area while ghosts stay inert.
+/// (down for top corners, up for bottom ones). Action buttons route to
+/// `on_action`-style `Invoke` messages; the rest of a live card is one
+/// dismiss area while ghosts stay inert.
 pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
     use iced::widget::{column, container, mouse_area};
     let cfg = &plots.config.notifications;
@@ -359,7 +383,18 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
         let pad = plots
             .notif_trans
             .pad(&plots.anim_runtime, &(output, card.id));
-        let body: Element<'_, Plant> = build_node(&card.node, 13.0, None).unwrap_or_else(|_| {
+        // Live buttons invoke actions; ghosts (and build failures
+        // falling back to the default tree) stay inert.
+        let msg = |action: String| {
+            let id = card.id;
+            Plant::Notify(NotifyEvent::Invoke(id, action))
+        };
+        let body: Element<'_, Plant> = build_node(
+            &card.node,
+            13.0,
+            card.live.then_some(&msg as &dyn Fn(String) -> Plant),
+        )
+        .unwrap_or_else(|_| {
             build_node(
                 &default_tree(plots.notifications.iter().find(|n| n.id == card.id)),
                 13.0,
@@ -436,6 +471,20 @@ fn ensure_notify_lua(plots: &mut Plots) -> Result<(), String> {
     Ok(())
 }
 
+/// `n.actions` for Lua: 1-based array of `{key, label}` tables.
+fn actions_table(lua: &mlua::Lua, actions: &[(String, String)]) -> Result<mlua::Table, String> {
+    let table = lua.create_table().map_err(|e| e.to_string())?;
+    for (i, (key, label)) in actions.iter().enumerate() {
+        let entry = lua.create_table().map_err(|e| e.to_string())?;
+        entry.set("key", key.clone()).map_err(|e| e.to_string())?;
+        entry
+            .set("label", label.clone())
+            .map_err(|e| e.to_string())?;
+        table.set(i + 1, entry).map_err(|e| e.to_string())?;
+    }
+    Ok(table)
+}
+
 /// Render one notification through `render(n)` and cache the tree.
 /// Missing/broken scripts fall back to [`default_tree`] (and clear
 /// any stale cached tree); errors log once per message.
@@ -460,6 +509,9 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
             .set("icon", n.icon.clone())
             .map_err(|e| e.to_string())?;
         table.set("urgency", n.urgency).map_err(|e| e.to_string())?;
+        table
+            .set("actions", actions_table(lua, &n.actions)?)
+            .map_err(|e| e.to_string())?;
         let render: mlua::Function = lua.globals().get("render").map_err(|e| e.to_string())?;
         let value: mlua::Value = render.call(table).map_err(|e| e.to_string())?;
         parse_node(&value)
@@ -519,23 +571,57 @@ impl Notification {
         Self::reconcile(plots, output)
     }
 
-    /// Dismiss by id (click, D-Bus close, sweep). Unknown ids are ignored.
+    /// Dismiss by id (card click). Unknown ids are ignored. Reports
+    /// reason 2 (`dismissed by user`) back over D-Bus.
     pub(crate) fn handle_dismissed(plots: &mut Plots, id: u32) -> Command<Plant> {
+        if !retire_noti(plots, id) {
+            return Command::none();
+        }
+        Command::batch(vec![
+            Self::reconcile_all(plots),
+            crate::notify::emit_closed(id, 2),
+        ])
+    }
+
+    /// Silent drop for peer-initiated closes (D-Bus
+    /// `CloseNotification`): the `NotificationClosed` signal (reason 3)
+    /// already went out on the bus, so no second signal here.
+    pub(crate) fn handle_peer_closed(plots: &mut Plots, id: u32) -> Command<Plant> {
         if !retire_noti(plots, id) {
             return Command::none();
         }
         Self::reconcile_all(plots)
     }
 
+    /// Fire one action button: emit `ActionInvoked` for valid keys,
+    /// then dismiss like a click (reason 2). Unknown ids — or keys the
+    /// notification doesn't offer (stale trees) — are ignored.
+    pub(crate) fn handle_invoke(plots: &mut Plots, id: u32, key: String) -> Command<Plant> {
+        let known = plots
+            .notifications
+            .iter()
+            .find(|n| n.id == id)
+            .is_some_and(|n| n.actions.iter().any(|(k, _)| *k == key));
+        if !known {
+            return Command::none();
+        }
+        let mut cmds = vec![crate::notify::emit_action_invoked(id, key)];
+        if retire_noti(plots, id) {
+            cmds.push(Self::reconcile_all(plots));
+            cmds.push(crate::notify::emit_closed(id, 2));
+        }
+        Command::batch(cmds)
+    }
+
     /// Expiry sweep tick (+ script hot-reload while visible): retire
-    /// timed-out notifications, close emptied windows. Repaint comes
-    /// from the `Scope::All` redraw scope.
+    /// timed-out notifications (reason 1 each), close emptied windows.
+    /// Repaint comes from the `Scope::All` redraw scope.
     pub(crate) fn handle_tick(plots: &mut Plots) -> Command<Plant> {
         if sync_notify_lua(plots) {
             render_all_notis(plots);
         }
         let now = Instant::now();
-        let mut retired = false;
+        let mut cmds = Vec::new();
         for id in plots
             .notifications
             .iter()
@@ -543,12 +629,15 @@ impl Notification {
             .map(|n| n.id)
             .collect::<Vec<_>>()
         {
-            retired |= retire_noti(plots, id);
+            if retire_noti(plots, id) {
+                cmds.push(crate::notify::emit_closed(id, 1));
+            }
         }
-        if !retired {
+        if cmds.is_empty() {
             return Command::none();
         }
-        Self::reconcile_all(plots)
+        cmds.push(Self::reconcile_all(plots));
+        Command::batch(cmds)
     }
 
     /// Reconcile every showing output (used after dismiss/sweep).
@@ -657,6 +746,7 @@ mod tests {
             urgency,
             received_at: Instant::now() - Duration::from_millis(age_ms),
             timeout: timeout_ms.map(Duration::from_millis),
+            actions: Vec::new(),
         }
     }
 
@@ -767,6 +857,7 @@ mod tests {
             urgency: 1,
             received_at: Instant::now(),
             timeout: Some(Duration::from_secs(5)),
+            actions: Vec::new(),
         };
         let queue = VecDeque::from([
             mk(1, Some(OutputId(1))),
@@ -822,5 +913,80 @@ mod tests {
         let _ = tree;
         let empty = default_tree(None);
         assert!(matches!(empty, WidgetNode::Column { .. }));
+    }
+
+    #[test]
+    fn default_tree_appends_one_button_row_per_action() {
+        let mut n = noti(1, 0, Some(5_000), 1);
+        // No actions: text only, no trailing row.
+        let bare = default_tree(Some(&n));
+        assert!(matches!(bare, WidgetNode::Column { .. }));
+        n.actions = vec![
+            ("default".to_string(), "Activate".to_string()),
+            ("mute".to_string(), "Mute".to_string()),
+        ];
+        let tree = default_tree(Some(&n));
+        let WidgetNode::Column { children, .. } = tree else {
+            panic!("expected column");
+        };
+        let Some(WidgetNode::Row { children: btns, .. }) = children.last() else {
+            panic!("expected trailing button row");
+        };
+        let keys: Vec<&str> = btns
+            .iter()
+            .filter_map(|b| match b {
+                WidgetNode::Button { action, label, .. } => {
+                    assert!(!label.is_empty());
+                    Some(action.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["default", "mute"]);
+    }
+
+    #[test]
+    fn from_dbus_carries_actions_through() {
+        let n = Notification::from_dbus(
+            Incoming {
+                id: 7,
+                app: "firefox".to_string(),
+                icon: "firefox".to_string(),
+                title: "t".to_string(),
+                body: "b".to_string(),
+                actions: vec![("default".to_string(), "Activate".to_string())],
+                urgency: 1,
+                timeout_ms: None,
+            },
+            5_000,
+        );
+        assert_eq!(n.id, 7);
+        assert_eq!(
+            n.actions,
+            vec![("default".to_string(), "Activate".to_string())]
+        );
+    }
+
+    #[test]
+    fn lua_sees_actions_as_key_label_tables() {
+        let lua = new_widget_lua().expect("sandbox");
+        let made = actions_table(
+            &lua,
+            &[
+                ("default".to_string(), "Activate".to_string()),
+                ("mute".to_string(), "Mute".to_string()),
+            ],
+        )
+        .expect("table");
+        lua.globals().set("got", made).expect("set");
+        // 1-based array of {key, label} — the shape the seed consumes.
+        let seen: String = lua
+            .load(r#"return got[1].key .. "=" .. got[1].label .. "," .. got[2].key"#)
+            .eval()
+            .expect("eval");
+        assert_eq!(seen, "default=Activate,mute");
+        let empty = actions_table(&lua, &[]).expect("empty");
+        let len: i64 = empty.len().expect("len");
+        assert_eq!(len, 0);
     }
 }
