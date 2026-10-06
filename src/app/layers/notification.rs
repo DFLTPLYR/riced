@@ -284,11 +284,15 @@ fn retire_noti(plots: &mut Plots, id: u32) -> bool {
     plots.notifications.retain(|n| n.id != id);
     let new_keys = output_keys(&plots.notifications, output);
     let duration = plots.config.animation.speed.duration();
+    // Bottom corners slide in from the other side (mirrors the old
+    // `enter_from` direction).
+    plots
+        .notif_list
+        .set_enter_from_x(enter_from(&plots.config.notifications).x);
     plots.notif_list.update(
         &mut plots.anim_runtime,
         duration,
         Axis::Vertical,
-        enter_from(&plots.config.notifications),
         &old_keys,
         &new_keys,
         &[(per_output_pos.unwrap_or(pos), (output, id), node)],
@@ -542,6 +546,19 @@ fn ensure_notify_lua(plots: &mut Plots) -> Result<(), String> {
         .exec()
         .map_err(|e| e.to_string())?;
     let _: mlua::Function = lua.globals().get("render").map_err(|e| e.to_string())?;
+    // Optional `transitions()` spec (same shape as widgets): parsed
+    // once per script load. Malformed specs log and keep defaults.
+    let current = (
+        plots.notif_list.enter_spec(),
+        plots.notif_list.exit_spec(),
+        plots.notif_list.displaced_spec(),
+    );
+    match super::top::parse_transitions(&lua, &current.0, &current.1, &current.2) {
+        Ok((enter, exit, displaced, custom)) => plots
+            .notif_list
+            .set_transitions(enter, exit, displaced, custom),
+        Err(e) => note_error(plots, e),
+    }
     plots.notify_lua = Some(lua);
     Ok(())
 }
@@ -610,6 +627,50 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
     }
 }
 
+/// Publish the live notification queue as the Lua `notifications`
+/// table (newest-first `{id, app, title, body, urgency, has_image}`
+/// rows; metadata only, no image handles or actions). Called alongside
+/// `publish_system_tables` before widget `render()`/popup/action calls
+/// so a notification-center widget can list (and, via the `on_action`
+/// return convention, dismiss) the queue.
+pub(crate) fn publish_notification_list(lua: &mlua::Lua, plots: &Plots) -> mlua::Result<()> {
+    let list = lua.create_table()?;
+    let mut i = 0;
+    for n in plots.notifications.iter().rev() {
+        let entry = lua.create_table()?;
+        entry.set("id", n.id)?;
+        entry.set("app", n.app.clone())?;
+        entry.set("title", n.title.clone())?;
+        entry.set("body", n.body.clone())?;
+        entry.set("urgency", n.urgency)?;
+        entry.set("has_image", n.image.is_some())?;
+        i += 1;
+        list.set(i, entry)?;
+    }
+    lua.globals().set("notifications", list)
+}
+
+/// Map an `on_action` return value onto notification commands:
+/// `{ dismiss = id }` clicks the card away (reason 2), `{ invoke =
+/// { id, key } }` fires an action button. Anything else (nil, text,
+/// misshaped tables, unknown ids/keys) is `Command::none` — the
+/// existing guards inside the handlers ignore it, so center widgets
+/// can't break the queue.
+pub(crate) fn command_from_action(value: &mlua::Value, plots: &mut Plots) -> Command<Plant> {
+    let mlua::Value::Table(t) = value else {
+        return Command::none();
+    };
+    if let Ok(id) = t.get::<u32>("dismiss") {
+        return Notification::handle_dismissed(plots, id);
+    }
+    if let Ok(inner) = t.get::<mlua::Table>("invoke")
+        && let (Ok(id), Ok(key)) = (inner.get::<u32>("id"), inner.get::<String>("key"))
+    {
+        return Notification::handle_invoke(plots, id, key);
+    }
+    Command::none()
+}
+
 /// Render every cached notification (script edit while visible).
 fn render_all_notis(plots: &mut Plots) {
     let ids: Vec<u32> = plots.notifications.iter().map(|n| n.id).collect();
@@ -648,13 +709,14 @@ impl Notification {
         // Fresh card fades/slides in on the list (direction follows the
         // anchored corner); survivors below it displace-glide down.
         let duration = plots.config.animation.speed.duration();
-        let from = enter_from(&plots.config.notifications);
+        plots
+            .notif_list
+            .set_enter_from_x(enter_from(&plots.config.notifications).x);
         let new_keys = output_keys(&plots.notifications, output);
         plots.notif_list.update(
             &mut plots.anim_runtime,
             duration,
             Axis::Vertical,
-            from,
             &old_keys,
             &new_keys,
             &[],
@@ -1055,6 +1117,68 @@ mod tests {
     }
 
     #[test]
+    fn publish_notification_list_exposes_newest_first() {
+        let (_tx, rx) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(rx);
+        for id in [1, 2, 3] {
+            plots.notifications.push_back(noti(id, 0, Some(5_000), 1));
+        }
+        let lua = mlua::Lua::new();
+        publish_notification_list(&lua, &plots).expect("publish");
+        let count: i64 = lua.load("return #notifications").eval().expect("count");
+        assert_eq!(count, 3);
+        // Newest (id 3) first.
+        let first: u32 = lua.load("return notifications[1].id").eval().expect("id");
+        assert_eq!(first, 3);
+        let last: u32 = lua.load("return notifications[3].id").eval().expect("id");
+        assert_eq!(last, 1);
+        let has_image: bool = lua
+            .load("return notifications[1].has_image")
+            .eval()
+            .expect("has_image");
+        assert!(!has_image);
+        // Empty queue publishes an empty table.
+        plots.notifications.clear();
+        publish_notification_list(&lua, &plots).expect("publish");
+        let count: i64 = lua.load("return #notifications").eval().expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn command_from_action_maps_dismiss_and_invoke() {
+        let (_tx, rx) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(rx);
+        let mut n = noti(5, 0, Some(5_000), 1);
+        n.actions = vec![("open".to_string(), "Open".to_string())];
+        plots.notifications.push_back(n);
+        let lua = mlua::Lua::new();
+        // Dismiss maps to a retire (id leaves the queue).
+        let value: mlua::Value = lua.load("return { dismiss = 5 }").eval().expect("eval");
+        let _ = command_from_action(&value, &mut plots);
+        assert!(plots.notifications.iter().all(|n| n.id != 5));
+        // Unknown ids are ignored (no panic, queue unchanged).
+        plots.notifications.push_back(noti(6, 0, Some(5_000), 1));
+        let value: mlua::Value = lua.load("return { dismiss = 99 }").eval().expect("eval");
+        let _ = command_from_action(&value, &mut plots);
+        assert_eq!(plots.notifications.len(), 1);
+        // Invoke with a valid key retires the card too.
+        let mut n = noti(7, 0, Some(5_000), 1);
+        n.actions = vec![("open".to_string(), "Open".to_string())];
+        plots.notifications.push_back(n);
+        let value: mlua::Value = lua
+            .load(r#"return { invoke = { id = 7, key = "open" } }"#)
+            .eval()
+            .expect("eval");
+        let _ = command_from_action(&value, &mut plots);
+        assert!(plots.notifications.iter().all(|n| n.id != 7));
+        // Non-tables / misshaped tables are no-ops.
+        for src in ["return 42", "return 'x'", "return { other = 1 }"] {
+            let value: mlua::Value = lua.load(src).eval().expect("eval");
+            let _ = command_from_action(&value, &mut plots);
+        }
+    }
+
+    #[test]
     fn visible_order_is_newest_first_per_output() {
         let mk = |id: u32, output: Option<OutputId>| Notification {
             id,
@@ -1105,17 +1229,14 @@ mod tests {
         use super::super::anim::ENTER_OFFSET;
         use super::super::listview::{Axis, ListView};
         use aura_anim::core::runtime::MotionRuntime;
-        use iced::Vector;
         // Same ListView machine as widget rows, keyed (output, id).
         let mut rt = MotionRuntime::new();
         let duration = Duration::from_millis(150);
         let mut list: ListView<(OutputId, u32), WidgetNode> = ListView::new(CARD_PITCH);
-        let from = Vector::new(ENTER_OFFSET, 0.0);
         list.update(
             &mut rt,
             duration,
             Axis::Vertical,
-            from,
             &[],
             &[(OutputId(1), 7)],
             &[],
@@ -1126,7 +1247,6 @@ mod tests {
             &mut rt,
             duration,
             Axis::Vertical,
-            from,
             &[(OutputId(1), 7)],
             &[],
             &[(
@@ -1147,7 +1267,6 @@ mod tests {
             &mut rt,
             duration,
             Axis::Vertical,
-            from,
             &[],
             &[(OutputId(2), 9)],
             &[],

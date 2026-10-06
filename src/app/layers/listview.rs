@@ -31,7 +31,7 @@ use aura_anim::core::{
     timing::Timing,
     tween::Tween,
 };
-use iced::{Element, Vector};
+use iced::Element;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::time::Duration;
@@ -43,26 +43,44 @@ pub(crate) enum Axis {
     Horizontal,
 }
 
-/// One QML-style transition block: a start/end [`ItemMotion`] plus an
-/// optional duration (`None` = the list's resolved duration).
+/// One QML-style transition block: start/end [`ItemMotion`] states
+/// plus an optional duration (`None` = the list's resolved duration).
 ///
-/// Meaning of `from` depends on the slot: `on_entered` starts motions
-/// AT `from` and runs home to settled; `on_exit` runs the live motion
-/// TOWARD `from`; `on_displaced` ignores `from` (distance comes from
-/// the index shift) and only uses the duration.
+/// Meaning of `from`/`to` depends on the slot: `on_entered` starts
+/// motions AT `from` and runs toward `to` (default: settled);
+/// `on_exit` runs the live motion TOWARD `to` (default: the exit
+/// state); `on_displaced` ignores both (distance comes from the index
+/// shift) and only uses the duration.
 #[derive(Debug, Clone)]
 pub(crate) struct Transition {
     pub from: ItemMotion,
+    pub to: ItemMotion,
     pub duration: Option<Duration>,
 }
 
 impl Transition {
     /// Slide in/out along `x` with a full fade: enter starts at
-    /// `(from_x, 0, transparent)`, exit ends at `(from_x, 0, gone)`.
+    /// `(from_x, 0, transparent)` and settles; exit ends at
+    /// `(from_x, 0, gone)`.
     pub fn slide_fade(from_x: f32) -> Self {
         Self {
             from: ItemMotion {
                 x: from_x,
+                y: 0.0,
+                opacity: 0.0,
+            },
+            to: ItemMotion::settled(),
+            duration: None,
+        }
+    }
+
+    /// Exit twin of [`Transition::slide_fade`]: starts settled, ends at
+    /// `(to_x, 0, gone)`.
+    pub fn slide_fade_out(to_x: f32) -> Self {
+        Self {
+            from: ItemMotion::settled(),
+            to: ItemMotion {
+                x: to_x,
                 y: 0.0,
                 opacity: 0.0,
             },
@@ -99,6 +117,15 @@ pub(crate) struct ListView<K, C> {
     enter: Transition,
     exit: Transition,
     displaced: Transition,
+    /// Set when a caller declares custom transitions, so per-call
+    /// corner overrides (notification slide side) don't clobber them.
+    enter_locked: bool,
+}
+
+impl<K, C> Default for ListView<K, C> {
+    fn default() -> Self {
+        Self::new(32.0)
+    }
 }
 
 impl<K, C> ListView<K, C> {
@@ -112,11 +139,13 @@ impl<K, C> ListView<K, C> {
             pitch: pitch.max(1.0),
             duration_override: None,
             enter: Transition::slide_fade(ENTER_OFFSET),
-            exit: Transition::slide_fade(-ENTER_OFFSET),
+            exit: Transition::slide_fade_out(-ENTER_OFFSET),
             displaced: Transition {
                 from: ItemMotion::settled(),
+                to: ItemMotion::settled(),
                 duration: None,
             },
+            enter_locked: false,
         }
     }
 
@@ -154,6 +183,46 @@ impl<K, C> ListView<K, C> {
         self.displaced = transition;
         self
     }
+
+    /// Replace all three transitions at once (Lua `transitions()`
+    /// specs land here after parsing; see `top::parse_transitions`).
+    /// `custom` locks the enter side so corner overrides don't apply.
+    pub fn set_transitions(
+        &mut self,
+        enter: Transition,
+        exit: Transition,
+        displaced: Transition,
+        custom: bool,
+    ) {
+        self.enter = enter;
+        self.exit = exit;
+        self.displaced = displaced;
+        self.enter_locked = self.enter_locked || custom;
+    }
+
+    /// Current transition specs (Lua specs layer over these).
+    pub fn enter_spec(&self) -> Transition {
+        self.enter.clone()
+    }
+
+    /// Current exit spec (Lua specs layer over this).
+    pub fn exit_spec(&self) -> Transition {
+        self.exit.clone()
+    }
+
+    /// Current displaced spec (Lua specs layer over this).
+    pub fn displaced_spec(&self) -> Transition {
+        self.displaced.clone()
+    }
+
+    /// Set the enter transition's `from.x` (the notification list
+    /// mirrors its slide side per anchored corner) while keeping the
+    /// fade and `to`. No-op once a caller declared custom transitions.
+    pub fn set_enter_from_x(&mut self, x: f32) {
+        if !self.enter_locked {
+            self.enter.from.x = x;
+        }
+    }
 }
 
 impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
@@ -162,7 +231,7 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
     }
 
     /// Reconcile one frame of list diff: keys in `new_keys` but not
-    /// `old_keys` enter (from `enter_from` + the enter fade);
+    /// `old_keys` enter (from the enter transition's start state);
     /// `removed` entries `(old index, key, content)` retire as ghosts;
     /// survivors whose index moved glide along `axis` by
     /// `index_delta × pitch` (displaced). Re-added mid-exit keys flip
@@ -179,7 +248,6 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         runtime: &mut MotionRuntime,
         global_duration: Duration,
         axis: Axis,
-        enter_from: Vector,
         old_keys: &[K],
         new_keys: &[K],
         removed: &[(usize, K, C)],
@@ -189,7 +257,7 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         let displaced_timing = self.resolve(self.displaced.duration, global_duration);
         // Exits first: ghosts claim their index before survivors move.
         for (index, key, content) in removed {
-            let exit = self.exit.from.clone();
+            let exit = self.exit.to.clone();
             match self.motions.get(key) {
                 Some(m) => {
                     let _ = m.transition_to(exit, runtime);
@@ -215,25 +283,23 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         for key in new_keys {
             if old_keys.contains(key) {
                 if self.ghosts.iter().any(|g| &g.key == key) {
+                    let home = self.enter.to.clone();
                     if let Some(m) = self.motions.get(key) {
-                        let _ = m.transition_to(ItemMotion::settled(), runtime);
+                        let _ = m.transition_to(home, runtime);
                     }
                     self.ghosts.retain(|g| &g.key != key);
                 }
                 continue;
             }
-            let start = ItemMotion {
-                x: enter_from.x,
-                y: enter_from.y,
-                opacity: self.enter.from.opacity,
-            };
+            let start = self.enter.from.clone();
+            let home = self.enter.to.clone();
             match self.motions.get(key) {
                 Some(m) => {
-                    let _ = m.transition_to(ItemMotion::settled(), runtime);
+                    let _ = m.transition_to(home, runtime);
                 }
                 None => {
                     let m = runtime.motion_with(start, enter_timing);
-                    let _ = m.transition_to(ItemMotion::settled(), runtime);
+                    let _ = m.transition_to(home, runtime);
                     self.motions.insert(key.clone(), m);
                 }
             }
@@ -348,11 +414,6 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         }
     }
 
-    /// Instant-settle everything (widget scope teardown).
-    pub fn clear_all(&mut self, runtime: &mut MotionRuntime) {
-        self.clear_scope(runtime, |_| true);
-    }
-
     fn drop_key(&mut self, runtime: &mut MotionRuntime, key: &K) {
         if let Some(m) = self.motions.remove(key) {
             let _ = runtime.remove(m);
@@ -393,6 +454,14 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         }
         !self.motions.is_empty()
     }
+
+    /// Read-only twin of [`ListView::sweep`] for shared borrows: whether
+    /// anything still animates (settled ghosts count as idle).
+    pub fn sweep_check(&self, runtime: &MotionRuntime) -> bool {
+        self.motions
+            .values()
+            .any(|m| !m.is_completed(runtime).unwrap_or(true))
+    }
 }
 
 #[cfg(test)]
@@ -415,15 +484,7 @@ mod tests {
     #[test]
     fn enter_runs_slide_fade_home() {
         let (mut rt, mut set) = harness();
-        set.update(
-            &mut rt,
-            dur(),
-            Axis::Vertical,
-            Vector::new(16.0, 0.0),
-            &[],
-            &keys(&["a"]),
-            &[],
-        );
+        set.update(&mut rt, dur(), Axis::Vertical, &[], &keys(&["a"]), &[]);
         let start = set.motion_of(&rt, &"a".to_string());
         assert_eq!((start.x, start.opacity), (16.0, 0.0));
         rt.tick(Duration::from_millis(75));
@@ -445,18 +506,11 @@ mod tests {
                 y: -24.0,
                 opacity: 0.0,
             },
+            to: ItemMotion::settled(),
             duration: None,
         });
-        // enter_from overrides x/y; the transition owns opacity.
-        set.update(
-            &mut rt,
-            dur(),
-            Axis::Vertical,
-            Vector::new(0.0, -24.0),
-            &[],
-            &keys(&["a"]),
-            &[],
-        );
+        // The transition fully owns the start state now.
+        set.update(&mut rt, dur(), Axis::Vertical, &[], &keys(&["a"]), &[]);
         let start = set.motion_of(&rt, &"a".to_string());
         assert_eq!((start.x, start.y, start.opacity), (0.0, -24.0, 0.0));
     }
@@ -464,22 +518,13 @@ mod tests {
     #[test]
     fn exit_ghosts_then_leaves() {
         let (mut rt, mut set) = harness();
-        set.update(
-            &mut rt,
-            dur(),
-            Axis::Vertical,
-            Vector::new(16.0, 0.0),
-            &[],
-            &keys(&["a", "b"]),
-            &[],
-        );
+        set.update(&mut rt, dur(), Axis::Vertical, &[], &keys(&["a", "b"]), &[]);
         rt.tick(Duration::from_millis(300));
         assert!(!set.sweep(&mut rt));
         set.update(
             &mut rt,
             dur(),
             Axis::Vertical,
-            Vector::new(16.0, 0.0),
             &keys(&["a", "b"]),
             &keys(&["b"]),
             &[(0, "a".to_string(), "A".to_string())],
@@ -503,7 +548,6 @@ mod tests {
             &mut rt,
             dur(),
             Axis::Vertical,
-            Vector::new(16.0, 0.0),
             &[],
             &keys(&["a", "b", "c"]),
             &[],
@@ -515,7 +559,6 @@ mod tests {
             &mut rt,
             dur(),
             Axis::Vertical,
-            Vector::new(16.0, 0.0),
             &keys(&["a", "b", "c"]),
             &keys(&["b", "c"]),
             &[(0, "a".to_string(), "A".to_string())],
@@ -542,7 +585,6 @@ mod tests {
             &mut rt,
             dur(),
             Axis::Horizontal,
-            Vector::new(16.0, 0.0),
             &[],
             &keys(&["a", "b"]),
             &[],
@@ -553,7 +595,6 @@ mod tests {
             &mut rt,
             dur(),
             Axis::Horizontal,
-            Vector::new(16.0, 0.0),
             &keys(&["a", "b"]),
             &keys(&["b"]),
             &[(0, "a".to_string(), "A".to_string())],
@@ -571,7 +612,6 @@ mod tests {
             &mut rt,
             dur(),
             Axis::Vertical,
-            Vector::new(16.0, 0.0),
             &[],
             &keys(&["a", "b", "c"]),
             &[],
@@ -580,7 +620,6 @@ mod tests {
             &mut rt,
             dur(),
             Axis::Vertical,
-            Vector::new(16.0, 0.0),
             &keys(&["a", "b", "c"]),
             &keys(&["a", "c"]),
             &[(1, "b".to_string(), "B".to_string())],
@@ -602,7 +641,8 @@ mod tests {
         // QML-style: exit flies to x = -200, displaced runs long.
         set = set
             .on_exit(Transition {
-                from: ItemMotion {
+                from: ItemMotion::settled(),
+                to: ItemMotion {
                     x: -200.0,
                     y: 0.0,
                     opacity: 0.0,
@@ -611,24 +651,16 @@ mod tests {
             })
             .on_displaced(Transition {
                 from: ItemMotion::settled(),
+                to: ItemMotion::settled(),
                 duration: Some(Duration::from_millis(500)),
             });
-        set.update(
-            &mut rt,
-            dur(),
-            Axis::Vertical,
-            Vector::new(16.0, 0.0),
-            &[],
-            &keys(&["a", "b"]),
-            &[],
-        );
+        set.update(&mut rt, dur(), Axis::Vertical, &[], &keys(&["a", "b"]), &[]);
         rt.tick(Duration::from_millis(300));
         assert!(!set.sweep(&mut rt));
         set.update(
             &mut rt,
             dur(),
             Axis::Vertical,
-            Vector::new(16.0, 0.0),
             &keys(&["a", "b"]),
             &keys(&["b"]),
             &[(0, "a".to_string(), "A".to_string())],
@@ -648,15 +680,7 @@ mod tests {
     fn duration_override_beats_global() {
         let (mut rt, mut set) = harness();
         set = set.duration_override(Duration::from_millis(600));
-        set.update(
-            &mut rt,
-            dur(),
-            Axis::Vertical,
-            Vector::new(16.0, 0.0),
-            &[],
-            &keys(&["a"]),
-            &[],
-        );
+        set.update(&mut rt, dur(), Axis::Vertical, &[], &keys(&["a"]), &[]);
         // Global 150ms would settle by now; the 600ms override runs on.
         rt.tick(Duration::from_millis(300));
         let mid = set.motion_of(&rt, &"a".to_string());

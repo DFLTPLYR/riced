@@ -1,8 +1,7 @@
 use super::Popup;
 use super::background::Background;
-use super::listview::Axis;
+use super::listview::{Axis, Transition};
 use crate::app::app::{PlotInfo, Plots};
-use crate::app::layers::anim::ENTER_OFFSET;
 use crate::app::{Plant, TopEvent, WidgetEvent};
 use crate::composables::panel_window::top_window;
 use crate::config::WidgetDef;
@@ -10,7 +9,7 @@ use crate::theme;
 use iced::mouse::Button;
 use iced::widget::{Space, button, column, container, progress_bar, row, text};
 use iced::window;
-use iced::{Element, Fill, Point, Task as Command, Vector};
+use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
@@ -383,7 +382,10 @@ fn render_slot_widgets(
     gap: f32,
     horizontal: bool,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    list: &super::listview::ListView<(String, String), WidgetNode>,
+    lists: &std::collections::HashMap<
+        String,
+        super::listview::ListView<(String, String), WidgetNode>,
+    >,
 ) -> Element<'static, Plant> {
     use iced::widget::mouse_area;
     let mut items = Vec::new();
@@ -448,7 +450,7 @@ fn render_slot_widgets(
                         size,
                         &msg,
                         anim_runtime,
-                        list,
+                        lists,
                     )
                 }
                 _ => build_node(node, size, Some(&msg)),
@@ -502,11 +504,21 @@ fn build_anim_list(
     size: f32,
     button_msg: &dyn Fn(String) -> Plant,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    list: &super::listview::ListView<(String, String), WidgetNode>,
+    lists: &std::collections::HashMap<
+        String,
+        super::listview::ListView<(String, String), WidgetNode>,
+    >,
 ) -> Result<Element<'static, Plant>, String> {
+    // This widget's own list (absent on first paint): settled motion.
+    let at_rest = crate::app::layers::anim::ItemMotion::settled();
     let shift_of = |action: &str| -> (f32, f32) {
-        let m = list.motion_of(anim_runtime, &(widget.to_string(), action.to_string()));
-        (m.x, m.y)
+        match lists.get(widget) {
+            Some(list) => {
+                let m = list.motion_of(anim_runtime, &(widget.to_string(), action.to_string()));
+                (m.x, m.y)
+            }
+            None => (at_rest.x, at_rest.y),
+        }
     };
     let mut items = Vec::new();
     for child in children {
@@ -520,12 +532,22 @@ fn build_anim_list(
         }
     }
     // Ghosts at their old indices (clamped: batch removals shift).
-    for ghost in list.ghosts_for(|(w, _)| w == widget) {
+    for ghost in lists
+        .get(widget)
+        .map(|list| list.ghosts_for(|(w, _)| w == widget))
+        .unwrap_or_default()
+    {
         let Ok(el) = build_node(&ghost.content, size, None) else {
             continue;
         };
-        let m = list.motion_of(anim_runtime, &ghost.key);
-        let el = super::motion::shifted(el, m.x, m.y, false);
+        let (x, y) = match lists.get(widget) {
+            Some(list) => {
+                let m = list.motion_of(anim_runtime, &ghost.key);
+                (m.x, m.y)
+            }
+            None => (0.0, 0.0),
+        };
+        let el = super::motion::shifted(el, x, y, false);
         let at = ghost.index.min(items.len());
         items.push(el);
         // Move the just-pushed ghost into place.
@@ -572,6 +594,140 @@ fn button_children(node: &WidgetNode) -> Vec<(String, WidgetNode)> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Parse an optional Lua `transitions()` spec over per-slot defaults
+/// (QML `Transition` blocks, declarative):
+///
+/// ```lua
+/// function transitions()
+///     return {
+///         add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
+///         remove = { x = { to = -200 }, opacity = { to = 0 }, duration = 250 },
+///         displaced = { duration = 250 },
+///     }
+/// end
+/// ```
+///
+/// Missing `transitions`, a nil return, or missing slots/fields keep
+/// the defaults, so partial specs compose. Anything misshaped errors
+/// naming the slot (callers log once and keep defaults — never
+/// half-applied). Durations are milliseconds, clamped to 0–5000.
+/// `displaced` takes only `duration` (distance comes from the layout).
+pub(crate) fn parse_transitions(
+    lua: &Lua,
+    enter: &Transition,
+    exit: &Transition,
+    displaced: &Transition,
+) -> Result<(Transition, Transition, Transition, bool), String> {
+    fn num(value: &Value) -> Option<f32> {
+        match value {
+            Value::Integer(i) => Some(*i as f32),
+            Value::Number(n) => Some(*n as f32),
+            _ => None,
+        }
+    }
+    fn axis_number(
+        slot: &Table,
+        slot_name: &str,
+        axis: &str,
+        field: &str,
+        keep: f32,
+    ) -> Result<f32, String> {
+        let axis_value: Value = slot.get(axis).map_err(|e| e.to_string())?;
+        let axis_table = match axis_value {
+            Value::Nil => return Ok(keep),
+            Value::Table(t) => t,
+            other => {
+                return Err(format!(
+                    "transitions().{slot_name}.{axis} must be a table like {{ from = 0, to = 1 }}, got {}",
+                    lua_value_kind(&other)
+                ));
+            }
+        };
+        match axis_table.get::<Value>(field).map_err(|e| e.to_string())? {
+            Value::Nil => Ok(keep),
+            v => num(&v).ok_or_else(|| {
+                format!(
+                    "transitions().{slot_name}.{axis}.{field} must be a number, got {}",
+                    lua_value_kind(&v)
+                )
+            }),
+        }
+    }
+    fn slot_duration(
+        slot: &Table,
+        slot_name: &str,
+        keep: Option<Duration>,
+    ) -> Result<Option<Duration>, String> {
+        match slot.get::<Value>("duration").map_err(|e| e.to_string())? {
+            Value::Nil => Ok(keep),
+            v => num(&v)
+                .filter(|n| *n >= 0.0)
+                .map(|n| Some(Duration::from_millis(n.clamp(0.0, 5000.0) as u64)))
+                .ok_or_else(|| {
+                    format!(
+                        "transitions().{slot_name}.duration must be a non-negative number of milliseconds, got {}",
+                        lua_value_kind(&v)
+                    )
+                }),
+        }
+    }
+    let func: Function = match lua.globals().get("transitions") {
+        Ok(f) => f,
+        Err(_) => return Ok((enter.clone(), exit.clone(), displaced.clone(), false)),
+    };
+    let spec: Value = func.call(()).map_err(|e| e.to_string())?;
+    let spec_table = match spec {
+        Value::Nil => return Ok((enter.clone(), exit.clone(), displaced.clone(), false)),
+        Value::Table(t) => t,
+        other => {
+            return Err(format!(
+                "transitions() must return a table, got {}",
+                lua_value_kind(&other)
+            ));
+        }
+    };
+    let mut out_enter = enter.clone();
+    let mut out_exit = exit.clone();
+    let mut out_displaced = displaced.clone();
+    for (slot_name, is_exit, is_displaced) in [
+        ("add", false, false),
+        ("remove", true, false),
+        ("displaced", false, true),
+    ] {
+        let slot_value: Value = spec_table.get(slot_name).map_err(|e| e.to_string())?;
+        let Value::Table(slot) = slot_value else {
+            if slot_value == Value::Nil {
+                continue;
+            }
+            return Err(format!(
+                "transitions().{slot_name} must be a table, got {}",
+                lua_value_kind(&slot_value)
+            ));
+        };
+        if is_displaced {
+            out_displaced.duration = slot_duration(&slot, slot_name, displaced.duration)?;
+            continue;
+        }
+        if is_exit {
+            out_exit.to.x = axis_number(&slot, slot_name, "x", "to", exit.to.x)?;
+            out_exit.to.y = axis_number(&slot, slot_name, "y", "to", exit.to.y)?;
+            out_exit.to.opacity = axis_number(&slot, slot_name, "opacity", "to", exit.to.opacity)?;
+            out_exit.duration = slot_duration(&slot, slot_name, exit.duration)?;
+        } else {
+            out_enter.from.x = axis_number(&slot, slot_name, "x", "from", enter.from.x)?;
+            out_enter.from.y = axis_number(&slot, slot_name, "y", "from", enter.from.y)?;
+            out_enter.from.opacity =
+                axis_number(&slot, slot_name, "opacity", "from", enter.from.opacity)?;
+            out_enter.to.x = axis_number(&slot, slot_name, "x", "to", enter.to.x)?;
+            out_enter.to.y = axis_number(&slot, slot_name, "y", "to", enter.to.y)?;
+            out_enter.to.opacity =
+                axis_number(&slot, slot_name, "opacity", "to", enter.to.opacity)?;
+            out_enter.duration = slot_duration(&slot, slot_name, enter.duration)?;
+        }
+    }
+    Ok((out_enter, out_exit, out_displaced, true))
 }
 
 /// Last script output (text, size) by widget name (`None` = empty cell).
@@ -1532,13 +1688,16 @@ fn call_lua_action(lua: &Lua) -> Result<(), String> {
 
 /// Run a widget's `on_action(key)` (cell buttons and popup items share
 /// it). Missing `on_action` is a silent no-op so plain-text widgets
-/// coexist with button trees.
-fn call_lua_named_action(lua: &Lua, action: &str) -> Result<(), String> {
+/// coexist with button trees. Returns the raw Lua value: handlers map
+/// `{ dismiss = id }` / `{ invoke = { id, key } }` onto notification
+/// commands (see `notification::command_from_action`), anything else
+/// just refreshes the widget.
+fn call_lua_named_action(lua: &Lua, action: &str) -> Result<Value, String> {
     let func: Function = match lua.globals().get("on_action") {
         Ok(f) => f,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(Value::Nil),
     };
-    func.call::<()>(action.to_string())
+    func.call::<Value>(action.to_string())
         .map_err(|e| e.to_string())
 }
 
@@ -1679,7 +1838,10 @@ impl Top {
         outputs: &HashMap<String, String>,
         trees: &HashMap<String, WidgetNode>,
         anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-        list: &super::listview::ListView<(String, String), WidgetNode>,
+        lists: &std::collections::HashMap<
+            String,
+            super::listview::ListView<(String, String), WidgetNode>,
+        >,
     ) -> Element<'_, Plant> {
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
@@ -1696,7 +1858,7 @@ impl Top {
                 gap,
                 horizontal,
                 anim_runtime,
-                list,
+                lists,
             );
             let (align_x, align_y) = self.local.align_at(pos).for_bar(horizontal);
             container(body)
@@ -2078,6 +2240,7 @@ impl Top {
             .ok_or_else(|| "runtime missing".to_string())?;
         publish_system_tables(lua, &plots.sysinfo, gpu).map_err(|e| e.to_string())?;
         publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())?;
+        super::notification::publish_notification_list(lua, plots).map_err(|e| e.to_string())?;
         call_lua_value(lua, "render")
     }
 
@@ -2096,9 +2259,30 @@ impl Top {
                 match parse_node(&Value::Table(t)) {
                     Ok(node) => {
                         // Diff button lists for enter/exit/displaced
-                        // transitions before replacing the cached tree.
+                        // transitions before replacing the cached tree,
+                        // applying this widget's Lua `transitions()`
+                        // spec (or the shared defaults) to its own list.
                         let old = plots.widget_trees.get(&def.name).cloned();
                         let duration = plots.config.animation.speed.duration();
+                        let list = plots
+                            .widget_lists
+                            .entry(def.name.clone())
+                            .or_insert_with(|| super::listview::ListView::new(TopLocal::ROW_PITCH));
+                        if let Some(lua) = plots.widget_lua.get(&def.name) {
+                            let current =
+                                (list.enter_spec(), list.exit_spec(), list.displaced_spec());
+                            match parse_transitions(lua, &current.0, &current.1, &current.2) {
+                                Ok((enter, exit, displaced, custom)) => {
+                                    list.set_transitions(enter, exit, displaced, custom);
+                                }
+                                Err(e) => {
+                                    Self::note_widget_error(plots, &def.name, e);
+                                    plots.widget_lists.remove(&def.name);
+                                    plots.widget_trees.insert(def.name.clone(), node);
+                                    return;
+                                }
+                            }
+                        }
                         let old_is_list = matches!(
                             old,
                             Some(WidgetNode::Row { .. } | WidgetNode::Column { .. })
@@ -2107,9 +2291,10 @@ impl Top {
                             matches!(node, WidgetNode::Row { .. } | WidgetNode::Column { .. });
                         if !old_is_list || !new_is_list {
                             // First paint or shape flip: settle instantly.
-                            plots
-                                .widget_list
-                                .clear_scope(&mut plots.anim_runtime, |(w, _)| w == &def.name);
+                            if let Some(list) = plots.widget_lists.get_mut(&def.name) {
+                                let name = def.name.clone();
+                                list.clear_scope(&mut plots.anim_runtime, move |(w, _)| *w == name);
+                            }
                         } else {
                             let old_node = old.as_ref().expect("list checked");
                             let old_kids = button_children(old_node);
@@ -2139,19 +2324,16 @@ impl Top {
                             } else {
                                 Axis::Vertical
                             };
-                            let enter_from = match axis {
-                                Axis::Horizontal => Vector::new(ENTER_OFFSET, 0.0),
-                                Axis::Vertical => Vector::new(0.0, ENTER_OFFSET),
-                            };
-                            plots.widget_list.update(
-                                &mut plots.anim_runtime,
-                                duration,
-                                axis,
-                                enter_from,
-                                &old_keys,
-                                &new_keys,
-                                &removed,
-                            );
+                            if let Some(list) = plots.widget_lists.get_mut(&def.name) {
+                                list.update(
+                                    &mut plots.anim_runtime,
+                                    duration,
+                                    axis,
+                                    &old_keys,
+                                    &new_keys,
+                                    &removed,
+                                );
+                            }
                         }
                         plots.widget_trees.insert(def.name.clone(), node);
                     }
@@ -2206,9 +2388,10 @@ impl Top {
         plots.widget_last_run.clear();
         plots.widget_last_error.clear();
         plots.widget_script_mtime.clear();
-        // Fresh Lua states mean fresh lists: drop in-flight transitions
-        // so the first post-reload paint settles instantly.
-        plots.widget_list.clear_all(&mut plots.anim_runtime);
+        // Fresh Lua states mean fresh lists: drop every per-widget
+        // list (their runtime slots free on the next sweep; the first
+        // post-reload paint re-enters from scratch and settles).
+        plots.widget_lists.clear();
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
         let gpu = Popup::gpu_usage_percent();
@@ -2309,8 +2492,18 @@ impl Top {
     /// redraw scope, not here.
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
         plots.anim_runtime.tick_at(Instant::now());
-        plots.widget_list.settle_nudged(&mut plots.anim_runtime);
-        plots.widget_list.sweep(&mut plots.anim_runtime);
+        for list in plots.widget_lists.values() {
+            list.settle_nudged(&mut plots.anim_runtime);
+        }
+        let dead: Vec<String> = plots
+            .widget_lists
+            .iter()
+            .filter(|(_, list)| !list.sweep_check(&plots.anim_runtime))
+            .map(|(w, _)| w.clone())
+            .collect();
+        for w in dead {
+            plots.widget_lists.remove(&w);
+        }
         super::notification::sweep_noti_anims(plots)
     }
 
@@ -2330,16 +2523,25 @@ impl Top {
                 .and_then(|()| {
                     publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
                 })
+                .and_then(|()| {
+                    super::notification::publish_notification_list(lua, plots)
+                        .map_err(|e| e.to_string())
+                })
                 .and_then(|()| call_lua_named_action(lua, &action))
         });
         match outcome {
-            Some(Ok(())) => {
+            Some(Ok(value)) => {
                 plots.widget_last_error.remove(&widget);
+                let notif = super::notification::command_from_action(&value, plots);
                 if let Some(def) = plots.widgets.iter().find(|d| d.name == widget).cloned()
                     && Self::refresh_widget(plots, &def, gpu)
                 {
-                    return Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed)));
+                    return Command::batch(vec![
+                        Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed))),
+                        notif,
+                    ]);
                 }
+                return notif;
             }
             Some(Err(e)) => Self::note_widget_error(plots, &widget, e),
             // Unknown widget: ignore (stale message after hot-reload).
@@ -2872,6 +3074,10 @@ impl Top {
                     .and_then(|()| {
                         publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
                     })
+                    .and_then(|()| {
+                        super::notification::publish_notification_list(lua, plots)
+                            .map_err(|e| e.to_string())
+                    })
                     .and_then(|()| call_lua_action(lua));
                 Some(acted)
             }
@@ -3133,6 +3339,20 @@ mod tests {
             name: name.to_string(),
             size: 13.0,
             ..Default::default()
+        }
+    }
+
+    /// Load the vendored seed components into a test state (production
+    /// injects them via `components_source()` from disk; tests seed
+    /// them directly so seed widgets using `iced.use` resolve).
+    fn load_seed_components(lua: &Lua) {
+        use crate::config::{SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_MENU};
+        for source in [
+            SEED_COMPONENT_DEFINE,
+            SEED_COMPONENT_CARD,
+            SEED_COMPONENT_MENU,
+        ] {
+            lua.load(source).exec().expect("seed component");
         }
     }
 
@@ -3451,6 +3671,7 @@ mod tests {
         }
         // Blank-key clinepass renders the connect hint popup (card tree).
         let lua = new_widget_lua().expect("sandbox");
+        load_seed_components(&lua);
         load_widget_script(&lua, "clinepass", SEED_CLINEPASS_LUA).expect("load");
         stub_theme(&lua);
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
@@ -3458,6 +3679,7 @@ mod tests {
         assert!(content.tree.is_some());
         // System seed: power cell plus a card with a four-row session menu.
         let lua = new_widget_lua().expect("sandbox");
+        load_seed_components(&lua);
         load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
@@ -3524,6 +3746,7 @@ mod tests {
         // first (popup reads _usage, never curls directly).
         let body = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":14,"resetsAt":"2026-10-03T20:48:05Z"},{"type":"weekly","percentUsed":5,"resetsAt":"2026-10-10T15:48:05Z"},{"type":"monthly","percentUsed":2,"resetsAt":"2026-11-02T15:48:05Z"}]},"success":true}"#;
         let lua = new_widget_lua().expect("sandbox");
+        load_seed_components(&lua);
         // Main-branch popup tints through theme.* (republished live).
         let theme = lua.create_table().expect("theme");
         theme.set("primary", "#00ff00").expect("set");
@@ -4405,10 +4628,127 @@ mod tests {
     }
 
     #[test]
+    fn parse_transitions_reads_qml_subset_and_defaults() {
+        use super::super::listview::Transition;
+        let enter = Transition::slide_fade(16.0);
+        let exit = Transition::slide_fade_out(-16.0);
+        let displaced = Transition {
+            from: crate::app::layers::anim::ItemMotion::settled(),
+            to: crate::app::layers::anim::ItemMotion::settled(),
+            duration: None,
+        };
+        // No transitions() at all: defaults pass through untouched.
+        let lua = new_widget_lua().expect("sandbox");
+        let (e, x, d, _) = parse_transitions(&lua, &enter, &exit, &displaced).expect("parse");
+        assert_eq!(e.from.x, 16.0);
+        assert_eq!(x.to.x, -16.0);
+        assert!(d.duration.is_none());
+        // Full spec overrides from/to/duration per slot.
+        lua.load(
+            r#"
+            function transitions()
+                return {
+                    add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
+                    remove = { x = { to = -200 }, duration = 250 },
+                    displaced = { duration = 300 },
+                }
+            end
+            "#,
+        )
+        .exec()
+        .expect("load");
+        let (e, x, d, custom) = parse_transitions(&lua, &enter, &exit, &displaced).expect("parse");
+        assert!(custom, "a transitions() spec marks the list customized");
+        assert_eq!((e.from.x, e.to.x, e.from.opacity), (200.0, 0.0, 0.0));
+        assert_eq!(x.to.x, -200.0);
+        assert_eq!(
+            (e.duration, x.duration, d.duration),
+            (
+                Some(Duration::from_millis(250)),
+                Some(Duration::from_millis(250)),
+                Some(Duration::from_millis(300)),
+            )
+        );
+        // Partial spec keeps unspecified fields at defaults (exit y is
+        // untouched, add.to.x untouched here since only from given).
+        lua.load(r#"function transitions() return { add = { x = { from = 50 } } } end"#)
+            .exec()
+            .expect("load");
+        let (e, x, d, _) = parse_transitions(&lua, &enter, &exit, &displaced).expect("parse");
+        assert_eq!(e.from.x, 50.0);
+        assert_eq!(e.to.x, 0.0); // default settle
+        assert_eq!(x.to.x, -16.0); // exit untouched
+        assert!(d.duration.is_none());
+        // Malformed specs error naming the slot; nil passes through.
+        lua.load(r#"function transitions() return { add = { x = "nope" } } end"#)
+            .exec()
+            .expect("load");
+        let err = parse_transitions(&lua, &enter, &exit, &displaced).expect_err("bad");
+        assert!(err.contains("add"), "{err}");
+        lua.load(r#"function transitions() return nil end"#)
+            .exec()
+            .expect("load");
+        assert!(parse_transitions(&lua, &enter, &exit, &displaced).is_ok());
+    }
+
+    #[test]
+    fn notify_center_seed_reads_queue_and_dismisses() {
+        use crate::config::SEED_NOTIFY_CENTER_LUA;
+        let lua = new_widget_lua().expect("sandbox");
+        load_seed_components(&lua);
+        load_widget_script(&lua, "notifycenter", SEED_NOTIFY_CENTER_LUA).expect("load");
+        // Empty queue: bell-only cell, "No notifications" popup.
+        lua.globals()
+            .set("notifications", lua.create_table().expect("t"))
+            .expect("set");
+        let value: Value = lua.load("return render()").eval().expect("render");
+        let _ = build_node(&parse_node(&value).expect("parse"), 13.0, None).expect("build");
+        let popup: Value = lua.load("return popup()").eval().expect("popup");
+        let _ = crate::app::layers::Popup::parse_popup_content(popup).expect("popup");
+        // One queued item: count cell + a dismiss row.
+        lua.load(
+            r#"notifications = { { id = 42, app = "mako", title = "hi", body = "b", urgency = 1, has_image = false } }"#,
+        )
+        .exec()
+        .expect("seed queue");
+        let value: Value = lua.load("return render()").eval().expect("render");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Row { .. }
+        ));
+        let popup: Value = lua.load("return popup()").eval().expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup");
+        let mut actions = Vec::new();
+        fn walk(node: &WidgetNode, out: &mut Vec<String>) {
+            match node {
+                WidgetNode::Button { action, .. } => out.push(action.clone()),
+                WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+                    for c in children {
+                        walk(c, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(tree) = &content.tree {
+            walk(tree, &mut actions);
+        }
+        assert_eq!(actions, vec!["dismiss:42"]);
+        // The dismiss key maps back through on_action to a table.
+        let value: Value = lua
+            .load(r#"return on_action("dismiss:42")"#)
+            .eval()
+            .expect("action");
+        match value {
+            Value::Table(t) => assert_eq!(t.get::<u32>("dismiss").expect("dismiss"), 42),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_anim_list_merges_live_and_ghosts() {
         use super::super::listview::{Axis, ListView};
         use aura_anim::core::runtime::MotionRuntime;
-        use iced::Vector;
         // Live row like the hypr seed renders: two buttons, the first
         // mid-enter, plus one exiting ghost at index 1.
         let children = vec![
@@ -4440,7 +4780,6 @@ mod tests {
             &mut rt,
             duration,
             Axis::Horizontal,
-            Vector::new(16.0, 0.0),
             &[],
             &[ws1.clone(), ws2.clone()],
             &[],
@@ -4449,7 +4788,6 @@ mod tests {
             &mut rt,
             duration,
             Axis::Horizontal,
-            Vector::new(16.0, 0.0),
             &[ws1.clone(), ws2.clone(), ws9.clone()],
             &[ws1.clone(), ws2.clone()],
             &[(
@@ -4467,6 +4805,8 @@ mod tests {
         );
         assert_eq!(list.ghosts_for(|_| true).len(), 1);
         let msg = |_: String| Plant::Tend;
+        let mut lists = std::collections::HashMap::new();
+        lists.insert("hypr".to_string(), list);
         // Live + ghost merge builds (ghost renders inert), rows and
         // columns alike.
         for is_row in [true, false] {
@@ -4480,7 +4820,7 @@ mod tests {
                 13.0,
                 &msg,
                 &rt,
-                &list,
+                &lists,
             )
             .expect("builds");
         }

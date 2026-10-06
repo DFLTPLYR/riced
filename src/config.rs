@@ -833,6 +833,47 @@ pub fn config_path() -> PathBuf {
 /// mid-transition) and fades ride style alpha; survivors glide toward
 /// their new slot (`displaced`). Popup trees stay static for now.
 ///
+/// Override the motion per widget (or for cards, in
+/// `notifications.lua`) with an optional `transitions()` — the QML
+/// `Transition { NumberAnimation { ... } }` subset, declarative and
+/// parsed once per diff:
+///
+/// ```lua
+/// function transitions()
+///     return {
+///         add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
+///         remove = { x = { to = -200 }, opacity = { to = 0 }, duration = 250 },
+///         displaced = { duration = 250 },
+///     }
+/// end
+/// ```
+///
+/// Missing `transitions`, slots, or fields keep the defaults (`add`/
+/// `remove` slide-fade ±16px, `displaced` glides the index delta at the
+/// global speed), so partial specs compose. `displaced` takes only
+/// `duration` (distance comes from the layout). Malformed specs log
+/// once and keep the defaults — never half-applied.
+///
+/// ## Notification queue: the `notifications` global
+///
+/// Republished before every `render()`/`popup()`/`on_action` call
+/// (newest-first): `notifications = { {id, app, title, body, urgency,
+/// has_image}, ... }` — metadata only, no image handles or actions.
+/// Build a notification center from this (see the `notifycenter`
+/// seed) and dismiss with the `on_action` return convention:
+///
+/// ```lua
+/// function on_action(key)
+///     local id = key:match("^dismiss:(%d+)$")
+///     if id then return { dismiss = tonumber(id) } end
+/// end
+/// ```
+///
+/// `{ dismiss = id }` clicks a card away (D-Bus reason 2);
+/// `{ invoke = { id = N, key = "k" } }` fires an action button.
+/// Anything else (nil, text, unknown ids) just re-renders the widget —
+/// the queue's own guards ignore bad targets.
+///
 /// ## Components: `iced.define` / `iced.use` + `components/`
 ///
 /// Reusable Lua builders over the constructors above, for cells,
@@ -1007,6 +1048,15 @@ size = 13.0
 # name = "system"
 # file = "system.lua"
 # interval = 60.0
+# size = 13.0
+
+# Notification center: bell + unread count; popup lists the live queue
+# with a dismiss button per row. Reads the `notifications` global and
+# dismisses via the on_action return convention.
+# [[widget]]
+# name = "notifycenter"
+# file = "notifycenter.lua"
+# interval = 1.0
 # size = 13.0
 "#;
 
@@ -1248,6 +1298,54 @@ function render(n)
         iced.separator(),
         iced.text(n.body),
     })
+end
+"#;
+
+/// Seed notification-center widget: a bell cell counting the live
+/// queue, with a popup listing the newest notifications and a dismiss
+/// button per row. Reads the `notifications` global (republished
+/// before every render) and dismisses via the `on_action` return
+/// convention (`{ dismiss = id }`). Uncomment its `[[widget]]` entry
+/// in widgets.toml to use it.
+pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = r#"-- Notification center: bell + unread count, popup lists the queue.
+-- Uncomment its [[widget]] entry in widgets.toml to use it.
+-- `notifications` is republished before every render (newest first,
+-- each { id, app, title, body, urgency, has_image }).
+function render()
+    local n = #notifications
+    if n == 0 then
+        return iced.icon("bell")
+    end
+    return iced.row({ iced.icon("bell"), iced.text(tostring(n)) })
+end
+
+function popup()
+    if #notifications == 0 then
+        return { text = "No notifications", width = 300 }
+    end
+    local rows = {}
+    for _, item in ipairs(notifications) do
+        local label = item.title ~= "" and item.title or item.body
+        rows[#rows + 1] = iced.row({
+            iced.text(label):width(180),
+            iced.button("{icon:x}", "dismiss:" .. item.id):width(40),
+        })
+    end
+    return {
+        ui = iced.use("card", {
+            title = "Notifications", icon = "bell",
+            body = iced.column(rows),
+        }),
+        width = 320,
+    }
+end
+
+function on_action(name)
+    local id = name:match("^dismiss:(%d+)$")
+    if id then
+        -- Return convention: dismiss the matching card (reason 2).
+        return { dismiss = tonumber(id) }
+    end
 end
 "#;
 
@@ -1555,6 +1653,7 @@ impl WidgetsFile {
             ("clinepass.lua", SEED_CLINEPASS_LUA),
             ("system.lua", SEED_SYSTEM_LUA),
             ("notifications.lua", SEED_NOTIFICATIONS_LUA),
+            ("notifycenter.lua", SEED_NOTIFY_CENTER_LUA),
         ] {
             Self::seed_script(dir, name, content);
         }

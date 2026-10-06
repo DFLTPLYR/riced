@@ -124,7 +124,13 @@ end
 - **List transitions**: top-level row/column `ui.button`s animate on
   add/remove (slide, keyed by action, animation-speed duration).
   Notification cards share the same machine, keyed by id. Label edits
-  swap instantly; first paint settles with no animation.
+  swap instantly; first paint settles with no animation. An optional
+  `transitions()` function overrides add/remove/displaced per widget
+  (QML `Transition` subset: `x`/`y`/`opacity` `{from, to}` + `duration`).
+- **Notification center**: the `notifications` global (newest-first
+  `{id, app, title, body, urgency, has_image}`) is republished before
+  every render; `on_action` may return `{ dismiss = id }` or
+  `{ invoke = { id, key } }` to act on the queue (see `notifycenter.lua`).
 
 Full contract with shapes and edge cases lives on `WidgetDef` in
 `src/config.rs` (the `/// Widgets:` doc block).

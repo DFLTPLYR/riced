@@ -92,12 +92,17 @@ pub struct Plots {
     // Script file mtimes per widget (live-reload on edit).
     pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
     // Animated lists (see layers::listview): one aura runtime shared
-    // by all surfaces, one ListView per list family — widget cell rows
-    // keyed (widget, action), notification stacks keyed (output, id).
+    // by all surfaces, one ListView per widget plus the notification
+    // stack — widget cell rows keyed (widget, action), notifications
+    // keyed (output, id). Per-widget lists let each widget own its
+    // Lua `transitions()` spec.
     pub(crate) anim_runtime: crate::app::layers::anim::AnimRuntime,
-    pub(crate) widget_list: crate::app::layers::listview::ListView<
-        (String, String),
-        crate::app::layers::top::WidgetNode,
+    pub(crate) widget_lists: HashMap<
+        String,
+        crate::app::layers::listview::ListView<
+            (String, String),
+            crate::app::layers::top::WidgetNode,
+        >,
     >,
     pub(crate) notif_list: crate::app::layers::listview::ListView<
         (iced_wayland_subscriber::OutputId, u32),
@@ -216,9 +221,7 @@ impl Plots {
             widget_last_error: HashMap::new(),
             widget_script_mtime: HashMap::new(),
             anim_runtime: crate::app::layers::anim::AnimRuntime::default(),
-            widget_list: crate::app::layers::listview::ListView::new(
-                crate::app::layers::top::TopLocal::ROW_PITCH,
-            ),
+            widget_lists: HashMap::new(),
             notif_list: crate::app::layers::listview::ListView::new(
                 crate::app::layers::notification::CARD_PITCH,
             ),
@@ -578,7 +581,7 @@ impl Plots {
                         &self.widget_outputs,
                         &self.widget_trees,
                         &self.anim_runtime,
-                        &self.widget_list,
+                        &self.widget_lists,
                     )
                 })
                 .unwrap_or_else(|| Space::new().into()),

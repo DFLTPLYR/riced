@@ -528,6 +528,10 @@ impl Popup {
                                 publish_theme_tables(lua, &plots.config.theme)
                                     .map_err(|e| e.to_string())
                             })
+                            .and_then(|()| {
+                                super::notification::publish_notification_list(lua, plots)
+                                    .map_err(|e| e.to_string())
+                            })
                             .and_then(|()| call_lua_value(lua, "popup"))
                             .and_then(Self::parse_popup_content)
                         {
@@ -613,17 +617,24 @@ impl Popup {
                         publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
                     })
                     .and_then(|()| {
+                        super::notification::publish_notification_list(lua, plots)
+                            .map_err(|e| e.to_string())
+                    })
+                    .and_then(|()| {
                         let on_action: mlua::Function =
                             lua.globals().get("on_action").map_err(|e| e.to_string())?;
-                        on_action.call::<()>(action).map_err(|e| e.to_string())
+                        on_action
+                            .call::<mlua::Value>(action)
+                            .map_err(|e| e.to_string())
                     });
                 Some(acted)
             }
             None => None,
         };
         match outcome {
-            Some(Ok(())) => {
+            Some(Ok(value)) => {
                 plots.widget_last_error.remove(&widget);
+                let notif = super::notification::command_from_action(&value, plots);
                 let refresh = Self::refresh_bodies(plots);
                 // Tree-aware cell refresh (same as the cell-action
                 // path): a tree render() must update widget_trees, not
@@ -634,10 +645,11 @@ impl Popup {
                         return Command::batch(vec![
                             refresh,
                             Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed))),
+                            notif,
                         ]);
                     }
                 }
-                return refresh;
+                return Command::batch(vec![refresh, notif]);
             }
             Some(Err(e)) => Top::note_widget_error(plots, &widget, e),
             None => {}
