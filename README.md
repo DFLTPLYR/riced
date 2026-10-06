@@ -109,6 +109,9 @@ end
 - **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil),
   `iced.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`, `separator`; `ui` is the same table).
+  `theme.*` carries the live iced palette (`primary`, `surface`,
+  `error`, ... as `"#rrggbb"`, republished every render) for
+  `:color()` on text/icon/button (hex or `{r, g, b}` tables).
   `iced.define(name, fn)` + `iced.use(name, props)` share reusable
   components from `widgets/components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a

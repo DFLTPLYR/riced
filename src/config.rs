@@ -806,15 +806,17 @@ pub fn config_path() -> PathBuf {
 /// bar's shrink-wrapped cells it looks like a no-op and pays off in
 /// popups and nested rows/columns.
 ///
-/// Setters per type: `text` → `:size()`, `:width()`, `:height()`;
-/// `row`/`column` → `:spacing()`, `:width()`, `:height()`; `button` →
-/// `:width()`, `:height()`, `:padding()`; `progress` → `:width()`
-/// (same as the second constructor arg), `:height()` (bar thickness =
-/// iced `girth`); `separator` → `:height()` only (rules fill their
-/// axis, so `:width()` fails naming the setter). Calling a setter the
-/// type doesn't own (e.g. `:padding()` on progress) fails at eval —
-/// typos stay visible. Wrong-typed values error at parse naming the
-/// field.
+/// Setters per type: `text` → `:size()`, `:width()`, `:height()`,
+/// `:color()`; `row`/`column` → `:spacing()`, `:width()`, `:height()`;
+/// `button` → `:width()`, `:height()`, `:padding()`, `:color()` (label
+/// tint only — surfaces stay themed); `progress` → `:width()` (same as
+/// the second constructor arg), `:height()` (bar thickness = iced
+/// `girth`); `separator` → `:height()` only; `icon` → `:color()` only
+/// (tint via surrounding text color). `:color()` takes `"#rgb"` /
+/// `"#rrggbb"` / `"#rrggbbaa"` or `{r, g, b[, a]}` 0–1 tables;
+/// unset stays themed. Calling a setter the type doesn't own (e.g.
+/// `:padding()` on progress) fails at eval — typos stay visible.
+/// Wrong-typed values error at parse naming the field.
 ///
 /// ## List transitions (QML-`ListView` add/remove)
 ///
@@ -853,6 +855,26 @@ pub fn config_path() -> PathBuf {
 /// (`00-define.lua`, `10-card.lua`, `20-menu.lua` — never overwritten).
 /// Editing any component rebuilds every Lua state on the next tick,
 /// like a `widgets.toml` change.
+///
+/// ## Theme colors: the `theme` table
+///
+/// Republished before every `render()` (widgets and notification
+/// cards), so theme switches flow in live: `theme.primary`,
+/// `theme.on_primary`, `theme.secondary`, `theme.surface`,
+/// `theme.background`, `theme.success`, `theme.warning`, `theme.error`
+/// (each `"#rrggbb"`, flattened from the live iced palette) plus their
+/// `on_*` text colors. Pair with `:color()`:
+///
+/// ```lua
+/// iced.text("! critical"):color(theme.error)
+/// ```
+///
+/// ## Raw constructors vs components
+///
+/// Prefer `iced.use(...)` components over hand-rolled `iced.row`
+/// trees: the seeds below are all component-built, and raw
+/// constructor use is legacy (still fully supported — nothing was
+/// removed, new widgets should just reach for components first).
 ///
 /// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
 ///
@@ -990,22 +1012,22 @@ size = 13.0
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
 /// Globals persist between calls; clicking the cell toggles the date menu.
-pub(crate) const SEED_CLOCK_LUA: &str = r#"-- Clock widget: time plus icon, composed with ui constructors.
+pub(crate) const SEED_CLOCK_LUA: &str = r#"-- Clock widget: time plus icon, composed with iced constructors.
 -- Called every `interval` seconds. Clicking toggles the date menu.
 function render()
-    return ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) })
+    return iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) })
 end
 
 function popup()
-    return { ui = ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) }), width = 300 }
+    return { ui = iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) }), width = 300 }
 end
 "#;
 
 /// Seed Lua label example, written next to the seeded `widgets.toml`.
-pub(crate) const SEED_HELLO_LUA: &str = r#"-- Label example: static text via ui.text. Uncomment its
+pub(crate) const SEED_HELLO_LUA: &str = r#"-- Label example: static text via iced.text. Uncomment its
 -- [[widget]] entry in widgets.toml to use it.
 function render()
-    return ui.text("hello")
+    return iced.text("hello")
 end
 "#;
 
@@ -1019,23 +1041,23 @@ local details = false
 function render()
     local cpu = string.format("%.0f", sysinfo.cpu_usage)
     local mem = string.format("%.0f", sysinfo.mem_usage)
-    return ui.row({
-        ui.icon("cpu"), ui.text(cpu .. "%"),
-        ui.icon("memory-stick"), ui.text(mem .. "%"),
+    return iced.row({
+        iced.icon("cpu"), iced.text(cpu .. "%"),
+        iced.icon("memory-stick"), iced.text(mem .. "%"),
     })
 end
 
 function popup()
     local cpu = string.format("%.1f%%", sysinfo.cpu_usage)
     local mem = string.format("%.1f%%", sysinfo.mem_usage)
-    local lines = ui.column({
-        ui.row({ ui.icon("cpu"), ui.text("CPU  " .. cpu) }),
-        ui.row({ ui.icon("memory-stick"), ui.text("Mem  " .. mem) }),
+    local lines = iced.column({
+        iced.row({ iced.icon("cpu"), iced.text("CPU  " .. cpu) }),
+        iced.row({ iced.icon("memory-stick"), iced.text("Mem  " .. mem) }),
     })
     if details then
-        lines = ui.column({
+        lines = iced.column({
             lines,
-            ui.row({ ui.icon("cpu"), ui.text("Cores " .. tostring(sysinfo.cpu_count)) }),
+            iced.row({ iced.icon("cpu"), iced.text("Cores " .. tostring(sysinfo.cpu_count)) }),
         })
     end
     return {
@@ -1060,7 +1082,7 @@ end
 pub(crate) const SEED_CPU_LUA: &str = r#"-- CPU usage as plain text, no icon.
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 function render()
-    return ui.text(string.format("%.0f%%", sysinfo.cpu_usage))
+    return iced.text(string.format("%.0f%%", sysinfo.cpu_usage))
 end
 "#;
 
@@ -1069,7 +1091,7 @@ end
 pub(crate) const SEED_RAM_LUA: &str = r#"-- RAM usage as plain text, no icon.
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 function render()
-    return ui.text(string.format("%.0f%%", sysinfo.mem_usage))
+    return iced.text(string.format("%.0f%%", sysinfo.mem_usage))
 end
 "#;
 
@@ -1081,9 +1103,9 @@ pub(crate) const SEED_GPU_LUA: &str = r#"-- GPU usage as plain text, no icon ("-
 function render()
     local usage = gfxinfo.usage
     if usage == nil then
-        return ui.text("--")
+        return iced.text("--")
     end
-    return ui.text(string.format("%.0f%%", usage))
+    return iced.text(string.format("%.0f%%", usage))
 end
 "#;
 
@@ -1095,19 +1117,22 @@ end
 pub(crate) const SEED_SYSTEM_LUA: &str = r#"-- Session menu: power cell, systemctl popup (native shell).
 -- Uncomment its [[widget]] entry in widgets.toml to use it.
 function render()
-    return ui.icon("power")
+    return iced.icon("power")
 end
 
 function popup()
     return {
-        ui = ui.row({ ui.icon("power"), ui.text("Session") }),
+        ui = iced.use("card", {
+            title = "Session",
+            icon = "power",
+            body = iced.use("menu", { items = {
+                { label = "Suspend", action = "suspend" },
+                { label = "Hibernate", action = "hibernate" },
+                { label = "Reboot", action = "reboot" },
+                { label = "Power off", action = "poweroff" },
+            } }),
+        }),
         width = 220,
-        items = {
-            { label = "Suspend", action = "suspend" },
-            { label = "Hibernate", action = "hibernate" },
-            { label = "Reboot", action = "reboot" },
-            { label = "Power off", action = "poweroff" },
-        },
     }
 end
 
@@ -1164,6 +1189,9 @@ iced.define("card", function(props)
         body = iced.text(body)
     end
     local head = iced.text(props.title or ""):size(14)
+    if props.color then
+        head = head:color(props.color)
+    end
     if props.icon then
         head = iced.row({ iced.icon(props.icon), head })
     end
@@ -1187,8 +1215,11 @@ iced.define("menu", function(props)
     props = props or {}
     local rows = {}
     for _, item in ipairs(props.items or {}) do
-        rows[#rows + 1] = iced.button(item.label or "?", item.action or "")
-            :width("fill")
+        local b = iced.button(item.label or "?", item.action or ""):width("fill")
+        if props.color then
+            b = b:color(props.color)
+        end
+        rows[#rows + 1] = b
     end
     return iced.column(rows)
 end)
@@ -1200,16 +1231,22 @@ end)
 /// built-in layout.
 pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency, actions }.
 -- urgency: 0 low, 1 normal, 2 critical. actions: 1-based array of
--- { key, label } (empty when the sender offers none). Edit live,
+-- { key, label } (empty when the sender offers none). Critical cards
+-- tint through theme.error (see the theme table). Edit live,
 -- cards re-render on save.
 function render(n)
     local head = n.app ~= "" and (n.app .. " — " .. n.title) or n.title
     if n.urgency >= 2 then
         head = "! " .. head
     end
-    return ui.column({
-        ui.row({ ui.icon("bell"), ui.text(head):size(14) }),
-        ui.text(n.body),
+    local title = iced.text(head):size(14)
+    if n.urgency >= 2 then
+        title = title:color(theme.error)
+    end
+    return iced.column({
+        iced.row({ iced.icon("bell"), title }),
+        iced.separator(),
+        iced.text(n.body),
     })
 end
 "#;
@@ -1221,7 +1258,7 @@ end
 /// global workspace id; a `_ws_ids` global maps positions back to
 /// ids for dispatch. Clicks dispatch via `on_action`.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (native shell).
+pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (native shell). Buttons are iced.* nodes.
 -- Polls hyprctl every interval (the engine is the loop). Shows only
 -- workspaces on the focused output; buttons are labeled by relative
 -- position (1..N), not workspace id. Enter/exit transitions are
@@ -1229,7 +1266,7 @@ pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (n
 function render()
     local ids_h = io.popen("hyprctl workspaces -j 2>/dev/null")
     if not ids_h then
-        return ui.text("--")
+        return iced.text("--")
     end
     local ids = ids_h:read("*a") or ""
     ids_h:close()
@@ -1250,13 +1287,13 @@ function render()
             pos = pos + 1
             _ws_ids[pos] = id
             local label = (id == current) and ("[" .. pos .. "]") or tostring(pos)
-            cells[#cells + 1] = ui.button(label, "ws:" .. pos)
+            cells[#cells + 1] = iced.button(label, "ws:" .. pos)
         end
     end
     if #cells == 0 then
-        return ui.text("--")
+        return iced.text("--")
     end
-    return ui.row(cells)
+    return iced.row(cells)
 end
 
 function on_action(name)
@@ -1278,15 +1315,15 @@ local API_KEY = ""
 local URL = "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
 
 function render()
-    return ui.icon("bot")
+    return iced.icon("bot")
 end
 
 function popup()
     if API_KEY == "" then
         return {
-            ui = ui.column({
-                ui.row({ ui.icon("bot"), ui.text("Cline Pass") }),
-                ui.text("paste API_KEY into clinepass.lua"),
+            ui = iced.use("card", {
+                title = "Cline Pass", icon = "bot",
+                body = "paste API_KEY into clinepass.lua",
             }),
             width = 300,
         }
@@ -1296,9 +1333,9 @@ function popup()
     -- in real rows once cached. Stale cache renders while refetching.
     if not _usage then
         return {
-            ui = ui.column({
-                ui.row({ ui.icon("bot"), ui.text("Cline Pass") }),
-                ui.row({ ui.spinner(), ui.text("fetching…") }),
+            ui = iced.use("card", {
+                title = "Cline Pass", icon = "bot",
+                body = iced.row({ iced.spinner(), iced.text("fetching…") }),
             }),
             width = 300,
         }
@@ -1307,22 +1344,29 @@ function popup()
     if body:match('"error"') then
         return { text = "cline: unauthorized (bad key?)", width = 300 }
     end
-    local rows = { ui.row({ ui.icon("bot"), ui.text("Cline Pass") }) }
+    local rows = {}
     -- Real shape: {"data":{"limits":[{"type":"five_hour",
     -- "percentUsed":14,"resetsAt":"..."}]},"success":true}.
     for kind, pct in body:gmatch('"type"%s*:%s*"([%w_%-]+)"%s*,%s*"percentUsed"%s*:%s*(%d+)') do
         local p = tonumber(pct) or 0
         local label = kind:gsub("_", " ")
-        rows[#rows + 1] = ui.row({
-            ui.text(label):width(80),
-            ui.progress(p / 100):height(8):width("fill"),
-            ui.text(p .. "%"):width(20),
+        rows[#rows + 1] = iced.row({
+            iced.text(label):width(80),
+            iced.progress(p / 100):height(8):width("fill"),
+            iced.text(p .. "%"):width(20),
         })
     end
-    if #rows == 1 then
-        rows[#rows + 1] = ui.text("no usage fields parsed")
+    if #rows == 0 then
+        rows[#rows + 1] = iced.text("no usage fields parsed")
     end
-    return { ui = ui.column(rows), width = 300 }
+    return {
+        ui = iced.use("card", {
+            title = "Cline Pass", icon = "bot",
+            color = theme.primary,
+            body = iced.column(rows),
+        }),
+        width = 300,
+    }
 end
 
 -- Background fetch on the render interval (globals persist): fills
@@ -1347,7 +1391,7 @@ function render()
             _usage = '{"error":"fetch failed"}'
         end
     end
-    return ui.icon("bot")
+    return iced.icon("bot")
 end
 "#;
 

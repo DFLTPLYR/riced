@@ -597,8 +597,14 @@ pub(crate) enum WidgetNode {
         size: Option<f32>,
         width: Option<NodeLength>,
         height: Option<NodeLength>,
+        /// Explicit label color (`:color()`); `None` inherits the theme.
+        color: Option<iced::Color>,
     },
-    Icon(String),
+    Icon {
+        name: String,
+        /// Tint (`:color()`); `None` inherits surrounding text color.
+        color: Option<iced::Color>,
+    },
     Row {
         children: Vec<WidgetNode>,
         spacing: f32,
@@ -622,6 +628,9 @@ pub(crate) enum WidgetNode {
         width: Option<NodeLength>,
         height: Option<NodeLength>,
         padding: Option<f32>,
+        /// Explicit label color (`:color()`); `None` uses the themed
+        /// button text (backgrounds always stay themed).
+        color: Option<iced::Color>,
     },
     Progress {
         value: f32,
@@ -635,9 +644,7 @@ pub(crate) enum WidgetNode {
     /// Horizontal hairline between items (`iced.separator()`), painted
     /// in the theme border color. Always full-width (iced rules fill
     /// their axis); only thickness (`height`, default 1px) chains.
-    Separator {
-        height: f32,
-    },
+    Separator { height: f32 },
 }
 
 /// Box sizing for `ui` nodes: a number is px (`Fixed`), `"fill"` /
@@ -674,6 +681,61 @@ fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String>
         Value::Number(n) => Ok(Some(n as f32)),
         other => Err(format!(
             "{what} {field} must be a number, got {}",
+            lua_value_kind(&other)
+        )),
+    }
+}
+
+/// Optional color from a node table: `"#rgb"` / `"#rrggbb"` /
+/// `"#rrggbbaa"` strings or `{r, g, b[, a]}` 0–1 tables (named or
+/// positional keys). Unset (nil — or the setter function sharing the
+/// field namespace) means `None`. Anything else errors naming the
+/// field, so typos stay visible.
+fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<iced::Color>, String> {
+    fn num(v: &Value) -> Option<f32> {
+        match v {
+            Value::Integer(i) => Some(*i as f32),
+            Value::Number(n) => Some(*n as f32),
+            _ => None,
+        }
+    }
+    match t.get::<Value>(field).map_err(|e| e.to_string())? {
+        Value::Nil | Value::Function(_) => Ok(None),
+        Value::String(s) => {
+            let raw = s.to_string_lossy();
+            // Expand `#rgb` to `#rrggbb` before the theme parser.
+            let expanded = if raw.len() == 4 && raw.starts_with('#') {
+                let c: Vec<char> = raw.chars().collect();
+                format!("#{}{}{}{}{}{}", c[1], c[1], c[2], c[2], c[3], c[3])
+            } else {
+                raw.to_string()
+            };
+            crate::theme::parse_hex(&expanded).ok_or_else(|| {
+                format!("{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table, got {raw:?}")
+            }).map(Some)
+        }
+        Value::Table(rgb) => {
+            let chan = |k: &str, i: i32| -> Option<f32> {
+                rgb.get::<Value>(k)
+                    .ok()
+                    .as_ref()
+                    .and_then(num)
+                    .or_else(|| rgb.get::<Value>(i).ok().as_ref().and_then(num))
+            };
+            match (chan("r", 1), chan("g", 2), chan("b", 3)) {
+                (Some(r), Some(g), Some(b)) => Ok(Some(iced::Color::from_rgba(
+                    r.clamp(0.0, 1.0),
+                    g.clamp(0.0, 1.0),
+                    b.clamp(0.0, 1.0),
+                    chan("a", 4).unwrap_or(1.0).clamp(0.0, 1.0),
+                ))),
+                _ => Err(format!(
+                    "{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table"
+                )),
+            }
+        }
+        other => Err(format!(
+            "{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table, got {}",
             lua_value_kind(&other)
         )),
     }
@@ -730,9 +792,13 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                     size: opt_number(t, "size", "ui.text()")?,
                     width: opt_length(t, "width", "ui.text()")?,
                     height: opt_length(t, "height", "ui.text()")?,
+                    color: opt_color(t, "color", "ui.text()")?,
                 }),
                 "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
-                    Value::String(s) => Ok(WidgetNode::Icon(s.to_string_lossy())),
+                    Value::String(s) => Ok(WidgetNode::Icon {
+                        name: s.to_string_lossy(),
+                        color: opt_color(t, "color", "ui.icon()")?,
+                    }),
                     Value::Nil => Err("ui.icon() needs a name".to_string()),
                     other => Err(format!(
                         "ui.icon() name must be a string, got {}",
@@ -805,6 +871,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         width: opt_length(t, "width", "ui.button()")?,
                         height: opt_length(t, "height", "ui.button()")?,
                         padding: opt_number(t, "padding", "ui.button()")?,
+                        color: opt_color(t, "color", "ui.button()")?,
                     })
                 }
                 "progress" => {
@@ -847,6 +914,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             size: None,
             width: None,
             height: None,
+            color: None,
         }),
     }
 }
@@ -864,6 +932,7 @@ pub(crate) fn build_node(
             size: own,
             width,
             height,
+            color,
         } => {
             let s = own.unwrap_or(size).max(1.0);
             let mut t = text(content.clone()).size(s);
@@ -873,12 +942,34 @@ pub(crate) fn build_node(
             if let Some(h) = height {
                 t = t.height(h.clone().iced());
             }
+            if let Some(c) = color {
+                t = t.color(*c);
+            }
             Ok(t.into())
         }
-        WidgetNode::Icon(name) => match icon_bytes(name) {
-            Some(bytes) => Ok(lucide_iced::themed_icon(bytes, size.max(1.0))),
-            None => Ok(text(format!("{{icon:{name}}}")).size(size.max(1.0)).into()),
-        },
+        WidgetNode::Icon { name, color } => {
+            let base: Element<'static, Plant> = match icon_bytes(name) {
+                Some(bytes) => lucide_iced::themed_icon(bytes, size.max(1.0)),
+                None => text(format!("{{icon:{name}}}")).size(size.max(1.0)).into(),
+            };
+            match color {
+                // Icons inherit text color as their tint: a
+                // shrink-wrapped text_color scope tints without
+                // disturbing layout.
+                Some(c) => {
+                    let tint = *c;
+                    Ok(container(base)
+                        .width(iced::Length::Shrink)
+                        .height(iced::Length::Shrink)
+                        .style(move |_| iced::widget::container::Style {
+                            text_color: Some(tint),
+                            ..Default::default()
+                        })
+                        .into())
+                }
+                None => Ok(base),
+            }
+        }
         WidgetNode::Row {
             children,
             spacing,
@@ -917,10 +1008,16 @@ pub(crate) fn build_node(
             width,
             height,
             padding,
+            color,
         } => {
             let mut item = button(rich_text(label.clone(), size, 4.0))
-                .padding(padding.unwrap_or(6.0).max(0.0))
-                .style(theme::menu_button(theme::RADIUS));
+                .padding(padding.unwrap_or(6.0).max(0.0));
+            // Label tint only: surfaces stay themed in every status.
+            if let Some(c) = color {
+                item = item.style(theme::menu_button_tinted(theme::RADIUS, *c));
+            } else {
+                item = item.style(theme::menu_button(theme::RADIUS));
+            }
             if let Some(w) = width {
                 // Buttons keep a 20px floor on Fixed widths so chained
                 // typos can't collapse the hit area; Fill/Shrink pass.
@@ -1008,6 +1105,23 @@ pub(crate) fn publish_system_tables(
     }
     globals.set("gfxinfo", gfx)?;
     Ok(())
+}
+
+/// Publish the live iced palette as the Lua `theme` table
+/// (`theme.primary`, `theme.on_primary`, ... — `"#rrggbb"` strings from
+/// [`crate::theme::lua_palette`]). Called alongside
+/// [`publish_system_tables`] before every due `render()` so theme
+/// switches flow into scripts on the next tick, and in the
+/// notification renderer on every card render.
+pub(crate) fn publish_theme_tables(
+    lua: &Lua,
+    theme: &crate::config::ThemeConfig,
+) -> mlua::Result<()> {
+    let table = lua.create_table()?;
+    for (key, hex) in crate::theme::lua_palette(theme) {
+        table.set(key, hex)?;
+    }
+    lua.globals().set("theme", table)
 }
 
 /// Lua state for one widget: string/table/math/os/io with native
@@ -1119,7 +1233,12 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
                     &["text", "row", "column", "button", "progress"],
                 )?,
             ),
+            ("color", setter(lua, "color", &["text", "icon", "button"])?),
         ],
+    )?;
+    let mt_icon = mt_for(
+        lua,
+        &[("color", setter(lua, "color", &["text", "icon", "button"])?)],
     )?;
     let mt_rowcol = mt_for(
         lua,
@@ -1163,6 +1282,7 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
                 )?,
             ),
             ("padding", setter(lua, "padding", &["button"])?),
+            ("color", setter(lua, "color", &["text", "icon", "button"])?),
         ],
     )?;
     let mt_progress = mt_for(
@@ -1198,14 +1318,15 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set("_riced_ui_mt_bare", mt_bare.clone())?;
     lua.globals()
         .set("_riced_ui_mt_separator", mt_separator.clone())?;
+    lua.globals().set("_riced_ui_mt_icon", mt_icon.clone())?;
     // Move clones into the constructor closures (mlua closures are
     // 'static): each captures only its own metatable.
-    let (mt_text_c, mt_bare_c, mt_rowcol_c, mt_button_c, mt_progress_c) = (
+    let (mt_text_c, mt_rowcol_c, mt_button_c, mt_progress_c, mt_icon_c) = (
         mt_text.clone(),
-        mt_bare.clone(),
         mt_rowcol.clone(),
         mt_button.clone(),
         mt_progress.clone(),
+        mt_icon.clone(),
     );
     let ui = lua.create_table()?;
     ui.set(
@@ -1217,7 +1338,7 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "icon",
         lua.create_function(move |lua, name: Value| {
-            node(lua, "icon", mt_bare_c.clone(), |t| t.set("name", name))
+            node(lua, "icon", mt_icon_c.clone(), |t| t.set("name", name))
         })?,
     )?;
     ui.set(
@@ -1956,6 +2077,7 @@ impl Top {
             .get(&def.name)
             .ok_or_else(|| "runtime missing".to_string())?;
         publish_system_tables(lua, &plots.sysinfo, gpu).map_err(|e| e.to_string())?;
+        publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())?;
         call_lua_value(lua, "render")
     }
 
@@ -2205,6 +2327,9 @@ impl Top {
         let outcome = plots.widget_lua.get(&widget).map(|lua| {
             publish_system_tables(lua, &plots.sysinfo, gpu)
                 .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
+                })
                 .and_then(|()| call_lua_named_action(lua, &action))
         });
         match outcome {
@@ -2744,6 +2869,9 @@ impl Top {
             Some(lua) => {
                 let acted = publish_system_tables(lua, &plots.sysinfo, gpu)
                     .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
+                    })
                     .and_then(|()| call_lua_action(lua));
                 Some(acted)
             }
@@ -3261,7 +3389,7 @@ mod tests {
 
     fn node_has_icon(node: &WidgetNode) -> bool {
         match node {
-            WidgetNode::Icon(_) => true,
+            WidgetNode::Icon { .. } => true,
             WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
                 children.iter().any(node_has_icon)
             }
@@ -3296,6 +3424,13 @@ mod tests {
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
         sys.refresh_memory();
+        // Seeds may read theme.* (republished live in prod); stub it.
+        let stub_theme = |lua: &mlua::Lua| {
+            let theme = lua.create_table().expect("theme");
+            theme.set("error", "#ff0000").expect("set");
+            theme.set("primary", "#00ff00").expect("set");
+            lua.globals().set("theme", theme).expect("theme");
+        };
         for source in [
             SEED_CLOCK_LUA,
             SEED_HELLO_LUA,
@@ -3309,23 +3444,41 @@ mod tests {
             let lua = new_widget_lua().expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
             publish_system_tables(&lua, &sys, None).expect("publish");
+            stub_theme(&lua);
             let value = call_lua_value(&lua, "render").expect("render");
             let node = parse_node(&value).expect("parse");
             let _ = build_node(&node, 13.0, None).expect("builds");
         }
-        // Blank-key clinepass renders the connect hint popup (ui tree).
+        // Blank-key clinepass renders the connect hint popup (card tree).
         let lua = new_widget_lua().expect("sandbox");
         load_widget_script(&lua, "clinepass", SEED_CLINEPASS_LUA).expect("load");
+        stub_theme(&lua);
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         assert!(content.tree.is_some());
-        // System seed: power cell plus a four-row session menu.
+        // System seed: power cell plus a card with a four-row session menu.
         let lua = new_widget_lua().expect("sandbox");
         load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
-        assert_eq!(content.items.len(), 4);
-        assert!(content.items.iter().all(|i| !i.action.is_empty()));
+        // Menu component now owns the rows (no popup `items` shorthand).
+        assert!(content.items.is_empty());
+        fn button_actions(node: &WidgetNode, out: &mut Vec<String>) {
+            match node {
+                WidgetNode::Button { action, .. } => out.push(action.clone()),
+                WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+                    for child in children {
+                        button_actions(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut actions = Vec::new();
+        if let Some(tree) = &content.tree {
+            button_actions(tree, &mut actions);
+        }
+        assert_eq!(actions, vec!["suspend", "hibernate", "reboot", "poweroff"]);
     }
 
     #[test]
@@ -3371,11 +3524,15 @@ mod tests {
         // first (popup reads _usage, never curls directly).
         let body = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":14,"resetsAt":"2026-10-03T20:48:05Z"},{"type":"weekly","percentUsed":5,"resetsAt":"2026-10-10T15:48:05Z"},{"type":"monthly","percentUsed":2,"resetsAt":"2026-11-02T15:48:05Z"}]},"success":true}"#;
         let lua = new_widget_lua().expect("sandbox");
+        // Main-branch popup tints through theme.* (republished live).
+        let theme = lua.create_table().expect("theme");
+        theme.set("primary", "#00ff00").expect("set");
+        lua.globals().set("theme", theme).expect("theme");
         // Stub io.popen: return the canned body regardless of command.
         // Method-call form: handle:read("*a") passes the handle as
         // first arg, mode second — accept both.
-        let io: mlua::Table = lua.globals().get("io").expect("io");
         let body_owned = body.to_string();
+        let io: mlua::Table = lua.globals().get("io").expect("io");
         io.set(
             "popen",
             lua.create_function(move |lua, _: String| {
@@ -3405,13 +3562,14 @@ mod tests {
         lua.load(SEED_CLINEPASS_LUA.replace(r#"local API_KEY = """#, r#"local API_KEY = "x""#))
             .exec()
             .expect("load");
-        // First popup (cold cache) is the spinner, not the data.
+        // First popup (cold cache) is the spinner card, not the data:
+        // card column is [head, separator, body].
         let popup: mlua::Value = lua.load("return popup()").eval().expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("spinner tree");
         assert!(matches!(
             tree,
-            WidgetNode::Column { children, .. } if children.len() == 2
+            WidgetNode::Column { children, .. } if children.len() == 3
         ));
         // render() fetches into _usage; second popup shows the rows.
         let _: mlua::Value = lua.load("return render()").eval().expect("render");
@@ -3420,11 +3578,16 @@ mod tests {
         let tree = content.tree.expect("usage tree");
         let built = build_node(&tree, 13.0, None).expect("builds");
         let _ = built;
-        // One row per window: header + 3 label/bar/pct rows.
+        // Card column is [head, separator, body]: the body holds one
+        // label/bar/pct row per window.
         match tree {
             WidgetNode::Column { children, .. } => {
-                assert_eq!(children.len(), 4);
-                for row in &children[1..] {
+                assert_eq!(children.len(), 3);
+                let Some(WidgetNode::Column { children: rows, .. }) = children.get(2) else {
+                    panic!("expected body column, got {children:?}");
+                };
+                assert_eq!(rows.len(), 3);
+                for row in rows {
                     assert!(matches!(
                         row,
                         WidgetNode::Row { children, .. } if children.len() == 3
@@ -3565,6 +3728,7 @@ mod tests {
                 size: Some(14.0),
                 width: None,
                 height: None,
+                color: None,
             }
         );
         // Multi-chain + nesting.
@@ -3580,6 +3744,7 @@ mod tests {
                 width: Some(NodeLength::Fixed(120.0)),
                 height: None,
                 padding: Some(4.0),
+                color: None,
             }
         );
         // Chained setter AFTER a failing pcall in the same state:
@@ -3597,6 +3762,7 @@ mod tests {
                     size: None,
                     width: None,
                     height: None,
+                    color: None,
                 }],
                 width: NodeLength::Shrink,
                 height: NodeLength::Shrink,
@@ -3689,6 +3855,7 @@ mod tests {
                     size: None,
                     width: None,
                     height: None,
+                    color: None,
                 }],
                 width: NodeLength::Fill,
                 height: NodeLength::Shrink,
@@ -3725,6 +3892,7 @@ mod tests {
                     size: None,
                     width: None,
                     height: None,
+                    color: None,
                 }],
                 width: NodeLength::Shrink,
                 height: NodeLength::Shrink,
@@ -3965,6 +4133,7 @@ mod tests {
                         size: None,
                         width: None,
                         height: None,
+                        color: None,
                     },
                     WidgetNode::Button {
                         label: "go".to_string(),
@@ -3972,14 +4141,19 @@ mod tests {
                         width: None,
                         height: None,
                         padding: None,
+                        color: None,
                     },
                     WidgetNode::Text {
                         content: "7".to_string(),
                         size: None,
                         width: None,
                         height: None,
+                        color: None,
                     },
-                    WidgetNode::Icon("cpu".to_string()),
+                    WidgetNode::Icon {
+                        name: "cpu".to_string(),
+                        color: None,
+                    },
                 ],
                 width: NodeLength::Shrink,
                 height: NodeLength::Shrink,
@@ -4005,15 +4179,23 @@ mod tests {
                 size: None,
                 width: None,
                 height: None,
+                color: None,
             },
-            WidgetNode::Icon("cpu".to_string()),
-            WidgetNode::Icon("typo".to_string()),
+            WidgetNode::Icon {
+                name: "cpu".to_string(),
+                color: None,
+            },
+            WidgetNode::Icon {
+                name: "typo".to_string(),
+                color: None,
+            },
             WidgetNode::Row {
                 children: vec![WidgetNode::Text {
                     content: "a".to_string(),
                     size: None,
                     width: None,
                     height: None,
+                    color: None,
                 }],
                 width: NodeLength::Shrink,
                 height: NodeLength::Shrink,
@@ -4031,6 +4213,7 @@ mod tests {
                 width: None,
                 height: None,
                 padding: None,
+                color: None,
             },
             WidgetNode::Progress {
                 value: 1.5,
@@ -4048,6 +4231,7 @@ mod tests {
             width: None,
             height: None,
             padding: None,
+            color: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
     }
@@ -4111,6 +4295,66 @@ mod tests {
     }
 
     #[test]
+    fn color_setter_accepts_hex_and_rgba_tables() {
+        let lua = new_widget_lua().expect("sandbox");
+        let red = iced::Color::from_rgb(1.0, 0.0, 0.0);
+        for (src, expect) in [
+            (r##"return iced.text("hi"):color("#ff0000")"##, red),
+            (r##"return iced.text("hi"):color("#f00")"##, red),
+            (
+                r#"return iced.text("hi"):color({ r = 1, g = 0, b = 0 })"#,
+                red,
+            ),
+            (
+                r#"return iced.text("hi"):color({ 1, 0, 0, 0.5 })"#,
+                iced::Color::from_rgba(1.0, 0.0, 0.0, 0.5),
+            ),
+        ] {
+            let value: Value = lua.load(src).eval().expect("eval");
+            match parse_node(&value).expect("parse") {
+                WidgetNode::Text { color: Some(c), .. } => {
+                    assert!(
+                        (c.r - expect.r).abs() < 0.01
+                            && (c.g - expect.g).abs() < 0.01
+                            && (c.b - expect.b).abs() < 0.01
+                            && (c.a - expect.a).abs() < 0.01,
+                        "{src} -> {c:?}"
+                    );
+                }
+                other => panic!("{src} -> unexpected {other:?}"),
+            }
+        }
+        // Unset stays themed; garbage names the field at parse time
+        // (setters store, parse validates — same as sizes).
+        let value: Value = lua.load(r#"return iced.text("hi")"#).eval().expect("eval");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Text { color: None, .. }
+        ));
+        let value: Value = lua
+            .load(r#"return iced.text("hi"):color("nope")"#)
+            .eval()
+            .expect("setter stores");
+        let err = parse_node(&value).expect_err("bad hex");
+        assert!(err.contains("color"), "{err}");
+        // Buttons and icons take colors too; buttons keep the tinted style.
+        let value: Value = lua
+            .load(r##"return iced.button("go", "run"):color("#00ff00")"##)
+            .eval()
+            .expect("eval");
+        let node = parse_node(&value).expect("parse");
+        assert!(matches!(node, WidgetNode::Button { color: Some(_), .. }));
+        let _ = build_node(&node, 13.0, None).expect("builds tinted");
+        let value: Value = lua
+            .load(r##"return iced.icon("cpu"):color("#00ff00")"##)
+            .eval()
+            .expect("eval");
+        let node = parse_node(&value).expect("parse");
+        assert!(matches!(node, WidgetNode::Icon { color: Some(_), .. }));
+        let _ = build_node(&node, 13.0, None).expect("builds tinted");
+    }
+
+    #[test]
     fn seed_components_define_working_builders() {
         use crate::config::{SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_MENU};
         let lua = new_widget_lua().expect("sandbox");
@@ -4144,6 +4388,20 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        // card color prop tints the title text.
+        let value: Value = lua
+            .load(r##"return iced.use("card", { title = "T", color = "#ff0000" })"##)
+            .eval()
+            .expect("card color");
+        match parse_node(&value).expect("parse") {
+            WidgetNode::Column { children, .. } => {
+                assert!(matches!(
+                    &children[..],
+                    [WidgetNode::Text { color: Some(_), .. }, _, _]
+                ));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -4160,6 +4418,7 @@ mod tests {
                 width: None,
                 height: None,
                 padding: None,
+                color: None,
             },
             WidgetNode::Button {
                 label: "[2]".to_string(),
@@ -4167,6 +4426,7 @@ mod tests {
                 width: None,
                 height: None,
                 padding: None,
+                color: None,
             },
         ];
         let mut rt = MotionRuntime::new();
@@ -4201,6 +4461,7 @@ mod tests {
                     width: None,
                     height: None,
                     padding: None,
+                    color: None,
                 },
             )],
         );

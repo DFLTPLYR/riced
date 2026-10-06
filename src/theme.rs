@@ -54,7 +54,7 @@ struct ThemeFile {
 
 /// Parse `#rrggbb` / `#rrggbbaa` into an iced [`Color`]. Anything else is
 /// `None` (caller substitutes the fallback field color and logs once).
-fn parse_hex(s: &str) -> Option<Color> {
+pub(crate) fn parse_hex(s: &str) -> Option<Color> {
     let hex = s.trim().strip_prefix('#')?;
     let (r, g, b, a) = match hex.len() {
         6 => (
@@ -424,6 +424,45 @@ pub fn theme_for(cfg: &ThemeConfig) -> Theme {
     Theme::custom(cfg.name.clone(), to_palette(&active))
 }
 
+/// `Color` back to `#rrggbb` for the Lua `theme` table (alpha is
+/// dropped — Lua transparency rides the `{r, g, b, a}` table form).
+pub fn hex(c: Color) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (c.r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.b.clamp(0.0, 1.0) * 255.0).round() as u8
+    )
+}
+
+/// Flattened live iced palette for Lua: `(name, "#rrggbb")` pairs from
+/// the active theme's extended palette (`color` + `text` per pair,
+/// `destructive` exposed as `error`/`on_error`). Republished before
+/// every widget `render()` so theme switches flow through.
+/// Flattened live iced palette for Lua: `(name, "#rrggbb")` pairs from
+/// the active theme's extended palette (each pair's `base` color +
+/// text; `danger` exposed as `error`/`on_error`, `background.weak` as
+/// `surface`/`on_surface`). Republished before every widget `render()`
+/// so theme switches flow through.
+pub fn lua_palette(cfg: &ThemeConfig) -> Vec<(&'static str, String)> {
+    use iced::theme::palette::Pair;
+    let theme = theme_for(cfg);
+    let p = theme.extended_palette();
+    let pair = |name: &'static str, on: &'static str, pair: Pair| {
+        [(name, hex(pair.color)), (on, hex(pair.text))]
+    };
+    [
+        pair("background", "on_background", p.background.base),
+        pair("surface", "on_surface", p.background.weak),
+        pair("primary", "on_primary", p.primary.base),
+        pair("secondary", "on_secondary", p.secondary.base),
+        pair("success", "on_success", p.success.base),
+        pair("warning", "on_warning", p.warning.base),
+        pair("error", "on_error", p.danger.base),
+    ]
+    .concat()
+}
+
 /// `daemon(...).style(...)` hook: transparent clear color (lets Hyprland
 /// blur/opacity windowrules see through layer surfaces) with theme text.
 pub fn app_style<State>(_: &State, _: &Theme) -> iced::theme::Style {
@@ -667,6 +706,25 @@ pub fn menu_button(rounding: f32) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
+/// Context-menu / generic raised button with an explicit label color
+/// (Lua `:color()`), same surfaces as [`menu_button`]; every status
+/// paints the label in `text`.
+pub fn menu_button_tinted(
+    rounding: f32,
+    text: Color,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let a = active();
+        match status {
+            button::Status::Hovered | button::Status::Pressed => {
+                button_base(shade(&a, Class::BgSurfaceVariant), text, rounding)
+            }
+            button::Status::Disabled => button_base(shade(&a, Class::BgSurface), text, rounding),
+            button::Status::Active => button_base(shade(&a, Class::BgSurface), text, rounding),
+        }
+    }
+}
+
 /// Settings nav button; selected pages paint `primary`/`on_primary`.
 pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, _| {
@@ -874,6 +932,69 @@ mod tests {
         let style = app_style::<()>(&(), &theme_for(&ThemeConfig::default()));
         assert_eq!(style.background_color, Color::TRANSPARENT);
         assert_eq!(style.text_color, active().on_surface);
+    }
+
+    #[test]
+    fn hex_writes_rrggbb_and_round_trips() {
+        assert_eq!(hex(Color::from_rgb(1.0, 0.0, 0.5)), "#ff0080");
+        assert_eq!(hex(Color::BLACK), "#000000");
+        assert_eq!(hex(Color::WHITE), "#ffffff");
+        // Round-trips through the theme-file parser (alpha dropped).
+        let back = parse_hex(&hex(Color::from_rgb(0.1, 0.2, 0.3))).unwrap();
+        assert!((back.r - 0.1).abs() < 0.01);
+        assert!((back.g - 0.2).abs() < 0.01);
+        assert!((back.b - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn lua_palette_flattens_live_iced_pairs() {
+        let _guard = SERIAL.lock().unwrap();
+        // Unknown name falls back to vendored gruvbox (deterministic).
+        let pairs = lua_palette(&ThemeConfig {
+            name: "no-such-theme".to_string(),
+            ..ThemeConfig::default()
+        });
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| *k).collect();
+        for key in [
+            "background",
+            "on_background",
+            "surface",
+            "on_surface",
+            "primary",
+            "on_primary",
+            "secondary",
+            "on_secondary",
+            "success",
+            "on_success",
+            "warning",
+            "on_warning",
+            "error",
+            "on_error",
+        ] {
+            assert!(keys.contains(&key), "{key}");
+        }
+        for (_, value) in &pairs {
+            assert!(
+                value.len() == 7 && value.starts_with('#'),
+                "not #rrggbb: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn publish_theme_tables_lands_hex_in_lua() {
+        let _guard = SERIAL.lock().unwrap();
+        let lua = mlua::Lua::new();
+        crate::app::layers::top::publish_theme_tables(
+            &lua,
+            &ThemeConfig {
+                name: "no-such-theme".to_string(),
+                ..ThemeConfig::default()
+            },
+        )
+        .expect("publish");
+        let primary: String = lua.load("return theme.primary").eval().expect("eval");
+        assert!(primary.len() == 7 && primary.starts_with('#'), "{primary}");
     }
 
     #[test]

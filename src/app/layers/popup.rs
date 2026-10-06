@@ -1,7 +1,7 @@
 use super::background::Background;
 use super::top::{
     Top, TopLocal, WidgetNode, build_node, call_lua_value, coerce_text, lua_has_func,
-    lua_value_kind, parse_node, publish_system_tables, rich_text,
+    lua_value_kind, parse_node, publish_system_tables, publish_theme_tables, rich_text,
 };
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::{Plant, TopEvent, WidgetEvent};
@@ -524,6 +524,10 @@ impl Popup {
                     Some(lua) => {
                         match publish_system_tables(lua, &plots.sysinfo, gpu)
                             .map_err(|e| e.to_string())
+                            .and_then(|()| {
+                                publish_theme_tables(lua, &plots.config.theme)
+                                    .map_err(|e| e.to_string())
+                            })
                             .and_then(|()| call_lua_value(lua, "popup"))
                             .and_then(Self::parse_popup_content)
                         {
@@ -605,6 +609,9 @@ impl Popup {
             Some(lua) => {
                 let acted = publish_system_tables(lua, &plots.sysinfo, Self::gpu_usage_percent())
                     .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
+                    })
                     .and_then(|()| {
                         let on_action: mlua::Function =
                             lua.globals().get("on_action").map_err(|e| e.to_string())?;
@@ -763,6 +770,7 @@ mod tests {
                 size: None,
                 width: None,
                 height: None,
+                color: None,
             }),
             ..Default::default()
         };

@@ -372,6 +372,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
         size: Some(14.0),
         width: None,
         height: None,
+        color: None,
     }];
     for line in body.lines().take(3) {
         children.push(WidgetNode::Text {
@@ -379,6 +380,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
             size: Some(12.0),
             width: None,
             height: None,
+            color: None,
         });
     }
     if !actions.is_empty() {
@@ -391,6 +393,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
                     width: None,
                     height: None,
                     padding: None,
+                    color: None,
                 })
                 .collect(),
             spacing: 4.0,
@@ -547,6 +550,9 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
     }
     let result: Result<WidgetNode, String> = (|| {
         let lua = plots.notify_lua.as_ref().ok_or("runtime missing")?;
+        // Fresh palette every card render (same republish policy as
+        // widget states, at arrival/edit granularity).
+        super::top::publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())?;
         let table = lua.create_table().map_err(|e| e.to_string())?;
         table.set("id", n.id).map_err(|e| e.to_string())?;
         table.set("app", n.app.clone()).map_err(|e| e.to_string())?;
@@ -997,6 +1003,10 @@ mod tests {
         let lua = new_widget_lua().expect("sandbox");
         inject_ui(&lua).expect("ui");
         lua.load(SEED_NOTIFICATIONS_LUA).exec().expect("load");
+        // Critical cards read theme.error (republished live in prod).
+        let theme = lua.create_table().expect("theme");
+        theme.set("error", "#ff0000").expect("set");
+        lua.globals().set("theme", theme).expect("theme");
         let table = lua.create_table().expect("table");
         table.set("id", 1).expect("set");
         table.set("app", "test").expect("set");
@@ -1101,6 +1111,7 @@ mod tests {
                     size: None,
                     width: None,
                     height: None,
+                    color: None,
                 },
             )],
         );
