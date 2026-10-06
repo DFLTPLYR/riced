@@ -88,14 +88,18 @@ pub struct Plots {
     pub(crate) widget_last_error: HashMap<String, String>,
     // Script file mtimes per widget (live-reload on edit).
     pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
-    // ListView-style enter/exit transitions (see layers::anim): one
-    // aura runtime shared by all surfaces, one transition set per
-    // list family — widget cell rows keyed (widget, action),
-    // notification stacks keyed (output, id).
+    // Animated lists (see layers::listview): one aura runtime shared
+    // by all surfaces, one ListView per list family — widget cell rows
+    // keyed (widget, action), notification stacks keyed (output, id).
     pub(crate) anim_runtime: crate::app::layers::anim::AnimRuntime,
-    pub(crate) list_trans: crate::app::layers::anim::TransSet<(String, String)>,
-    pub(crate) notif_trans:
-        crate::app::layers::anim::TransSet<(iced_wayland_subscriber::OutputId, u32)>,
+    pub(crate) widget_list: crate::app::layers::listview::ListView<
+        (String, String),
+        crate::app::layers::top::WidgetNode,
+    >,
+    pub(crate) notif_list: crate::app::layers::listview::ListView<
+        (iced_wayland_subscriber::OutputId, u32),
+        crate::app::layers::top::WidgetNode,
+    >,
     // Live system snapshot for the `sysinfo` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
     pub(crate) sysinfo: sysinfo::System,
@@ -208,8 +212,12 @@ impl Plots {
             widget_last_error: HashMap::new(),
             widget_script_mtime: HashMap::new(),
             anim_runtime: crate::app::layers::anim::AnimRuntime::default(),
-            list_trans: Default::default(),
-            notif_trans: Default::default(),
+            widget_list: crate::app::layers::listview::ListView::new(
+                crate::app::layers::top::TopLocal::ROW_PITCH,
+            ),
+            notif_list: crate::app::layers::listview::ListView::new(
+                crate::app::layers::notification::CARD_PITCH,
+            ),
             sysinfo,
         };
         // Render Lua widgets once so bars populate on the first frame
@@ -566,7 +574,7 @@ impl Plots {
                         &self.widget_outputs,
                         &self.widget_trees,
                         &self.anim_runtime,
-                        &self.list_trans,
+                        &self.widget_list,
                     )
                 })
                 .unwrap_or_else(|| Space::new().into()),

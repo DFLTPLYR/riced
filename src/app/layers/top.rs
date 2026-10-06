@@ -1,6 +1,8 @@
 use super::Popup;
 use super::background::Background;
+use super::listview::Axis;
 use crate::app::app::{PlotInfo, Plots};
+use crate::app::layers::anim::ENTER_OFFSET;
 use crate::app::{Plant, TopEvent, WidgetEvent};
 use crate::composables::panel_window::top_window;
 use crate::config::WidgetDef;
@@ -8,7 +10,7 @@ use crate::theme;
 use iced::mouse::Button;
 use iced::widget::{Space, button, column, container, progress_bar, row, text};
 use iced::window;
-use iced::{Element, Fill, Point, Task as Command};
+use iced::{Element, Fill, Point, Task as Command, Vector};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
@@ -138,6 +140,11 @@ impl TopLocal {
 
     /// Hard cap for slot padding/spacing (px).
     pub(crate) const MAX_SLOT_GAP: f32 = 64.0;
+
+    /// Estimated button pitch (px) for list displaced glides
+    /// (text 13 + padding 12 + border ≈ 27–30; iced can't measure
+    /// items in view code, see `ListView`).
+    pub(crate) const ROW_PITCH: f32 = 32.0;
 
     /// Opacity steps: 0/25/50/75/100%. Snaps any value to the nearest step
     /// so config, slider drags, and preset buttons all agree.
@@ -376,7 +383,7 @@ fn render_slot_widgets(
     gap: f32,
     horizontal: bool,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    list_trans: &super::anim::TransSet<(String, String)>,
+    list: &super::listview::ListView<(String, String), WidgetNode>,
 ) -> Element<'static, Plant> {
     use iced::widget::mouse_area;
     let mut items = Vec::new();
@@ -441,8 +448,7 @@ fn render_slot_widgets(
                         size,
                         &msg,
                         anim_runtime,
-                        list_trans,
-                        horizontal,
+                        list,
                     )
                 }
                 _ => build_node(node, size, Some(&msg)),
@@ -480,11 +486,11 @@ fn render_slot_widgets(
     }
 }
 
-/// Build a top-level row/column with enter/exit transitions: direct
-/// button children (keyed by action) slide from their motion pad;
-/// retained ghosts render inert at their old indices. Live build
-/// failures skip the widget (mirrors plain `build_node` strictness);
-/// ghost build failures skip just that ghost.
+/// Build a top-level row/column with QML-style transitions: direct
+/// button children (keyed by action) shift by their live motion
+/// without disturbing layout; retained ghosts render inert at their
+/// old indices. Live build failures skip the widget (mirrors plain
+/// `build_node` strictness); ghost build failures skip just that ghost.
 #[allow(clippy::too_many_arguments)]
 fn build_anim_list(
     widget: &str,
@@ -496,40 +502,32 @@ fn build_anim_list(
     size: f32,
     button_msg: &dyn Fn(String) -> Plant,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    trans: &super::anim::TransSet<(String, String)>,
-    horizontal: bool,
+    list: &super::listview::ListView<(String, String), WidgetNode>,
 ) -> Result<Element<'static, Plant>, String> {
-    let pad_of = |action: &str| -> f32 {
-        trans.pad(anim_runtime, &(widget.to_string(), action.to_string()))
-    };
-    let wrap = |el: Element<'static, Plant>, pad: f32| -> Element<'static, Plant> {
-        if pad <= 0.01 {
-            return el;
-        }
-        let mut p = iced::Padding::ZERO;
-        if horizontal {
-            p.left = pad;
-        } else {
-            p.top = pad;
-        }
-        container(el).padding(p).into()
+    let shift_of = |action: &str| -> (f32, f32) {
+        let m = list.motion_of(anim_runtime, &(widget.to_string(), action.to_string()));
+        (m.x, m.y)
     };
     let mut items = Vec::new();
     for child in children {
         let el = build_node(child, size, Some(button_msg))?;
-        let pad = match child {
-            WidgetNode::Button { action, .. } => pad_of(action),
-            _ => 0.0,
-        };
-        items.push(wrap(el, pad));
+        match child {
+            WidgetNode::Button { action, .. } => {
+                let (x, y) = shift_of(action);
+                items.push(super::motion::shifted(el, x, y, true));
+            }
+            _ => items.push(el),
+        }
     }
     // Ghosts at their old indices (clamped: batch removals shift).
-    for ghost in trans.ghosts_for(|(w, _)| w == widget) {
-        let Ok(el) = build_node(&ghost.node, size, None) else {
+    for ghost in list.ghosts_for(|(w, _)| w == widget) {
+        let Ok(el) = build_node(&ghost.content, size, None) else {
             continue;
         };
+        let m = list.motion_of(anim_runtime, &ghost.key);
+        let el = super::motion::shifted(el, m.x, m.y, false);
         let at = ghost.index.min(items.len());
-        items.push(wrap(el, trans.pad(anim_runtime, &ghost.key)));
+        items.push(el);
         // Move the just-pushed ghost into place.
         let last = items.len() - 1;
         if at < last {
@@ -557,6 +555,22 @@ fn build_anim_list(
             column = column.push(item);
         }
         Ok(column.into())
+    }
+}
+
+/// Direct button children `(action key, node)` of a top-level row or
+/// column, in order. Anything else has no stable key and never
+/// transitions.
+fn button_children(node: &WidgetNode) -> Vec<(String, WidgetNode)> {
+    match node {
+        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => children
+            .iter()
+            .filter_map(|child| match child {
+                WidgetNode::Button { action, .. } => Some((action.clone(), child.clone())),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1452,7 +1466,7 @@ impl Top {
         outputs: &HashMap<String, String>,
         trees: &HashMap<String, WidgetNode>,
         anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-        list_trans: &super::anim::TransSet<(String, String)>,
+        list: &super::listview::ListView<(String, String), WidgetNode>,
     ) -> Element<'_, Plant> {
         let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
         let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
@@ -1469,7 +1483,7 @@ impl Top {
                 gap,
                 horizontal,
                 anim_runtime,
-                list_trans,
+                list,
             );
             let (align_x, align_y) = self.local.align_at(pos).for_bar(horizontal);
             container(body)
@@ -1867,18 +1881,64 @@ impl Top {
                 plots.widget_outputs.remove(&def.name);
                 match parse_node(&Value::Table(t)) {
                     Ok(node) => {
-                        // Diff button lists for enter/exit transitions
-                        // before replacing the cached tree.
+                        // Diff button lists for enter/exit/displaced
+                        // transitions before replacing the cached tree.
                         let old = plots.widget_trees.get(&def.name).cloned();
                         let duration = plots.config.animation.speed.duration();
-                        super::anim::sync_list_anims(
-                            &mut plots.list_trans,
-                            &mut plots.anim_runtime,
-                            &def.name,
-                            old.as_ref(),
-                            &node,
-                            duration,
+                        let old_is_list = matches!(
+                            old,
+                            Some(WidgetNode::Row { .. } | WidgetNode::Column { .. })
                         );
+                        let new_is_list =
+                            matches!(node, WidgetNode::Row { .. } | WidgetNode::Column { .. });
+                        if !old_is_list || !new_is_list {
+                            // First paint or shape flip: settle instantly.
+                            plots
+                                .widget_list
+                                .clear_scope(&mut plots.anim_runtime, |(w, _)| w == &def.name);
+                        } else {
+                            let old_node = old.as_ref().expect("list checked");
+                            let old_kids = button_children(old_node);
+                            let new_kids = button_children(&node);
+                            let old_keys: Vec<(String, String)> = old_kids
+                                .iter()
+                                .map(|(k, _)| (def.name.clone(), k.clone()))
+                                .collect();
+                            let new_keys: Vec<(String, String)> = new_kids
+                                .iter()
+                                .map(|(k, _)| (def.name.clone(), k.clone()))
+                                .collect();
+                            let by_key: std::collections::HashMap<&str, &WidgetNode> =
+                                old_kids.iter().map(|(k, n)| (k.as_str(), n)).collect();
+                            let removed: Vec<(usize, (String, String), WidgetNode)> = old_keys
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, k)| !new_keys.contains(k))
+                                .filter_map(|(i, k)| {
+                                    by_key
+                                        .get(k.1.as_str())
+                                        .map(|n| (i, k.clone(), (*n).clone()))
+                                })
+                                .collect();
+                            let axis = if matches!(node, WidgetNode::Row { .. }) {
+                                Axis::Horizontal
+                            } else {
+                                Axis::Vertical
+                            };
+                            let enter_from = match axis {
+                                Axis::Horizontal => Vector::new(ENTER_OFFSET, 0.0),
+                                Axis::Vertical => Vector::new(0.0, ENTER_OFFSET),
+                            };
+                            plots.widget_list.update(
+                                &mut plots.anim_runtime,
+                                duration,
+                                axis,
+                                enter_from,
+                                &old_keys,
+                                &new_keys,
+                                &removed,
+                            );
+                        }
                         plots.widget_trees.insert(def.name.clone(), node);
                     }
                     Err(e) => {
@@ -1934,7 +1994,7 @@ impl Top {
         plots.widget_script_mtime.clear();
         // Fresh Lua states mean fresh lists: drop in-flight transitions
         // so the first post-reload paint settles instantly.
-        plots.list_trans.clear_all(&mut plots.anim_runtime);
+        plots.widget_list.clear_all(&mut plots.anim_runtime);
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
         let gpu = Popup::gpu_usage_percent();
@@ -2035,7 +2095,8 @@ impl Top {
     /// redraw scope, not here.
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
         plots.anim_runtime.tick_at(Instant::now());
-        plots.list_trans.sweep(&mut plots.anim_runtime);
+        plots.widget_list.settle_nudged(&mut plots.anim_runtime);
+        plots.widget_list.sweep(&mut plots.anim_runtime);
         super::notification::sweep_noti_anims(plots)
     }
 
@@ -3900,8 +3961,9 @@ mod tests {
 
     #[test]
     fn build_anim_list_merges_live_and_ghosts() {
-        use crate::app::layers::anim::TransSet;
+        use super::super::listview::{Axis, ListView};
         use aura_anim::core::runtime::MotionRuntime;
+        use iced::Vector;
         // Live row like the hypr seed renders: two buttons, the first
         // mid-enter, plus one exiting ghost at index 1.
         let children = vec![
@@ -3922,57 +3984,57 @@ mod tests {
         ];
         let mut rt = MotionRuntime::new();
         let duration = Duration::from_millis(150);
-        let mut set: TransSet<(String, String)> = TransSet::default();
+        let mut list: ListView<(String, String), WidgetNode> = ListView::new(32.0);
+        let ws1 = ("hypr".to_string(), "ws:1".to_string());
+        let ws2 = ("hypr".to_string(), "ws:2".to_string());
+        let ws9 = ("hypr".to_string(), "ws:9".to_string());
         // First button mid-enter, plus one exiting ghost at index 1.
-        set.enter(
+        list.update(
             &mut rt,
             duration,
-            ("hypr".to_string(), "ws:1".to_string()),
-            false,
+            Axis::Horizontal,
+            Vector::new(16.0, 0.0),
+            &[],
+            &[ws1.clone(), ws2.clone()],
+            &[],
         );
-        set.retire(
+        list.update(
             &mut rt,
             duration,
-            ("hypr".to_string(), "ws:9".to_string()),
-            1,
-            WidgetNode::Button {
-                label: "9".to_string(),
-                action: "ws:9".to_string(),
-                width: None,
-                height: None,
-                padding: None,
-            },
+            Axis::Horizontal,
+            Vector::new(16.0, 0.0),
+            &[ws1.clone(), ws2.clone(), ws9.clone()],
+            &[ws1.clone(), ws2.clone()],
+            &[(
+                1,
+                ws9.clone(),
+                WidgetNode::Button {
+                    label: "9".to_string(),
+                    action: "ws:9".to_string(),
+                    width: None,
+                    height: None,
+                    padding: None,
+                },
+            )],
         );
+        assert_eq!(list.ghosts_for(|_| true).len(), 1);
         let msg = |_: String| Plant::Tend;
-        // Live + ghost merge builds (ghost renders inert).
-        let _ = build_anim_list(
-            "hypr",
-            &children,
-            4.0,
-            NodeLength::Shrink,
-            NodeLength::Shrink,
-            true,
-            13.0,
-            &msg,
-            &rt,
-            &set,
-            true,
-        )
-        .expect("builds");
-        // Vertical bars pad the top instead of the left: same build.
-        let _ = build_anim_list(
-            "hypr",
-            &children,
-            4.0,
-            NodeLength::Shrink,
-            NodeLength::Shrink,
-            false,
-            13.0,
-            &msg,
-            &rt,
-            &set,
-            false,
-        )
-        .expect("builds");
+        // Live + ghost merge builds (ghost renders inert), rows and
+        // columns alike.
+        for is_row in [true, false] {
+            let _ = build_anim_list(
+                "hypr",
+                &children,
+                4.0,
+                NodeLength::Shrink,
+                NodeLength::Shrink,
+                is_row,
+                13.0,
+                &msg,
+                &rt,
+                &list,
+            )
+            .expect("builds");
+        }
     }
 }

@@ -8,22 +8,24 @@
 //! Bodies render from `notifications.lua`, falling back to
 //! [`default_tree`] when the script is missing or broken.
 //!
-//! Cards animate on the shared [`crate::app::layers::anim::TransSet`]
-//! machine keyed `(output, id)`: arrivals slide in from the anchored
-//! edge, dismissals linger as inert ghosts sliding out. Placement
+//! Cards animate on the shared [`crate::app::layers::listview::ListView`]
+//! keyed `(output, id)`: arrivals fade/slide in from the anchored
+//! edge, dismissals linger as inert ghosts fading out. Placement
 //! honors `[notifications] output`: `"mouse"` resolves the output
 //! under the last-known global cursor (or the compositor's `LastOutput`
 //! equivalent via `OutputOption`), any other value pins by output name
 //! (`OutputInfo.name`, e.g. `"DP-1"`).
 
 use super::background::Background;
+use super::listview::Axis;
 use super::top::{NodeLength, WidgetNode, build_node, inject_ui, new_widget_lua, parse_node};
 use crate::app::app::{PlotInfo, Plots};
+use crate::app::layers::anim::{ENTER_OFFSET, ItemMotion};
 use crate::app::{NotifyEvent, Plant};
 use crate::config::NotificationConfig;
 use crate::theme;
 use iced::window;
-use iced::{Element, Length, Task as Command};
+use iced::{Element, Length, Task as Command, Vector};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, KeyboardInteractivity, Layer, LayerSize, NewLayerShellSettings,
     OutputOption, WlRegion,
@@ -38,6 +40,9 @@ use std::time::{Duration, Instant};
 /// surfaces need an upfront size and Lua can't measure text.
 const CARD_H: f32 = 100.0;
 const CARD_GAP: f32 = 8.0;
+/// Full card pitch (chrome + gap): the displaced-glide step and the
+/// input-region stride. Chrome is `CARD_H` + 10px padding top/bottom.
+pub(crate) const CARD_PITCH: f32 = CARD_H + 20.0 + CARD_GAP;
 const WINDOW_PAD: f32 = 16.0;
 /// Corner margin left at each anchored edge (matches `placement`'s
 /// `M`): the window spans the full output height minus both margins.
@@ -253,11 +258,11 @@ impl Notification {
     }
 }
 
-/// Retire one notification into a ghost on the shared transition set:
-/// drop it from the queue but keep its tree, fading/sliding out from
-/// its current values (mid-enter dismissals retarget smoothly instead
-/// of jumping). Survivors below the removed index glide up one slot
-/// (`displaced`). Returns false when the id was already gone.
+/// Retire one notification into a ghost on the list: drop it from the
+/// queue but keep its tree, fading/sliding out from its current values
+/// (mid-enter dismissals retarget smoothly instead of jumping).
+/// Survivors below the removed index glide up one slot (`displaced`,
+/// owned by the list diff). Returns false when the id was already gone.
 fn retire_noti(plots: &mut Plots, id: u32) -> bool {
     let order = visible_order(&plots.notifications);
     let Some(pos) = order.iter().position(|(nid, _)| *nid == id) else {
@@ -265,32 +270,45 @@ fn retire_noti(plots: &mut Plots, id: u32) -> bool {
         return false;
     };
     let output = order[pos].1;
+    let old_keys = output_keys(&plots.notifications, output);
+    let per_output_pos = old_keys.iter().position(|(_, nid)| *nid == id);
     let cached = plots.notif_trees.remove(&id);
     let fallback = plots.notifications.iter().find(|n| n.id == id);
     let node = cached.unwrap_or_else(|| default_tree(fallback));
     plots.notifications.retain(|n| n.id != id);
+    let new_keys = output_keys(&plots.notifications, output);
     let duration = plots.config.animation.speed.duration();
-    plots
-        .notif_trans
-        .retire(&mut plots.anim_runtime, duration, (output, id), pos, node);
-    // Survivors below the hole glide up one card slot (displaced):
-    // nudge each by key — swept (already-settled) survivors have no
-    // entry, and `nudge_one` recreates their motion at the offset.
-    let survivors: Vec<u32> = plots
-        .notifications
-        .iter()
-        .filter(|n| n.output == Some(output))
-        .map(|n| n.id)
-        .collect();
-    for sid in survivors {
-        plots.notif_trans.nudge_one(
-            &mut plots.anim_runtime,
-            duration,
-            (output, sid),
-            CARD_H + 20.0 + CARD_GAP,
-        );
-    }
+    plots.notif_list.update(
+        &mut plots.anim_runtime,
+        duration,
+        Axis::Vertical,
+        enter_from(&plots.config.notifications),
+        &old_keys,
+        &new_keys,
+        &[(per_output_pos.unwrap_or(pos), (output, id), node)],
+    );
     true
+}
+
+/// Newest-first keys for one output's stack: the list order shared by
+/// arrive/retire/view.
+fn output_keys(notifications: &VecDeque<Notification>, output: OutputId) -> Vec<(OutputId, u32)> {
+    notifications
+        .iter()
+        .rev()
+        .filter(|n| n.output == Some(output))
+        .map(|n| (output, n.id))
+        .collect()
+}
+
+/// Enter direction for arrivals: sideways toward the anchored corner
+/// (matches the old slide side; bottom corners mirror it).
+fn enter_from(cfg: &NotificationConfig) -> Vector {
+    if cfg.position.starts_with("bottom") {
+        Vector::new(-ENTER_OFFSET, 0.0)
+    } else {
+        Vector::new(ENTER_OFFSET, 0.0)
+    }
 }
 
 /// Visible `(id, output)` in newest-first, per-output view order —
@@ -319,17 +337,17 @@ fn visible_order(notifications: &VecDeque<Notification>) -> Vec<(u32, OutputId)>
 /// keeps covering a dismissed card's old rect (dead, unclickable
 /// zone) until the next arrival/dismiss re-pushes it.
 pub(crate) fn sweep_noti_anims(plots: &mut Plots) -> Command<Plant> {
-    plots.notif_trans.settle_nudged(&mut plots.anim_runtime);
+    plots.notif_list.settle_nudged(&mut plots.anim_runtime);
     let before: std::collections::HashMap<OutputId, usize> = plots
         .notif_windows
         .keys()
         .copied()
-        .map(|o| (o, plots.notif_trans.ghosts_for(|(go, _)| *go == o).len()))
+        .map(|o| (o, plots.notif_list.ghosts_for(|(go, _)| *go == o).len()))
         .collect();
-    plots.notif_trans.sweep(&mut plots.anim_runtime);
+    plots.notif_list.sweep(&mut plots.anim_runtime);
     let mut cmds = Vec::new();
     for output in plots.notif_windows.keys().copied().collect::<Vec<_>>() {
-        let after = plots.notif_trans.ghosts_for(|(go, _)| *go == output).len();
+        let after = plots.notif_list.ghosts_for(|(go, _)| *go == output).len();
         if before.get(&output).copied().unwrap_or(0) != after {
             cmds.push(Notification::push_input_region(plots, output));
         }
@@ -400,59 +418,26 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
     use iced::widget::{column, container, mouse_area, scrollable};
     let cfg = &plots.config.notifications;
     let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
-    struct Card {
-        id: u32,
-        node: WidgetNode,
-        live: bool,
-    }
-    let mut cards: Vec<Card> = visible_order(&plots.notifications)
-        .into_iter()
-        .filter(|(_, o)| *o == output)
-        .map(|(id, _)| {
-            let node =
-                plots.notif_trees.get(&id).cloned().unwrap_or_else(|| {
-                    default_tree(plots.notifications.iter().find(|n| n.id == id))
-                });
-            Card {
-                id,
-                node,
-                live: true,
-            }
-        })
-        .collect();
-    for ghost in plots.notif_trans.ghosts_for(|(o, _)| *o == output) {
-        let at = ghost.index.min(cards.len());
-        let card = Card {
-            id: ghost.key.1,
-            node: ghost.node.clone(),
-            live: false,
+    let live_keys = output_keys(&plots.notifications, output);
+    let content =
+        move |key: &(OutputId, u32)| -> Option<WidgetNode> {
+            Some(plots.notif_trees.get(&key.1).cloned().unwrap_or_else(|| {
+                default_tree(plots.notifications.iter().find(|n| n.id == key.1))
+            }))
         };
-        cards.push(card);
-        let last = cards.len() - 1;
-        if at < last {
-            let card = cards.remove(last);
-            cards.insert(at, card);
-        }
-    }
-    let mut stack = column![].spacing(CARD_GAP);
-    for card in &cards {
-        let motion = plots
-            .notif_trans
-            .motion_of(&plots.anim_runtime, &(output, card.id));
+    let render = move |key: &(OutputId, u32), node: WidgetNode, motion: ItemMotion, live: bool| {
+        let id = key.1;
         // Live buttons invoke actions; ghosts (and build failures
         // falling back to the default tree) stay inert.
-        let msg = |action: String| {
-            let id = card.id;
-            Plant::Notify(NotifyEvent::Invoke(id, action))
-        };
+        let msg = move |action: String| Plant::Notify(NotifyEvent::Invoke(id, action));
         let body: Element<'_, Plant> = build_node(
-            &card.node,
+            &node,
             13.0,
-            card.live.then_some(&msg as &dyn Fn(String) -> Plant),
+            live.then_some(&msg as &dyn Fn(String) -> Plant),
         )
         .unwrap_or_else(|_| {
             build_node(
-                &default_tree(plots.notifications.iter().find(|n| n.id == card.id)),
+                &default_tree(plots.notifications.iter().find(|n| n.id == id)),
                 13.0,
                 None,
             )
@@ -472,14 +457,20 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
                 .style(theme::menu_box),
             motion.opacity,
         );
-        let el: Element<'_, Plant> = super::motion::shifted(chrome, motion.x, motion.y, card.live);
-        let el: Element<'_, Plant> = if card.live {
+        let el: Element<'_, Plant> = super::motion::shifted(chrome, motion.x, motion.y, live);
+        if live {
             mouse_area(el)
-                .on_press(Plant::Notify(NotifyEvent::Dismissed(card.id)))
+                .on_press(Plant::Notify(NotifyEvent::Dismissed(id)))
                 .into()
         } else {
             el
-        };
+        }
+    };
+    let mut stack = column![].spacing(CARD_GAP);
+    for el in plots
+        .notif_list
+        .items(&plots.anim_runtime, &live_keys, &content, &render)
+    {
         stack = stack.push(el);
     }
     scrollable(stack)
@@ -487,7 +478,6 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
         .height(Length::Fill)
         .into()
 }
-
 /// Script file for the Lua renderer, next to the widget scripts
 /// (`~/.config/riced/widgets/notifications.lua`). Never overwritten
 /// once seeded; missing file falls back to [`default_tree`].
@@ -620,17 +610,25 @@ impl Notification {
             plots.notif_next_id = plots.notif_next_id.max(1).wrapping_add(1);
         }
         let id = n.id;
+        let old_keys = output_keys(&plots.notifications, output);
         enqueue(&mut plots.notifications, n);
         if let Some(stored) = plots.notifications.iter().find(|n| n.id == id).cloned() {
             render_noti(plots, &stored);
         }
-        // Fresh card fades/slides in on the shared transition set
-        // (direction follows the anchored corner).
-        let from_bottom = plots.config.notifications.position.starts_with("bottom");
+        // Fresh card fades/slides in on the list (direction follows the
+        // anchored corner); survivors below it displace-glide down.
         let duration = plots.config.animation.speed.duration();
-        plots
-            .notif_trans
-            .enter(&mut plots.anim_runtime, duration, (output, id), from_bottom);
+        let from = enter_from(&plots.config.notifications);
+        let new_keys = output_keys(&plots.notifications, output);
+        plots.notif_list.update(
+            &mut plots.anim_runtime,
+            duration,
+            Axis::Vertical,
+            from,
+            &old_keys,
+            &new_keys,
+            &[],
+        );
         Self::reconcile(plots, output)
     }
 
@@ -731,7 +729,7 @@ impl Notification {
             .iter()
             .filter(|n| n.output == Some(output))
             .count();
-        let ghosts = plots.notif_trans.ghosts_for(|(o, _)| *o == output).len();
+        let ghosts = plots.notif_list.ghosts_for(|(o, _)| *o == output).len();
         let visible = live + ghosts;
         match plots.notif_windows.get(&output).copied() {
             None => {
@@ -800,26 +798,23 @@ impl Notification {
     /// to their unscrolled position (harmless: still inside the
     /// window, still clickable area).
     pub(crate) fn input_rects(plots: &Plots, output: OutputId) -> Vec<(i32, i32, i32, i32)> {
-        let count = visible_order(&plots.notifications)
-            .into_iter()
-            .filter(|(_, o)| *o == output)
-            .count()
-            + plots.notif_trans.ghosts_for(|(o, _)| *o == output).len();
+        let count = output_keys(&plots.notifications, output).len()
+            + plots.notif_list.ghosts_for(|(o, _)| *o == output).len();
         let cfg = &plots.config.notifications;
         let width = cfg.width.max(200.0);
         let mut rects = Vec::with_capacity(count);
         let mut y = 0.0f32;
         for _ in 0..count {
             // Settled chrome height: padding 10 + body 100 + gap 8.
-            // In-flight pads only shift cards within the window; the
+            // In-flight motion only shifts cards within the window; the
             // rect union still covers them.
             rects.push((
                 0,
                 y.round() as i32,
                 width.round() as i32,
-                (CARD_H + 20.0).round() as i32,
+                (CARD_PITCH - CARD_GAP).round() as i32,
             ));
-            y += CARD_H + 20.0 + CARD_GAP;
+            y += CARD_PITCH;
         }
         rects
     }
@@ -863,7 +858,7 @@ impl Notification {
         // Output gone: settle its transitions instantly (no window left
         // to animate in).
         plots
-            .notif_trans
+            .notif_list
             .clear_scope(&mut plots.anim_runtime, |(o, _)| *o == output);
         if cmds.is_empty() {
             Command::none()
@@ -972,9 +967,9 @@ mod tests {
         let rects = Notification::input_rects(&plots, OutputId(1));
         assert_eq!(rects.len(), 2);
         let w = plots.config.notifications.width.max(200.0).round() as i32;
-        let card = (CARD_H + 20.0).round() as i32;
+        let card = (CARD_PITCH - CARD_GAP).round() as i32;
         assert_eq!(rects[0], (0, 0, w, card));
-        assert_eq!(rects[1], (0, card + CARD_GAP as i32, w, card));
+        assert_eq!(rects[1], (0, CARD_PITCH.round() as i32, w, card));
         // Output 2 sees only its own card.
         assert_eq!(Notification::input_rects(&plots, OutputId(2)).len(), 1);
     }
@@ -1070,34 +1065,59 @@ mod tests {
     }
 
     #[test]
-    fn notification_transitions_share_the_generic_set() {
-        use super::super::anim::{ENTER_OFFSET, TransSet};
+    fn notification_lists_share_the_generic_component() {
+        use super::super::anim::ENTER_OFFSET;
+        use super::super::listview::{Axis, ListView};
         use aura_anim::core::runtime::MotionRuntime;
-        // Same TransSet machine as widget rows, keyed (output, id).
+        use iced::Vector;
+        // Same ListView machine as widget rows, keyed (output, id).
         let mut rt = MotionRuntime::new();
         let duration = Duration::from_millis(150);
-        let mut set: TransSet<(OutputId, u32)> = TransSet::default();
-        set.enter(&mut rt, duration, (OutputId(1), 7), false);
-        let start = set.motion_of(&rt, &(OutputId(1), 7));
-        assert_eq!((start.x, start.opacity), (ENTER_OFFSET, 0.0));
-        set.retire(
+        let mut list: ListView<(OutputId, u32), WidgetNode> = ListView::new(CARD_PITCH);
+        let from = Vector::new(ENTER_OFFSET, 0.0);
+        list.update(
             &mut rt,
             duration,
-            (OutputId(1), 7),
-            0,
-            WidgetNode::Text {
-                content: "hi".to_string(),
-                size: None,
-                width: None,
-                height: None,
-            },
+            Axis::Vertical,
+            from,
+            &[],
+            &[(OutputId(1), 7)],
+            &[],
         );
-        assert_eq!(set.ghosts_for(|(o, _)| *o == OutputId(1)).len(), 1);
+        let start = list.motion_of(&rt, &(OutputId(1), 7));
+        assert_eq!((start.x, start.opacity), (ENTER_OFFSET, 0.0));
+        list.update(
+            &mut rt,
+            duration,
+            Axis::Vertical,
+            from,
+            &[(OutputId(1), 7)],
+            &[],
+            &[(
+                0,
+                (OutputId(1), 7),
+                WidgetNode::Text {
+                    content: "hi".to_string(),
+                    size: None,
+                    width: None,
+                    height: None,
+                },
+            )],
+        );
+        assert_eq!(list.ghosts_for(|(o, _)| *o == OutputId(1)).len(), 1);
         // Other outputs untouched by scope clearing.
-        set.enter(&mut rt, duration, (OutputId(2), 9), false);
-        set.clear_scope(&mut rt, |(o, _)| *o == OutputId(1));
-        assert!(set.ghosts_for(|_| true).is_empty());
-        assert!(set.motion_of(&rt, &(OutputId(2), 9)).x > 0.0);
+        list.update(
+            &mut rt,
+            duration,
+            Axis::Vertical,
+            from,
+            &[],
+            &[(OutputId(2), 9)],
+            &[],
+        );
+        list.clear_scope(&mut rt, |(o, _)| *o == OutputId(1));
+        assert!(list.ghosts_for(|_| true).is_empty());
+        assert!(list.motion_of(&rt, &(OutputId(2), 9)).x > 0.0);
     }
 
     #[test]

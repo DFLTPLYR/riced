@@ -814,12 +814,13 @@ pub fn config_path() -> PathBuf {
 ///
 /// ## List transitions (QML-`ListView` add/remove)
 ///
-/// One generic transition set (`layers::anim::TransSet`) serves every
-/// animated list in the shell. Direct `ui.button` children of a cell's
+/// One native list component (`layers::listview::ListView`) serves every
+/// animated list in the shell, with QML-style `on_entered` / `on_exit`
+/// / `on_displaced` transitions. Direct `ui.button` children of a cell's
 /// top-level row/column animate on add/remove (keyed by `action`,
-/// driven by aura-anim): entering items slide in, removed items linger
-/// as inert ghosts sliding out, then leave. Notification cards use the
-/// same machine keyed `(output, id)`, sliding from the anchored edge.
+/// driven by aura-anim): entering items fade/slide in, removed items linger
+/// as inert ghosts fading out, then leave. Notification cards use the
+/// same component keyed `(output, id)`, sliding from the anchored edge.
 /// Label-only edits on the same key swap instantly. First paint
 /// settles with no animation; durations follow the global animation
 /// speed. Geometric slides only — iced offers no opacity widget, and
