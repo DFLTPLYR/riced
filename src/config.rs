@@ -1229,7 +1229,7 @@ end)
 /// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
 /// visible cards re-render on save; delete the file to restore the
 /// built-in layout.
-pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency, actions }.
+pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency, actions, has_image }.
 -- urgency: 0 low, 1 normal, 2 critical. actions: 1-based array of
 -- { key, label } (empty when the sender offers none). Critical cards
 -- tint through theme.error (see the theme table). Edit live,

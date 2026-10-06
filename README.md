@@ -147,7 +147,8 @@ timeout_ms = 5000
   internal events — config/widgets parse errors, template failures,
   theme-regen results (critical ones persist until clicked).
 - **Lua layout**: `widgets/notifications.lua` defines
-  `render(n)` over `{ id, app, title, body, icon, urgency, actions }`
+  `render(n)` over `{ id, app, title, body, icon, urgency, actions,
+  has_image }`
   (`actions` is a 1-based array of `{ key, label }` tables, empty when
   the sender offers none) with the full `ui.*` set; edits re-render
   visible cards on save, and deleting the file restores the built-in
@@ -160,7 +161,10 @@ timeout_ms = 5000
   live: the built-in card renders one button per action, and button
   clicks emit `ActionInvoked` back over D-Bus (then dismiss with
   reason "invoked"); capability `actions` is claimed alongside `body`.
-  Image hints stay a later stage.
+  App images render too: `image-data` pixbufs first, then the
+  `image-path` hint, then `app_icon` as a file path — a 36px thumbnail
+  left of the card body (themed icon names still render text-only).
+  Scripts see `n.has_image` to adapt layout.
 
 ## Configuration
 

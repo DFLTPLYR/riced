@@ -64,6 +64,9 @@ pub struct Notification {
     pub timeout: Option<Duration>,
     /// Action `(key, label)` pairs from the D-Bus `actions` array.
     pub actions: Vec<(String, String)>,
+    /// Decoded app image (`image-data` / `image-path` / icon path);
+    /// `None` renders text-only.
+    pub image: Option<iced::widget::image::Handle>,
 }
 
 /// One output's geometry for hit-testing: `(id, (x, y, w, h))`.
@@ -77,6 +80,7 @@ pub(crate) struct Incoming {
     pub title: String,
     pub body: String,
     pub actions: Vec<(String, String)>,
+    pub image: Option<iced::widget::image::Handle>,
     pub urgency: u8,
     /// Client-requested timeout; `None` means server default.
     pub timeout_ms: Option<u64>,
@@ -113,6 +117,7 @@ impl Notification {
             received_at: Instant::now(),
             timeout,
             actions: Vec::new(),
+            image: None,
         }
     }
 
@@ -137,6 +142,7 @@ impl Notification {
             received_at: Instant::now(),
             timeout,
             actions: incoming.actions,
+            image: incoming.image,
         }
     }
 }
@@ -418,7 +424,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
 /// `on_action`-style `Invoke` messages; the rest of a live card is one
 /// dismiss area while ghosts stay inert.
 pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
-    use iced::widget::{column, container, mouse_area, scrollable};
+    use iced::widget::{column, container, image::Image, mouse_area, row, scrollable};
     let cfg = &plots.config.notifications;
     let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
     let live_keys = output_keys(&plots.notifications, output);
@@ -446,13 +452,28 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
             )
             .expect("default tree builds")
         });
+        // App image (decoded D-Bus `image-data` / `image-path` / icon
+        // path): a 36px thumbnail left of the Lua body. Ghosts already
+        // left the queue, so their exits render text-only.
+        let content_body: Element<'_, Plant> = match plots
+            .notifications
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| n.image.clone())
+        {
+            Some(handle) => row![Image::new(handle).width(36.0).height(36.0), body]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .into(),
+            None => body,
+        };
         // QML-style motion: `x` slides the card horizontally (enter
         // from the anchored side, exit toward -x), `opacity` fades it,
         // `y` glides survivors toward their new slot (displaced). The
         // overlay transform draws the card shifted without disturbing
         // layout; the style alpha fades chrome + text together.
         let chrome = super::motion::faded(
-            container(body)
+            container(content_body)
                 .width(Length::Fixed(width))
                 .height(Length::Fixed(CARD_H))
                 .padding(10.0)
@@ -566,6 +587,9 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
             .set("icon", n.icon.clone())
             .map_err(|e| e.to_string())?;
         table.set("urgency", n.urgency).map_err(|e| e.to_string())?;
+        table
+            .set("has_image", n.image.is_some())
+            .map_err(|e| e.to_string())?;
         table
             .set("actions", actions_table(lua, &n.actions)?)
             .map_err(|e| e.to_string())?;
@@ -891,6 +915,7 @@ mod tests {
             received_at: Instant::now() - Duration::from_millis(age_ms),
             timeout: timeout_ms.map(Duration::from_millis),
             actions: Vec::new(),
+            image: None,
         }
     }
 
@@ -1042,6 +1067,7 @@ mod tests {
             received_at: Instant::now(),
             timeout: Some(Duration::from_secs(5)),
             actions: Vec::new(),
+            image: None,
         };
         let queue = VecDeque::from([
             mk(1, Some(OutputId(1))),
@@ -1181,6 +1207,7 @@ mod tests {
                 title: "t".to_string(),
                 body: "b".to_string(),
                 actions: vec![("default".to_string(), "Activate".to_string())],
+                image: None,
                 urgency: 1,
                 timeout_ms: None,
             },
@@ -1191,6 +1218,7 @@ mod tests {
             n.actions,
             vec![("default".to_string(), "Activate".to_string())]
         );
+        assert!(n.image.is_none());
     }
 
     #[test]
