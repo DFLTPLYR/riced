@@ -107,8 +107,12 @@ end
   No allowlist (`;` chains work; owner-accepted risk). `os.exit` /
   `os.remove` / `os.rename` and `require` stay blocked.
 - **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil),
-  `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
-  `button`, `progress`, `spinner`).
+  `iced.*` (`text`, `icon` — full Lucide set, `row`, `column`,
+  `button`, `progress`, `spinner`, `separator`; `ui` is the same table).
+  `iced.define(name, fn)` + `iced.use(name, props)` share reusable
+  components from `widgets/components/*.lua` (seeded `spacer`,
+  `card`, `menu`); component edits rebuild all states like a
+  `widgets.toml` change.
 - **Clicks**: `popup()` toggles a menu (`text`/`width`/`height`/
   `items`/`ui`); else `on_press()` runs bare. Cell `ui.button`s call
   that widget's `on_action(key)` directly; popup rows do the same.

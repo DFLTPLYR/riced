@@ -632,6 +632,12 @@ pub(crate) enum WidgetNode {
     /// Purely visual (no action) — scripts return it first, then swap
     /// in real content once cached data arrives.
     Spinner,
+    /// Horizontal hairline between items (`iced.separator()`), painted
+    /// in the theme border color. Always full-width (iced rules fill
+    /// their axis); only thickness (`height`, default 1px) chains.
+    Separator {
+        height: f32,
+    },
 }
 
 /// Box sizing for `ui` nodes: a number is px (`Fixed`), `"fill"` /
@@ -828,6 +834,11 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                     })
                 }
                 "spinner" => Ok(WidgetNode::Spinner),
+                "separator" => Ok(WidgetNode::Separator {
+                    height: opt_number(t, "height", "ui.separator()")?
+                        .unwrap_or(1.0)
+                        .max(1.0),
+                }),
                 other => Err(format!("unknown ui node type {other:?}")),
             }
         }
@@ -952,6 +963,15 @@ pub(crate) fn build_node(
             lucide_iced::bytes::LOADER_CIRCLE,
             size.max(1.0) * 1.5,
         )),
+        // Hairline: theme border color, full-width by rule design.
+        WidgetNode::Separator { height } => Ok(iced::widget::rule::horizontal(height.max(1.0))
+            .style(|_| iced::widget::rule::Style {
+                color: theme::border_color(),
+                radius: 0.0.into(),
+                fill_mode: iced::widget::rule::FillMode::Full,
+                snap: true,
+            })
+            .into()),
     }
 }
 
@@ -1013,9 +1033,10 @@ pub(crate) fn new_widget_lua() -> mlua::Result<Lua> {
     Ok(lua)
 }
 
-/// The `ui` constructors table, present in every widget state next to
-/// `sysinfo`/`gfxinfo`. Each call builds a plain description table —
-/// no iced objects cross into Lua; [`parse_node`] interprets them.
+/// The `iced` constructors table (plus legacy `ui` alias), present in
+/// every widget state next to `sysinfo`/`gfxinfo`. Each call builds a
+/// plain description table — no iced objects cross into Lua;
+/// [`parse_node`] interprets them.
 ///
 /// Every node type gets its own metatable with iced-spelled chainable
 /// setters, so Lua reads like iced builders: `ui.progress(0.5)`
@@ -1166,6 +1187,7 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
         ],
     )?;
     let mt_bare = mt_for(lua, &[])?;
+    let mt_separator = mt_for(lua, &[("height", setter(lua, "height", &["separator"])?)])?;
     lua.globals().set("_riced_ui_mt_text", mt_text.clone())?;
     lua.globals()
         .set("_riced_ui_mt_rowcol", mt_rowcol.clone())?;
@@ -1174,6 +1196,8 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     lua.globals()
         .set("_riced_ui_mt_progress", mt_progress.clone())?;
     lua.globals().set("_riced_ui_mt_bare", mt_bare.clone())?;
+    lua.globals()
+        .set("_riced_ui_mt_separator", mt_separator.clone())?;
     // Move clones into the constructor closures (mlua closures are
     // 'static): each captures only its own metatable.
     let (mt_text_c, mt_bare_c, mt_rowcol_c, mt_button_c, mt_progress_c) = (
@@ -1240,7 +1264,75 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
             node(lua, "spinner", mt_bare_c2.clone(), |_| Ok(()))
         })?,
     )?;
-    lua.globals().set("ui", ui)
+    let mt_separator_c = mt_separator.clone();
+    ui.set(
+        "separator",
+        lua.create_function(move |lua, _: Value| {
+            node(lua, "separator", mt_separator_c.clone(), |_| Ok(()))
+        })?,
+    )?;
+    // Named component registry (per state): `iced.define(name, fn)`
+    // stores a builder, `iced.use(name, props)` calls it and returns
+    // the node table (metatable intact, so chaining still works).
+    // Non-table or typeless returns error naming the component.
+    lua.globals()
+        .set("_riced_components", lua.create_table()?)?;
+    ui.set(
+        "define",
+        lua.create_function(|lua, (name, func): (String, Function)| {
+            let registry: Table = lua.globals().get("_riced_components")?;
+            if registry.get::<Value>(name.clone())? != Value::Nil {
+                eprintln!("iced: component {name:?} redefined (last wins)");
+            }
+            registry.set(name, func)?;
+            Ok(())
+        })?,
+    )?;
+    ui.set(
+        "use",
+        lua.create_function(|lua, (name, props): (String, Value)| {
+            let registry: Table = lua.globals().get("_riced_components")?;
+            let func: Function = match registry.get::<Value>(name.clone())? {
+                Value::Function(f) => f,
+                _ => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "unknown component {name:?} — iced.define it first"
+                    )));
+                }
+            };
+            let out: Value = func.call(props)?;
+            match &out {
+                Value::Table(t) => match t.get::<Value>("type")? {
+                    Value::String(_) => Ok(out),
+                    other => Err(mlua::Error::RuntimeError(format!(
+                        "component {name:?} must return a ui node table, got type {}",
+                        lua_value_kind(&other)
+                    ))),
+                },
+                _ => Err(mlua::Error::RuntimeError(format!(
+                    "component {name:?} must return a ui node table, got {}",
+                    lua_value_kind(&out)
+                ))),
+            }
+        })?,
+    )?;
+    // Canonical namespace: `iced` owns every constructor above (plus
+    // `define`/`use`). Bare `ui` stays as the same table so existing
+    // scripts keep working untouched.
+    lua.globals().set("iced", ui.clone())?;
+    lua.globals().set("ui", ui)?;
+    // Shared component library (`components/*.lua`, see
+    // `config::components_source`): runs in every state so widgets and
+    // the notification renderer share `iced.define` components. The
+    // registry above is fresh per injection, so re-injection redefines
+    // silently. A broken library logs once and leaves bare `iced` —
+    // widgets still render, components just stay undefined.
+    if let Some(source) = crate::config::components_source()
+        && let Err(e) = lua.load(&source).set_name("@components").exec()
+    {
+        eprintln!("components: {e}");
+    }
+    Ok(())
 }
 
 /// Load a widget script into its state and verify it defines `render`.
@@ -3945,6 +4037,7 @@ mod tests {
                 width: NodeLength::Fixed(120.0),
                 height: None,
             },
+            WidgetNode::Separator { height: 2.0 },
         ] {
             let _ = build_node(&node, size, no_msg).expect("builds");
         }
@@ -3957,6 +4050,100 @@ mod tests {
             padding: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
+    }
+
+    #[test]
+    fn separator_parses_defaults_and_chains() {
+        let lua = new_widget_lua().expect("sandbox");
+        // `iced` is the canonical table; bare `ui` is the same table.
+        let same: bool = lua.load("return ui == iced").eval().expect("alias");
+        assert!(same);
+        for (src, height) in [
+            ("return iced.separator()", 1.0),
+            ("return iced.separator():height(3)", 3.0),
+            ("return ui.separator()", 1.0),
+        ] {
+            let value: Value = lua.load(src).eval().expect("eval");
+            let node = parse_node(&value).expect("parse");
+            assert_eq!(node, WidgetNode::Separator { height }, "{src}");
+        }
+    }
+
+    #[test]
+    fn iced_define_and_use_round_trip_with_chaining() {
+        let lua = new_widget_lua().expect("sandbox");
+        lua.load(
+            r#"
+            iced.define("__t_stat", function(props)
+                return iced.row({ iced.icon(props.icon), iced.text(props.value) })
+            end)
+            "#,
+        )
+        .exec()
+        .expect("define");
+        // Chaining survives `use` (component returns a constructor value).
+        let value: Value = lua
+            .load(r#"return iced.use("__t_stat", { icon = "cpu", value = "42%" }):width("fill")"#)
+            .eval()
+            .expect("use");
+        match parse_node(&value).expect("parse") {
+            WidgetNode::Row {
+                width: NodeLength::Fill,
+                children,
+                ..
+            } => assert_eq!(children.len(), 2),
+            other => panic!("unexpected {other:?}"),
+        }
+        // Unknown names and non-node returns error naming the component.
+        let err = lua
+            .load(r#"return iced.use("__t_missing", {})"#)
+            .eval::<Value>()
+            .expect_err("missing");
+        assert!(err.to_string().contains("__t_missing"), "{err}");
+        lua.load(r#"iced.define("__t_bad", function() return 42 end)"#)
+            .exec()
+            .expect("define bad");
+        let err = lua
+            .load(r#"return iced.use("__t_bad", {})"#)
+            .eval::<Value>()
+            .expect_err("bad");
+        assert!(err.to_string().contains("__t_bad"), "{err}");
+    }
+
+    #[test]
+    fn seed_components_define_working_builders() {
+        use crate::config::{SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_MENU};
+        let lua = new_widget_lua().expect("sandbox");
+        for source in [
+            SEED_COMPONENT_DEFINE,
+            SEED_COMPONENT_CARD,
+            SEED_COMPONENT_MENU,
+        ] {
+            lua.load(source).exec().expect("seed loads");
+        }
+        // spacer from the docs file, card and menu from their files.
+        for src in [
+            r#"return iced.use("spacer", { h = 4 })"#,
+            r#"return iced.use("card", { title = "T", body = "b" })"#,
+            r#"return iced.use("menu", { items = { { label = "Go", action = "go" } } })"#,
+        ] {
+            let value: Value = lua.load(src).eval().expect("use");
+            parse_node(&value).expect("parses");
+        }
+        // menu carries the action key through to a button.
+        let value: Value = lua
+            .load(r#"return iced.use("menu", { items = { { label = "Go", action = "go" } } })"#)
+            .eval()
+            .expect("menu");
+        match parse_node(&value).expect("parse") {
+            WidgetNode::Column { children, .. } => {
+                assert!(matches!(
+                    &children[..],
+                    [WidgetNode::Button { action, .. }] if action == "go"
+                ));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

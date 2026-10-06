@@ -768,7 +768,7 @@ pub fn config_path() -> PathBuf {
 /// end
 /// ```
 ///
-/// ## `ui.*` constructors
+/// ## `iced.*` constructors (`ui` is the same table, kept as alias)
 ///
 /// - `ui.text(s)`: themed text (icon placeholders resolved).
 /// - `ui.icon(name)`: full Lucide set by name (`"bot"`,
@@ -783,6 +783,8 @@ pub fn config_path() -> PathBuf {
 /// - `ui.progress(0.0-1.0 [, width])`: bar, clamped, 120px default.
 /// - `ui.spinner()`: loading ring for slow fetches — return it first,
 ///   swap in cached data on later ticks (see clinepass seed).
+/// - `ui.separator()`: horizontal hairline in the theme border color.
+///   Always full-width; only `:height()` chains (thickness, 1px default).
 ///
 /// ## Chaining (iced-spelled setters)
 ///
@@ -808,9 +810,11 @@ pub fn config_path() -> PathBuf {
 /// `row`/`column` → `:spacing()`, `:width()`, `:height()`; `button` →
 /// `:width()`, `:height()`, `:padding()`; `progress` → `:width()`
 /// (same as the second constructor arg), `:height()` (bar thickness =
-/// iced `girth`). Calling a setter the type doesn't own (e.g.
-/// `:padding()` on progress) fails at eval — typos stay visible.
-/// Wrong-typed values error at parse naming the field.
+/// iced `girth`); `separator` → `:height()` only (rules fill their
+/// axis, so `:width()` fails naming the setter). Calling a setter the
+/// type doesn't own (e.g. `:padding()` on progress) fails at eval —
+/// typos stay visible. Wrong-typed values error at parse naming the
+/// field.
 ///
 /// ## List transitions (QML-`ListView` add/remove)
 ///
@@ -823,9 +827,32 @@ pub fn config_path() -> PathBuf {
 /// same component keyed `(output, id)`, sliding from the anchored edge.
 /// Label-only edits on the same key swap instantly. First paint
 /// settles with no animation; durations follow the global animation
-/// speed. Geometric slides only — iced offers no opacity widget, and
-/// surviving siblings reflow instantly (no `displaced`). Popup trees
-/// stay static for now.
+/// speed. Slides draw through a GPU offset (layout never reflows
+/// mid-transition) and fades ride style alpha; survivors glide toward
+/// their new slot (`displaced`). Popup trees stay static for now.
+///
+/// ## Components: `iced.define` / `iced.use` + `components/`
+///
+/// Reusable Lua builders over the constructors above, for cells,
+/// popups, and notification cards alike. `components/*.lua` (sorted)
+/// runs in every widget state after `iced` is built:
+///
+/// ```lua
+/// iced.define("stat", function(props)
+///     return iced.row({ iced.icon(props.icon), iced.text(props.value) })
+/// end)
+///
+/// function render()
+///     return iced.use("stat", { icon = "cpu", value = "42%" }):width("fill")
+/// end
+/// ```
+///
+/// Components must return `iced.*` constructor values (chaining and
+/// parsing keep working); unknown names and non-node returns error
+/// naming the component. Seeds ship `spacer`, `card`, and `menu`
+/// (`00-define.lua`, `10-card.lua`, `20-menu.lua` — never overwritten).
+/// Editing any component rebuilds every Lua state on the next tick,
+/// like a `widgets.toml` change.
 ///
 /// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
 ///
@@ -1092,6 +1119,81 @@ function on_action(name)
 end
 "#;
 
+/// Seed component library docs (`components/00-define.lua`): how
+/// `iced.define` / `iced.use` work. Pure documentation plus a trivial
+/// `spacer` — the file teaches the pattern every other component uses.
+pub(crate) const SEED_COMPONENT_DEFINE: &str = r#"-- Shared components: define once, use in any widget (or the
+-- notification card). Files run alphabetically after `iced` is built,
+-- so later files may use earlier ones. Edit live — every widget state
+-- rebuilds on save. Delete a file to drop its components.
+--
+-- Define a component: props in, ui tree out. Return values MUST come
+-- from `iced.*` constructors (plain tables lose chaining and fail to
+-- parse). `iced.use` checks this and names the offender.
+--
+--     iced.define("stat", function(props)
+--         props = props or {}
+--         return iced.row({
+--             iced.icon(props.icon or "info"),
+--             iced.text(props.value or "--"),
+--         })
+--     end)
+--
+-- Use it anywhere a ui tree works (cells, popups, notifications):
+--
+--     return iced.use("stat", { icon = "cpu", value = "42%" }):width("fill")
+--
+-- Unknown names and non-node returns are eval errors naming the
+-- component, so typos stay visible instead of rendering blank.
+iced.define("spacer", function(props)
+    props = props or {}
+    return iced.text(""):height(props.h or 8)
+end)
+"#;
+
+/// Seed `card` component (`components/10-card.lua`): titled card body,
+/// the shape behind notification cards and stats popups.
+pub(crate) const SEED_COMPONENT_CARD: &str = r#"-- Card: title row plus body, for popups and panels.
+-- props: { title, body, icon } — body is text or a ui tree.
+--     iced.use("card", { title = "Cline Pass", icon = "bot",
+--                         body = iced.text("42%") })
+iced.define("card", function(props)
+    props = props or {}
+    local body = props.body
+    if type(body) == "string" then
+        body = iced.text(body)
+    end
+    local head = iced.text(props.title or ""):size(14)
+    if props.icon then
+        head = iced.row({ iced.icon(props.icon), head })
+    end
+    return iced.column({
+        head,
+        iced.separator(),
+        body or iced.text(""),
+    })
+end)
+"#;
+
+/// Seed `menu` component (`components/20-menu.lua`): uniform action
+/// rows from `{ label, action }` items, the session-menu shape.
+pub(crate) const SEED_COMPONENT_MENU: &str = r#"-- Menu: one full-width button per { label, action } item.
+-- Clicks land in the owning widget's on_action(action), exactly like
+-- popup `items` rows.
+--     iced.use("menu", { items = {
+--         { label = "Reboot", action = "reboot" },
+--     } })
+iced.define("menu", function(props)
+    props = props or {}
+    local rows = {}
+    for _, item in ipairs(props.items or {}) do
+        rows[#rows + 1] = iced.button(item.label or "?", item.action or "")
+            :width("fill")
+    end
+    return iced.column(rows)
+end)
+"#;
+
 /// Seed notification renderer: `render(n)` layouts one notification
 /// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
 /// visible cards re-render on save; delete the file to restore the
@@ -1265,6 +1367,111 @@ pub fn widgets_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("widgets"))
 }
 
+/// Shared component library dir (`~/.config/riced/widgets/components/`):
+/// every `*.lua` file (sorted) is concatenated and executed in each
+/// widget state after `iced` is built, so `iced.define` components are
+/// available to all widgets and the notification renderer. No
+/// `require` needed (and none available — the sandbox nils it).
+pub fn components_dir() -> PathBuf {
+    widgets_dir().join("components")
+}
+
+/// Concatenated `components/*.lua` source (sorted by filename, tagged
+/// with `-- file:` separators for error lines), or `None` when the
+/// dir is missing/empty. Tested via [`components_source_in`].
+pub fn components_source() -> Option<String> {
+    components_source_in(&components_dir())
+}
+
+/// Newest mtime across `components/*.lua` (folder hot-reload stamp),
+/// or `None` when the dir is missing/empty.
+pub fn components_mtime() -> Option<SystemTime> {
+    components_mtime_in(&components_dir())
+}
+
+fn lua_files_sorted(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+        .collect();
+    files.sort();
+    files
+}
+
+fn components_source_in(dir: &std::path::Path) -> Option<String> {
+    let files = lua_files_sorted(dir);
+    if files.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for path in &files {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                out.push_str(&format!("-- file: {name}\n{content}"));
+                if !content.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Err(e) => eprintln!("components: cannot read {}: {e}", path.display()),
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn components_mtime_in(dir: &std::path::Path) -> Option<SystemTime> {
+    lua_files_sorted(dir)
+        .iter()
+        .filter_map(|p| read_mtime(p))
+        .max()
+}
+
+/// Hot-reload check for the components dir: fresh stamp when any
+/// `*.lua` changed (or appeared) since `known`. Never fails.
+pub fn poll_components(known_mtime: &Option<SystemTime>) -> Option<Option<SystemTime>> {
+    let mtime = components_mtime();
+    if mtime != *known_mtime {
+        return Some(mtime);
+    }
+    None
+}
+
+/// Seed one component file when missing (never overwrite).
+fn seed_component(dir: &std::path::Path, name: &str, content: &str) {
+    let path = dir.join(name);
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, content) {
+        eprintln!("components: cannot write {}: {e}", path.display());
+    }
+}
+
+/// Restore every seed component that is missing (never overwrite).
+fn seed_components_in(dir: &std::path::Path) {
+    for (name, content) in [
+        ("00-define.lua", SEED_COMPONENT_DEFINE),
+        ("10-card.lua", SEED_COMPONENT_CARD),
+        ("20-menu.lua", SEED_COMPONENT_MENU),
+    ] {
+        seed_component(dir, name, content);
+    }
+}
+
+/// Restore seed components under the live components dir.
+fn seed_components() {
+    seed_components_in(&components_dir());
+}
+
 impl WidgetsFile {
     fn parse(content: &str) -> Vec<WidgetDef> {
         match toml::from_str::<WidgetsFile>(content) {
@@ -1309,9 +1516,11 @@ impl WidgetsFile {
         }
     }
 
-    /// Restore every seed script under the live widgets dir.
+    /// Restore every seed script under the live widgets dir, plus the
+    /// shared components.
     fn seed_all() {
         Self::seed_all_in(&widgets_dir());
+        seed_components();
     }
 
     /// Load from [`widgets_path`]. Creates the seeded files (plus
@@ -1930,6 +2139,59 @@ mod tests {
             std::fs::read_to_string(dir.join("clock.lua")).unwrap(),
             "-- mine"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn components_source_concatenates_sorted_lua() {
+        let dir = std::env::temp_dir().join(format!("riced-components-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Missing/empty dir reads as no library.
+        assert!(components_source_in(&dir).is_none());
+        assert!(components_mtime_in(&dir).is_none());
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(components_source_in(&dir).is_none());
+        std::fs::write(dir.join("20-b.lua"), "b = 2\n").unwrap();
+        std::fs::write(dir.join("10-a.lua"), "a = 1\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored\n").unwrap();
+        let source = components_source_in(&dir).expect("source");
+        // Sorted: a before b; non-lua files skipped; file tags present.
+        assert!(
+            source.find("-- file: 10-a.lua").unwrap() < source.find("-- file: 20-b.lua").unwrap()
+        );
+        assert!(!source.contains("ignored"));
+        assert!(components_mtime_in(&dir).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn components_seeds_restore_without_overwriting() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-components-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        seed_components_in(&dir);
+        assert!(dir.join("00-define.lua").is_file());
+        assert!(dir.join("10-card.lua").is_file());
+        assert!(dir.join("20-menu.lua").is_file());
+        std::fs::write(dir.join("10-card.lua"), "-- mine").unwrap();
+        seed_components_in(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("10-card.lua")).unwrap(),
+            "-- mine"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn components_mtime_tracks_newest_file() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-components-mtime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(components_mtime_in(&dir).is_none());
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(components_mtime_in(&dir).is_none());
+        std::fs::write(dir.join("10-a.lua"), "a = 1\n").unwrap();
+        assert!(components_mtime_in(&dir).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

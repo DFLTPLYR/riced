@@ -78,6 +78,9 @@ pub struct Plots {
     // Bars reference entries by name; hot-reloaded like the config.
     pub(crate) widgets: Vec<crate::config::WidgetDef>,
     pub(crate) widgets_mtime: Option<std::time::SystemTime>,
+    // Shared component library (`components/*.lua`) stamp: edits rebuild
+    // every Lua state (widgets + notification renderer) on the next tick.
+    pub(crate) components_mtime: Option<std::time::SystemTime>,
     // Lua widget runtimes keyed by def name, last rendered text, last
     // run tick, and last error (errors log only on change, never per
     // tick). States are rebuilt on every widgets.toml hot-reload.
@@ -187,6 +190,7 @@ impl Plots {
             config_mtime,
             widgets,
             widgets_mtime,
+            components_mtime: crate::config::components_mtime(),
             config_dirty: false,
             config_save_seq: 0,
             theme_mtime,
@@ -890,6 +894,20 @@ impl Plots {
                     self.widgets_mtime = mtime;
                     return Command::batch(vec![
                         Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(defs))),
+                        self.notify_parse_error(),
+                    ]);
+                }
+                // Shared components hot-reload the same way: any
+                // `components/*.lua` change rebuilds every Lua state
+                // (same defs, fresh runtimes) and drops the cached
+                // notification renderer so it re-execs the library.
+                if let Some(mtime) = crate::config::poll_components(&self.components_mtime) {
+                    self.components_mtime = mtime;
+                    self.notify_lua = None;
+                    return Command::batch(vec![
+                        Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(
+                            self.widgets.clone(),
+                        ))),
                         self.notify_parse_error(),
                     ]);
                 }
