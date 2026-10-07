@@ -975,6 +975,38 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn trim_memory_releases_churned_arenas() {
+        // Churn ~64MB through small (arena, not mmap) blocks, drop it
+        // all, then trim: RSS must fall substantially. Median-of-three
+        // samples each side; sibling tests share this process.
+        fn median(mut v: Vec<u64>) -> u64 {
+            v.sort_unstable();
+            v[v.len() / 2]
+        }
+        let sample = || (0..3).map(|_| rss_kb()).collect::<Vec<_>>();
+        let mut held = Vec::new();
+        for _ in 0..2048 {
+            let mut block = vec![0u8; 32 * 1024];
+            // Touch every page: zero-filled allocations fault lazily.
+            for byte in block.iter_mut().step_by(4096) {
+                *byte = 1;
+            }
+            std::hint::black_box(block.as_mut_ptr());
+            held.push(block);
+        }
+        let peak = median(sample());
+        drop(held);
+        trim_memory();
+        let after = median(sample());
+        let released = peak.saturating_sub(after);
+        assert!(
+            released > 32 * 1024,
+            "trim released only {released} KiB (peak {peak}, after {after})"
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn repeated_regen_rss_stays_flat() {
         let _guard = SERIAL.lock().unwrap();
