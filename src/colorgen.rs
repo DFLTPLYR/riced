@@ -194,6 +194,24 @@ fn combine_views(views: &[image::RgbImage]) -> Option<PathBuf> {
 // Generation: wallpaper views → reshell {light, dark} JSON
 // ---------------------------------------------------------------------------
 
+/// Release fully-free allocator pages back to the OS after a batch
+/// job (theme regen peaks in the tens of MB of transient image
+/// buffers). glibc arenas otherwise retain the high-water RSS on the
+/// pooled worker thread indefinitely — not a leak, but indistinguishable
+/// from one in a task manager. No-op off glibc Linux.
+pub(crate) fn trim_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // Best effort: failure just keeps the status quo.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
 /// Build the dynamic theme from rasterized wallpaper views (see
 /// [`render_views`]): downscale the stitched strip to 128x128, extract the
 /// seed color, and build both M3 schemes. Returns the reshell-format payload
@@ -944,6 +962,47 @@ mod tests {
         assert_eq!((views[1].width(), views[1].height()), (40, 40));
         assert_eq!(views[0].get_pixel(0, 0).0, [10, 20, 30]);
         assert_eq!(views[1].get_pixel(0, 0).0, [200, 100, 50]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rss_kb() -> u64 {
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map(|pages| pages * 4)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn repeated_regen_rss_stays_flat() {
+        let _guard = SERIAL.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("riced-genleak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Realistic wallpaper pixels so arena effects show.
+        let img = test_image(&dir, "wall.png", 512, [0x45, 0x85, 0x88]);
+        let images = std::slice::from_ref(&img);
+        let mut rss = Vec::new();
+        for _ in 0..14 {
+            let views = render_views(&[(0.0, 0.0, 512.0, 512.0)], images);
+            let generated = generate_from_views(&views, "content", true).unwrap();
+            std::hint::black_box(generated);
+            rss.push(rss_kb());
+        }
+        // Medians, not endpoints: sibling tests share this process and
+        // a single transient spike from another thread must not fail
+        // us — but a true per-regen leak shifts the whole second half.
+        // (Warmup iterations excluded: first-touch inits are one-time.)
+        fn median(mut v: Vec<u64>) -> u64 {
+            v.sort_unstable();
+            v[v.len() / 2]
+        }
+        let early = median(rss[4..9].to_vec());
+        let late = median(rss[9..14].to_vec());
+        let growth = late.saturating_sub(early);
+        assert!(growth < 1024, "regen RSS grew {growth} KiB: {rss:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

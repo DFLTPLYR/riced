@@ -430,21 +430,28 @@ impl Plots {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let views = crate::colorgen::render_views(&rects, &images);
-                    match crate::colorgen::generate_from_views(&views, &variant, darkmode) {
-                        Ok(g) => {
-                            let mut errors = Vec::new();
-                            if let Err(e) = crate::colorgen::write_dynamic_theme(&g.payload) {
-                                errors.push(format!("cannot write dynamic.json: {e}"));
-                                return errors;
-                            }
-                            if let Some(dir) = templates {
+                    let errors =
+                        match crate::colorgen::generate_from_views(&views, &variant, darkmode) {
+                            Ok(g) => {
+                                let mut errors = Vec::new();
+                                if let Err(e) = crate::colorgen::write_dynamic_theme(&g.payload) {
+                                    errors.push(format!("cannot write dynamic.json: {e}"));
+                                } else if let Some(dir) = templates {
+                                    errors.extend(crate::colorgen::process_templates(
+                                        &dir,
+                                        &g.variables,
+                                    ));
+                                }
                                 errors
-                                    .extend(crate::colorgen::process_templates(&dir, &g.variables));
                             }
-                            errors
-                        }
-                        Err(e) => vec![e],
-                    }
+                            Err(e) => vec![e],
+                        };
+                    // Views + quantization buffers peak in the tens of MB
+                    // and are all dropped here; without a trim glibc
+                    // arenas retain the high-water RSS forever on this
+                    // pooled worker thread.
+                    crate::colorgen::trim_memory();
+                    errors
                 })
                 .await
                 .unwrap_or_else(|e| vec![format!("theme regen failed: {e}")])
