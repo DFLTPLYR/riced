@@ -775,11 +775,21 @@ pub(crate) fn build_with_lists(
                     .map(|(_, c)| build_with_lists(c, widget, size, message, runtime, lists))
                     .collect::<Result<Vec<_>, _>>()?
             };
+            // from_vecs deliberately does not infer sizing from children.
+            // Match iced's push/extend semantics before installing the keyed
+            // delegates, otherwise a shrink list of fill buttons gets width 0.
+            let (list_width, list_height) = elements.iter().fold(
+                (width.clone().iced(), height.clone().iced()),
+                |(w, h), child| {
+                    let hints = child.as_widget().size_hint();
+                    (w.enclose(hints.width), h.enclose(hints.height))
+                },
+            );
             if *horizontal {
                 Ok(iced::widget::Row::with_children(elements)
                     .spacing(*spacing)
-                    .width(width.clone().iced())
-                    .height(height.clone().iced())
+                    .width(list_width)
+                    .height(list_height)
                     .into())
             } else {
                 use std::hash::{Hash, Hasher};
@@ -796,8 +806,8 @@ pub(crate) fn build_with_lists(
                 }
                 Ok(iced::widget::keyed::Column::from_vecs(identities, elements)
                     .spacing(*spacing)
-                    .width(width.clone().iced())
-                    .height(height.clone().iced())
+                    .width(list_width)
+                    .height(list_height)
                     .into())
             }
         }
@@ -811,10 +821,11 @@ pub(crate) fn build_with_lists(
                 .iter()
                 .map(|c| build_with_lists(c, widget, size, message, runtime, lists))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(iced::widget::Row::with_children(elements)
+            Ok(iced::widget::Row::new()
                 .spacing(*spacing)
                 .width(width.clone().iced())
                 .height(height.clone().iced())
+                .extend(elements)
                 .into())
         }
         WidgetNode::Column {
@@ -827,10 +838,11 @@ pub(crate) fn build_with_lists(
                 .iter()
                 .map(|c| build_with_lists(c, widget, size, message, runtime, lists))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(iced::widget::Column::with_children(elements)
+            Ok(iced::widget::Column::new()
                 .spacing(*spacing)
                 .width(width.clone().iced())
                 .height(height.clone().iced())
+                .extend(elements)
                 .into())
         }
         WidgetNode::Container {

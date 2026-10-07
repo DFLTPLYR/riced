@@ -681,6 +681,22 @@ fn button_base(background: Color, text_color: Color, radius: f32) -> button::Sty
     }
 }
 
+/// Press feedback uses a primary-tinted surface and a primary border.
+/// Explicit label tints remain readable because the fill stays mostly surface.
+fn pressed_menu_style(a: &ActiveTheme, text: Color, radius: f32) -> button::Style {
+    let surface = a.surface_variant;
+    let tint = 0.2;
+    let background = Color::from_rgba(
+        surface.r * (1.0 - tint) + a.primary.r * tint,
+        surface.g * (1.0 - tint) + a.primary.g * tint,
+        surface.b * (1.0 - tint) + a.primary.b * tint,
+        surface.a,
+    );
+    let mut style = button_base(background, text, radius);
+    style.border.color = a.primary;
+    style
+}
+
 /// Context-menu / generic raised button, mirroring reshell `Menu` items
 /// (`primary` label, `surface` base, `surface_variant` + `on_surface` when
 /// highlighted). `rounding` comes from config
@@ -690,11 +706,12 @@ pub fn menu_button(rounding: f32) -> impl Fn(&Theme, button::Status) -> button::
     move |_, status| {
         let a = active();
         match status {
-            button::Status::Hovered | button::Status::Pressed => button_base(
+            button::Status::Hovered => button_base(
                 shade(&a, Class::BgSurfaceVariant),
                 shade(&a, Class::Text),
                 rounding,
             ),
+            button::Status::Pressed => pressed_menu_style(&a, shade(&a, Class::Text), rounding),
             button::Status::Disabled => button_base(
                 shade(&a, Class::BgSurface),
                 shade(&a, Class::TextDisabled),
@@ -719,9 +736,10 @@ pub fn menu_button_tinted(
     move |_, status| {
         let a = active();
         match status {
-            button::Status::Hovered | button::Status::Pressed => {
+            button::Status::Hovered => {
                 button_base(shade(&a, Class::BgSurfaceVariant), text, rounding)
             }
+            button::Status::Pressed => pressed_menu_style(&a, text, rounding),
             button::Status::Disabled => button_base(shade(&a, Class::BgSurface), text, rounding),
             button::Status::Active => button_base(shade(&a, Class::BgSurface), text, rounding),
         }
@@ -926,6 +944,30 @@ mod tests {
         assert_eq!(theme.to_string(), "dracula");
         assert_eq!(theme.palette().background, parse_hex("#282a36").unwrap());
         assert_eq!(theme.palette().text, parse_hex("#f8f8f2").unwrap());
+    }
+
+    #[test]
+    fn menu_buttons_have_distinct_hover_and_pressed_feedback() {
+        let _guard = SERIAL.lock().unwrap();
+        let theme = theme_for(&ThemeConfig {
+            name: "dracula".into(),
+            ..Default::default()
+        });
+        let style = menu_button(RADIUS);
+        let active = style(&theme, button::Status::Active);
+        let hovered = style(&theme, button::Status::Hovered);
+        let pressed = style(&theme, button::Status::Pressed);
+        assert_ne!(active.background, hovered.background);
+        assert_ne!(hovered.background, pressed.background);
+        assert_ne!(hovered.border.color, pressed.border.color);
+        let tint = Color::from_rgb(1.0, 0.0, 0.5);
+        let tinted = menu_button_tinted(RADIUS, tint);
+        assert_eq!(tinted(&theme, button::Status::Hovered).text_color, tint);
+        assert_eq!(tinted(&theme, button::Status::Pressed).text_color, tint);
+        assert_ne!(
+            tinted(&theme, button::Status::Hovered).background,
+            tinted(&theme, button::Status::Pressed).background
+        );
     }
 
     #[test]

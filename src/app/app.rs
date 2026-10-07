@@ -38,7 +38,15 @@ fn throttled_graft(
         *last = now;
         return Some(Plant::Graft(id, event));
     }
-    if matches!(event, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) {
+    if matches!(
+        event,
+        Event::Mouse(
+            iced::mouse::Event::ButtonPressed(_)
+                | iced::mouse::Event::ButtonReleased(_)
+                | iced::mouse::Event::CursorEntered
+                | iced::mouse::Event::CursorLeft
+        )
+    ) {
         return Some(Plant::Graft(id, event));
     }
     None
@@ -1256,8 +1264,14 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::TopPlot(TopEvent::Released(..))
         | Plant::TopPlot(TopEvent::Remove(..)) => Scope::All,
         Plant::Graft(_, Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => Scope::All,
-        // CursorMoved is handled via throttled background tick; no direct redraw to avoid flood
-        Plant::Graft(_, Event::Mouse(iced::mouse::Event::CursorMoved { .. })) => Scope::None,
+        // Pointer movement is throttled by the subscription; redraw only
+        // its own surface so native hover/pressed status survives rebuilds.
+        Plant::Graft(id, Event::Mouse(
+            iced::mouse::Event::CursorMoved { .. }
+            | iced::mouse::Event::CursorEntered
+            | iced::mouse::Event::CursorLeft
+            | iced::mouse::Event::ButtonPressed(_)
+        )) => Scope::Window(*id),
         // ConfigTick is a cheap mtime check — redraw only on actual reload.
         // IpcPoll just stats an (usually absent) file — same, no redraw.
         // TemplatesDone only logs hook/template errors; the theme itself
@@ -1286,5 +1300,49 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::Graft(_, _) => Scope::None,
         Plant::Wayland(_) => Scope::All,
         _ => Scope::All,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_feedback_redraws_only_its_window() {
+        let id = iced::window::Id::unique();
+        for event in [
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(1.0, 2.0),
+            },
+            iced::mouse::Event::CursorEntered,
+            iced::mouse::Event::CursorLeft,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        ] {
+            assert_eq!(
+                redraw_scope(&Plant::Graft(id, Event::Mouse(event))),
+                Scope::Window(id)
+            );
+        }
+        assert_eq!(
+            redraw_scope(&Plant::Graft(
+                id,
+                Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left
+                ))
+            )),
+            Scope::All
+        );
+    }
+
+    #[test]
+    fn captured_button_presses_still_schedule_visual_feedback() {
+        let id = iced::window::Id::unique();
+        let message = throttled_graft(
+            Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            iced::event::Status::Captured,
+            id,
+        )
+        .expect("press event");
+        assert_eq!(redraw_scope(&message), Scope::Window(id));
     }
 }

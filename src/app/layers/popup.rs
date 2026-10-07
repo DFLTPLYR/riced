@@ -727,6 +727,85 @@ mod tests {
     use crate::app::layers::top::NodeLength;
 
     #[test]
+    fn session_menu_delegates_have_visible_layout_bounds() {
+        use crate::app::layers::{listview::ListView, top};
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        let lua = top::new_widget_lua().unwrap();
+        for (_, source) in crate::config::builtin_component_files() {
+            lua.load(&source).exec().unwrap();
+        }
+        top::load_widget_script(&lua, "system", crate::config::SEED_SYSTEM_LUA).unwrap();
+        let content =
+            Popup::parse_popup_content(top::call_lua_value(&lua, "popup").unwrap()).unwrap();
+        let tree = content.tree.unwrap();
+        let runtime = aura_anim::core::runtime::MotionRuntime::new();
+        let mut lists = HashMap::new();
+        lists.insert("session/session-actions".into(), ListView::new(32.0));
+        let popup_id = window::Id::unique();
+        let handler =
+            |key: String| Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(popup_id, key)));
+        let mut element =
+            top::build_with_lists(&tree, "session", 13.0, Some(&handler), &runtime, &lists)
+                .unwrap();
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .expect("software renderer");
+        let mut state = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut state,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(220.0, 300.0)),
+        );
+        let menu = &node.children()[2];
+        assert_eq!(menu.children().len(), 4);
+        assert!(menu.size().width > 100.0, "collapsed menu: {menu:?}");
+        for child in menu.children() {
+            assert!(
+                child.size().width > 100.0 && child.size().height > 20.0,
+                "invisible menu delegate: {child:?}"
+            );
+        }
+        let mut messages = Vec::new();
+        let viewport = iced::Rectangle::with_size(iced::Size::new(220.0, 300.0));
+        for child in menu.children() {
+            let point = Point::new(
+                menu.bounds().x + child.bounds().x + child.size().width / 2.0,
+                menu.bounds().y + child.bounds().y + child.size().height / 2.0,
+            );
+            for event in [
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut state,
+                    &iced::Event::Mouse(event),
+                    iced::advanced::Layout::new(&node),
+                    iced::mouse::Cursor::Available(point),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &viewport,
+                );
+            }
+        }
+        let actions: Vec<_> = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(id, key)))
+                    if id == popup_id =>
+                {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actions, ["suspend", "hibernate", "reboot", "poweroff"]);
+    }
+
+    #[test]
     fn slot_at_point_maps_cells_and_gaps() {
         // 3 cells across 300px with 4px gaps: cells are ~97.33px.
         let at = |x: f32| {

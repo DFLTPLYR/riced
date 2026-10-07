@@ -387,8 +387,11 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
             let motion = self.motion_of(runtime, key);
             let el = render(key, node, motion.clone(), true);
             // Keep the wrapper shape stable when ghost children appear/disappear.
-            let mut layer =
-                iced::widget::stack![super::motion::shifted(el, motion.x, motion.y, true)];
+            let base = super::motion::shifted(el, motion.x, motion.y, true);
+            let hints = base.as_widget().size_hint();
+            let mut layer = iced::widget::stack![base]
+                .width(iced::Length::Shrink.enclose(hints.width))
+                .height(iced::Length::Shrink.enclose(hints.height));
             if out.is_empty() {
                 for overlay in overlays.drain(..) {
                     layer = layer.push(overlay);

@@ -59,7 +59,9 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
         }
     }
     fn size_hint(&self) -> Size<Length> {
-        self.size()
+        // Ghosts allocate zero space but must not advertise a void hint:
+        // Stack::push discards void children, which would hide the exit.
+        self.content.as_widget().size_hint()
     }
     fn layout(
         &mut self,
@@ -98,6 +100,21 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
             shell,
             &(*viewport - self.offset),
         );
+        // iced Button caches its visual status on RedrawRequested, not in
+        // Tree state. After a view rebuild that cache is empty and the
+        // child may not request its first hover/press frame itself.
+        if matches!(
+            event,
+            Event::Mouse(
+                iced::mouse::Event::CursorMoved { .. }
+                    | iced::mouse::Event::CursorEntered
+                    | iced::mouse::Event::CursorLeft
+                    | iced::mouse::Event::ButtonPressed(_)
+                    | iced::mouse::Event::ButtonReleased(_)
+            )
+        ) {
+            shell.request_redraw();
+        }
     }
     fn draw(
         &self,
@@ -180,6 +197,126 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_buttons_request_first_hover_frame_and_render_each_status() {
+        use iced::advanced::renderer::Headless;
+        use std::sync::{Arc, Mutex};
+        let painted = Arc::new(Mutex::new(Vec::new()));
+        let recorded = painted.clone();
+        let runtime = aura_anim::core::runtime::MotionRuntime::new();
+        let list: super::super::listview::ListView<String, String> =
+            super::super::listview::ListView::new(32.0);
+        let mut elements = list.items(
+            &runtime,
+            &["item".into()],
+            &|_| Some("Item".into()),
+            move |_, label, _, _| {
+                let recorded = recorded.clone();
+                let content: Element<'static, String> =
+                    iced::widget::button(iced::widget::text(label))
+                        .width(Length::Fill)
+                        .on_press("clicked".into())
+                        .style(move |theme, status| {
+                            recorded.lock().unwrap().push(status);
+                            iced::widget::button::primary(theme, status)
+                        })
+                        .into();
+                content
+            },
+        );
+        let mut element = elements.remove(0);
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut tree = widget::Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(220.0, 300.0)),
+        );
+        let viewport = Rectangle::with_size(Size::new(220.0, 300.0));
+        let inside = mouse::Cursor::Available(iced::Point::new(20.0, 10.0));
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(20.0, 10.0),
+            }),
+            Layout::new(&node),
+            inside,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut shell,
+            &viewport,
+        );
+        assert_eq!(
+            shell.redraw_request(),
+            iced::window::RedrawRequest::NextFrame
+        );
+        for (event, cursor) in [
+            (None, inside),
+            (
+                Some(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                inside,
+            ),
+            (
+                Some(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                inside,
+            ),
+            (Some(mouse::Event::CursorLeft), mouse::Cursor::Unavailable),
+        ] {
+            if let Some(event) = event {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &Event::Mouse(event),
+                    Layout::new(&node),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &viewport,
+                );
+            }
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                )),
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &viewport,
+            );
+            iced::advanced::Renderer::reset(&mut renderer, viewport);
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &renderer::Style::default(),
+                Layout::new(&node),
+                cursor,
+                &viewport,
+            );
+        }
+        use iced::widget::button::Status;
+        assert_eq!(
+            *painted.lock().unwrap(),
+            [
+                Status::Hovered,
+                Status::Pressed,
+                Status::Hovered,
+                Status::Active
+            ]
+        );
+        assert_eq!(messages, ["clicked"]);
+    }
+
+    #[test]
     fn exit_delegate_does_not_reserve_layout_space() {
         let content: Element<'static, (), (), ()> =
             iced::widget::Space::new().width(80).height(100).into();
@@ -192,6 +329,29 @@ mod tests {
         );
         assert_eq!(layout.size(), Size::ZERO);
         assert_eq!(layout.children()[0].size(), Size::new(80.0, 100.0));
+    }
+
+    #[test]
+    fn stack_retains_zero_space_exit_delegate() {
+        let content: Element<'static, (), (), ()> =
+            iced::widget::Space::new().width(80).height(30).into();
+        let mut element: Element<'static, (), (), ()> =
+            iced::widget::stack![iced::widget::Space::new().width(100).height(50)]
+                .push(ghost(content, -200.0, 0.0))
+                .into();
+        let mut tree = widget::Tree::new(&element);
+        assert_eq!(
+            tree.children.len(),
+            2,
+            "Stack must not discard the ghost as void"
+        );
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(220.0, 300.0)),
+        );
+        assert_eq!(node.size(), Size::new(100.0, 50.0));
+        assert_eq!(node.children()[1].size(), Size::ZERO);
     }
 
     #[test]
