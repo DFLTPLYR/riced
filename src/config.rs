@@ -1137,11 +1137,12 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 /// in widgets.toml to use it.
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
-/// Seed Wayland overview (read-only): renders one text cell per
-/// workspace **on the first known output only**, bracketting the
-/// active one (`[2]`); the popup lists each workspace with its
-/// toplevels (`class — title`). No `on_action` exists — windows are
-/// never focused, moved, or closed from here.
+/// Seed Wayland overview: renders one button per workspace **on the
+/// first known output only**, bracketting the active one (`[2]`); the
+/// popup is a listview with one header row per workspace plus one row
+/// per toplevel (`class — title`). Clicks focus the workspace via
+/// `hyprctl dispatch workspace <id>` — windows are never moved or
+/// closed from here.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
 pub(crate) const SEED_HYPR_LUA: &str = include_str!("../scripts/widgets/hypr.lua");
 

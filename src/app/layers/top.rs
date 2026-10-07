@@ -4690,53 +4690,68 @@ mod tests {
         outputs.set(1, first).expect("set");
         wayland.set("outputs", outputs).expect("outputs");
         load_widget_script(&lua, "hypr", SEED_HYPR_LUA).expect("load");
-        // Bar strip: read-only text cells, active workspace bracketed.
-        // No buttons, no dispatch surface.
+        // Bar strip: one button per workspace, active bracketed.
         let value = call_lua_value(&lua, "view").expect("view");
         let node = parse_node(&value).expect("parse");
         match node {
             WidgetNode::Row { children, .. } => {
                 assert_eq!(children.len(), 2);
-                for (child, want) in children.iter().zip(["1", "[2]"]) {
+                for (child, want) in children.iter().zip([("1", "ws:3"), ("[2]", "ws:5")]) {
                     match child {
-                        WidgetNode::Text { content, .. } => assert_eq!(content, want),
-                        other => panic!("expected text, got {other:?}"),
+                        WidgetNode::Button { label, action, .. } => {
+                            assert_eq!((label.as_str(), action.as_str()), want)
+                        }
+                        other => panic!("expected button, got {other:?}"),
                     }
                 }
             }
             other => panic!("expected row, got {other:?}"),
         }
-        // The seed defines no actions at all (never a tiling manager).
-        let app: mlua::Table = lua.named_registry_value("riced.widget.app").expect("app");
-        let on_action: mlua::Value = app.get("on_action").expect("get");
+        // Clicking dispatches a workspace focus (recorded, not spawned).
+        let os: mlua::Table = lua.globals().get("os").expect("os");
+        os.set(
+            "execute",
+            lua.create_function(|lua, cmd: String| {
+                lua.globals().set("_dispatched", cmd)?;
+                Ok(true)
+            })
+            .expect("exec"),
+        )
+        .expect("set execute");
+        call_lua_named_action(&lua, "ws:3").expect("action");
+        let dispatched: String = lua.load("return _dispatched").eval().expect("dispatched");
         assert!(
-            matches!(on_action, mlua::Value::Nil),
-            "read-only: no on_action"
+            dispatched.contains("workspace 3"),
+            "dispatches focus, got {dispatched:?}"
         );
-        // Popup lists each workspace with its toplevels.
+        // Popup is a listview: workspace headers plus toplevel rows.
         let popup = call_lua_value(&lua, "popup").expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("popup tree");
-        let mut texts = Vec::new();
+        let mut labels = Vec::new();
         let mut stack = vec![&tree];
         while let Some(node) = stack.pop() {
             match node {
-                WidgetNode::Text { content, .. } => texts.push(content.clone()),
+                WidgetNode::Button { label, .. } => labels.push(label.clone()),
+                WidgetNode::Text { content, .. } => labels.push(content.clone()),
                 WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
                     stack.extend(children.iter());
+                }
+                WidgetNode::ListView { items, .. } => {
+                    stack.extend(items.iter().map(|(_, node)| node));
                 }
                 _ => {}
             }
         }
         assert!(
-            texts.iter().any(|t| t.contains("3 (DP-1)")),
-            "workspace header missing: {texts:?}"
+            labels.iter().any(|t| t.contains("3 (DP-1)")),
+            "workspace header missing: {labels:?}"
         );
         assert!(
-            texts
+            labels
                 .iter()
                 .any(|t| t.contains("foot") && t.contains("shell")),
-            "toplevel row missing: {texts:?}"
+            "toplevel row missing: {labels:?}"
         );
     }
 
