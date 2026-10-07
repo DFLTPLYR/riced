@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use wayland_client::backend::ObjectData;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -66,6 +67,9 @@ impl ToplevelCache {
 struct Listener {
     pending: HashMap<u32, Toplevel>,
     shared: Arc<Mutex<Vec<Toplevel>>>,
+    /// Set when the compositor sends `finished` (list revoked): the
+    /// dispatch loop exits and the snapshot clears.
+    finished: bool,
 }
 
 impl Listener {
@@ -103,6 +107,7 @@ fn listen(shared: Arc<Mutex<Vec<Toplevel>>>) {
     let mut listener = Listener {
         pending: HashMap::new(),
         shared,
+        finished: false,
     };
     let Ok((globals, mut queue)) = registry_queue_init::<Listener>(&conn) else {
         return;
@@ -114,7 +119,11 @@ fn listen(shared: Arc<Mutex<Vec<Toplevel>>>) {
     {
         return;
     }
-    while queue.blocking_dispatch(&mut listener).is_ok() {}
+    while queue.blocking_dispatch(&mut listener).is_ok() {
+        if listener.finished {
+            break;
+        }
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
@@ -132,7 +141,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
 impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for Listener {
     fn event(
         state: &mut Self,
-        _: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        proxy: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
         event: ext_foreign_toplevel_list_v1::Event,
         _: &(),
         _: &Connection,
@@ -146,9 +155,23 @@ impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for Li
                     .or_default();
                 state.publish();
             }
-            ext_foreign_toplevel_list_v1::Event::Finished => {}
+            // Revoked: no more events will ever arrive. Destroy the
+            // object per spec and clear back to the empty degrade.
+            ext_foreign_toplevel_list_v1::Event::Finished => {
+                proxy.destroy();
+                state.pending.clear();
+                state.publish();
+                state.finished = true;
+            }
             _ => {}
         }
+    }
+
+    /// Opcode 0 (`toplevel`) carries the new handle object; every other
+    /// event on this interface is data-only.
+    fn event_created_child(opcode: u16, qhandle: &QueueHandle<Self>) -> Arc<dyn ObjectData> {
+        assert_eq!(opcode, 0, "unexpected child-creating opcode {opcode}");
+        qhandle.make_data::<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()>(())
     }
 }
 
@@ -188,6 +211,7 @@ mod tests {
         let mut listener = Listener {
             pending: HashMap::new(),
             shared: shared.clone(),
+            finished: false,
         };
         listener.upsert_title(7, "shell".to_string());
         listener.upsert_app_id(7, "foot".to_string());
