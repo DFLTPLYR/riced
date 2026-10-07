@@ -92,18 +92,22 @@ pub struct Plots {
     // Lua widget runtimes keyed by def name, last rendered text, last
     // run tick, and last error (errors log only on change, never per
     // tick). States are rebuilt on every widgets.toml hot-reload.
+    // States are shared across bars; rendered trees/outputs are per
+    // bar (keyed `(bar, name)`) so `bar.output` can differ per bar.
     pub(crate) widget_lua: HashMap<String, mlua::Lua>,
-    pub(crate) widget_outputs: HashMap<String, String>,
-    pub(crate) widget_trees: HashMap<String, crate::app::layers::top::WidgetNode>,
+    pub(crate) widget_outputs: HashMap<(iced::window::Id, String), String>,
+    pub(crate) widget_trees:
+        HashMap<(iced::window::Id, String), crate::app::layers::top::WidgetNode>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
     pub(crate) widget_last_error: HashMap<String, String>,
     // Script file mtimes per widget (live-reload on edit).
     pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
     // Animated lists (see layers::listview): one aura runtime shared
-    // by all surfaces, one ListView per widget plus the notification
-    // stack — widget cell rows keyed (widget, action), notifications
-    // keyed (output, id). Per-widget lists let each widget own its
-    // Lua `transitions()` spec.
+    // by all surfaces, one ListView per (bar, widget, list) — owners
+    // are `"{bar:?}/{widget}/{list}"` strings — plus the notification
+    // stack. Widget cell rows keyed (owner, key), notifications keyed
+    // (output, id). Per-list runtimes let each list own its Lua
+    // `transitions()` spec without bars animating each other.
     pub(crate) anim_runtime: crate::app::layers::anim::AnimRuntime,
     pub(crate) widget_lists: HashMap<
         String,
@@ -722,7 +726,8 @@ impl Plots {
                 // output, skipped when that edge already has a bar (user
                 // additions and re-added outputs never duplicate).
                 // File order is spawn order (deterministic).
-                for (index, cfg) in self.config.bar.iter().enumerate() {
+                let bars = self.config.bar.clone();
+                for (index, cfg) in bars.iter().enumerate() {
                     let Some(anchor) = Top::parse_anchor(&cfg.anchor) else {
                         eprintln!(
                             "riced: [[bar]] #{index}: unknown anchor {:?}, skipping",
@@ -762,6 +767,7 @@ impl Plots {
                     let (win_id, settings) = top.open(output_id.0, w, h);
                     self.tops.insert(win_id, top);
                     self.ids.insert(win_id, PlotInfo::Top(output_id));
+                    Top::render_bar_widgets(self, win_id);
                     cmds.push(Command::done(Plant::NewLayerShell {
                         settings,
                         id: win_id,
@@ -1121,8 +1127,8 @@ impl Plots {
                 WidgetEvent::Anim => Top::handle_anim_frame(self),
                 WidgetEvent::Changed => Popup::refresh_bodies(self),
                 WidgetEvent::PopupSelect(id, action) => Popup::handle_select(self, id, action),
-                WidgetEvent::CellAction(widget, action) => {
-                    Top::handle_cell_action(self, widget, action)
+                WidgetEvent::CellAction(bar, widget, action) => {
+                    Top::handle_cell_action(self, bar, widget, action)
                 }
                 // Widget-domain alias of `BarEvent::SlotWidget`: same handler.
                 WidgetEvent::SetSlotWidget(id, pos, widget, enabled) => {

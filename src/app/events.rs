@@ -107,8 +107,9 @@ pub enum WidgetEvent {
     PopupSelect(Id, String),
     /// Click a cell button (`ui.button` in a `render()` tree): run the
     /// owning widget's `on_action()` with the button key, then
-    /// re-render that widget (a toggle flips its next output).
-    CellAction(String, String),
+    /// re-render that widget (a toggle flips its next output). Carries
+    /// the origin bar so `on_action` sees that bar's `bar.output`.
+    CellAction(Id, String, String),
     /// Widget of one slot by `widgets.toml` name (position, not
     /// label): checked appends the name, unchecked removes it. Applied
     /// live, persisted. Accepted here as a widget-domain alias of

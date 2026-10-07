@@ -758,6 +758,11 @@ pub fn config_path() -> PathBuf {
 ///   plus native `toplevels` (`app_id`, `title`) from
 ///   `ext-foreign-toplevel-list`. Compositors lacking those protocols
 ///   yield empty lists. No focus: standard Wayland defines none.
+/// - `bar`: where this render happens — `bar.output` is the bar's
+///   connector name (nil while unknown). States are shared across
+///   bars but trees render per bar, so filter per-bar content (e.g.
+///   workspaces) on this, not on `wayland.outputs[1]`. Notification
+///   cards have no bar: `bar.output` is nil there.
 /// - `os.execute(cmd)` / `io.popen(cmd)`: native shell. Capture
 ///   stdout with `io.popen(cmd):read("*a")`; wrap slow calls in
 ///   `pcall`, cache on self, refresh hourly.

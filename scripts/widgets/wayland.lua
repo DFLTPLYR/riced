@@ -3,10 +3,10 @@
 -- windows are never focused, moved, or closed from here.
 local app = {}
 
--- Workspaces on the first known output (all of them while outputs are
--- unknown, e.g. off-compositor).
+-- Workspaces on this bar's output (all of them while the bar's
+-- output is unknown, e.g. off-compositor).
 local function visible_workspaces()
-    local output = wayland.outputs[1] and wayland.outputs[1].name or nil
+    local output = bar.output
     local list = {}
     for _, ws in ipairs(wayland.workspaces) do
         if not output or ws.monitor == output then

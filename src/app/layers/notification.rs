@@ -631,8 +631,11 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
         // Fresh service tables every card render (arrival/edit
         // granularity, like widget states; `gpu` is nil here — cards
         // render off-tick, so no fresh GPU reading is available).
+        // Cards have no bar: `bar.output` stays nil, but the table
+        // itself is still published so the global contract holds.
         let ctx = crate::services::ServiceCtx::from_plots(plots, None);
         crate::services::publish_all(&ctx, lua).map_err(|e| e.to_string())?;
+        crate::services::publish_bar(lua, "").map_err(|e| e.to_string())?;
         let table = lua.create_table().map_err(|e| e.to_string())?;
         table.set("id", n.id).map_err(|e| e.to_string())?;
         table.set("app", n.app.clone()).map_err(|e| e.to_string())?;

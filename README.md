@@ -112,7 +112,8 @@ return app
   palette hex for `:color()`), `notifications` (queue snapshot,
   newest-first), `wayland` (`outputs`, native `workspaces` from
   `ext-workspace` and `toplevels` from `ext-foreign-toplevel-list`;
-  empty where unsupported, no focus),
+  empty where unsupported, no focus), plus `bar.output` (the
+  rendering bar's connector, nil when unknown),
   republished before every due render/popup/action.
   `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`, `separator`).

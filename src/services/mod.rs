@@ -8,6 +8,7 @@
 //! of the tick path — see [`toplevels::ToplevelCache`], whose listener
 //! thread blocks on the compositor socket while ticks just clone the
 //! latest snapshot.
+mod bar;
 mod notifications;
 mod registry;
 mod system;
@@ -16,6 +17,7 @@ mod toplevels;
 mod wayland;
 mod workspaces;
 
+pub use bar::publish as publish_bar;
 pub use registry::{ServiceCtx, publish_all};
 pub use toplevels::{Toplevel, ToplevelCache};
 pub use workspaces::{Workspace, WorkspaceCache};

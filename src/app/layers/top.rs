@@ -377,8 +377,8 @@ fn render_slot_widgets(
     pos: usize,
     names: &[String],
     defs: &[WidgetDef],
-    outputs: &HashMap<String, String>,
-    trees: &HashMap<String, WidgetNode>,
+    outputs: &HashMap<(window::Id, String), String>,
+    trees: &HashMap<(window::Id, String), WidgetNode>,
     gap: f32,
     horizontal: bool,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
@@ -410,7 +410,7 @@ fn render_slot_widgets(
                 ))))
                 .into()
         };
-        if let Some(node) = trees.get(name) {
+        if let Some(node) = trees.get(&(bar_id, name.clone())) {
             let size = defs
                 .iter()
                 .find(|d| d.name == *name)
@@ -419,9 +419,13 @@ fn render_slot_widgets(
             // Trees failing to build render nothing (logged at ingest).
             // Buttons arm a per-widget MouseArea: the click carries the
             // owning widget, so on_action routes back to its own state.
+            // List owners scope to this bar, so two bars never animate
+            // each other.
             let widget = name.clone();
+            let scope = Top::list_scope(bar_id, name);
             let msg = move |action: String| {
                 Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(
+                    bar_id,
                     widget.clone(),
                     action,
                 )))
@@ -441,7 +445,7 @@ fn render_slot_widgets(
                 } => {
                     let is_row = matches!(node, WidgetNode::Row { .. });
                     build_anim_list(
-                        name,
+                        &scope,
                         children,
                         *spacing,
                         width.clone(),
@@ -453,12 +457,12 @@ fn render_slot_widgets(
                         lists,
                     )
                 }
-                _ => build_with_lists(node, name, size, Some(&msg), anim_runtime, lists),
+                _ => build_with_lists(node, &scope, size, Some(&msg), anim_runtime, lists),
             };
             if let Ok(item) = built {
                 items.push(area(item, name));
             }
-        } else if let Some((output, size)) = lua_cell_text(name, defs, outputs) {
+        } else if let Some((output, size)) = lua_cell_text(bar_id, name, defs, outputs) {
             items.push(area(rich_text(output, size, gap), name));
         }
     }
@@ -1039,12 +1043,16 @@ fn parse_transition_value(
 /// Last script output (text, size) by widget name (`None` = empty cell).
 /// Split out so the cache lookup stays testable without rendering.
 fn lua_cell_text(
+    bar: window::Id,
     name: &str,
     defs: &[WidgetDef],
-    outputs: &HashMap<String, String>,
+    outputs: &HashMap<(window::Id, String), String>,
 ) -> Option<(String, f32)> {
     let def = defs.iter().find(|d| d.name == name)?;
-    outputs.get(name).cloned().map(|text| (text, def.size))
+    outputs
+        .get(&(bar, name.to_string()))
+        .cloned()
+        .map(|text| (text, def.size))
 }
 
 /// One composable UI node, built in Lua via the `ui` table and
@@ -2597,8 +2605,8 @@ impl Top {
         &self,
         id: window::Id,
         widgets: &[WidgetDef],
-        outputs: &HashMap<String, String>,
-        trees: &HashMap<String, WidgetNode>,
+        outputs: &HashMap<(window::Id, String), String>,
+        trees: &HashMap<(window::Id, String), WidgetNode>,
         anim_runtime: &aura_anim::core::runtime::MotionRuntime,
         lists: &std::collections::HashMap<
             String,
@@ -2986,13 +2994,37 @@ impl Top {
         Ok(())
     }
 
-    /// Publish fresh system tables and call one widget's `render()`,
-    /// returning the raw value. Errors are returned for
-    /// once-per-message logging by the caller.
+    /// Owner scope for one bar's widget instance: legacy button lists
+    /// and declared `ui.listview`s key runtimes (and motion keys) under
+    /// this, so two bars never animate each other.
+    fn list_scope(bar: window::Id, widget: &str) -> String {
+        format!("{bar:?}/{widget}")
+    }
+
+    /// Bars whose slots reference `widget`: its per-bar render targets.
+    /// Widgets in no bar render nowhere (nothing displays them).
+    fn bars_with_widget(plots: &Plots, widget: &str) -> Vec<window::Id> {
+        plots
+            .tops
+            .iter()
+            .filter(|(_, top)| {
+                top.local
+                    .widgets
+                    .iter()
+                    .any(|slot| slot.iter().any(|name| name == widget))
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Publish fresh service tables plus this bar's `bar.output`, then
+    /// call one widget's `render()`, returning the raw value. Errors
+    /// are returned for once-per-message logging by the caller.
     fn render_lua_value(
         plots: &mut Plots,
         def: &crate::config::WidgetDef,
         gpu: Option<f32>,
+        bar: window::Id,
     ) -> Result<Value, String> {
         Self::sync_script_state(plots, def);
         Self::ensure_widget_lua(plots, def)?;
@@ -3002,30 +3034,36 @@ impl Top {
             .ok_or_else(|| "runtime missing".to_string())?;
         let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
         crate::services::publish_all(&ctx, lua).map_err(|e| e.to_string())?;
+        let output = Self::output_name(plots, bar);
+        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())?;
         call_lua_value(lua, "view")
     }
 
     /// Store one `render()` result: tables become [`WidgetNode`] trees,
     /// scalars become cached text. Switching shapes clears the other
-    /// cache so nothing stale renders.
+    /// cache so nothing stale renders. Trees/text cache per bar (same
+    /// widget renders per-bar `bar.output`); the Lua state stays
+    /// shared, so `self` is per widget, not per bar.
     fn ingest_render_value(
         plots: &mut Plots,
         def: &crate::config::WidgetDef,
+        bar: window::Id,
         result: Result<Value, String>,
     ) {
+        let tree_key = (bar, def.name.clone());
+        let scope = Self::list_scope(bar, &def.name);
         match result {
             Ok(Value::Table(t)) => {
                 plots.widget_last_error.remove(&def.name);
-                plots.widget_outputs.remove(&def.name);
+                plots.widget_outputs.remove(&tree_key);
                 match parse_node(&Value::Table(t)) {
                     Ok(node) => {
                         // Diff button lists for enter/exit/displaced
                         // transitions before replacing the cached tree,
                         // applying this widget's Lua `transitions()`
                         // spec (or the shared defaults) to its own list.
-                        let old = plots.widget_trees.get(&def.name).cloned();
-                        if let Err(error) =
-                            sync_declared_lists(plots, &def.name, old.as_ref(), &node)
+                        let old = plots.widget_trees.get(&tree_key).cloned();
+                        if let Err(error) = sync_declared_lists(plots, &scope, old.as_ref(), &node)
                         {
                             Self::note_widget_error(plots, &def.name, error);
                             return;
@@ -3033,7 +3071,7 @@ impl Top {
                         let duration = plots.config.animation.speed.duration();
                         let list = plots
                             .widget_lists
-                            .entry(def.name.clone())
+                            .entry(scope.clone())
                             .or_insert_with(|| super::listview::ListView::new(TopLocal::ROW_PITCH));
                         if let Some(lua) = plots.widget_lua.get(&def.name) {
                             let defaults: super::listview::ListView<(String, String), WidgetNode> =
@@ -3050,8 +3088,8 @@ impl Top {
                                 Err(e) => {
                                     list.clear_all(&mut plots.anim_runtime);
                                     Self::note_widget_error(plots, &def.name, e);
-                                    plots.widget_lists.remove(&def.name);
-                                    plots.widget_trees.insert(def.name.clone(), node);
+                                    plots.widget_lists.remove(&scope);
+                                    plots.widget_trees.insert(tree_key.clone(), node);
                                     return;
                                 }
                             }
@@ -3064,9 +3102,10 @@ impl Top {
                             matches!(node, WidgetNode::Row { .. } | WidgetNode::Column { .. });
                         if !old_is_list || !new_is_list {
                             // First paint or shape flip: settle instantly.
-                            if let Some(list) = plots.widget_lists.get_mut(&def.name) {
-                                let name = def.name.clone();
-                                list.clear_scope(&mut plots.anim_runtime, move |(w, _)| *w == name);
+                            if let Some(list) = plots.widget_lists.get_mut(&scope) {
+                                list.clear_scope(&mut plots.anim_runtime, move |(w, _)| {
+                                    *w == scope
+                                });
                             }
                         } else {
                             let old_node = old.as_ref().expect("list checked");
@@ -3074,11 +3113,11 @@ impl Top {
                             let new_kids = button_children(&node);
                             let old_keys: Vec<(String, String)> = old_kids
                                 .iter()
-                                .map(|(k, _)| (def.name.clone(), k.clone()))
+                                .map(|(k, _)| (scope.clone(), k.clone()))
                                 .collect();
                             let new_keys: Vec<(String, String)> = new_kids
                                 .iter()
-                                .map(|(k, _)| (def.name.clone(), k.clone()))
+                                .map(|(k, _)| (scope.clone(), k.clone()))
                                 .collect();
                             let by_key: std::collections::HashMap<&str, &WidgetNode> =
                                 old_kids.iter().map(|(k, n)| (k.as_str(), n)).collect();
@@ -3097,7 +3136,7 @@ impl Top {
                             } else {
                                 Axis::Vertical
                             };
-                            if let Some(list) = plots.widget_lists.get_mut(&def.name) {
+                            if let Some(list) = plots.widget_lists.get_mut(&scope) {
                                 list.update(
                                     &mut plots.anim_runtime,
                                     duration,
@@ -3108,20 +3147,20 @@ impl Top {
                                 );
                             }
                         }
-                        plots.widget_trees.insert(def.name.clone(), node);
+                        plots.widget_trees.insert(tree_key, node);
                     }
                     Err(e) => {
-                        plots.widget_trees.remove(&def.name);
+                        plots.widget_trees.remove(&tree_key);
                         Self::note_widget_error(plots, &def.name, e);
                     }
                 }
             }
             Ok(value) => {
                 plots.widget_last_error.remove(&def.name);
-                plots.widget_trees.remove(&def.name);
+                plots.widget_trees.remove(&tree_key);
                 match coerce_text(value, "render()") {
                     Ok(text) => {
-                        plots.widget_outputs.insert(def.name.clone(), text);
+                        plots.widget_outputs.insert(tree_key, text);
                     }
                     Err(e) => Self::note_widget_error(plots, &def.name, e),
                 }
@@ -3154,6 +3193,8 @@ impl Top {
     /// (Re)build runtimes for every def and render once, so bars
     /// populate immediately. Called at startup and after every
     /// `widgets.toml` hot-reload (which clears the old states).
+    /// Per-bar trees render when bars appear (`render_bar_widgets`)
+    /// or on the next due tick; with no bars yet this only resets.
     pub(crate) fn init_widget_lua(plots: &mut Plots) {
         plots.widget_lua.clear();
         plots.widget_outputs.clear();
@@ -3175,10 +3216,35 @@ impl Top {
         let now = Instant::now();
         for def in &defs {
             plots.widget_last_run.insert(def.name.clone(), now);
-            let result = Self::render_lua_value(plots, def, gpu);
-            Self::ingest_render_value(plots, def, result);
+            for bar in Self::bars_with_widget(plots, &def.name) {
+                let result = Self::render_lua_value(plots, def, gpu, bar);
+                Self::ingest_render_value(plots, def, bar, result);
+            }
         }
         Self::warn_unknown_slot_widgets(plots);
+    }
+
+    /// Render every widget slotted on a bar (bar creation at startup
+    /// or output hotplug): without this a new bar paints empty until
+    /// each widget's interval elapses.
+    pub(crate) fn render_bar_widgets(plots: &mut Plots, bar: window::Id) {
+        plots.sysinfo.refresh_cpu_usage();
+        plots.sysinfo.refresh_memory();
+        let gpu = Popup::gpu_usage_percent();
+        let now = Instant::now();
+        let names: Vec<String> = plots
+            .tops
+            .get(&bar)
+            .map(|top| top.local.widgets.iter().flatten().cloned().collect())
+            .unwrap_or_default();
+        for def in plots.widgets.clone() {
+            if !names.iter().any(|name| name == &def.name) {
+                continue;
+            }
+            plots.widget_last_run.insert(def.name.clone(), now);
+            let result = Self::render_lua_value(plots, &def, gpu, bar);
+            Self::ingest_render_value(plots, &def, bar, result);
+        }
     }
 
     /// Warn about slot names that resolve to no registry entry (typos
@@ -3232,24 +3298,37 @@ impl Top {
         changed
     }
 
-    /// Re-render one widget now and report whether visible output
-    /// moved (text or tree). Shared by the interval tick, the
-    /// `on_press()` click path, cell actions, and popup selects.
+    /// Re-render one widget on every bar showing it, and report whether
+    /// any visible output moved (text or tree). Shared by the interval
+    /// tick, the `on_press()` click path, cell actions, and popup selects.
     pub(crate) fn refresh_widget(
         plots: &mut Plots,
         def: &crate::config::WidgetDef,
         gpu: Option<f32>,
     ) -> bool {
-        let before = (
-            plots.widget_outputs.get(&def.name).cloned(),
-            plots.widget_trees.get(&def.name).cloned(),
-        );
-        let result = Self::render_lua_value(plots, def, gpu);
-        Self::ingest_render_value(plots, def, result);
-        let after = (
-            plots.widget_outputs.get(&def.name).cloned(),
-            plots.widget_trees.get(&def.name).cloned(),
-        );
+        let bars = Self::bars_with_widget(plots, &def.name);
+        let before: Vec<_> = bars
+            .iter()
+            .map(|bar| {
+                (
+                    plots.widget_outputs.get(&(*bar, def.name.clone())).cloned(),
+                    plots.widget_trees.get(&(*bar, def.name.clone())).cloned(),
+                )
+            })
+            .collect();
+        for bar in &bars {
+            let result = Self::render_lua_value(plots, def, gpu, *bar);
+            Self::ingest_render_value(plots, def, *bar, result);
+        }
+        let after: Vec<_> = bars
+            .iter()
+            .map(|bar| {
+                (
+                    plots.widget_outputs.get(&(*bar, def.name.clone())).cloned(),
+                    plots.widget_trees.get(&(*bar, def.name.clone())).cloned(),
+                )
+            })
+            .collect();
         before != after
     }
 
@@ -3277,17 +3356,23 @@ impl Top {
     /// Click a cell button: run the owning widget's `on_action(key)`
     /// (the view closure stamps the owner, so the key routes to its
     /// own Lua state — no slot-wide popup/`on_press` fallback), then
-    /// re-render that widget like the click path does.
+    /// re-render that widget like the click path does. `on_action` sees
+    /// the clicking bar's `bar.output`.
     pub(crate) fn handle_cell_action(
         plots: &mut Plots,
+        bar: window::Id,
         widget: String,
         action: String,
     ) -> Command<Plant> {
         let gpu = Popup::gpu_usage_percent();
         let outcome = plots.widget_lua.get(&widget).map(|lua| {
+            let output = Self::output_name(plots, bar);
             let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
             crate::services::publish_all(&ctx, lua)
                 .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
+                })
                 .and_then(|()| call_lua_named_action(lua, &action))
         });
         match outcome {
@@ -3776,7 +3861,7 @@ impl Top {
                 cmds.push(cmd);
             }
         } else if lua_has_func(&plots.widget_lua, widget, "on_press") {
-            cmds.push(Self::run_on_press(plots, widget));
+            cmds.push(Self::run_on_press(plots, bar_id, widget));
         } else {
             let names = plots
                 .tops
@@ -3819,20 +3904,25 @@ impl Top {
             .find(|w| lua_has_func(&plots.widget_lua, w, "on_press"))
             .cloned()
         {
-            return Self::run_on_press(plots, &name);
+            return Self::run_on_press(plots, bar_id, &name);
         }
         Command::none()
     }
 
     /// Run one widget's `on_press()` click action, then re-render it
     /// (a toggle flips its next output). Errors log once-per-message.
-    fn run_on_press(plots: &mut Plots, name: &str) -> Command<Plant> {
+    /// `on_action` sees the clicking bar's `bar.output`.
+    fn run_on_press(plots: &mut Plots, bar: window::Id, name: &str) -> Command<Plant> {
         let gpu = Popup::gpu_usage_percent();
         let outcome = match plots.widget_lua.get(name) {
             Some(lua) => {
+                let output = Self::output_name(plots, bar);
                 let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
                 let acted = crate::services::publish_all(&ctx, lua)
                     .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
+                    })
                     .and_then(|()| call_lua_action(lua));
                 Some(acted)
             }
@@ -4050,6 +4140,7 @@ impl Top {
             persist_new(plots, &mut top, anchor, output);
             plots.tops.insert(win_id, top);
             plots.ids.insert(win_id, PlotInfo::Top(output_id));
+            Self::render_bar_widgets(plots, win_id);
             println!(
                 "Added {} bar for output {output_id:?} window {win_id:?} (closest to {:?} @ {menu_pos:?} stored_output {menu_output:?}) — calling top.open() and spawning NewLayerShell",
                 anchor_name(anchor),
@@ -4074,6 +4165,7 @@ impl Top {
             persist_new(plots, &mut top, Anchor::Top, String::new());
             plots.tops.insert(win_id, top);
             plots.ids.insert(win_id, PlotInfo::Top(sentinel));
+            Self::render_bar_widgets(plots, win_id);
             println!(
                 "Added sentinel Top window {win_id:?} (no output yet) — calling top.open_active()"
             );
@@ -4212,17 +4304,23 @@ mod tests {
 
     #[test]
     fn lua_cell_text_reads_cache_with_size() {
+        let bar = window::Id::unique();
         let defs = vec![lua_widget("w")];
-        let empty: HashMap<String, String> = HashMap::new();
-        assert_eq!(lua_cell_text("w", &defs, &empty), None);
+        let empty: HashMap<(window::Id, String), String> = HashMap::new();
+        assert_eq!(lua_cell_text(bar, "w", &defs, &empty), None);
         let mut outputs = HashMap::new();
-        outputs.insert("w".to_string(), "hi".to_string());
+        outputs.insert((bar, "w".to_string()), "hi".to_string());
         assert_eq!(
-            lua_cell_text("w", &defs, &outputs),
+            lua_cell_text(bar, "w", &defs, &outputs),
             Some(("hi".to_string(), 13.0))
         );
         // Unknown names never read the cache.
-        assert_eq!(lua_cell_text("nope", &defs, &outputs), None);
+        assert_eq!(lua_cell_text(bar, "nope", &defs, &outputs), None);
+        // Another bar's cache never leaks across.
+        assert_eq!(
+            lua_cell_text(window::Id::unique(), "w", &defs, &outputs),
+            None
+        );
     }
 
     #[test]
@@ -4339,13 +4437,14 @@ mod tests {
     }
 
     /// Publish every service table from throwaway fixtures (mirrors
-    /// what `render_lua_value` does from live `Plots`).
+    /// what `render_lua_value` does from live `Plots`, including the
+    /// nil `bar.output` for output-agnostic seeds).
     fn publish_test_services(lua: &mlua::Lua, sys: &sysinfo::System, gpu: Option<f32>) {
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
-        let workspaces = crate::services::WorkspaceCache::default();
         let toplevels = crate::services::ToplevelCache::default();
+        let workspaces = crate::services::WorkspaceCache::default();
         let ctx = crate::services::ServiceCtx {
             sys,
             gpu,
@@ -4356,6 +4455,7 @@ mod tests {
             workspaces: &workspaces,
         };
         crate::services::publish_all(&ctx, lua).expect("publish");
+        crate::services::publish_bar(lua, "").expect("bar");
     }
 
     #[test]
@@ -4698,15 +4798,10 @@ mod tests {
             workspaces: &workspaces,
         };
         crate::services::publish_all(&ctx, &lua).expect("publish");
-        // One known output so the strip filters to DP-1 (`OutputInfo`
-        // needs a live compositor; the service's own shape test covers
-        // the outputs table itself).
-        let wayland: mlua::Table = lua.globals().get("wayland").expect("wayland");
-        let outputs = lua.create_table().expect("outputs");
-        let first = lua.create_table().expect("first");
-        first.set("name", "DP-1").expect("name");
-        outputs.set(1, first).expect("set");
-        wayland.set("outputs", outputs).expect("outputs");
+        // This bar lives on DP-1 (`OutputInfo` needs a live
+        // compositor; the service's own shape test covers the outputs
+        // table itself).
+        crate::services::publish_bar(&lua, "DP-1").expect("bar");
         load_widget_script(&lua, "wayland", SEED_WAYLAND_LUA).expect("load");
         // Bar is a horizontal strip over the local output only: `code`
         // passes, `web` (unknown monitor) and `mail` (HDMI-1) do not.
@@ -5219,6 +5314,42 @@ mod tests {
             .eval()
             .expect("eval");
         assert!(parse_node(&Value::Table(bad)).is_err());
+    }
+
+    #[test]
+    fn listview_delegate_accepts_mixed_nodes_and_components() {
+        let lua = new_widget_lua().expect("sandbox");
+        lua.load(
+            r#"iced.define('wsbtn', function(p) return iced.button(p.label, p.action):width(120) end)"#,
+        )
+        .exec()
+        .expect("define");
+        let value: Value = lua
+            .load(
+                r#"return ui.listview({{key='a',label='x'},{key='b',label='y'}}):id('s'):key('key')
+                    :delegate(function(item)
+                        if item.key == 'a' then
+                            return ui.text(item.label)
+                        else
+                            return ui.wsbtn({label=item.label, action='go'})
+                        end
+                    end)"#,
+            )
+            .eval()
+            .expect("eval");
+        let node = parse_node(&value).expect("parse");
+        match node {
+            WidgetNode::ListView { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[0].1, WidgetNode::Text { .. }));
+                assert!(matches!(
+                    items[1].1,
+                    WidgetNode::Button { ref label, ref action, .. }
+                    if label == "y" && action == "go"
+                ));
+            }
+            other => panic!("expected listview, got {other:?}"),
+        }
     }
 
     #[test]

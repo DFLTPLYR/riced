@@ -352,13 +352,24 @@ impl Popup {
             }
         }
         let body = match plots.widget_lua.get(&name) {
-            Some(lua) => match call_lua_value(lua, "popup").and_then(Self::parse_popup_content) {
-                Ok(content) => content,
-                Err(e) => {
-                    Top::note_widget_error(plots, &name, e);
-                    return None;
+            Some(lua) => {
+                let ctx = crate::services::ServiceCtx::from_plots(plots, Self::gpu_usage_percent());
+                let output = Top::output_name(plots, bar_id);
+                match crate::services::publish_all(&ctx, lua)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
+                    })
+                    .and_then(|()| call_lua_value(lua, "popup"))
+                    .and_then(Self::parse_popup_content)
+                {
+                    Ok(content) => content,
+                    Err(e) => {
+                        Top::note_widget_error(plots, &name, e);
+                        return None;
+                    }
                 }
-            },
+            }
             None => return None,
         };
         // An empty menu (no text, tree, or items) opens nothing.
@@ -530,10 +541,10 @@ impl Popup {
     /// content; popups whose widget left `widgets.toml` are dismissed.
     /// Returns close commands for dismissals (possibly none).
     pub(crate) fn refresh_bodies(plots: &mut Plots) -> Command<Plant> {
-        let open: Vec<(window::Id, String)> = plots
+        let open: Vec<(window::Id, String, window::Id)> = plots
             .popups
             .iter()
-            .map(|(id, popup)| (*id, popup.widget.clone()))
+            .map(|(id, popup)| (*id, popup.widget.clone(), popup.bar_id))
             .collect();
         if open.is_empty() {
             return Command::none();
@@ -542,7 +553,7 @@ impl Popup {
         plots.sysinfo.refresh_memory();
         let gpu = Self::gpu_usage_percent();
         let mut cmds = Vec::new();
-        for (pid, name) in open {
+        for (pid, name, bar) in open {
             // Gone from the config: dismiss. Anything else keeps its
             // last good body on error (a typo mid-save must not close
             // the menu you're editing).
@@ -558,9 +569,14 @@ impl Popup {
                 }
                 Ok(()) => match plots.widget_lua.get(&name) {
                     Some(lua) => {
+                        let output = Top::output_name(plots, bar);
                         let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
                         match crate::services::publish_all(&ctx, lua)
                             .map_err(|e| e.to_string())
+                            .and_then(|()| {
+                                crate::services::publish_bar(lua, &output)
+                                    .map_err(|e| e.to_string())
+                            })
                             .and_then(|()| call_lua_value(lua, "popup"))
                             .and_then(Self::parse_popup_content)
                         {
@@ -640,6 +656,7 @@ impl Popup {
         let Some(widget) = plots.popups.get(&id).map(|p| p.widget.clone()) else {
             return Command::none();
         };
+        let bar = plots.popups.get(&id).map(|p| p.bar_id);
         // Fresh handler for the click: an edited `on_action()` applies
         // immediately (in-memory toggle state resets on reload, same
         // as editing any widget script).
@@ -652,9 +669,13 @@ impl Popup {
         }
         let outcome = match plots.widget_lua.get(&widget) {
             Some(lua) => {
+                let output = bar.map(|b| Top::output_name(plots, b)).unwrap_or_default();
                 let ctx = crate::services::ServiceCtx::from_plots(plots, Self::gpu_usage_percent());
                 let acted = crate::services::publish_all(&ctx, lua)
                     .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
+                    })
                     .and_then(|()| super::top::call_lua_named_action(lua, &action));
                 Some(acted)
             }
