@@ -1045,7 +1045,7 @@ size = 13.0
 # interval = 2.0
 # size = 13.0
 
-# Basic Wayland overview (read-only): window count in the bar,
+# Basic Wayland overview (read-only): workspace strip in the bar,
 # workspaces plus toplevels in a popup listview. No management.
 # [[widget]]
 # name = "wayland"
@@ -1138,7 +1138,8 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 /// in widgets.toml to use it.
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
-/// Seed Wayland overview (read-only): window count in the bar; the
+/// Seed Wayland overview (read-only): horizontal workspace strip in
+/// the bar (first known output only, active bracketed); the
 /// popup is a listview with one row per workspace (`name (monitor)`,
 /// active bracketed) plus one row per toplevel (`app_id — title`).
 /// No `on_action` exists — windows are never focused, moved, or

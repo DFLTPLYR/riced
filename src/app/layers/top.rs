@@ -4672,6 +4672,11 @@ mod tests {
                 monitor: "".to_string(),
                 active: false,
             },
+            Workspace {
+                name: "mail".to_string(),
+                monitor: "HDMI-1".to_string(),
+                active: false,
+            },
         ]);
         let toplevels = ToplevelCache::from_rows(vec![
             Toplevel {
@@ -4693,13 +4698,39 @@ mod tests {
             workspaces: &workspaces,
         };
         crate::services::publish_all(&ctx, &lua).expect("publish");
+        // One known output so the strip filters to DP-1 (`OutputInfo`
+        // needs a live compositor; the service's own shape test covers
+        // the outputs table itself).
+        let wayland: mlua::Table = lua.globals().get("wayland").expect("wayland");
+        let outputs = lua.create_table().expect("outputs");
+        let first = lua.create_table().expect("first");
+        first.set("name", "DP-1").expect("name");
+        outputs.set(1, first).expect("set");
+        wayland.set("outputs", outputs).expect("outputs");
         load_widget_script(&lua, "wayland", SEED_WAYLAND_LUA).expect("load");
-        // Bar shows the window count as plain text.
+        // Bar is a horizontal strip over the local output only: `code`
+        // passes, `web` (unknown monitor) and `mail` (HDMI-1) do not.
         let value = call_lua_value(&lua, "view").expect("view");
         let node = parse_node(&value).expect("parse");
         match node {
-            WidgetNode::Text { content, .. } => assert_eq!(content, "2 windows"),
-            other => panic!("expected text, got {other:?}"),
+            WidgetNode::ListView {
+                id,
+                horizontal,
+                items,
+                ..
+            } => {
+                assert_eq!(id, "wayland-strip");
+                assert!(horizontal, "strip runs along the bar");
+                let labels: Vec<&str> = items
+                    .iter()
+                    .map(|(_, item)| match item {
+                        WidgetNode::Text { content, .. } => content.as_str(),
+                        other => panic!("expected text, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(labels, ["[code]"]);
+            }
+            other => panic!("expected listview, got {other:?}"),
         }
         // The seed defines no actions at all (pure standard Wayland
         // cannot focus other windows; nothing to dispatch).
@@ -4736,6 +4767,10 @@ mod tests {
         assert!(
             labels.iter().any(|t| t == "web"),
             "workspace row missing: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|t| t == "mail (HDMI-1)"),
+            "other-output row missing: {labels:?}"
         );
         assert!(
             labels

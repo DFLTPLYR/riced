@@ -1,12 +1,41 @@
--- Basic Wayland overview (read-only): window count in the bar,
+-- Basic Wayland overview (read-only): workspace strip in the bar,
 -- workspaces plus toplevels in a popup listview. No actions exist —
 -- windows are never focused, moved, or closed from here.
 local app = {}
 
+-- Workspaces on the first known output (all of them while outputs are
+-- unknown, e.g. off-compositor).
+local function visible_workspaces()
+    local output = wayland.outputs[1] and wayland.outputs[1].name or nil
+    local list = {}
+    for _, ws in ipairs(wayland.workspaces) do
+        if not output or ws.monitor == output then
+            list[#list + 1] = ws
+        end
+    end
+    return list
+end
+
 function app:view()
-    local n = #wayland.toplevels
-    if n == 0 then return ui.text("--") end
-    return ui.text(n == 1 and "1 window" or (n .. " windows"))
+    -- Horizontal strip, one cell per workspace; names are not unique
+    -- across groups, so identical labels get an occurrence count to
+    -- keep keys stable across renders.
+    local cells = {}
+    local seen = {}
+    for _, ws in ipairs(visible_workspaces()) do
+        local label = ws.active and ("[" .. ws.name .. "]") or ws.name
+        local tag = ws.monitor .. ":" .. ws.name
+        seen[tag] = (seen[tag] or 0) + 1
+        cells[#cells + 1] = { key = "ws:" .. tag .. "#" .. seen[tag], label = label }
+    end
+    if #cells == 0 then return ui.text("--") end
+    return ui.listview(cells):id("wayland-strip"):key("key"):axis("horizontal")
+        :delegate(function(item)
+            return ui.text(item.label)
+        end)
+        :onEntered({ opacity = { from = 0, to = 1 }, duration = 250 })
+        :onExit({ opacity = { to = 0 }, duration = 250 })
+        :onDisplaced({ duration = 250 })
 end
 
 function app:popup()
