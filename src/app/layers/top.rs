@@ -4658,6 +4658,7 @@ mod tests {
         // Positions must be 1..2 over DP-1 only — never raw ids.
         let workspaces = r#"[{"id":3,"name":"3","monitor":"DP-1","monitorID":0,"windows":1},{"id":4,"name":"4","monitor":"HDMI-1","monitorID":1,"windows":0},{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}]"#;
         let active = r#"{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}"#;
+        let clients = r#"[{"class":"foot","title":"shell","workspace":{"id":3,"name":"3"}}]"#;
         let lua = new_widget_lua().expect("sandbox");
         // Feed the seed through the real `wayland` service: parse the
         // compositor JSON the same way `HyprCache` does, publish, render.
@@ -4667,7 +4668,7 @@ mod tests {
         let queue = std::collections::VecDeque::new();
         let hypr = crate::services::HyprCache {
             workspaces: crate::services::HyprCache::parse_workspaces(workspaces),
-            clients: Vec::new(),
+            clients: crate::services::HyprCache::parse_clients(clients),
             active_workspace: crate::services::HyprCache::parse_active(active),
         };
         let ctx = crate::services::ServiceCtx {
@@ -4688,44 +4689,54 @@ mod tests {
         first.set("name", "DP-1").expect("name");
         outputs.set(1, first).expect("set");
         wayland.set("outputs", outputs).expect("outputs");
-        // Record dispatches instead of spawning hyprctl.
-        let os: mlua::Table = lua.globals().get("os").expect("os");
-        os.set(
-            "execute",
-            lua.create_function(|lua, cmd: String| {
-                lua.globals().set("_dispatched", cmd)?;
-                Ok(true)
-            })
-            .expect("exec"),
-        )
-        .expect("set execute");
         load_widget_script(&lua, "hypr", SEED_HYPR_LUA).expect("load");
+        // Bar strip: read-only text cells, active workspace bracketed.
+        // No buttons, no dispatch surface.
         let value = call_lua_value(&lua, "view").expect("view");
         let node = parse_node(&value).expect("parse");
         match node {
             WidgetNode::Row { children, .. } => {
                 assert_eq!(children.len(), 2);
-                match &children[0] {
-                    WidgetNode::Button { label, action, .. } => {
-                        assert_eq!((label.as_str(), action.as_str()), ("1", "ws:1"));
+                for (child, want) in children.iter().zip(["1", "[2]"]) {
+                    match child {
+                        WidgetNode::Text { content, .. } => assert_eq!(content, want),
+                        other => panic!("expected text, got {other:?}"),
                     }
-                    other => panic!("expected button, got {other:?}"),
-                }
-                match &children[1] {
-                    WidgetNode::Button { label, action, .. } => {
-                        assert_eq!((label.as_str(), action.as_str()), ("[2]", "ws:2"));
-                    }
-                    other => panic!("expected button, got {other:?}"),
                 }
             }
             other => panic!("expected row, got {other:?}"),
         }
-        // Position 1 maps back to workspace id 3 (not "workspace 1").
-        call_lua_named_action(&lua, "ws:1").expect("action");
-        let dispatched: String = lua.load("return _dispatched").eval().expect("dispatched");
+        // The seed defines no actions at all (never a tiling manager).
+        let app: mlua::Table = lua.named_registry_value("riced.widget.app").expect("app");
+        let on_action: mlua::Value = app.get("on_action").expect("get");
         assert!(
-            dispatched.contains("workspace = 3"),
-            "dispatches mapped id, got {dispatched:?}"
+            matches!(on_action, mlua::Value::Nil),
+            "read-only: no on_action"
+        );
+        // Popup lists each workspace with its toplevels.
+        let popup = call_lua_value(&lua, "popup").expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let tree = content.tree.expect("popup tree");
+        let mut texts = Vec::new();
+        let mut stack = vec![&tree];
+        while let Some(node) = stack.pop() {
+            match node {
+                WidgetNode::Text { content, .. } => texts.push(content.clone()),
+                WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+                    stack.extend(children.iter());
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            texts.iter().any(|t| t.contains("3 (DP-1)")),
+            "workspace header missing: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("foot") && t.contains("shell")),
+            "toplevel row missing: {texts:?}"
         );
     }
 

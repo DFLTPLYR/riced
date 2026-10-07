@@ -1044,8 +1044,8 @@ size = 13.0
 # interval = 2.0
 # size = 13.0
 
-# Hyprland workspaces: polls hyprctl every 0.5s (the loop is the
-# interval) via io.popen.
+# Basic Wayland overview (read-only): workspace strip in the bar,
+# workspaces plus toplevels in the popup. No window management.
 # [[widget]]
 # name = "hypr"
 # file = "hypr.lua"
@@ -1137,12 +1137,11 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 /// in widgets.toml to use it.
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
-/// Seed Hyprland workspaces: polls `hyprctl workspaces -j` every
-/// interval (the engine is the loop — no async in Lua) and renders
-/// one button per workspace **on the focused output only**. Buttons
-/// use the relative position in that output's list (`1..N`), not the
-/// global workspace id; a `_ws_ids` global maps positions back to
-/// ids for dispatch. Clicks dispatch via `on_action`.
+/// Seed Wayland overview (read-only): renders one text cell per
+/// workspace **on the first known output only**, bracketting the
+/// active one (`[2]`); the popup lists each workspace with its
+/// toplevels (`class — title`). No `on_action` exists — windows are
+/// never focused, moved, or closed from here.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
 pub(crate) const SEED_HYPR_LUA: &str = include_str!("../scripts/widgets/hypr.lua");
 
