@@ -17,6 +17,7 @@ use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 
 /// One workspace: protocol metadata only, no handles.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -80,6 +81,15 @@ struct Listener {
     group_outputs: HashMap<u32, HashSet<u32>>,
     /// Output protocol id → connector name (`wl_output.name`).
     outputs: HashMap<u32, String>,
+    /// Output protocol id → logical name (`xdg-output name`, preferred:
+    /// `wl_output.name` is duplicated on some compositors).
+    xdg_names: HashMap<u32, String>,
+    /// xdg-output protocol id → wl_output protocol id it describes.
+    xdg_output_of: HashMap<u32, u32>,
+    /// Kept alive: dropping proxies may release the objects.
+    xdg_outputs: HashMap<u32, zxdg_output_v1::ZxdgOutputV1>,
+    /// Kept alive: xdg-outputs die with the manager otherwise.
+    _xdg_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     shared: Arc<Mutex<Vec<Workspace>>>,
     /// Set on manager `finished` (revoked): loop exits, snapshot clears.
     finished: bool,
@@ -103,12 +113,30 @@ macro_rules! dtrace {
 }
 
 impl Listener {
+    /// Bind one output global and attach its xdg-output so logical
+    /// names resolve even where `wl_output.name` is wrong.
+    fn bind_output(&mut self, output: wl_output::WlOutput, qh: &QueueHandle<Self>) {
+        let oid = output.id().protocol_id();
+        if let Some(manager) = &self._xdg_manager {
+            let xdg = manager.get_xdg_output(&output, qh, ());
+            self.xdg_output_of.insert(xdg.id().protocol_id(), oid);
+            self.xdg_outputs.insert(oid, xdg);
+        }
+    }
+
+    fn output_name(&self, id: u32) -> Option<&str> {
+        self.xdg_names
+            .get(&id)
+            .or_else(|| self.outputs.get(&id))
+            .map(String::as_str)
+    }
+
     fn monitor_of(&self, group: Option<u32>) -> String {
         let mut names: Vec<&str> = group
             .and_then(|g| self.group_outputs.get(&g))
             .into_iter()
             .flatten()
-            .filter_map(|id| self.outputs.get(id).map(String::as_str))
+            .filter_map(|id| self.output_name(*id))
             .collect();
         names.sort_unstable();
         names.dedup();
@@ -159,6 +187,10 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
         groups: HashMap::new(),
         group_outputs: HashMap::new(),
         outputs: HashMap::new(),
+        xdg_names: HashMap::new(),
+        xdg_output_of: HashMap::new(),
+        xdg_outputs: HashMap::new(),
+        _xdg_manager: None,
         shared,
         finished: false,
         debug,
@@ -179,13 +211,22 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
     if debug {
         eprintln!("riced(workspaces): manager bound");
     }
+    listener._xdg_manager = globals
+        .bind::<zxdg_output_manager_v1::ZxdgOutputManagerV1, _, _>(&qh, 1..=3, ())
+        .ok();
+    if debug && listener._xdg_manager.is_none() {
+        eprintln!("riced(workspaces): xdg-output not advertised; wl names only");
+    }
     // Outputs known at startup (hotplugged ones bind on registry arrival).
     for global in globals.contents().clone_list() {
         if global.interface == "wl_output" && global.version >= 2 {
             let version = global.version.min(4);
-            globals
+            if let Some(output) = globals
                 .bind::<wl_output::WlOutput, _, _>(&qh, version..=version, ())
-                .ok();
+                .ok()
+            {
+                listener.bind_output(output, &qh);
+            }
         }
     }
     while queue.blocking_dispatch(&mut listener).is_ok() {
@@ -197,7 +238,7 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         proxy: &wl_registry::WlRegistry,
         event: wl_registry::Event,
         _: &GlobalListContents,
@@ -214,7 +255,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
             && version >= 2
         {
             let version = version.min(4);
-            let _ = proxy.bind::<wl_output::WlOutput, (), Self>(name, version, qhandle, ());
+            let output = proxy.bind::<wl_output::WlOutput, (), Self>(name, version, qhandle, ());
+            state.bind_output(output, qhandle);
         }
     }
 }
@@ -232,6 +274,38 @@ impl Dispatch<wl_output::WlOutput, ()> for Listener {
             let id = proxy.id().protocol_id();
             dtrace!(state, "output {id}: name {name:?}");
             state.outputs.insert(id, name);
+            state.publish();
+        }
+    }
+}
+
+impl Dispatch<zxdg_output_manager_v1::ZxdgOutputManagerV1, ()> for Listener {
+    fn event(
+        _: &mut Self,
+        _: &zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        _: zxdg_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The manager is event-free; outputs arrive via `zxdg_output_v1`.
+    }
+}
+
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for Listener {
+    fn event(
+        state: &mut Self,
+        proxy: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_output_v1::Event::Name { name } = event
+            && let Some(oid) = state.xdg_output_of.get(&proxy.id().protocol_id())
+        {
+            dtrace!(state, "output {oid}: xdg-name {name:?}");
+            state.xdg_names.insert(*oid, name);
             state.publish();
         }
     }
@@ -398,6 +472,10 @@ mod tests {
             groups: HashMap::new(),
             group_outputs: HashMap::new(),
             outputs: HashMap::from([(10, "DP-1".to_string()), (11, "HDMI-1".to_string())]),
+            xdg_names: HashMap::new(),
+            xdg_output_of: HashMap::new(),
+            xdg_outputs: HashMap::new(),
+            _xdg_manager: None,
             shared: shared.clone(),
             finished: false,
             debug: false,
