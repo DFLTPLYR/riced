@@ -2911,6 +2911,50 @@ impl Top {
         Self::persist_bar(plots, id)
     }
 
+    pub(crate) fn handle_widget_layout(
+        plots: &mut Plots,
+        id: window::Id,
+        expected: Vec<Vec<String>>,
+        widgets: Vec<Vec<String>>,
+    ) -> Command<Plant> {
+        let Some(top) = plots.tops.get_mut(&id) else {
+            return Command::none();
+        };
+        if !Self::valid_widget_layout(&top.local.widgets, &expected, &widgets, &plots.widgets) {
+            return Command::none();
+        }
+        top.local.widgets = widgets;
+        Self::render_bar_widgets(plots, id);
+        Self::persist_bar(plots, id)
+    }
+
+    fn valid_widget_layout(
+        live: &[Vec<String>],
+        expected: &[Vec<String>],
+        widgets: &[Vec<String>],
+        defs: &[WidgetDef],
+    ) -> bool {
+        if live != expected || widgets.len() != expected.len() || widgets == expected {
+            return false;
+        }
+        if widgets.iter().any(|slot| {
+            slot.iter()
+                .enumerate()
+                .any(|(i, name)| TopLocal::is_empty_widget(name) || slot[..i].contains(name))
+        }) {
+            return false;
+        }
+        // Existing missing definitions can be moved/removed; newly added
+        // names must still exist after a widgets.toml reload.
+        if widgets.iter().flatten().any(|name| {
+            !expected.iter().flatten().any(|old| old == name)
+                && !defs.iter().any(|def| &def.name == name)
+        }) {
+            return false;
+        }
+        true
+    }
+
     /// Set the slot cell padding (`TopEvent::Bar(BarEvent::SlotPadding)`): single
     /// commit per press (slider, not a drag stream — still coalesced).
     pub(crate) fn handle_set_slot_padding(
@@ -4321,6 +4365,24 @@ mod tests {
             lua_cell_text(window::Id::unique(), "w", &defs, &outputs),
             None
         );
+    }
+
+    #[test]
+    fn preview_drop_rejects_stale_layout_and_removed_pool_definitions() {
+        let old = vec![vec!["missing".to_string()], vec![]];
+        let moved = vec![vec![], vec!["missing".to_string()]];
+        assert!(Top::valid_widget_layout(&old, &old, &moved, &[]));
+        assert!(!Top::valid_widget_layout(&moved, &old, &moved, &[]));
+        let added = vec![vec!["missing".into(), "clock".into()], vec![]];
+        assert!(!Top::valid_widget_layout(&old, &old, &added, &[]));
+        assert!(Top::valid_widget_layout(
+            &old,
+            &old,
+            &added,
+            &[lua_widget("clock")]
+        ));
+        let duplicates = vec![vec!["missing".into(), "missing".into()], vec![]];
+        assert!(!Top::valid_widget_layout(&old, &old, &duplicates, &[]));
     }
 
     #[test]

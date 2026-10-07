@@ -1152,6 +1152,11 @@ impl Plots {
                 BarEvent::SlotWidget(id, pos, widget, enabled) => {
                     Top::handle_set_slot_widget(self, id, pos, widget, enabled)
                 }
+                BarEvent::WidgetLayout {
+                    bar,
+                    expected,
+                    widgets,
+                } => Top::handle_widget_layout(self, bar, expected, widgets),
                 BarEvent::SlotPadding(id, value) => Top::handle_set_slot_padding(self, id, value),
                 BarEvent::SlotSpacing(id, value) => Top::handle_set_slot_spacing(self, id, value),
             },

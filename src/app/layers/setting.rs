@@ -5,6 +5,7 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
 use crate::app::{BarEvent, Corner, Edge, Plant, StyleEvent, TopEvent};
 use crate::components::display_map::{MapLayer, MapView, images_layer, outputs_layer};
+use crate::components::panel_preview::Preview;
 use crate::composables::spin_box::spin_box;
 use crate::config::{AnimationSpeed, BackgroundImage, ConfigPatch};
 use crate::theme;
@@ -75,6 +76,17 @@ impl SettingPage {
             Self::Animation => "Animation",
         }
     }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Menu => "Size and style the shell's menu controls.",
+            Self::Panel => "Choose a bar, arrange its widgets, and fine-tune its appearance.",
+            Self::ContextMenu => "Customize the menu opened by right-clicking the wallpaper.",
+            Self::Wallpaper => "Arrange images across your displays and adjust their placement.",
+            Self::Theme => "Choose a palette and preview its colors in light or dark mode.",
+            Self::Animation => "Set the pace of animated color and property changes.",
+        }
+    }
 }
 
 impl Setting {
@@ -102,16 +114,23 @@ impl Setting {
         container(
             row![
                 scrollable(self.nav(id))
-                    .width(Length::FillPortion(2))
+                    .width(Length::Fixed(168.0))
                     .height(Length::Fill),
-                rule::vertical(2),
-                scrollable(self.content(id, plots))
-                    .width(Length::FillPortion(8))
-                    .height(Length::Fill)
-                    .spacing(8),
+                scrollable(
+                    column![
+                        page_heading(self.page.title(), self.page.description()),
+                        self.content(id, plots),
+                        hint("Changes apply live and are saved automatically."),
+                    ]
+                    .spacing(20)
+                    .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .spacing(8),
             ]
-            .spacing(12)
-            .padding(16),
+            .spacing(24)
+            .padding(24),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -121,20 +140,25 @@ impl Setting {
 
     /// Left nav pane (30%): one button per page, highlighted when selected.
     fn nav(&self, id: window::Id) -> Element<'_, Plant> {
-        let mut col = column![text("Settings").size(16)];
+        let mut col = column![
+            text("RICED").size(20).color(theme::text()),
+            hint("Make it yours"),
+            rule::horizontal(1)
+        ]
+        .spacing(12);
         for page in SettingPage::all() {
             let selected = page == self.page;
             col = col.push(
-                button(text(page.title()).size(13).color(theme::text()))
+                button(text(page.title()).size(14).color(theme::text()))
                     .width(Length::Fill)
                     .on_press(Plant::SettingPlot(crate::app::SettingEvent::Select(
                         id, page,
                     )))
-                    .padding(8)
+                    .padding(12)
                     .style(theme::nav_button(selected)),
             );
         }
-        col.spacing(8).width(Length::Fill).into()
+        col.spacing(10).width(Length::Fill).into()
     }
 
     /// Right content pane (70%): live controls for the selected page. Each
@@ -154,39 +178,54 @@ impl Setting {
     fn menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
         let c = &plots.config.composable;
         column![
-            text("Menu").size(16),
-            slider_row(
-                format!("Width {:.0}", c.menu.width),
-                c.menu.width,
-                80.0..=400.0,
-                ConfigPatch::MenuWidth
+            section(
+                "Dimensions",
+                "Overall size of the menu control.",
+                column![
+                    slider_row(
+                        "Width (px)".into(),
+                        c.menu.width,
+                        80.0..=400.0,
+                        ConfigPatch::MenuWidth
+                    ),
+                    slider_row(
+                        "Height (px)".into(),
+                        c.menu.height,
+                        40.0..=200.0,
+                        ConfigPatch::MenuHeight
+                    ),
+                ]
+                .spacing(16)
+                .into()
             ),
-            slider_row(
-                format!("Height {:.0}", c.menu.height),
-                c.menu.height,
-                40.0..=200.0,
-                ConfigPatch::MenuHeight
-            ),
-            slider_row(
-                format!("Padding {:.0}", c.menu.padding),
-                c.menu.padding,
-                0.0..=32.0,
-                ConfigPatch::MenuPadding
-            ),
-            slider_row(
-                format!("Spacing {:.0}", c.menu.spacing),
-                c.menu.spacing,
-                0.0..=32.0,
-                ConfigPatch::MenuSpacing
-            ),
-            slider_row(
-                format!("Rounding {:.0}", c.menu.rounding),
-                c.menu.rounding,
-                0.0..=20.0,
-                ConfigPatch::MenuRounding
+            section(
+                "Spacing & corners",
+                "Padding is the inside inset; spacing separates child controls.",
+                column![
+                    slider_row(
+                        "Inside padding (px)".into(),
+                        c.menu.padding,
+                        0.0..=32.0,
+                        ConfigPatch::MenuPadding
+                    ),
+                    slider_row(
+                        "Child spacing (px)".into(),
+                        c.menu.spacing,
+                        0.0..=32.0,
+                        ConfigPatch::MenuSpacing
+                    ),
+                    slider_row(
+                        "Corner radius (px)".into(),
+                        c.menu.rounding,
+                        0.0..=20.0,
+                        ConfigPatch::MenuRounding
+                    ),
+                ]
+                .spacing(16)
+                .into()
             ),
         ]
-        .spacing(8)
+        .spacing(16)
         .width(Length::Fill)
         .into()
     }
@@ -194,43 +233,57 @@ impl Setting {
     fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
         let c = &plots.config.composable;
         column![
-            text("Context Menu").size(16),
-            slider_row(
-                format!("Width {:.0}", c.context_menu.width),
-                c.context_menu.width,
-                80.0..=400.0,
-                ConfigPatch::ContextMenuWidth
+            section(
+                "Menu surface",
+                "Control the overall width, inside padding, and gaps between entries.",
+                column![
+                    slider_row(
+                        "Width (px)".into(),
+                        c.context_menu.width,
+                        80.0..=400.0,
+                        ConfigPatch::ContextMenuWidth
+                    ),
+                    slider_row(
+                        "Inside padding (px)".into(),
+                        c.context_menu.padding,
+                        0.0..=32.0,
+                        ConfigPatch::ContextMenuPadding
+                    ),
+                    slider_row(
+                        "Entry spacing (px)".into(),
+                        c.context_menu.spacing,
+                        0.0..=32.0,
+                        ConfigPatch::ContextMenuSpacing
+                    ),
+                    slider_row(
+                        "Corner radius (px)".into(),
+                        c.context_menu.rounding,
+                        0.0..=20.0,
+                        ConfigPatch::ContextMenuRounding
+                    ),
+                ]
+                .spacing(16)
+                .into()
             ),
-            slider_row(
-                format!("Padding {:.0}", c.context_menu.padding),
-                c.context_menu.padding,
-                0.0..=32.0,
-                ConfigPatch::ContextMenuPadding
-            ),
-            slider_row(
-                format!("Spacing {:.0}", c.context_menu.spacing),
-                c.context_menu.spacing,
-                0.0..=32.0,
-                ConfigPatch::ContextMenuSpacing
-            ),
-            slider_row(
-                format!("Rounding {:.0}", c.context_menu.rounding),
-                c.context_menu.rounding,
-                0.0..=20.0,
-                ConfigPatch::ContextMenuRounding
-            ),
-            rule::horizontal(2),
-            slider_row(
-                format!("Item padding {:.0}", c.context_menu_item.padding),
-                c.context_menu_item.padding,
-                0.0..=32.0,
-                ConfigPatch::ContextMenuItemPadding
-            ),
-            slider_row(
-                format!("Item rounding {:.0}", c.context_menu_item.rounding),
-                c.context_menu_item.rounding,
-                0.0..=20.0,
-                ConfigPatch::ContextMenuItemRounding
+            section(
+                "Menu entries",
+                "Adjust the padding and corners of individual clickable items.",
+                column![
+                    slider_row(
+                        "Item padding (px)".into(),
+                        c.context_menu_item.padding,
+                        0.0..=32.0,
+                        ConfigPatch::ContextMenuItemPadding
+                    ),
+                    slider_row(
+                        "Item corner radius (px)".into(),
+                        c.context_menu_item.rounding,
+                        0.0..=20.0,
+                        ConfigPatch::ContextMenuItemRounding
+                    ),
+                ]
+                .spacing(16)
+                .into()
             ),
         ]
         .spacing(8)
@@ -242,12 +295,11 @@ impl Setting {
     /// below (defaults to the first). Length % + thickness px, floating
     /// (+ margins when floating) and per-corner rounding.
     fn panel_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        let mut col = column![
-            text("Panel").size(16),
-            text("Bars").size(16),
-            text("Size, floating and margins apply live to the bar.").size(11),
-        ]
-        .spacing(8);
+        let mut col = column![section_heading(
+            "Choose a bar",
+            "Each display can have its own bar configuration."
+        )]
+        .spacing(16);
         let mut bars: Vec<_> = plots
             .ids
             .iter()
@@ -280,11 +332,16 @@ impl Setting {
         };
         let mut picker = row![].spacing(8);
         for (wid, output) in &bars {
+            let connector = plots
+                .output_infos
+                .get(output)
+                .and_then(|info| info.name.clone())
+                .unwrap_or_else(|| "Unknown display".to_string());
             let label = plots
                 .tops
                 .get(wid)
-                .map(|t| format!("{} {output:?}", t.anchor_label()))
-                .unwrap_or_else(|| format!("BAR {output:?}"));
+                .map(|t| format!("{connector} · {}", t.anchor_label()))
+                .unwrap_or(connector);
             picker = picker.push(
                 button(text(label).size(13).color(theme::text()))
                     .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectBar(
@@ -294,19 +351,24 @@ impl Setting {
                     .style(theme::nav_button(*wid == selected)),
             );
         }
-        col = col.push(picker);
+        col = col.push(
+            scrollable(picker).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::default(),
+            )),
+        );
         let remove_label = plots
             .tops
             .get(&selected)
             .map(|t| format!("Remove {} bar", t.anchor_label()))
             .unwrap_or_else(|| String::from("Remove bar"));
-        col = col.push(
-            button(text(remove_label).size(13).color(theme::button_text()))
-                .on_press(Plant::TopPlot(TopEvent::Remove(selected)))
-                .padding(8)
-                .style(theme::menu_button(theme::RADIUS))
-                .width(Length::Fill),
-        );
+        let remove_button = button(text(remove_label).size(13).color(theme::active().error))
+            .on_press(Plant::TopPlot(TopEvent::Remove(selected)))
+            .padding(8)
+            .style(theme::menu_button_tinted(
+                theme::RADIUS,
+                theme::active().error,
+            ))
+            .width(Length::Shrink);
         let output = bars
             .iter()
             .find_map(|(wid, o)| (*wid == selected).then_some(*o));
@@ -340,6 +402,10 @@ impl Setting {
                 .max(1.0);
             let length = top.local.length_pct.clamp(1.0, 100.0);
             let thickness = top.local.thickness_px.clamp(1.0, thick_max as f32);
+            col = col.push(section_heading(
+                "Size & appearance",
+                "Length is a percentage of the display edge; thickness is measured in pixels.",
+            ));
             col = col.push(plant_slider_row(
                 format!("Length {:.0}%", length),
                 length as f64,
@@ -363,7 +429,7 @@ impl Setting {
                 let current = TopLocal::snap_opacity(top.local.opacity);
                 let mut presets = row![text("Opacity").width(Length::Fill)].spacing(8);
                 for step in TopLocal::OPACITY_STEPS {
-                    let label = format!("{:.0}", step * 100.0);
+                    let label = format!("{:.0}%", step * 100.0);
                     presets = presets.push(
                         button(text(label).size(12).color(theme::text()))
                             .on_press(Plant::TopPlot(TopEvent::Style(StyleEvent::Opacity(
@@ -376,7 +442,7 @@ impl Setting {
                 col = col.push(presets);
             }
 
-            col = col.push(rule::horizontal(2));
+            col = col.push(section_heading("Slots & widgets", "Slots divide the bar into regions. Select a slot to edit its alignment and widgets."));
             // Grid cells along the long axis. Named `Slots` (not
             // columns/rows) so the label stays correct when the anchor
             // flips between horizontal (top/bottom) and vertical
@@ -426,18 +492,26 @@ impl Setting {
                     Some(s) if s < n => s,
                     _ => 0,
                 };
-                let mut picker = row![text("Align").width(Length::Fill)].spacing(8);
+                let mut picker = row![].spacing(8);
                 for pos in 0..n {
                     picker = picker.push(
-                        button(text(format!("{}", pos + 1)).size(12).color(theme::text()))
-                            .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectSlot(
-                                id, pos,
-                            )))
-                            .padding(6)
-                            .style(theme::nav_button(pos == sel)),
+                        button(
+                            text(format!("Slot {}", pos + 1))
+                                .size(12)
+                                .color(theme::text()),
+                        )
+                        .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectSlot(
+                            id, pos,
+                        )))
+                        .padding(6)
+                        .style(theme::nav_button(pos == sel)),
                     );
                 }
-                col = col.push(picker);
+                col = col.push(
+                    scrollable(picker).direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::default(),
+                    )),
+                );
                 let current = top.local.align_at(sel);
                 let mut presets = row![].spacing(8);
                 for align in [SlotAlign::Start, SlotAlign::Center, SlotAlign::End] {
@@ -451,53 +525,53 @@ impl Setting {
                     );
                 }
                 col = col.push(presets);
-                // Widgets for the picked slot: one checkbox per
-                // `widgets.toml` entry — checked entries render together
-                // in the slot. A stale (unresolvable) name gets a checked
-                // box too so the slot can still be cleared.
-                let current = top.local.widgets_at(sel).to_vec();
-                let mut list = column![text("Widgets").size(13)].spacing(4);
-                for stale in current.iter().filter(|name| {
-                    !TopLocal::is_empty_widget(name)
-                        && !plots.widgets.iter().any(|d| &d.name == *name)
-                }) {
-                    let name = stale.clone();
-                    list = list.push(Checkbox::new(true).label(format!("{name} ?")).on_toggle(
-                        move |on| {
-                            Plant::TopPlot(TopEvent::Bar(BarEvent::SlotWidget(
-                                wid,
-                                sel,
-                                name.clone(),
-                                on,
-                            )))
-                        },
+                let slots = top.local.widgets.clone();
+                let names: Vec<String> = plots
+                    .widgets
+                    .iter()
+                    .filter(|def| !TopLocal::is_empty_widget(&def.name))
+                    .map(|def| def.name.clone())
+                    .collect();
+                let preview = iced::widget::responsive(move |size| {
+                    Preview::new(
+                        id,
+                        wid,
+                        slots.clone(),
+                        names.clone(),
+                        horizontal,
+                        sel,
+                        size.width,
+                    )
+                    .element()
+                })
+                .width(Length::Fill)
+                .height(Length::Shrink);
+                col = col.push(section(
+                    "Arrange your panel",
+                    "Drag onto a widget to swap, or onto free slot space to move. Click a slot to edit its alignment. Escape cancels a drag.",
+                    preview.into(),
+                ));
+                if plots.widgets.is_empty() {
+                    col = col.push(hint(
+                        "Add widget definitions in widgets.toml to fill the available-widget pool.",
                     ));
                 }
-                for def in &plots.widgets {
-                    let name = def.name.clone();
-                    let checked = current.iter().any(|w| w == &name);
-                    list = list.push(Checkbox::new(checked).label(name.clone()).on_toggle(
-                        move |on| {
-                            Plant::TopPlot(TopEvent::Bar(BarEvent::SlotWidget(
-                                wid,
-                                sel,
-                                name.clone(),
-                                on,
-                            )))
-                        },
-                    ));
-                }
-                col = col.push(list);
             }
 
-            col = col.push(rule::horizontal(2));
+            col = col.push(section_heading(
+                "Floating & corners",
+                "Inset the bar from the display edge and soften its corners.",
+            ));
             col = col.push(
                 Checkbox::new(top.local.floating)
-                    .label("Floating look (inset content, reserved space kept)")
+                    .label("Floating bar")
                     .on_toggle(move |v| {
                         Plant::TopPlot(TopEvent::Style(StyleEvent::Floating(wid, v)))
                     }),
             );
+            col = col.push(hint(
+                "Floating adds space around the bar; the reserved desktop area stays unchanged.",
+            ));
 
             if top.local.floating {
                 let top_margin = row![
@@ -630,7 +704,14 @@ impl Setting {
             col = col.push(top_radius_group);
             col = col.push(bottom_radius_group);
         }
-        col.spacing(8).width(Length::Fill).into()
+        col.push(section(
+            "Remove this bar",
+            "Remove the selected bar from the display and saved configuration.",
+            remove_button.into(),
+        ))
+        .spacing(16)
+        .width(Length::Fill)
+        .into()
     }
 
     /// Theme picker: dark/light toggle plus one button per
@@ -640,7 +721,14 @@ impl Setting {
     fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
         let current = &plots.config.theme;
         let mut list = column![
-            text("Theme").size(16),
+            section_heading(
+                "Color mode",
+                &format!(
+                    "Current palette: {} · {}",
+                    current.name,
+                    if current.darkmode { "Dark" } else { "Light" }
+                )
+            ),
             row![
                 button(text("Dark").size(13).color(theme::text()))
                     .width(Length::Fill)
@@ -659,7 +747,11 @@ impl Setting {
             ]
             .spacing(8),
         ]
-        .spacing(8);
+        .spacing(16);
+        list = list.push(section_heading(
+            "Choose a palette",
+            "Swatches preview the primary, secondary, and tertiary colors.",
+        ));
         for name in theme::available_themes() {
             let selected = name == current.name;
             let preview = theme::preview(&name, current.darkmode);
@@ -667,6 +759,9 @@ impl Setting {
                 button(
                     row![
                         text(name.clone()).size(13).color(preview.on_surface),
+                        text(if selected { "Selected" } else { "" })
+                            .size(11)
+                            .color(preview.on_surface),
                         Space::new().width(Length::Fill),
                         row![
                             swatch(preview.primary, preview.outline),
@@ -683,7 +778,7 @@ impl Setting {
                 .on_press(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
                     name,
                 ))))
-                .padding(8)
+                .padding(14)
                 .style(theme::preview_button(preview, selected)),
             );
         }
@@ -696,31 +791,50 @@ impl Setting {
     /// re-times on the next redraw and persists the choice to `config.toml`.
     fn animation_content(&self, plots: &Plots) -> Element<'_, Plant> {
         let current = plots.config.animation.speed;
-        let mut speeds = row![].spacing(8);
+        let mut speeds = column![].spacing(10);
         for speed in AnimationSpeed::all() {
             let selected = speed == current;
             speeds = speeds.push(
                 button(
-                    text(format!(
-                        "{} ({}ms)",
-                        speed.title(),
-                        speed.duration().as_millis()
-                    ))
-                    .size(13)
-                    .color(theme::text()),
+                    column![
+                        row![
+                            text(speed.title())
+                                .size(14)
+                                .color(theme::text())
+                                .width(Length::Fill),
+                            text(format!(
+                                "{} ms{}",
+                                speed.duration().as_millis(),
+                                if selected { " · Selected" } else { "" }
+                            ))
+                            .size(12)
+                            .color(theme::text()),
+                        ]
+                        .spacing(8),
+                        hint(match speed {
+                            AnimationSpeed::Fast => "Quick and responsive",
+                            AnimationSpeed::Medium => "Balanced everyday transitions",
+                            AnimationSpeed::Slow => "Relaxed and more pronounced",
+                        }),
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
                 )
                 .width(Length::Fill)
                 .on_press(Plant::Config(ConfigEvent::Patch(
                     ConfigPatch::AnimationSpeed(speed),
                 )))
-                .padding(8)
+                .padding(14)
                 .style(theme::nav_button(selected)),
             );
         }
         column![
-            text("Animation").size(16),
-            text("Global speed for animated color and property changes.").size(11),
-            speeds.width(Length::Fill),
+            section(
+                "Transition speed",
+                "Shorter durations feel snappier; longer durations make changes more gradual.",
+                speeds.width(Length::Fill).into()
+            ),
+            hint("Some Lua listviews define their own durations and override this global setting."),
         ]
         .spacing(8)
         .width(Length::Fill)
@@ -729,6 +843,7 @@ impl Setting {
 
     fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         column![
+            section_heading("Display layout", "Drag images to position them. Use the map to see how they overlap your displays."),
             row![
                 button(text("Add wallpaper…").size(13).color(theme::button_text()))
                     .on_press(Plant::BackgroundPlot(
@@ -740,10 +855,9 @@ impl Setting {
             ]
             .spacing(8),
             self.wallpaper_grid(id, plots),
-            self.wallpaper_images(id, plots),
-            container(Space::new().height(Length::Fill).width(Length::Fill)),
+            section("Image properties", "Choose an image below to adjust its placement. Reset restores that property's default.", self.wallpaper_images(id, plots)),
         ]
-        .spacing(8)
+        .spacing(16)
         .into()
     }
 
@@ -770,12 +884,16 @@ impl Setting {
         for (i, img) in images.iter().enumerate() {
             let name = image_file_name(img);
             picker = picker.push(
-                button(text(format!("{i}: {name}")).size(12).color(theme::text()))
-                    .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectImage(
-                        id, i,
-                    )))
-                    .padding(8)
-                    .style(theme::nav_button(i == sel)),
+                button(
+                    text(format!("{} · {name}", i + 1))
+                        .size(12)
+                        .color(theme::text()),
+                )
+                .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectImage(
+                    id, i,
+                )))
+                .padding(8)
+                .style(theme::nav_button(i == sel)),
             );
         }
         let img = &images[sel];
@@ -788,23 +906,36 @@ impl Setting {
         // Match the renderer's effective scale, including wheel values up
         // to 10x and larger valid values loaded from config.toml.
         let shown_scale = iscale.max(0.01);
-        let mut col = column![picker, rule::horizontal(2)];
+        let mut col = column![
+            scrollable(picker).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::default()
+            ))
+        ]
+        .spacing(16);
         col = col.push(
             row![
-                text(format!("Image {sel}: {name}"))
+                text(format!("Image {} · {name}", sel + 1))
                     .size(13)
                     .color(theme::text())
                     .width(Length::Fill),
-                button(text("Remove").size(12).color(theme::button_text()))
+                button(text("Remove image").size(12).color(theme::active().error))
                     .on_press(Plant::Config(ConfigEvent::Patch(
                         ConfigPatch::RemoveImage { index: sel }
                     )))
                     .padding(6)
-                    .style(theme::menu_button(theme::RADIUS)),
+                    .style(theme::menu_button_tinted(
+                        theme::RADIUS,
+                        theme::active().error
+                    )),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
         );
+        col = col.push(hint(format!("Source resolution: {fw:.0} × {fh:.0} px")));
+        col = col.push(section_heading(
+            "Position & stacking",
+            "X and Y are desktop coordinates. Higher Z values place the image in front.",
+        ));
         col = col.push(image_spin_row(
             "X (px)",
             ix as f64,
@@ -860,8 +991,12 @@ impl Setting {
                 z: 0,
             })),
         ));
+        col = col.push(section_heading(
+            "Dimensions & scale",
+            "Width and height define the base size; scale multiplies both dimensions.",
+        ));
         col = col.push(image_spin_row(
-            format!("Width (px, file {fw:.0})"),
+            "Width (px)",
             shown_width as f64,
             0.0..=16000.0_f64.max(shown_width as f64),
             1.0,
@@ -880,7 +1015,7 @@ impl Setting {
             })),
         ));
         col = col.push(image_spin_row(
-            format!("Height (px, file {fh:.0})"),
+            "Height (px)",
             shown_height as f64,
             0.0..=16000.0_f64.max(shown_height as f64),
             1.0,
@@ -936,7 +1071,7 @@ impl Setting {
             outputs_layer(id, outputs, images, handles, view),
         ])
         .style(theme::menu_box)
-        .height(Length::Fixed(600.0))
+        .height(Length::Fixed(360.0))
         .clip(true)
         .width(Length::Fill)
         .into()
@@ -1117,6 +1252,41 @@ impl Setting {
     }
 }
 
+fn hint(message: impl Into<String>) -> Element<'static, Plant> {
+    text(message.into())
+        .size(12)
+        .color(theme::text_dim())
+        .into()
+}
+
+fn page_heading(title: &str, description: &str) -> Element<'static, Plant> {
+    column![
+        text(title.to_owned()).size(26).color(theme::text()),
+        hint(description),
+    ]
+    .spacing(6)
+    .width(Length::Fill)
+    .into()
+}
+
+fn section_heading(title: &str, description: &str) -> Element<'static, Plant> {
+    column![
+        text(title.to_owned()).size(16).color(theme::text()),
+        hint(description),
+    ]
+    .spacing(5)
+    .width(Length::Fill)
+    .into()
+}
+
+fn section<'a>(title: &str, description: &str, body: Element<'a, Plant>) -> Element<'a, Plant> {
+    container(column![section_heading(title, description), body].spacing(16))
+        .padding(18)
+        .width(Length::Fill)
+        .style(theme::menu_box)
+        .into()
+}
+
 /// Single palette swatch box for theme preview rows: fixed-size tile
 /// painted with the previewed theme's own color.
 fn swatch(color: iced::Color, border: iced::Color) -> Element<'static, Plant> {
@@ -1139,16 +1309,30 @@ fn slider_row(
     range: RangeInclusive<f64>,
     ctor: fn(f32) -> ConfigPatch,
 ) -> Element<'static, Plant> {
-    column![
-        text(label).size(13).color(theme::text()),
-        slider(range, value as f64, move |v| {
-            Plant::Config(ConfigEvent::Patch(ctor(v as f32)))
-        })
-        // Drags preview in live memory; release persists to the config file.
-        .on_release(Plant::Config(ConfigEvent::SaveNow))
-        .width(Length::Fill),
-    ]
-    .spacing(4)
+    let on_change = move |v: f64| Plant::Config(ConfigEvent::Patch(ctor(v as f32)));
+    container(
+        column![
+            row![
+                text(label)
+                    .size(14)
+                    .color(theme::text())
+                    .width(Length::Fill),
+                spin_box(value as f64, range.clone(), 1.0, 0, on_change)
+                    .width(Length::Fixed(120.0))
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+            slider(range, value as f64, move |v| {
+                Plant::Config(ConfigEvent::Patch(ctor(v as f32)))
+            })
+            // Drags preview in live memory; release persists to the config file.
+            .on_release(Plant::Config(ConfigEvent::SaveNow))
+            .width(Length::Fill),
+        ]
+        .spacing(10),
+    )
+    .padding(12)
+    .width(Length::Fill)
     .into()
 }
 
@@ -1164,13 +1348,28 @@ fn plant_slider_row(
     msg: impl Fn(f64) -> Plant + 'static,
     release: Option<Plant>,
 ) -> Element<'static, Plant> {
+    let bounds = format!("{:.0} – {:.0}", range.start(), range.end());
     let mut sl = slider(range, value, msg).step(step).width(Length::Fill);
     if let Some(on_release) = release {
         sl = sl.on_release(on_release);
     }
-    column![text(label).size(13).color(theme::text()), sl,]
-        .spacing(4)
-        .into()
+    container(
+        column![
+            row![
+                text(label)
+                    .size(14)
+                    .color(theme::text())
+                    .width(Length::Fill),
+                hint(bounds)
+            ]
+            .spacing(12),
+            sl,
+        ]
+        .spacing(10),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .into()
 }
 
 /// Short file name for an image entry (`"(empty path)"` for sparse entries).
@@ -1199,19 +1398,26 @@ fn image_spin_row(
     on_commit: impl Fn(f64) -> Plant + Clone + 'static,
     on_reset: Plant,
 ) -> Element<'static, Plant> {
-    row![
-        text(label.into())
-            .size(13)
-            .color(theme::text())
-            .width(Length::FillPortion(4)),
-        spin_box(value, range, step, decimals, on_commit).width(Length::Fixed(150.0)),
-        button(text("Reset").size(11).color(theme::button_text()))
-            .on_press(on_reset)
-            .padding(6)
-            .style(theme::menu_button(theme::RADIUS)),
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center)
+    container(
+        column![
+            text(label.into())
+                .size(14)
+                .color(theme::text())
+                .width(Length::Fill),
+            row![
+                spin_box(value, range, step, decimals, on_commit).width(Length::Fill),
+                button(text("Reset default").size(12).color(theme::button_text()))
+                    .on_press(on_reset)
+                    .padding(6)
+                    .style(theme::menu_button(theme::RADIUS)),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(8),
+    )
+    .padding(10)
+    .width(Length::Fill)
     .into()
 }
 

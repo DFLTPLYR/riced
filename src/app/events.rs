@@ -137,6 +137,12 @@ pub enum BarEvent {
     /// label): checked appends the name, unchecked removes it. Applied
     /// live, persisted to the bar's `[[bar]] widgets` entry.
     SlotWidget(Id, usize, String, bool),
+    /// Atomic settings-preview drop; reject if the layout changed mid-drag.
+    WidgetLayout {
+        bar: Id,
+        expected: Vec<Vec<String>>,
+        widgets: Vec<Vec<String>>,
+    },
     /// Inset inside every slot cell (px): applied live, persisted to
     /// the bar's `[[bar]] slot_padding` entry.
     SlotPadding(Id, f32),
