@@ -77,7 +77,7 @@ src/app/app.rs:454      redraw_scope: SelectionTick|Button => All, CursorMoved =
 Bar cells are Lua scripts in `~/.config/riced/widgets/`, declared in
 `~/.config/riced/widgets.toml` and referenced by name from `[[bar]]`
 `widgets` entries. First run seeds a clock plus commented
-hello/stats/cpu/ram/gpu/wayland/clinepass examples — uncomment a
+hello/stats/cpu/ram/gpu/workspaces/clinepass examples — uncomment a
 `[[widget]]` entry to use it.
 
 ```toml

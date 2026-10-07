@@ -4546,12 +4546,12 @@ mod tests {
 
     /// Seeds render through the full pipeline: parse plus build.
     /// Off-compositor services (Hyprland socket, outputs) degrade to
-    /// empty tables, so every seed renders — including wayland ("--").
+    /// empty tables, so every seed renders — including workspaces ("--").
     #[test]
     fn seed_scripts_parse_and_build() {
         use crate::config::{
             SEED_CLINEPASS_LUA, SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA,
-            SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA, SEED_WAYLAND_LUA,
+            SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA, SEED_WORKSPACES_LUA,
         };
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
@@ -4565,7 +4565,7 @@ mod tests {
             SEED_CPU_LUA,
             SEED_RAM_LUA,
             SEED_GPU_LUA,
-            SEED_WAYLAND_LUA,
+            SEED_WORKSPACES_LUA,
             SEED_CLINEPASS_LUA,
             SEED_SYSTEM_LUA,
         ] {
@@ -4751,8 +4751,8 @@ mod tests {
     }
 
     #[test]
-    fn wayland_seed_lists_native_toplevels_without_actions() {
-        use crate::config::SEED_WAYLAND_LUA;
+    fn workspaces_seed_filters_bar_output_and_dispatches_actual_name() {
+        use crate::config::SEED_WORKSPACES_LUA;
         use crate::services::{Toplevel, ToplevelCache, Workspace, WorkspaceCache};
         let lua = new_widget_lua().expect("sandbox");
         // Feed the seed through the real `wayland` service from a
@@ -4805,10 +4805,10 @@ mod tests {
         // compositor; the service's own shape test covers the outputs
         // table itself).
         crate::services::publish_bar(&lua, "DP-1").expect("bar");
-        load_widget_script(&lua, "wayland", SEED_WAYLAND_LUA).expect("load");
+        load_widget_script(&lua, "workspaces", SEED_WORKSPACES_LUA).expect("load");
         // Bar is a horizontal strip over the local output: `code`
-        // passes by monitor, `web` (unresolvable monitor) shows as
-        // fallback, `mail` (HDMI-1) does not.
+        // passes by monitor; `web` (unassigned) and `mail` (HDMI-1)
+        // remain excluded from this strip.
         let value = call_lua_value(&lua, "view").expect("view");
         let node = parse_node(&value).expect("parse");
         match node {
@@ -4823,63 +4823,30 @@ mod tests {
                 let labels: Vec<&str> = items
                     .iter()
                     .map(|(_, item)| match item {
-                        WidgetNode::Text { content, .. } => content.as_str(),
-                        other => panic!("expected text, got {other:?}"),
+                        WidgetNode::Button { label, action, .. } => {
+                            assert_eq!(action, "code");
+                            label.as_str()
+                        }
+                        other => panic!("expected button, got {other:?}"),
                     })
                     .collect();
-                assert_eq!(labels, ["web", "[code]"]);
+                assert_eq!(labels, ["1"]);
             }
             other => panic!("expected listview, got {other:?}"),
         }
-        // The seed defines no actions at all (pure standard Wayland
-        // cannot focus other windows; nothing to dispatch).
-        let app: mlua::Table = lua.named_registry_value("riced.widget.app").expect("app");
-        let on_action: mlua::Value = app.get("on_action").expect("get");
-        assert!(
-            matches!(on_action, mlua::Value::Nil),
-            "read-only: no on_action"
-        );
-        // Popup is a listview: workspace rows first (active
-        // bracketed), then one row per toplevel; empty titles fall back
-        // to the app id.
-        let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
-        let tree = content.tree.expect("popup tree");
-        let mut labels = Vec::new();
-        let mut stack = vec![&tree];
-        while let Some(node) = stack.pop() {
-            match node {
-                WidgetNode::Text { content, .. } => labels.push(content.clone()),
-                WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
-                    stack.extend(children.iter());
-                }
-                WidgetNode::ListView { items, .. } => {
-                    stack.extend(items.iter().map(|(_, node)| node));
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            labels.iter().any(|t| t == "[code (DP-1)]"),
-            "active workspace row missing: {labels:?}"
-        );
-        assert!(
-            labels.iter().any(|t| t == "web"),
-            "workspace row missing: {labels:?}"
-        );
-        assert!(
-            labels.iter().any(|t| t == "mail (HDMI-1)"),
-            "other-output row missing: {labels:?}"
-        );
-        assert!(
-            labels
-                .iter()
-                .any(|t| t.contains("foot") && t.contains("shell")),
-            "toplevel row missing: {labels:?}"
-        );
-        assert!(
-            labels.iter().any(|t| t == "  firefox — firefox"),
-            "app-id fallback missing: {labels:?}"
+        // Record the action rather than launching hyprctl in tests.
+        let os: mlua::Table = lua.globals().get("os").expect("os");
+        os.set(
+            "execute",
+            lua.create_function(|lua, command: String| lua.globals().set("dispatched", command))
+                .expect("execute"),
+        )
+        .expect("stub");
+        call_lua_named_action(&lua, "1001").expect("action");
+        let command: String = lua.globals().get("dispatched").expect("command");
+        assert_eq!(
+            command,
+            "hyprctl dispatch 'hl.dsp.focus({workspace = 1001})' >/dev/null 2>&1"
         );
     }
 

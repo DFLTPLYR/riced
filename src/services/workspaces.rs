@@ -171,28 +171,11 @@ impl Listener {
     }
 
     fn publish(&self) {
-        // Outputs no group claims (the compositor never assigned
-        // them): lend their geometry to workspaces whose own group
-        // has none, so a missing `output_enter` degrades to
-        // best-effort placement instead of invisibility. On
-        // conforming compositors this set is empty (no-op).
-        let claimed: HashSet<u32> = self.group_outputs.values().flatten().copied().collect();
-        let mut unclaimed: Vec<[f32; 4]> = self
-            .outputs
-            .keys()
-            .filter(|id| !claimed.contains(id))
-            .filter_map(|id| self.output_rect(*id))
-            .collect();
-        unclaimed.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        unclaimed.dedup();
         let mut rows: Vec<Workspace> = self
             .workspaces
             .values()
             .map(|row| {
-                let mut rects = self.group_rects(row.group);
-                if rects.is_empty() {
-                    rects.clone_from(&unclaimed);
-                }
+                let rects = self.group_rects(row.group);
                 Workspace {
                     name: row.name.clone(),
                     monitor: self.monitor_of(row.group),
@@ -284,12 +267,13 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
     for global in globals.contents().clone_list() {
         if global.interface == "wl_output" && global.version >= 2 {
             let version = global.version.min(4);
-            if let Some(output) = globals
-                .bind::<wl_output::WlOutput, _, _>(&qh, version..=version, ())
-                .ok()
-            {
-                listener.bind_output(output, &qh);
-            }
+            // GlobalList::bind selects the first matching interface,
+            // not this loop's global. Bind by registry name so each
+            // physical output is subscribed exactly once.
+            let output = globals
+                .registry()
+                .bind::<wl_output::WlOutput, (), Listener>(global.name, version, &qh, ());
+            listener.bind_output(output, &qh);
         }
     }
     while queue.blocking_dispatch(&mut listener).is_ok() {
@@ -632,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_workspaces_inherit_unclaimed_output_geometry() {
+    fn unassigned_workspaces_do_not_inherit_other_output_geometry() {
         let (mut st, shared) = listener();
         // Group 1 claims output 10 only; output 11 is unclaimed.
         st.groups.insert(1, HashSet::from([100]));
@@ -662,7 +646,7 @@ mod tests {
         let code = rows.iter().find(|r| r.name == "code").expect("code");
         assert_eq!(code.rects, vec![[0.0, 0.0, 2560.0, 1440.0]]);
         let mail = rows.iter().find(|r| r.name == "mail").expect("mail");
-        assert_eq!(mail.rects, vec![[2560.0, 0.0, 1920.0, 1080.0]]);
+        assert!(mail.rects.is_empty());
     }
 
     #[test]
