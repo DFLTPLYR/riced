@@ -172,14 +172,24 @@ impl MapLayer {
         }
     }
 
-    /// Native size: stored `width`/`height`, or a header-only lookup when
-    /// both are `0` (mirrors the QML `width = sourceSize.width` default).
+    /// Unscaled size: each stored axis independently overrides its file
+    /// dimension. Zero means native size for that axis.
     /// `None` for empty/unreadable paths or degenerate sizes.
     pub(crate) fn native_size(img: &BackgroundImage) -> Option<(f32, f32)> {
         if img.width > 0.0 && img.height > 0.0 {
             return Some((img.width, img.height));
         }
-        Self::file_dimensions(img)
+        let size = Self::size_with_file(img, Self::file_dimensions(img)?);
+        (size.0 > 0.0 && size.1 > 0.0).then_some(size)
+    }
+
+    /// Shared resolution for rendering and the wallpaper inputs. Keep the
+    /// native-size sentinel in configuration while displaying concrete pixels.
+    pub(crate) fn size_with_file(img: &BackgroundImage, file: (f32, f32)) -> (f32, f32) {
+        (
+            if img.width > 0.0 { img.width } else { file.0 },
+            if img.height > 0.0 { img.height } else { file.1 },
+        )
     }
 
     /// File dimensions straight from the image header, ignoring any stored
@@ -705,6 +715,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(MapLayer::file_dimensions(&img), Some((40.0, 30.0)));
+        // A single edited axis must take effect while the other remains native.
+        let mut partial = img.clone();
+        partial.height = 0.0;
+        assert_eq!(MapLayer::native_size(&partial), Some((800.0, 30.0)));
+        assert_eq!(
+            MapLayer::size_with_file(&partial, (40.0, 30.0)),
+            (800.0, 30.0)
+        );
+        partial.width = 0.0;
+        partial.height = 600.0;
+        assert_eq!(MapLayer::native_size(&partial), Some((40.0, 600.0)));
+        partial.height = 0.0;
+        partial.scale = 9.0;
+        assert_eq!(MapLayer::native_size(&partial), Some((40.0, 30.0)));
+        assert_eq!(MapLayer::resolved(&partial), Some((0.0, 0.0, 360.0, 270.0)));
+        // Resolving the visible inputs does not replace sentinel values or scale.
+        assert_eq!(
+            (partial.width, partial.height, partial.scale),
+            (0.0, 0.0, 9.0)
+        );
         // Missing file → None (reset falls back to the native flag).
         let missing = BackgroundImage {
             path: dir.join("nope.png").to_string_lossy().into_owned(),

@@ -784,6 +784,10 @@ impl Setting {
         // Actual file resolution for Width/Height reset (falls back to
         // 0 = native flag when the file is unreadable).
         let (fw, fh) = MapLayer::file_dimensions(img).unwrap_or((0.0, 0.0));
+        let (shown_width, shown_height) = MapLayer::size_with_file(img, (fw, fh));
+        // Match the renderer's effective scale, including wheel values up
+        // to 10x and larger valid values loaded from config.toml.
+        let shown_scale = iscale.max(0.01);
         let mut col = column![picker, rule::horizontal(2)];
         col = col.push(
             row![
@@ -858,8 +862,8 @@ impl Setting {
         ));
         col = col.push(image_spin_row(
             format!("Width (px, file {fw:.0})"),
-            iw as f64,
-            0.0..=16000.0,
+            shown_width as f64,
+            0.0..=16000.0_f64.max(shown_width as f64),
             1.0,
             0,
             move |v| {
@@ -877,8 +881,8 @@ impl Setting {
         ));
         col = col.push(image_spin_row(
             format!("Height (px, file {fh:.0})"),
-            ih as f64,
-            0.0..=16000.0,
+            shown_height as f64,
+            0.0..=16000.0_f64.max(shown_height as f64),
             1.0,
             0,
             move |v| {
@@ -896,8 +900,8 @@ impl Setting {
         ));
         col = col.push(image_spin_row(
             "Scale (×)",
-            iscale as f64,
-            0.01..=8.0,
+            shown_scale as f64,
+            0.01..=10.0_f64.max(shown_scale as f64),
             0.1,
             2,
             move |v| {
@@ -941,6 +945,9 @@ impl Setting {
     /// Replace the map pan/zoom/drag view (`MapViewChanged`). Field stays
     /// private; `Plots` writes through here like cursor maps elsewhere.
     pub(crate) fn set_map_view(&mut self, view: MapView) {
+        if let Some(index) = view.selected {
+            self.selected_image = Some(index);
+        }
         self.map_view = view;
     }
 
@@ -1000,6 +1007,7 @@ impl Setting {
     ) -> Command<Plant> {
         if let Some(setting) = plots.settings.get_mut(&id) {
             setting.selected_image = Some(index);
+            setting.map_view.selected = Some(index);
         }
         Command::none()
     }
@@ -1011,6 +1019,18 @@ impl Setting {
             Some(s) if s == index => self.selected_image = None,
             Some(s) if s > index => self.selected_image = Some(s - 1),
             _ => {}
+        }
+        match self.map_view.selected {
+            Some(s) if s == index => self.map_view.selected = None,
+            Some(s) if s > index => self.map_view.selected = Some(s - 1),
+            _ => {}
+        }
+        if let Some(drag) = &mut self.map_view.drag {
+            match drag.image {
+                Some(s) if s == index => self.map_view.drag = None,
+                Some(s) if s > index => drag.image = Some(s - 1),
+                _ => {}
+            }
         }
     }
 
@@ -1193,4 +1213,43 @@ fn image_spin_row(
     .spacing(8)
     .align_y(iced::Alignment::Center)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_selection_updates_wallpaper_input_selection() {
+        let mut setting = Setting::default();
+        setting.set_map_view(MapView {
+            selected: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(setting.selected_image, Some(2));
+        // Panning empty space should retain the last inspected image.
+        setting.set_map_view(MapView::default());
+        assert_eq!(setting.selected_image, Some(2));
+    }
+
+    #[test]
+    fn removing_wallpaper_remaps_editor_and_map_selection() {
+        let mut setting = Setting::default();
+        setting.set_map_view(MapView {
+            selected: Some(2),
+            drag: Some(crate::components::display_map::MapDrag {
+                image: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        setting.image_removed(0);
+        assert_eq!(setting.selected_image, Some(1));
+        assert_eq!(setting.map_view.selected, Some(1));
+        assert_eq!(setting.map_view.drag.unwrap().image, Some(1));
+        setting.image_removed(1);
+        assert_eq!(setting.selected_image, None);
+        assert_eq!(setting.map_view.selected, None);
+        assert!(setting.map_view.drag.is_none());
+    }
 }
