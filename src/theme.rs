@@ -1027,17 +1027,26 @@ mod tests {
     }
 
     #[test]
-    fn publish_theme_tables_lands_hex_in_lua() {
+    fn theme_service_lands_hex_in_lua() {
         let _guard = SERIAL.lock().unwrap();
         let lua = mlua::Lua::new();
-        crate::app::layers::top::publish_theme_tables(
-            &lua,
-            &ThemeConfig {
-                name: "no-such-theme".to_string(),
-                ..ThemeConfig::default()
-            },
-        )
-        .expect("publish");
+        let sys = sysinfo::System::new();
+        let outputs = std::collections::HashMap::new();
+        let queue = std::collections::VecDeque::new();
+        let hypr = crate::services::HyprCache::default();
+        let theme = ThemeConfig {
+            name: "no-such-theme".to_string(),
+            ..ThemeConfig::default()
+        };
+        let ctx = crate::services::ServiceCtx {
+            sys: &sys,
+            gpu: None,
+            theme: &theme,
+            outputs: &outputs,
+            notifications: &queue,
+            hypr: &hypr,
+        };
+        crate::services::publish_all(&ctx, &lua).expect("publish");
         let primary: String = lua.load("return theme.primary").eval().expect("eval");
         assert!(primary.len() == 7 && primary.starts_with('#'), "{primary}");
     }

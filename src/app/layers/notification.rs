@@ -628,9 +628,11 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
     }
     let result: Result<WidgetNode, String> = (|| {
         let lua = plots.notify_lua.as_ref().ok_or("runtime missing")?;
-        // Fresh palette every card render (same republish policy as
-        // widget states, at arrival/edit granularity).
-        super::top::publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())?;
+        // Fresh service tables every card render (arrival/edit
+        // granularity, like widget states; `gpu` is nil here — cards
+        // render off-tick, so no fresh GPU reading is available).
+        let ctx = crate::services::ServiceCtx::from_plots(plots, None);
+        crate::services::publish_all(&ctx, lua).map_err(|e| e.to_string())?;
         let table = lua.create_table().map_err(|e| e.to_string())?;
         table.set("id", n.id).map_err(|e| e.to_string())?;
         table.set("app", n.app.clone()).map_err(|e| e.to_string())?;
@@ -668,29 +670,6 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
             plots.notif_trees.remove(&n.id);
         }
     }
-}
-
-/// Publish the live notification queue as the Lua `notifications`
-/// table (newest-first `{id, app, title, body, urgency, has_image}`
-/// rows; metadata only, no image handles or actions). Called alongside
-/// `publish_system_tables` before widget `render()`/popup/action calls
-/// so a notification-center widget can list (and, via the `on_action`
-/// return convention, dismiss) the queue.
-pub(crate) fn publish_notification_list(lua: &mlua::Lua, plots: &Plots) -> mlua::Result<()> {
-    let list = lua.create_table()?;
-    let mut i = 0;
-    for n in plots.notifications.iter().rev() {
-        let entry = lua.create_table()?;
-        entry.set("id", n.id)?;
-        entry.set("app", n.app.clone())?;
-        entry.set("title", n.title.clone())?;
-        entry.set("body", n.body.clone())?;
-        entry.set("urgency", n.urgency)?;
-        entry.set("has_image", n.image.is_some())?;
-        i += 1;
-        list.set(i, entry)?;
-    }
-    lua.globals().set("notifications", list)
 }
 
 /// Map an `on_action` return value onto notification commands:
@@ -1206,14 +1185,15 @@ mod tests {
     }
 
     #[test]
-    fn publish_notification_list_exposes_newest_first() {
+    fn notifications_service_exposes_newest_first() {
         let (_tx, rx) = iced_wayland_subscriber::shell::channel();
         let mut plots = Plots::new(rx);
         for id in [1, 2, 3] {
             plots.notifications.push_back(noti(id, 0, Some(5_000), 1));
         }
         let lua = mlua::Lua::new();
-        publish_notification_list(&lua, &plots).expect("publish");
+        let ctx = crate::services::ServiceCtx::from_plots(&plots, None);
+        crate::services::publish_all(&ctx, &lua).expect("publish");
         let count: i64 = lua.load("return #notifications").eval().expect("count");
         assert_eq!(count, 3);
         // Newest (id 3) first.
@@ -1228,7 +1208,8 @@ mod tests {
         assert!(!has_image);
         // Empty queue publishes an empty table.
         plots.notifications.clear();
-        publish_notification_list(&lua, &plots).expect("publish");
+        let ctx = crate::services::ServiceCtx::from_plots(&plots, None);
+        crate::services::publish_all(&ctx, &lua).expect("publish");
         let count: i64 = lua.load("return #notifications").eval().expect("count");
         assert_eq!(count, 0);
     }

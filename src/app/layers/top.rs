@@ -1845,58 +1845,6 @@ pub(crate) fn build_node_opacity(
     }
 }
 
-/// Refresh the `sysinfo`/`gfxinfo` globals of one Lua state from live
-/// system data. Scripts see `sysinfo.cpu_usage` (%, all cores),
-/// `sysinfo.cpu_count`, `sysinfo.mem_used`/`mem_total` (bytes),
-/// `sysinfo.mem_usage` (%), and `gfxinfo.usage` (% or nil when the
-/// GPU exposes nothing readable).
-pub(crate) fn publish_system_tables(
-    lua: &Lua,
-    sys: &sysinfo::System,
-    gpu: Option<f32>,
-) -> mlua::Result<()> {
-    let globals = lua.globals();
-    let info = lua.create_table()?;
-    info.set("cpu_usage", sys.global_cpu_usage())?;
-    info.set("cpu_count", sys.cpus().len())?;
-    info.set("mem_used", sys.used_memory())?;
-    info.set("mem_total", sys.total_memory())?;
-    let total = sys.total_memory();
-    info.set(
-        "mem_usage",
-        if total > 0 {
-            sys.used_memory() as f32 / total as f32 * 100.0
-        } else {
-            0.0
-        },
-    )?;
-    globals.set("sysinfo", info)?;
-    let gfx = lua.create_table()?;
-    match gpu {
-        Some(usage) => gfx.set("usage", usage)?,
-        None => gfx.set("usage", Value::Nil)?,
-    }
-    globals.set("gfxinfo", gfx)?;
-    Ok(())
-}
-
-/// Publish the live iced palette as the Lua `theme` table
-/// (`theme.primary`, `theme.on_primary`, ... — `"#rrggbb"` strings from
-/// [`crate::theme::lua_palette`]). Called alongside
-/// [`publish_system_tables`] before every due `render()` so theme
-/// switches flow into scripts on the next tick, and in the
-/// notification renderer on every card render.
-pub(crate) fn publish_theme_tables(
-    lua: &Lua,
-    theme: &crate::config::ThemeConfig,
-) -> mlua::Result<()> {
-    let table = lua.create_table()?;
-    for (key, hex) in crate::theme::lua_palette(theme) {
-        table.set(key, hex)?;
-    }
-    lua.globals().set("theme", table)
-}
-
 /// Lua state for one widget: string/table/math/os/io with native
 /// shell (`os.execute`, `io.popen` live — owner-accepted risk, no
 /// allowlist). `os.exit`/`os.remove`/`os.rename` stay nil'd, as do
@@ -1926,7 +1874,7 @@ fn empty_widget_lua() -> mlua::Result<Lua> {
 }
 
 /// The `iced` constructors table (plus legacy `ui` alias), present in
-/// every widget state next to `sysinfo`/`gfxinfo`. Each call builds a
+/// every widget state next to the service tables. Each call builds a
 /// plain description table — no iced objects cross into Lua;
 /// [`parse_node`] interprets them.
 ///
@@ -3052,9 +3000,8 @@ impl Top {
             .widget_lua
             .get(&def.name)
             .ok_or_else(|| "runtime missing".to_string())?;
-        publish_system_tables(lua, &plots.sysinfo, gpu).map_err(|e| e.to_string())?;
-        publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())?;
-        super::notification::publish_notification_list(lua, plots).map_err(|e| e.to_string())?;
+        let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
+        crate::services::publish_all(&ctx, lua).map_err(|e| e.to_string())?;
         call_lua_value(lua, "view")
     }
 
@@ -3260,6 +3207,9 @@ impl Top {
         let now = Instant::now();
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
+        // One Hyprland socket round-trip per tick, shared by every
+        // widget state (see `crate::services::hypr::HyprCache`).
+        plots.hypr_cache.refresh();
         let gpu = Popup::gpu_usage_percent();
         let defs = plots.widgets.clone();
         let mut changed = false;
@@ -3338,15 +3288,9 @@ impl Top {
     ) -> Command<Plant> {
         let gpu = Popup::gpu_usage_percent();
         let outcome = plots.widget_lua.get(&widget).map(|lua| {
-            publish_system_tables(lua, &plots.sysinfo, gpu)
+            let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
+            crate::services::publish_all(&ctx, lua)
                 .map_err(|e| e.to_string())
-                .and_then(|()| {
-                    publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
-                })
-                .and_then(|()| {
-                    super::notification::publish_notification_list(lua, plots)
-                        .map_err(|e| e.to_string())
-                })
                 .and_then(|()| call_lua_named_action(lua, &action))
         });
         match outcome {
@@ -3889,15 +3833,9 @@ impl Top {
         let gpu = Popup::gpu_usage_percent();
         let outcome = match plots.widget_lua.get(name) {
             Some(lua) => {
-                let acted = publish_system_tables(lua, &plots.sysinfo, gpu)
+                let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
+                let acted = crate::services::publish_all(&ctx, lua)
                     .map_err(|e| e.to_string())
-                    .and_then(|()| {
-                        publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
-                    })
-                    .and_then(|()| {
-                        super::notification::publish_notification_list(lua, plots)
-                            .map_err(|e| e.to_string())
-                    })
                     .and_then(|()| call_lua_action(lua));
                 Some(acted)
             }
@@ -4403,21 +4341,41 @@ mod tests {
         assert!(icon_bytes("").is_none());
     }
 
+    /// Publish every service table from throwaway fixtures (mirrors
+    /// what `render_lua_value` does from live `Plots`).
+    fn publish_test_services(lua: &mlua::Lua, sys: &sysinfo::System, gpu: Option<f32>) {
+        let theme = crate::config::ThemeConfig::default();
+        let outputs = std::collections::HashMap::new();
+        let queue = std::collections::VecDeque::new();
+        let hypr = crate::services::HyprCache::default();
+        let ctx = crate::services::ServiceCtx {
+            sys,
+            gpu,
+            theme: &theme,
+            outputs: &outputs,
+            notifications: &queue,
+            hypr: &hypr,
+        };
+        crate::services::publish_all(&ctx, lua).expect("publish");
+    }
+
     #[test]
-    fn system_tables_expose_cpu_memory_and_gpu() {
+    fn system_service_exposes_cpu_memory_and_gpu() {
         let lua = new_widget_lua().expect("sandbox");
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        publish_system_tables(&lua, &sys, Some(42.0)).expect("publish");
-        let cpu: f32 = lua.load("return sysinfo.cpu_usage").eval().expect("eval");
+        publish_test_services(&lua, &sys, Some(42.0));
+        let cpu: f32 = lua.load("return system.cpu_usage").eval().expect("eval");
         assert!(cpu >= 0.0);
         assert!(sys.total_memory() > 0);
-        let gfx: f32 = lua.load("return gfxinfo.usage").eval().expect("eval");
-        assert_eq!(gfx, 42.0);
+        let count: u64 = lua.load("return system.cpu_count").eval().expect("eval");
+        assert_eq!(count as usize, sys.cpus().len());
+        let gpu: f32 = lua.load("return system.gpu_usage").eval().expect("eval");
+        assert_eq!(gpu, 42.0);
         // Missing GPUs read as nil, not an error.
-        publish_system_tables(&lua, &sys, None).expect("publish");
-        let nil: Value = lua.load("return gfxinfo.usage").eval().expect("eval");
+        publish_test_services(&lua, &sys, None);
+        let nil: Value = lua.load("return system.gpu_usage").eval().expect("eval");
         assert!(matches!(nil, Value::Nil));
     }
 
@@ -4480,7 +4438,7 @@ mod tests {
         for source in [SEED_CPU_LUA, SEED_RAM_LUA, SEED_GPU_LUA] {
             let lua = new_widget_lua().expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
-            publish_system_tables(&lua, &sys, None).expect("publish");
+            publish_test_services(&lua, &sys, None);
             let value = call_lua_value(&lua, "view").expect("view");
             let node = parse_node(&value).expect("parse");
             assert!(!node_has_icon(&node), "usage seeds stay icon-free");
@@ -4488,23 +4446,19 @@ mod tests {
     }
 
     /// Seeds render through the full pipeline: parse plus build.
-    /// The hypr seed is excluded — it needs a compositor socket.
+    /// Off-compositor services (Hyprland socket, outputs) degrade to
+    /// empty tables, so every seed renders — including hypr ("--").
     #[test]
     fn seed_scripts_parse_and_build() {
         use crate::config::{
             SEED_CLINEPASS_LUA, SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA,
-            SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA,
+            SEED_HYPR_LUA, SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA,
         };
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        // Seeds may read theme.* (republished live in prod); stub it.
-        let stub_theme = |lua: &mlua::Lua| {
-            let theme = lua.create_table().expect("theme");
-            theme.set("error", "#ff0000").expect("set");
-            theme.set("primary", "#00ff00").expect("set");
-            lua.globals().set("theme", theme).expect("theme");
-        };
+        // Services publish the real theme palette (same as prod); no
+        // stub needed.
         for source in [
             SEED_CLOCK_LUA,
             SEED_HELLO_LUA,
@@ -4512,13 +4466,13 @@ mod tests {
             SEED_CPU_LUA,
             SEED_RAM_LUA,
             SEED_GPU_LUA,
+            SEED_HYPR_LUA,
             SEED_CLINEPASS_LUA,
             SEED_SYSTEM_LUA,
         ] {
             let lua = new_widget_lua().expect("sandbox");
             load_widget_script(&lua, "seed", source).expect("load");
-            publish_system_tables(&lua, &sys, None).expect("publish");
-            stub_theme(&lua);
+            publish_test_services(&lua, &sys, None);
             let value = call_lua_value(&lua, "view").expect("view");
             let node = parse_node(&value).expect("parse");
             let _ = build_node(&node, 13.0, None).expect("builds");
@@ -4527,7 +4481,7 @@ mod tests {
         let lua = new_widget_lua().expect("sandbox");
         load_seed_components(&lua);
         load_widget_script(&lua, "clinepass", SEED_CLINEPASS_LUA).expect("load");
-        stub_theme(&lua);
+        publish_test_services(&lua, &sys, None);
         let popup = call_lua_value(&lua, "popup").expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         assert!(content.tree.is_some());
@@ -4705,37 +4659,35 @@ mod tests {
         let workspaces = r#"[{"id":3,"name":"3","monitor":"DP-1","monitorID":0,"windows":1},{"id":4,"name":"4","monitor":"HDMI-1","monitorID":1,"windows":0},{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}]"#;
         let active = r#"{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}"#;
         let lua = new_widget_lua().expect("sandbox");
-        // Stub io.popen by command (method-call read form).
-        let io: mlua::Table = lua.globals().get("io").expect("io");
-        let (ws, act) = (workspaces.to_string(), active.to_string());
-        io.set(
-            "popen",
-            lua.create_function(move |lua, cmd: String| {
-                let body = if cmd.contains("activeworkspace") {
-                    act.clone()
-                } else {
-                    ws.clone()
-                };
-                let h = lua.create_table().expect("handle");
-                h.set(
-                    "read",
-                    lua.create_function(move |_, (_h, _m): (mlua::Value, mlua::Value)| {
-                        Ok(body.clone())
-                    })
-                    .expect("read"),
-                )
-                .expect("set read");
-                h.set(
-                    "close",
-                    lua.create_function(|_, _: mlua::Value| Ok(true))
-                        .expect("close"),
-                )
-                .expect("set close");
-                Ok(h)
-            })
-            .expect("popen"),
-        )
-        .expect("set popen");
+        // Feed the seed through the real `wayland` service: parse the
+        // compositor JSON the same way `HyprCache` does, publish, render.
+        let sys = sysinfo::System::new();
+        let theme = crate::config::ThemeConfig::default();
+        let outputs = std::collections::HashMap::new();
+        let queue = std::collections::VecDeque::new();
+        let hypr = crate::services::HyprCache {
+            workspaces: crate::services::HyprCache::parse_workspaces(workspaces),
+            clients: Vec::new(),
+            active_workspace: crate::services::HyprCache::parse_active(active),
+        };
+        let ctx = crate::services::ServiceCtx {
+            sys: &sys,
+            gpu: None,
+            theme: &theme,
+            outputs: &outputs,
+            notifications: &queue,
+            hypr: &hypr,
+        };
+        crate::services::publish_all(&ctx, &lua).expect("publish");
+        // One known output so the seed filters to DP-1 (`OutputInfo`
+        // needs a live compositor; the service's own shape test covers
+        // the outputs table itself).
+        let wayland: mlua::Table = lua.globals().get("wayland").expect("wayland");
+        let outputs = lua.create_table().expect("outputs");
+        let first = lua.create_table().expect("first");
+        first.set("name", "DP-1").expect("name");
+        outputs.set(1, first).expect("set");
+        wayland.set("outputs", outputs).expect("outputs");
         // Record dispatches instead of spawning hyprctl.
         let os: mlua::Table = lua.globals().get("os").expect("os");
         os.set(

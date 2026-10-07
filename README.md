@@ -108,12 +108,12 @@ return app
   `os.execute(cmd)` runs, `io.popen(cmd):read("*a")` captures stdout.
   No allowlist (`;` chains work; owner-accepted risk). `os.exit` /
   `os.remove` / `os.rename` and `require` stay blocked.
-- **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil),
+- **Services**: `system` (cpu/mem/gpu or nil), `theme` (live iced
+  palette hex for `:color()`), `notifications` (queue snapshot,
+  newest-first), `wayland` (`outputs`, `workspaces`, `toplevels`,
+  `active_workspace`), republished before every due render/popup/action.
   `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`, `separator`).
-  `theme.*` carries the live iced palette (`primary`, `surface`,
-  `error`, ... as `"#rrggbb"`, republished every render) for
-  `:color()` on text/icon/button (hex or `{r, g, b}` tables).
   `ui.define(name, fn)` registers reusable builders called as `ui.name(props)`;
   components from `widgets/components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a

@@ -726,8 +726,9 @@ pub fn config_path() -> PathBuf {
 ///
 /// Each widget returns an app table with app:view, loaded into a sandboxed
 /// Lua state. Put mutable state and caches on the app instance (self). Every
-/// `interval` seconds (clamped to >= 0.25) the engine publishes fresh
-/// `sysinfo`/`gfxinfo` tables and calls `app:view()`; when the output
+/// `interval` seconds (clamped to >= 0.25) the engine republishes
+/// the service tables (`system`, `theme`, `notifications`, `wayland`
+/// — see `crate::services`) and calls `app:view()`; when the output
 /// (text or tree) differs from the last tick, the bar repaints. Editing
 /// the `.lua` file reloads it live (mtime watch) — including
 /// `app:popup()`/`app:on_action()`: opening a menu always uses the saved
@@ -746,15 +747,22 @@ pub fn config_path() -> PathBuf {
 ///
 /// ## Globals
 ///
-/// - `sysinfo`: `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total`
-///   (bytes), `mem_usage` (%). Refreshed before every due `app:view()`.
-/// - `gfxinfo`: `usage` (% or nil when the GPU exposes nothing).
+/// - `system`: `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total`
+///   (bytes), `mem_usage` (%), `gpu_usage` (% or nil when the GPU
+///   exposes nothing). Refreshed before every due `app:view()`.
+/// - `theme`: live palette hex pairs (`theme.primary`, ...).
+/// - `notifications`: queue snapshot, newest-first (`id`, `app`,
+///   `title`, `body`, `urgency`, `has_image`).
+/// - `wayland`: `outputs` (`name`, `x`, `y`, `w`, `h`),
+///   `workspaces` (`id`, `name`, `monitor`, `windows`), `toplevels`
+///   (`class`, `title`, `workspace`), `active_workspace` (nil when
+///   unknown).
 /// - `os.execute(cmd)` / `io.popen(cmd)`: native shell. Capture
 ///   stdout with `io.popen(cmd):read("*a")`; wrap slow calls in
 ///   `pcall`, cache on self, refresh hourly.
 /// - `ui.*`: composable node constructors (below). Cell text may also
 ///   embed `{icon:name}` placeholders for theme-aware Lucide icons,
-///   e.g. `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage)`.
+///   e.g. `"{icon:cpu} " .. string.format("%.0f", system.cpu_usage)`.
 ///
 /// ## Returned app module
 ///

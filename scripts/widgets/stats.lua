@@ -3,18 +3,18 @@ local app = { details = false }
 
 function app:view()
     return ui.row({
-        ui.icon("cpu"), ui.text(string.format("%.0f%%", sysinfo.cpu_usage)),
-        ui.icon("memory-stick"), ui.text(string.format("%.0f%%", sysinfo.mem_usage)),
+        ui.icon("cpu"), ui.text(string.format("%.0f%%", system.cpu_usage)),
+        ui.icon("memory-stick"), ui.text(string.format("%.0f%%", system.mem_usage)),
     })
 end
 
 function app:popup()
     local lines = {
-        ui.row({ ui.icon("cpu"), ui.text(string.format("CPU  %.1f%%", sysinfo.cpu_usage)) }),
-        ui.row({ ui.icon("memory-stick"), ui.text(string.format("Mem  %.1f%%", sysinfo.mem_usage)) }),
+        ui.row({ ui.icon("cpu"), ui.text(string.format("CPU  %.1f%%", system.cpu_usage)) }),
+        ui.row({ ui.icon("memory-stick"), ui.text(string.format("Mem  %.1f%%", system.mem_usage)) }),
     }
     if self.details then
-        lines[#lines + 1] = ui.row({ ui.icon("cpu"), ui.text("Cores " .. sysinfo.cpu_count) })
+        lines[#lines + 1] = ui.row({ ui.icon("cpu"), ui.text("Cores " .. system.cpu_count) })
     end
     return {
         ui = ui.card({ title = "System stats", body = ui.column(lines) }),

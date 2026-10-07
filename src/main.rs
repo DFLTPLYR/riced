@@ -9,6 +9,7 @@ mod composables;
 mod config;
 mod lua;
 mod notify;
+mod services;
 mod theme;
 
 use app::{Plots, redraw_scope};

@@ -1,7 +1,7 @@
 use super::background::Background;
 use super::top::{
     Top, TopLocal, WidgetNode, call_lua_value, coerce_text, lua_has_func, lua_value_kind,
-    parse_node, publish_system_tables, publish_theme_tables, rich_text,
+    parse_node, rich_text,
 };
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::{Plant, TopEvent, WidgetEvent};
@@ -558,16 +558,9 @@ impl Popup {
                 }
                 Ok(()) => match plots.widget_lua.get(&name) {
                     Some(lua) => {
-                        match publish_system_tables(lua, &plots.sysinfo, gpu)
+                        let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
+                        match crate::services::publish_all(&ctx, lua)
                             .map_err(|e| e.to_string())
-                            .and_then(|()| {
-                                publish_theme_tables(lua, &plots.config.theme)
-                                    .map_err(|e| e.to_string())
-                            })
-                            .and_then(|()| {
-                                super::notification::publish_notification_list(lua, plots)
-                                    .map_err(|e| e.to_string())
-                            })
                             .and_then(|()| call_lua_value(lua, "popup"))
                             .and_then(Self::parse_popup_content)
                         {
@@ -659,15 +652,9 @@ impl Popup {
         }
         let outcome = match plots.widget_lua.get(&widget) {
             Some(lua) => {
-                let acted = publish_system_tables(lua, &plots.sysinfo, Self::gpu_usage_percent())
+                let ctx = crate::services::ServiceCtx::from_plots(plots, Self::gpu_usage_percent());
+                let acted = crate::services::publish_all(&ctx, lua)
                     .map_err(|e| e.to_string())
-                    .and_then(|()| {
-                        publish_theme_tables(lua, &plots.config.theme).map_err(|e| e.to_string())
-                    })
-                    .and_then(|()| {
-                        super::notification::publish_notification_list(lua, plots)
-                            .map_err(|e| e.to_string())
-                    })
                     .and_then(|()| super::top::call_lua_named_action(lua, &action));
                 Some(acted)
             }
