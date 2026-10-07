@@ -51,7 +51,7 @@ pub(crate) enum Axis {
 /// `on_exit` runs the live motion TOWARD `to` (default: the exit
 /// state); `on_displaced` ignores both (distance comes from the index
 /// shift) and only uses the duration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Transition {
     pub from: ItemMotion,
     pub to: ItemMotion,
@@ -89,14 +89,6 @@ impl Transition {
     }
 }
 
-/// Item renderer for [`ListView::items`]: key, owned content, live
-/// motion, and liveness (ghosts render inert) into an element.
-/// Caller closures are usually `move` (copying the `&Plots` ref and
-/// any `Copy` config) so the returned elements borrow only state that
-/// outlives the view.
-type ItemRender<'a, K, C, Message, Theme, Renderer> =
-    dyn Fn(&K, C, ItemMotion, bool) -> Element<'a, Message, Theme, Renderer> + 'a;
-
 /// A removed-but-still-visible item: last-known content plus its list
 /// index, rendered inert (no clicks) until the exit motion settles.
 #[derive(Debug, Clone)]
@@ -111,8 +103,10 @@ pub(crate) struct ListGhost<K, C> {
 #[derive(Debug)]
 pub(crate) struct ListView<K, C> {
     motions: HashMap<K, Motion<ItemMotion>>,
+    displacements: HashMap<K, Motion<ItemMotion>>,
     ghosts: Vec<ListGhost<K, C>>,
     pitch: f32,
+    axis: Axis,
     duration_override: Option<Duration>,
     enter: Transition,
     exit: Transition,
@@ -129,14 +123,19 @@ impl<K, C> Default for ListView<K, C> {
 }
 
 impl<K, C> ListView<K, C> {
+    pub fn set_pitch(&mut self, pitch: f32) {
+        self.pitch = pitch.max(1.0);
+    }
     /// Empty list with default slide-fade transitions and no duration
     /// override. Set the row pitch (px per item, displaced math) and
     /// axis/enter direction per [`ListView::update`] call.
     pub fn new(pitch: f32) -> Self {
         Self {
             motions: HashMap::new(),
+            displacements: HashMap::new(),
             ghosts: Vec::new(),
             pitch: pitch.max(1.0),
+            axis: Axis::Vertical,
             duration_override: None,
             enter: Transition::slide_fade(ENTER_OFFSET),
             exit: Transition::slide_fade_out(-ENTER_OFFSET),
@@ -197,7 +196,7 @@ impl<K, C> ListView<K, C> {
         self.enter = enter;
         self.exit = exit;
         self.displaced = displaced;
-        self.enter_locked = self.enter_locked || custom;
+        self.enter_locked = custom;
     }
 
     /// Current transition specs (Lua specs layer over these).
@@ -252,6 +251,7 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         new_keys: &[K],
         removed: &[(usize, K, C)],
     ) {
+        self.axis = axis;
         let enter_timing = self.resolve(self.enter.duration, global_duration);
         let exit_timing = self.resolve(self.exit.duration, global_duration);
         let displaced_timing = self.resolve(self.displaced.duration, global_duration);
@@ -260,7 +260,8 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
             let exit = self.exit.to.clone();
             match self.motions.get(key) {
                 Some(m) => {
-                    let _ = m.transition_to(exit, runtime);
+                    let current = m.value(runtime).unwrap_or_else(|_| ItemMotion::settled());
+                    let _ = runtime.play(*m, Tween::between(current, exit, exit_timing));
                 }
                 None => {
                     let m = runtime.motion_with(ItemMotion::settled(), exit_timing);
@@ -295,7 +296,8 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
             let home = self.enter.to.clone();
             match self.motions.get(key) {
                 Some(m) => {
-                    let _ = m.transition_to(home, runtime);
+                    let current = m.value(runtime).unwrap_or_else(|_| ItemMotion::settled());
+                    let _ = runtime.play(*m, Tween::between(current, home, enter_timing));
                 }
                 None => {
                     let m = runtime.motion_with(start, enter_timing);
@@ -320,7 +322,7 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
                 Axis::Vertical => (0.0, delta),
                 Axis::Horizontal => (delta, 0.0),
             };
-            let Some(m) = self.motions.get(key).cloned() else {
+            let Some(m) = self.displacements.get(key).cloned() else {
                 // Swept long ago: recreate at the displaced offset,
                 // gliding home (the nudge-then-settle pair in one).
                 let at = ItemMotion {
@@ -330,24 +332,25 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
                 };
                 let motion = runtime.motion_with(at, displaced_timing);
                 let _ = motion.transition_to(ItemMotion::settled(), runtime);
-                self.motions.insert(key.clone(), motion);
+                self.displacements.insert(key.clone(), motion);
                 continue;
             };
-            if m.is_completed(runtime).unwrap_or(false)
-                && let Ok(cur) = m.value(runtime)
-            {
-                let to = ItemMotion {
+            if let Ok(cur) = m.value(runtime) {
+                let from = ItemMotion {
                     x: cur.x + dx,
                     y: cur.y + dy,
                     opacity: cur.opacity,
                 };
-                let _ = runtime.play(m, Tween::between(cur, to, displaced_timing));
+                let _ = runtime.play(
+                    m,
+                    Tween::between(from, ItemMotion::settled(), displaced_timing),
+                );
             }
         }
     }
 
-    /// Build the merged item list: live keys in order with ghosts
-    /// inserted at their old indices (clamped). Content resolves owned
+    /// Build the live list, with inert ghost overlays anchored at their
+    /// previous slots. Ghosts never allocate live layout slots. Content resolves owned
     /// per key (elements never borrow it — iced widgets own their
     /// data), each entry renders through `render(key, content, motion,
     /// live)` and shifts by its live `(x, y)` without disturbing
@@ -358,7 +361,7 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         runtime: &MotionRuntime,
         live_keys: &[K],
         content: &dyn Fn(&K) -> Option<C>,
-        render: &ItemRender<'a, K, C, Message, Theme, Renderer>,
+        render: impl Fn(&K, C, ItemMotion, bool) -> Element<'a, Message, Theme, Renderer>,
     ) -> Vec<Element<'a, Message, Theme, Renderer>>
     where
         Message: 'a,
@@ -366,36 +369,64 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         Renderer: iced::advanced::Renderer + 'a,
     {
         let mut out: Vec<Element<'a, Message, Theme, Renderer>> = Vec::new();
+        let mut overlays = Vec::new();
+        for ghost in self.ghosts.iter() {
+            let motion = self.motion_of(runtime, &ghost.key);
+            let el = render(&ghost.key, ghost.content.clone(), motion.clone(), false);
+            let anchor = ghost.index as f32 * self.pitch;
+            let (x, y) = match self.axis {
+                Axis::Vertical => (motion.x, motion.y + anchor),
+                Axis::Horizontal => (motion.x + anchor, motion.y),
+            };
+            overlays.push(super::motion::ghost(el, x, y));
+        }
         for key in live_keys {
             let Some(node) = content(key) else {
                 continue;
             };
             let motion = self.motion_of(runtime, key);
             let el = render(key, node, motion.clone(), true);
-            out.push(super::motion::shifted(el, motion.x, motion.y, true));
-        }
-        for ghost in self.ghosts.iter() {
-            let motion = self.motion_of(runtime, &ghost.key);
-            let el = render(&ghost.key, ghost.content.clone(), motion.clone(), false);
-            let el = super::motion::shifted(el, motion.x, motion.y, false);
-            let at = ghost.index.min(out.len());
-            out.push(el);
-            let last = out.len() - 1;
-            if at < last {
-                let el = out.remove(last);
-                out.insert(at, el);
+            // Keep the wrapper shape stable when ghost children appear/disappear.
+            let mut layer =
+                iced::widget::stack![super::motion::shifted(el, motion.x, motion.y, true)];
+            if out.is_empty() {
+                for overlay in overlays.drain(..) {
+                    layer = layer.push(overlay);
+                }
             }
+            out.push(layer.into());
+        }
+        if out.is_empty() && !overlays.is_empty() {
+            let base: Element<'a, Message, Theme, Renderer> = iced::widget::Space::new()
+                .height(self.pitch)
+                .width(iced::Length::Fill)
+                .into();
+            let mut layer = iced::widget::stack![base];
+            for overlay in overlays {
+                layer = layer.push(overlay);
+            }
+            out.push(layer.into());
         }
         out
     }
 
     /// Current motion values for a key; settled when absent.
     pub fn motion_of(&self, runtime: &MotionRuntime, key: &K) -> ItemMotion {
-        self.motions
+        let mut value = self
+            .motions
             .get(key)
             .and_then(|m| m.value(runtime).ok())
             .map(|v| v.clamped())
-            .unwrap_or_else(ItemMotion::settled)
+            .unwrap_or_else(|| self.enter.to.clone());
+        if let Some(offset) = self
+            .displacements
+            .get(key)
+            .and_then(|m| m.value(runtime).ok())
+        {
+            value.x += offset.x;
+            value.y += offset.y;
+        }
+        value.clamped()
     }
 
     /// Ghosts matching `pred`, in index order, for mask math and tests.
@@ -408,7 +439,13 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
     /// Instant-settle every key matching `pred` (first paints, shape
     /// flips, output removal).
     pub fn clear_scope(&mut self, runtime: &mut MotionRuntime, pred: impl Fn(&K) -> bool) {
-        let dead: Vec<K> = self.motions.keys().filter(|k| pred(k)).cloned().collect();
+        let dead: Vec<K> = self
+            .motions
+            .keys()
+            .chain(self.displacements.keys())
+            .filter(|k| pred(k))
+            .cloned()
+            .collect();
         for key in dead {
             self.drop_key(runtime, &key);
         }
@@ -418,26 +455,15 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         if let Some(m) = self.motions.remove(key) {
             let _ = runtime.remove(m);
         }
+        if let Some(m) = self.displacements.remove(key) {
+            let _ = runtime.remove(m);
+        }
         self.ghosts.retain(|g| &g.key != key);
     }
 
-    /// Glide every nudged axis offset back to rest (second half of the
-    /// displaced pair): call on the frame after [`ListView::update`].
-    pub fn settle_nudged(&self, runtime: &mut MotionRuntime) {
-        for m in self.motions.values() {
-            if let Ok(cur) = m.value(runtime)
-                && (cur.x.abs() >= 0.5 || cur.y.abs() >= 0.5)
-            {
-                let _ = m.transition_to(
-                    ItemMotion {
-                        x: 0.0,
-                        y: 0.0,
-                        opacity: cur.opacity,
-                    },
-                    runtime,
-                );
-            }
-        }
+    /// Release all runtime slots when a list is reloaded or removed.
+    pub fn clear_all(&mut self, runtime: &mut MotionRuntime) {
+        self.clear_scope(runtime, |_| true);
     }
 
     /// Drop settled motions (freeing runtime slots). Returns whether
@@ -450,17 +476,23 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
             .map(|(k, _)| k.clone())
             .collect();
         for key in dead {
-            self.drop_key(runtime, &key);
+            if let Some(m) = self.motions.remove(&key) {
+                let _ = runtime.remove(m);
+            }
+            self.ghosts.retain(|g| g.key != key);
         }
-        !self.motions.is_empty()
-    }
-
-    /// Read-only twin of [`ListView::sweep`] for shared borrows: whether
-    /// anything still animates (settled ghosts count as idle).
-    pub fn sweep_check(&self, runtime: &MotionRuntime) -> bool {
-        self.motions
-            .values()
-            .any(|m| !m.is_completed(runtime).unwrap_or(true))
+        let settled: Vec<K> = self
+            .displacements
+            .iter()
+            .filter(|(_, m)| m.is_completed(runtime).unwrap_or(true))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in settled {
+            if let Some(m) = self.displacements.remove(&key) {
+                let _ = runtime.remove(m);
+            }
+        }
+        !self.motions.is_empty() || !self.displacements.is_empty()
     }
 }
 
@@ -468,6 +500,46 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
 mod tests {
     use super::*;
     use aura_anim::core::runtime::MotionRuntime;
+
+    #[test]
+    fn exit_keeps_its_target_and_own_duration_during_displacement() {
+        let (mut rt, mut list) = harness();
+        list = list
+            .on_entered(Transition {
+                duration: Some(Duration::from_millis(600)),
+                ..Transition::slide_fade(200.0)
+            })
+            .on_exit(Transition {
+                duration: Some(Duration::from_millis(250)),
+                ..Transition::slide_fade_out(-200.0)
+            });
+        list.update(&mut rt, dur(), Axis::Vertical, &[], &keys(&["a", "b"]), &[]);
+        rt.tick(Duration::from_millis(100));
+        let before = list.motion_of(&rt, &"a".to_string());
+        list.update(
+            &mut rt,
+            dur(),
+            Axis::Vertical,
+            &keys(&["a", "b"]),
+            &keys(&["b"]),
+            &[(0, "a".to_string(), "A".to_string())],
+        );
+        assert_eq!(list.motion_of(&rt, &"a".to_string()).x, before.x);
+        for _ in 0..15 {
+            rt.tick(Duration::from_millis(16));
+            list.sweep(&mut rt);
+        }
+        assert_eq!(list.ghosts_for(|_| true).len(), 1);
+        let exit = list.motion_of(&rt, &"a".to_string());
+        assert!(exit.x < -190.0 && exit.opacity < 0.05, "{exit:?}");
+        rt.tick(Duration::from_millis(16));
+        list.sweep(&mut rt);
+        assert!(list.ghosts_for(|_| true).is_empty());
+        // The survivor is still entering with its independent appearance duration.
+        assert!(list.motion_of(&rt, &"b".to_string()).opacity < 1.0);
+        list.clear_all(&mut rt);
+        assert_eq!(rt.motion_count(), 0);
+    }
 
     fn harness() -> (MotionRuntime, ListView<String, String>) {
         (MotionRuntime::new(), ListView::new(40.0))
@@ -569,7 +641,6 @@ mod tests {
         let c = set.motion_of(&rt, &"c".to_string());
         assert!(b.y > 0.0, "b {b:?}");
         assert!(c.y > 0.0, "c {c:?}");
-        set.settle_nudged(&mut rt);
         rt.tick(Duration::from_millis(300));
         assert!(!set.sweep(&mut rt));
         for k in ["b", "c"] {
@@ -632,7 +703,8 @@ mod tests {
             &content,
             render,
         );
-        assert_eq!(els.len(), 3);
+        // Exits are overlays on the first live delegate, not layout slots.
+        assert_eq!(els.len(), 2);
     }
 
     #[test]

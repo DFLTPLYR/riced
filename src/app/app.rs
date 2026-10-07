@@ -140,6 +140,8 @@ pub struct Plots {
     pub(crate) notifications: std::collections::VecDeque<crate::app::layers::Notification>,
     pub(crate) notif_windows: HashMap<OutputId, iced::window::Id>,
     pub(crate) notif_sizes: HashMap<OutputId, u32>,
+    pub(crate) notif_scroll: HashMap<OutputId, f32>,
+    pub(crate) notif_exit_images: HashMap<u32, iced::widget::image::Handle>,
     pub(crate) notif_next_id: u32,
     pub(crate) last_cursor_global: Option<Point>,
     // Notification Lua renderer (`notifications.lua`): separate state
@@ -207,6 +209,8 @@ impl Plots {
             notifications: std::collections::VecDeque::new(),
             notif_windows: HashMap::new(),
             notif_sizes: HashMap::new(),
+            notif_scroll: HashMap::new(),
+            notif_exit_images: HashMap::new(),
             notif_next_id: 1,
             last_cursor_global: None,
             notify_lua: None,
@@ -588,7 +592,7 @@ impl Plots {
             Some(PlotInfo::Popup(_output)) => self
                 .popups
                 .get(&id)
-                .map(|p| p.view())
+                .map(|p| p.view(self))
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Notification(output)) => super::layers::notification::view(self, output),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
@@ -1160,6 +1164,10 @@ impl Plots {
                 Notification::handle_invoke(self, id, key)
             }
             Plant::Notify(NotifyEvent::Tick) => Notification::handle_tick(self),
+            Plant::Notify(NotifyEvent::Scrolled(output, offset)) => {
+                self.notif_scroll.insert(output, offset);
+                Notification::push_input_region(self, output)
+            }
             Plant::Notify(NotifyEvent::DBusUp) => {
                 eprintln!("riced: notifications: D-Bus server up");
                 Command::none()
@@ -1236,7 +1244,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Notify(NotifyEvent::PeerClosed(_))
         | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
-        Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
+        Plant::Notify(NotifyEvent::DBusUp | NotifyEvent::Scrolled(..)) => Scope::None,
         // Widget press only records; every other widget event repaints
         // (animation frames while a motion runs, releases opening a
         // popup, actions refreshing tiles, changed outputs).

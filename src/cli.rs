@@ -14,6 +14,12 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Commands {
+    /// Run the M0 declarative Lua app in a plain iced window.
+    LuaDemo {
+        /// Override the embedded main.lua (file edits reload live).
+        #[arg(long)]
+        script: Option<PathBuf>,
+    },
     /// Ask the running daemon to open the Settings panel
     #[command(alias = "settings")]
     OpenSettings,
@@ -117,6 +123,18 @@ fn take_at(path: &Path) -> Option<QueuedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_lua_demo_override() {
+        assert_eq!(
+            Cli::try_parse_from(["riced", "lua-demo", "--script", "/tmp/main.lua"])
+                .unwrap()
+                .command,
+            Some(Commands::LuaDemo {
+                script: Some(PathBuf::from("/tmp/main.lua"))
+            })
+        );
+    }
 
     #[test]
     fn parses_open_settings_and_alias() {

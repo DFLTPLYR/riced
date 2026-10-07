@@ -55,7 +55,7 @@ pub(crate) const ENTER_OFFSET: f32 = 16.0;
 /// glides), and `opacity` (`1.0` opaque, `0.0` gone). Enter runs
 /// `+x -> 0` with `0 -> 1` fade; exit runs `0 -> -x` with `1 -> 0`
 /// fade; survivors glide `y` toward their new slot.
-#[derive(Clone, Debug, Animatable)]
+#[derive(Clone, Debug, PartialEq, Animatable)]
 pub(crate) struct ItemMotion {
     pub x: f32,
     pub y: f32,

@@ -42,7 +42,7 @@ const CARD_H: f32 = 100.0;
 const CARD_GAP: f32 = 8.0;
 /// Full card pitch (chrome + gap): the displaced-glide step and the
 /// input-region stride. Chrome is `CARD_H` + 10px padding top/bottom.
-pub(crate) const CARD_PITCH: f32 = CARD_H + 20.0 + CARD_GAP;
+pub(crate) const CARD_PITCH: f32 = CARD_H + CARD_GAP;
 const WINDOW_PAD: f32 = 16.0;
 /// Corner margin left at each anchored edge (matches `placement`'s
 /// `M`): the window spans the full output height minus both margins.
@@ -84,6 +84,16 @@ pub(crate) struct Incoming {
     pub urgency: u8,
     /// Client-requested timeout; `None` means server default.
     pub timeout_ms: Option<u64>,
+}
+
+/// Queue changes invalidate render timestamps; globals and open center
+/// popups refresh without waiting for the configured polling interval.
+fn refresh_queue_widgets(plots: &mut Plots) -> Command<Plant> {
+    plots.widget_last_run.clear();
+    Command::batch(vec![
+        super::top::Top::handle_widget_tick(plots),
+        super::popup::Popup::refresh_bodies(plots),
+    ])
 }
 
 impl Notification {
@@ -281,6 +291,9 @@ fn retire_noti(plots: &mut Plots, id: u32) -> bool {
     let cached = plots.notif_trees.remove(&id);
     let fallback = plots.notifications.iter().find(|n| n.id == id);
     let node = cached.unwrap_or_else(|| default_tree(fallback));
+    if let Some(image) = fallback.and_then(|n| n.image.clone()) {
+        plots.notif_exit_images.insert(id, image);
+    }
     plots.notifications.retain(|n| n.id != id);
     let new_keys = output_keys(&plots.notifications, output);
     let duration = plots.config.animation.speed.duration();
@@ -347,7 +360,6 @@ fn visible_order(notifications: &VecDeque<Notification>) -> Vec<(u32, OutputId)>
 /// keeps covering a dismissed card's old rect (dead, unclickable
 /// zone) until the next arrival/dismiss re-pushes it.
 pub(crate) fn sweep_noti_anims(plots: &mut Plots) -> Command<Plant> {
-    plots.notif_list.settle_nudged(&mut plots.anim_runtime);
     let before: std::collections::HashMap<OutputId, usize> = plots
         .notif_windows
         .keys()
@@ -355,10 +367,21 @@ pub(crate) fn sweep_noti_anims(plots: &mut Plots) -> Command<Plant> {
         .map(|o| (o, plots.notif_list.ghosts_for(|(go, _)| *go == o).len()))
         .collect();
     plots.notif_list.sweep(&mut plots.anim_runtime);
+    let retained: std::collections::HashSet<u32> = plots
+        .notif_list
+        .ghosts_for(|_| true)
+        .iter()
+        .map(|ghost| ghost.key.1)
+        .collect();
+    plots
+        .notif_exit_images
+        .retain(|id, _| retained.contains(id));
     let mut cmds = Vec::new();
     for output in plots.notif_windows.keys().copied().collect::<Vec<_>>() {
         let after = plots.notif_list.ghosts_for(|(go, _)| *go == output).len();
         if before.get(&output).copied().unwrap_or(0) != after {
+            cmds.push(Notification::reconcile(plots, output));
+        } else {
             cmds.push(Notification::push_input_region(plots, output));
         }
     }
@@ -428,7 +451,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
 /// `on_action`-style `Invoke` messages; the rest of a live card is one
 /// dismiss area while ghosts stay inert.
 pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
-    use iced::widget::{column, container, image::Image, mouse_area, row, scrollable};
+    use iced::widget::{container, image::Image, mouse_area, row, scrollable};
     let cfg = &plots.config.notifications;
     let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
     let live_keys = output_keys(&plots.notifications, output);
@@ -443,10 +466,11 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
         // Live buttons invoke actions; ghosts (and build failures
         // falling back to the default tree) stay inert.
         let msg = move |action: String| Plant::Notify(NotifyEvent::Invoke(id, action));
-        let body: Element<'_, Plant> = build_node(
+        let body: Element<'_, Plant> = super::top::build_node_opacity(
             &node,
             13.0,
             live.then_some(&msg as &dyn Fn(String) -> Plant),
+            motion.opacity,
         )
         .unwrap_or_else(|_| {
             build_node(
@@ -464,11 +488,18 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
             .iter()
             .find(|n| n.id == id)
             .and_then(|n| n.image.clone())
+            .or_else(|| plots.notif_exit_images.get(&id).cloned())
         {
-            Some(handle) => row![Image::new(handle).width(36.0).height(36.0), body]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .into(),
+            Some(handle) => row![
+                Image::new(handle)
+                    .width(36.0)
+                    .height(36.0)
+                    .opacity(motion.opacity),
+                body
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into(),
             None => body,
         };
         // QML-style motion: `x` slides the card horizontally (enter
@@ -476,16 +507,21 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
         // `y` glides survivors toward their new slot (displaced). The
         // overlay transform draws the card shifted without disturbing
         // layout; the style alpha fades chrome + text together.
-        let chrome = super::motion::faded(
-            container(content_body)
-                .width(Length::Fixed(width))
-                .height(Length::Fixed(CARD_H))
-                .padding(10.0)
-                .clip(true)
-                .style(theme::menu_box),
-            motion.opacity,
-        );
-        let el: Element<'_, Plant> = super::motion::shifted(chrome, motion.x, motion.y, live);
+        let opacity = motion.opacity;
+        let chrome: Element<'_, Plant> = container(content_body)
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(CARD_H))
+            .padding(10.0)
+            .clip(true)
+            .style(move |theme| {
+                let mut style = theme::menu_box(theme);
+                style.background = style.background.map(|bg| bg.scale_alpha(opacity));
+                style.border.color = style.border.color.scale_alpha(opacity);
+                style.shadow.color = style.shadow.color.scale_alpha(opacity);
+                style
+            })
+            .into();
+        let el: Element<'_, Plant> = chrome;
         if live {
             mouse_area(el)
                 .on_press(Plant::Notify(NotifyEvent::Dismissed(id)))
@@ -494,16 +530,20 @@ pub fn view(plots: &Plots, output: OutputId) -> Element<'_, Plant> {
             el
         }
     };
-    let mut stack = column![].spacing(CARD_GAP);
-    for el in plots
+    let elements = plots
         .notif_list
-        .items(&plots.anim_runtime, &live_keys, &content, &render)
-    {
-        stack = stack.push(el);
+        .items(&plots.anim_runtime, &live_keys, &content, render);
+    let mut keys: Vec<u32> = live_keys.iter().map(|(_, id)| *id).collect();
+    if keys.is_empty() && !elements.is_empty() {
+        keys.push(0);
     }
+    let stack = iced::widget::keyed::Column::from_vecs(keys, elements).spacing(CARD_GAP);
     scrollable(stack)
         .width(Length::Fill)
         .height(Length::Fill)
+        .on_scroll(move |viewport| {
+            Plant::Notify(NotifyEvent::Scrolled(output, viewport.absolute_offset().y))
+        })
         .into()
 }
 /// Script file for the Lua renderer, next to the widget scripts
@@ -541,17 +581,17 @@ fn ensure_notify_lua(plots: &mut Plots) -> Result<(), String> {
     let source = std::fs::read_to_string(script_path()).map_err(|e| format!("cannot read {e}"))?;
     let lua = new_widget_lua().map_err(|e| e.to_string())?;
     inject_ui(&lua).map_err(|e| e.to_string())?;
-    lua.load(&source)
-        .set_name("@notifications.lua")
-        .exec()
+    super::top::load_widget_script(&lua, "notifications.lua", &source)
         .map_err(|e| e.to_string())?;
-    let _: mlua::Function = lua.globals().get("render").map_err(|e| e.to_string())?;
     // Optional `transitions()` spec (same shape as widgets): parsed
     // once per script load. Malformed specs log and keep defaults.
+    let mut defaults: super::listview::ListView<(OutputId, u32), WidgetNode> =
+        super::listview::ListView::new(CARD_PITCH);
+    defaults.set_enter_from_x(enter_from(&plots.config.notifications).x);
     let current = (
-        plots.notif_list.enter_spec(),
-        plots.notif_list.exit_spec(),
-        plots.notif_list.displaced_spec(),
+        defaults.enter_spec(),
+        defaults.exit_spec(),
+        defaults.displaced_spec(),
     );
     match super::top::parse_transitions(&lua, &current.0, &current.1, &current.2) {
         Ok((enter, exit, displaced, custom)) => plots
@@ -610,8 +650,11 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
         table
             .set("actions", actions_table(lua, &n.actions)?)
             .map_err(|e| e.to_string())?;
-        let render: mlua::Function = lua.globals().get("render").map_err(|e| e.to_string())?;
-        let value: mlua::Value = render.call(table).map_err(|e| e.to_string())?;
+        let value = super::top::call_widget_method(
+            lua,
+            "view",
+            mlua::MultiValue::from_vec(vec![mlua::Value::Table(table)]),
+        )?;
         parse_node(&value)
     })();
     // Borrow dance: result computed, plots free again.
@@ -721,7 +764,10 @@ impl Notification {
             &new_keys,
             &[],
         );
-        Self::reconcile(plots, output)
+        Command::batch(vec![
+            Self::reconcile(plots, output),
+            refresh_queue_widgets(plots),
+        ])
     }
 
     /// Dismiss by id (card click). Unknown ids are ignored. Reports
@@ -733,6 +779,7 @@ impl Notification {
         Command::batch(vec![
             Self::reconcile_all(plots),
             crate::notify::emit_closed(id, 2),
+            refresh_queue_widgets(plots),
         ])
     }
 
@@ -743,7 +790,10 @@ impl Notification {
         if !retire_noti(plots, id) {
             return Command::none();
         }
-        Self::reconcile_all(plots)
+        Command::batch(vec![
+            Self::reconcile_all(plots),
+            refresh_queue_widgets(plots),
+        ])
     }
 
     /// Fire one action button: emit `ActionInvoked` for valid keys,
@@ -762,6 +812,7 @@ impl Notification {
         if retire_noti(plots, id) {
             cmds.push(Self::reconcile_all(plots));
             cmds.push(crate::notify::emit_closed(id, 2));
+            cmds.push(refresh_queue_widgets(plots));
         }
         Command::batch(cmds)
     }
@@ -790,6 +841,7 @@ impl Notification {
             return Command::none();
         }
         cmds.push(Self::reconcile_all(plots));
+        cmds.push(refresh_queue_widgets(plots));
         Command::batch(cmds)
     }
 
@@ -890,23 +942,33 @@ impl Notification {
     /// to their unscrolled position (harmless: still inside the
     /// window, still clickable area).
     pub(crate) fn input_rects(plots: &Plots, output: OutputId) -> Vec<(i32, i32, i32, i32)> {
-        let count = output_keys(&plots.notifications, output).len()
-            + plots.notif_list.ghosts_for(|(o, _)| *o == output).len();
         let cfg = &plots.config.notifications;
-        let width = cfg.width.max(200.0);
-        let mut rects = Vec::with_capacity(count);
-        let mut y = 0.0f32;
-        for _ in 0..count {
-            // Settled chrome height: padding 10 + body 100 + gap 8.
-            // In-flight motion only shifts cards within the window; the
-            // rect union still covers them.
-            rects.push((
-                0,
-                y.round() as i32,
-                width.round() as i32,
-                (CARD_PITCH - CARD_GAP).round() as i32,
-            ));
-            y += CARD_PITCH;
+        let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
+        let viewport = iced::Rectangle::new(
+            iced::Point::ORIGIN,
+            iced::Size::new(
+                cfg.width.max(200.0),
+                window_height_for_output(output_height(plots, output)) as f32,
+            ),
+        );
+        let scroll = plots.notif_scroll.get(&output).copied().unwrap_or(0.0);
+        let mut rects = Vec::new();
+        for (index, key) in output_keys(&plots.notifications, output).iter().enumerate() {
+            let motion = plots.notif_list.motion_of(&plots.anim_runtime, key);
+            let bounds = iced::Rectangle::new(
+                iced::Point::new(motion.x, index as f32 * CARD_PITCH + motion.y - scroll),
+                iced::Size::new(width, CARD_H),
+            );
+            if let Some(visible) = bounds.intersection(&viewport) {
+                let x = visible.x.floor() as i32;
+                let y = visible.y.floor() as i32;
+                rects.push((
+                    x,
+                    y,
+                    (visible.x + visible.width).ceil() as i32 - x,
+                    (visible.y + visible.height).ceil() as i32 - y,
+                ));
+            }
         }
         rects
     }
@@ -943,6 +1005,7 @@ impl Notification {
             )));
         }
         plots.notif_sizes.remove(&output);
+        plots.notif_scroll.remove(&output);
         plots.notifications.retain(|n| n.output != Some(output));
         let live: std::collections::HashSet<u32> =
             plots.notifications.iter().map(|n| n.id).collect();
@@ -1059,12 +1122,28 @@ mod tests {
         }
         let rects = Notification::input_rects(&plots, OutputId(1));
         assert_eq!(rects.len(), 2);
-        let w = plots.config.notifications.width.max(200.0).round() as i32;
+        let w = (plots.config.notifications.width.max(200.0) - WINDOW_PAD * 2.0).round() as i32;
         let card = (CARD_PITCH - CARD_GAP).round() as i32;
         assert_eq!(rects[0], (0, 0, w, card));
         assert_eq!(rects[1], (0, CARD_PITCH.round() as i32, w, card));
         // Output 2 sees only its own card.
         assert_eq!(Notification::input_rects(&plots, OutputId(2)).len(), 1);
+    }
+
+    #[test]
+    fn input_mask_tracks_scroll_and_excludes_exit_delegates() {
+        let (_tx, rx) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(rx);
+        plots.notifications.push_back(noti(1, 0, Some(5000), 1));
+        plots.notifications.push_back(noti(2, 0, Some(5000), 1));
+        plots.notif_scroll.insert(OutputId(1), 50.0);
+        let rects = Notification::input_rects(&plots, OutputId(1));
+        assert_eq!((rects[0].1, rects[0].3), (0, 50));
+        assert_eq!(rects[1].1, 58);
+        assert!(retire_noti(&mut plots, 2));
+        assert_eq!(plots.notif_list.ghosts_for(|_| true).len(), 1);
+        // Only the survivor contributes input, despite the retained ghost.
+        assert_eq!(Notification::input_rects(&plots, OutputId(1)).len(), 1);
     }
 
     #[test]
@@ -1089,7 +1168,8 @@ mod tests {
         use crate::config::SEED_NOTIFICATIONS_LUA;
         let lua = new_widget_lua().expect("sandbox");
         inject_ui(&lua).expect("ui");
-        lua.load(SEED_NOTIFICATIONS_LUA).exec().expect("load");
+        super::super::top::load_widget_script(&lua, "notifications.lua", SEED_NOTIFICATIONS_LUA)
+            .expect("load");
         // Critical cards read theme.error (republished live in prod).
         let theme = lua.create_table().expect("theme");
         theme.set("error", "#ff0000").expect("set");
@@ -1101,8 +1181,12 @@ mod tests {
         table.set("body", "world").expect("set");
         table.set("icon", "").expect("set");
         table.set("urgency", 1).expect("set");
-        let render: mlua::Function = lua.globals().get("render").expect("render");
-        let value: mlua::Value = render.call(table).expect("call");
+        let value = super::super::top::call_widget_method(
+            &lua,
+            "view",
+            mlua::MultiValue::from_vec(vec![mlua::Value::Table(table)]),
+        )
+        .expect("call");
         let node = parse_node(&value).expect("parse");
         assert!(matches!(node, WidgetNode::Column { .. }));
         // Critical urgency renders without error too.
@@ -1112,7 +1196,12 @@ mod tests {
             table2.set(k, v).expect("set");
         }
         table2.set("urgency", 2).expect("set");
-        let value: mlua::Value = render.call(table2).expect("call");
+        let value = super::super::top::call_widget_method(
+            &lua,
+            "view",
+            mlua::MultiValue::from_vec(vec![mlua::Value::Table(table2)]),
+        )
+        .expect("call");
         assert!(parse_node(&value).is_ok());
     }
 

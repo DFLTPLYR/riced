@@ -1,352 +1,225 @@
-//! QML-style motion wrapper for animated list items.
-//!
-//! iced 0.14 has no opacity or translate widget, so this module wraps
-//! any [`Element`] in a custom [`Widget`] that draws its content
-//! through a GPU transform + alpha fade:
-//!
-//! - [`shifted`] offsets the item by `(x, y)` px at draw time (the
-//!   `Float`-widget overlay trick: layout is untouched, only the
-//!   painted position moves — like QML `x`/`y`).
-//! - [`faded`] scales the card chrome + text alpha by `opacity`
-//!   (style-level fade; icons inherit `text_color`, so they fade too).
-//!
-//! Settled items (`x = y = 0`, `opacity = 1`) skip the wrapper so the
-//! tree stays flat when nothing animates.
+//! Draw-time translation, consistent hit testing, and non-layout exit delegates.
+//! Opacity is applied by primitive builders, not by inherited text color.
 
-use iced::advanced::mouse;
-use iced::advanced::overlay;
-use iced::advanced::renderer::{self, Renderer as _};
-use iced::advanced::widget::{self, Tree, Widget};
-use iced::advanced::{Clipboard, Layout, Shell};
-use iced::{Element, Event, Length, Rectangle, Transformation, Vector};
+use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer, widget};
+use iced::{Element, Event, Length, Rectangle, Size, Transformation, Vector};
 
-/// Draw `content` shifted by `(x, y)` px without disturbing layout.
-///
-/// `clickable` gates hit-testing: ghosts render through the same
-/// wrapper but stay inert. Near-zero offsets return the content
-/// unwrapped (fewer layout nodes when settled).
-pub fn shifted<'a, Message, Theme, Renderer>(
-    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+pub fn shifted<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
+    content: impl Into<Element<'a, M, T, R>>,
     x: f32,
     y: f32,
     clickable: bool,
-) -> Element<'a, Message, Theme, Renderer>
-where
-    Message: 'a,
-    Theme: 'a,
-    Renderer: iced::advanced::Renderer + 'a,
-{
-    if x.abs() < 0.05 && y.abs() < 0.05 {
-        return content.into();
-    }
-    Element::new(Shift {
+) -> Element<'a, M, T, R> {
+    Element::new(Motion {
         content: content.into(),
         offset: Vector::new(x, y),
         clickable,
+        detached: false,
     })
 }
 
-/// Fade a card container + its text by `opacity` (style-level: the
-/// wrapper rebuilds the chrome style with scaled alpha and passes a
-/// dimmed `text_color` down to the content). Near-one opacity returns
-/// the content unwrapped.
-pub fn faded<'a, Message: 'a>(
-    content: iced::widget::Container<'a, Message, iced::Theme, iced::Renderer>,
-    opacity: f32,
-) -> Element<'a, Message, iced::Theme, iced::Renderer> {
-    if opacity >= 0.995 {
-        return content.into();
-    }
-    Element::new(Fade {
-        content: content.into(),
-        opacity: opacity.clamp(0.0, 1.0),
+pub fn ghost<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
+    content: Element<'a, M, T, R>,
+    x: f32,
+    y: f32,
+) -> Element<'a, M, T, R> {
+    Element::new(Motion {
+        content,
+        offset: Vector::new(x, y),
+        clickable: false,
+        detached: true,
     })
 }
 
-struct Shift<'a, Message, Theme, Renderer> {
-    content: Element<'a, Message, Theme, Renderer>,
+struct Motion<'a, M, T, R> {
+    content: Element<'a, M, T, R>,
     offset: Vector,
     clickable: bool,
+    detached: bool,
 }
 
-impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Shift<'_, Message, Theme, Renderer>
-where
-    Renderer: iced::advanced::Renderer,
-{
+impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
     fn tag(&self) -> widget::tree::Tag {
         self.content.as_widget().tag()
     }
-
     fn state(&self) -> widget::tree::State {
         self.content.as_widget().state()
     }
-
-    fn children(&self) -> Vec<Tree> {
+    fn children(&self) -> Vec<widget::Tree> {
         self.content.as_widget().children()
     }
-
-    fn diff(&self, tree: &mut Tree) {
+    fn diff(&self, tree: &mut widget::Tree) {
         self.content.as_widget().diff(tree);
     }
-
-    fn size(&self) -> iced::Size<Length> {
-        self.content.as_widget().size()
+    fn size(&self) -> Size<Length> {
+        if self.detached {
+            Size::new(Length::Fixed(0.0), Length::Fixed(0.0))
+        } else {
+            self.content.as_widget().size()
+        }
     }
-
-    fn size_hint(&self) -> iced::Size<Length> {
-        self.content.as_widget().size_hint()
+    fn size_hint(&self) -> Size<Length> {
+        self.size()
     }
-
     fn layout(
         &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &iced::advanced::layout::Limits,
-    ) -> iced::advanced::layout::Node {
-        self.content.as_widget_mut().layout(tree, renderer, limits)
+        tree: &mut widget::Tree,
+        renderer: &R,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let child = self.content.as_widget_mut().layout(tree, renderer, limits);
+        if self.detached {
+            layout::Node::with_children(Size::ZERO, vec![child])
+        } else {
+            child
+        }
     }
-
     fn update(
         &mut self,
-        tree: &mut Tree,
+        tree: &mut widget::Tree,
         event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        renderer: &Renderer,
+        renderer: &R,
         clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
+        shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
         if !self.clickable {
             return;
         }
         self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+            tree,
+            event,
+            layout,
+            cursor * Transformation::translate(-self.offset.x, -self.offset.y),
+            renderer,
+            clipboard,
+            shell,
+            &(*viewport - self.offset),
         );
     }
-
     fn draw(
         &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
+        tree: &widget::Tree,
+        renderer: &mut R,
+        theme: &T,
         style: &renderer::Style,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        let child = if self.detached {
+            layout.children().next().expect("ghost child")
+        } else {
+            layout
+        };
         renderer.with_translation(self.offset, |renderer| {
-            self.content
-                .as_widget()
-                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+            self.content.as_widget().draw(
+                tree,
+                renderer,
+                theme,
+                style,
+                child,
+                cursor * Transformation::translate(-self.offset.x, -self.offset.y),
+                &(*viewport - self.offset),
+            );
         });
     }
-
     fn mouse_interaction(
         &self,
-        tree: &Tree,
+        tree: &widget::Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
-        renderer: &Renderer,
+        renderer: &R,
     ) -> mouse::Interaction {
         if !self.clickable {
             return mouse::Interaction::None;
         }
-        // Hit-test against the SHIFTED bounds: the cursor is in layout
-        // coords, the card paints offset — translate the query so
-        // clicks land where the card visibly is.
-        let shifted_layout = layout;
-        let _ = shifted_layout;
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-        offset: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        void::Void::into_overlay_none(
-            self.content
-                .as_widget_mut()
-                .overlay(tree, layout, renderer, viewport, offset),
+        self.content.as_widget().mouse_interaction(
+            tree,
+            layout,
+            cursor * Transformation::translate(-self.offset.x, -self.offset.y),
+            &(*viewport - self.offset),
+            renderer,
         )
     }
-}
-
-/// Helper to map `Option<overlay::Element>` through without naming
-/// the crate's internal `Void` type at the call site.
-mod void {
-    pub struct Void;
-    impl Void {
-        pub fn into_overlay_none<'b, Message, Theme, Renderer>(
-            inner: Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>>,
-        ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
-            inner
-        }
-    }
-}
-
-impl<'a, Message, Theme, Renderer> From<Shift<'a, Message, Theme, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
-where
-    Message: 'a,
-    Theme: 'a,
-    Renderer: iced::advanced::Renderer + 'a,
-{
-    fn from(shift: Shift<'a, Message, Theme, Renderer>) -> Self {
-        Element::new(shift)
-    }
-}
-
-struct Fade<'a, Message> {
-    content: Element<'a, Message, iced::Theme, iced::Renderer>,
-    opacity: f32,
-}
-
-impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Fade<'_, Message> {
-    fn tag(&self) -> widget::tree::Tag {
-        self.content.as_widget().tag()
-    }
-
-    fn state(&self) -> widget::tree::State {
-        self.content.as_widget().state()
-    }
-
-    fn children(&self) -> Vec<Tree> {
-        self.content.as_widget().children()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        self.content.as_widget().diff(tree);
-    }
-
-    fn size(&self) -> iced::Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> iced::Size<Length> {
-        self.content.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &iced::Renderer,
-        limits: &iced::advanced::layout::Limits,
-    ) -> iced::advanced::layout::Node {
-        self.content.as_widget_mut().layout(tree, renderer, limits)
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &iced::Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget_mut().update(
-            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-        );
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        // Scale the inherited text color: container chrome passes it
-        // down as `text_color`, and themed icons use it as their tint
-        // — so one scale fades text, icons, and labels together.
-        let faded = renderer::Style {
-            text_color: style.text_color.scale_alpha(self.opacity),
-        };
-        renderer.with_layer(layout.bounds(), |renderer| {
-            self.content
-                .as_widget()
-                .draw(tree, renderer, theme, &faded, layout, cursor, viewport);
-        });
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &iced::Renderer,
-    ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(tree, layout, cursor, viewport, renderer)
-    }
-
     fn operate(
         &mut self,
-        tree: &mut Tree,
+        tree: &mut widget::Tree,
         layout: Layout<'_>,
-        renderer: &iced::Renderer,
+        renderer: &R,
         operation: &mut dyn widget::Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(tree, layout, renderer, operation);
+        if self.clickable {
+            self.content
+                .as_widget_mut()
+                .operate(tree, layout, renderer, operation);
+        }
     }
-
     fn overlay<'b>(
         &'b mut self,
-        tree: &'b mut Tree,
+        tree: &'b mut widget::Tree,
         layout: Layout<'b>,
-        renderer: &iced::Renderer,
+        renderer: &R,
         viewport: &Rectangle,
         offset: Vector,
-    ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
+    ) -> Option<overlay::Element<'b, M, T, R>> {
+        if !self.clickable {
+            return None;
+        }
         self.content
             .as_widget_mut()
-            .overlay(tree, layout, renderer, viewport, offset)
+            .overlay(tree, layout, renderer, viewport, offset + self.offset)
     }
 }
 
-impl<'a, Message> From<Fade<'a, Message>> for Element<'a, Message, iced::Theme, iced::Renderer>
-where
-    Message: 'a,
-{
-    fn from(fade: Fade<'a, Message>) -> Self {
-        Element::new(fade)
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Unused import guard: [`Transformation`] is the GPU primitive the
-/// overlay path would use for combined transforms (kept referenced so
-/// the design note stays compiler-checked).
-#[allow(dead_code)]
-fn _transform_note(t: Transformation) -> Transformation {
-    t
+    #[test]
+    fn exit_delegate_does_not_reserve_layout_space() {
+        let content: Element<'static, (), (), ()> =
+            iced::widget::Space::new().width(80).height(100).into();
+        let mut element = ghost(content, -200.0, 108.0);
+        let mut tree = widget::Tree::new(&element);
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(320.0, 800.0)),
+        );
+        assert_eq!(layout.size(), Size::ZERO);
+        assert_eq!(layout.children()[0].size(), Size::new(80.0, 100.0));
+    }
+
+    #[test]
+    fn shifted_click_uses_visible_coordinates_and_ghost_is_inert() {
+        for clickable in [true, false] {
+            let content: Element<'static, (), (), ()> =
+                iced::widget::mouse_area(iced::widget::Space::new().width(50).height(50))
+                    .on_press(())
+                    .into();
+            let mut element = shifted(content, 100.0, 0.0, clickable);
+            let mut tree = widget::Tree::new(&element);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(320.0, 800.0)),
+            );
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                Layout::new(&node),
+                mouse::Cursor::Available(iced::Point::new(110.0, 10.0)),
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(320.0, 800.0)),
+            );
+            assert_eq!(messages.len(), usize::from(clickable));
+        }
+    }
 }

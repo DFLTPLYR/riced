@@ -84,22 +84,24 @@ hello/stats/cpu/ram/gpu/hypr/clinepass examples — uncomment a
 [[widget]]
 name = "clock"
 file = "clock.lua"
-interval = 1.0  # seconds between render() calls (>= 0.25)
+interval = 1.0  # seconds between app:view() calls (>= 0.25)
 size = 13.0
 ```
 
 ```lua
--- clock.lua: render() every interval, popup() on click
-function render()
+-- clock.lua: methods are bound to this returned app instance.
+local app = {}
+function app:view()
     return ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) })
 end
-function popup()
+function app:popup()
     return { ui = ui.text(os.date("%A, %d %B %Y")), width = 300, height = 200 }
 end
+return app
 ```
 
-- **Lifecycle**: one sandboxed state per widget, globals persist
-  (use them as the cache). `render()` re-runs every `interval`;
+- **Lifecycle**: scripts return an app table with `app:view()`;
+  store caches and mutable state on `self`. `app:view()` re-runs every `interval`;
   output changes repaint. `.lua` edits hot-reload, `widgets.toml`
   edits rebuild all states, errors log once per message.
 - **Shell**: string/table/math/os/io with native shell —
@@ -107,33 +109,118 @@ end
   No allowlist (`;` chains work; owner-accepted risk). `os.exit` /
   `os.remove` / `os.rename` and `require` stay blocked.
 - **Globals**: `sysinfo` (cpu/mem), `gfxinfo` (gpu or nil),
-  `iced.*` (`text`, `icon` — full Lucide set, `row`, `column`,
-  `button`, `progress`, `spinner`, `separator`; `ui` is the same table).
+  `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
+  `button`, `progress`, `spinner`, `separator`).
   `theme.*` carries the live iced palette (`primary`, `surface`,
   `error`, ... as `"#rrggbb"`, republished every render) for
   `:color()` on text/icon/button (hex or `{r, g, b}` tables).
-  `iced.define(name, fn)` + `iced.use(name, props)` share reusable
+  `ui.define(name, fn)` registers reusable builders called as `ui.name(props)`;
   components from `widgets/components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a
   `widgets.toml` change.
-- **Clicks**: `popup()` toggles a menu (`text`/`width`/`height`/
-  `items`/`ui`); else `on_press()` runs bare. Cell `ui.button`s call
-  that widget's `on_action(key)` directly; popup rows do the same.
-- **Slow fetches**: return `ui.spinner()` first, fill a global in
-  `render()`, show cached rows after (see `clinepass.lua`).
+- **Clicks**: `app:popup()` toggles a menu (`text`/`width`/`height`/
+  `items`/`ui`); else `app:on_press()` runs. Cell `ui.button`s call
+  that app's `app:on_action(key)` directly; popup rows do the same.
+- **Slow fetches**: return `ui.spinner()` first, keep cached data on
+  the app instance, then show cached rows (see `clinepass.lua`).
 - **List transitions**: top-level row/column `ui.button`s animate on
   add/remove (slide, keyed by action, animation-speed duration).
   Notification cards share the same machine, keyed by id. Label edits
   swap instantly; first paint settles with no animation. An optional
-  `transitions()` function overrides add/remove/displaced per widget
+  `app:transitions()` method overrides add/remove/displaced per widget
   (QML `Transition` subset: `x`/`y`/`opacity` `{from, to}` + `duration`).
 - **Notification center**: the `notifications` global (newest-first
   `{id, app, title, body, urgency, has_image}`) is republished before
-  every render; `on_action` may return `{ dismiss = id }` or
+  every view; `app:on_action` may return `{ dismiss = id }` or
   `{ invoke = { id, key } }` to act on the queue (see `notifycenter.lua`).
 
 Full contract with shapes and edge cases lives on `WidgetDef` in
 `src/config.rs` (the `/// Widgets:` doc block).
+
+### Component-built animated lists
+
+Registered components are called directly (`ui.card(props)`). Setters are repeatable;
+properties are stored separately from methods.
+
+```lua
+function app:popup()
+    return { width = 320, height = 400, ui = ui.scrollable(
+        ui.listview(notifications)
+            :id("center"):key("id"):pitch(32):spacing(4)
+            :delegate(function(n)
+                return ui.button(n.title, "dismiss:" .. n.id):width("fill")
+            end)
+            :onEntered({ x = { from = 200, to = 0 },
+                         opacity = { from = 0, to = 1 }, duration = 250 })
+            :onExit({ x = { to = -200 }, opacity = { to = 0 }, duration = 250 })
+            :onDisplaced({ duration = 250 })
+    ) }
+end
+```
+
+List ids are unique within a widget or popup; item keys are unique string
+or integer fields. Delegates run when Lua produces the tree, not on animation
+frames. `pitch` is the estimated item size plus spacing along the list axis;
+`:axis("horizontal")` selects a horizontal list. Exits paint as inert overlays
+without reserving layout slots. The app's `app:transitions()` method is
+supported for automatic button lists.
+
+Other composition primitives are `ui.container(child)` (width, height,
+padding, background, radius), `ui.scrollable(child)`, `ui.space()`, and
+`ui.image(path)` (width and height). Card props may supply `padding`, `radius`,
+and `background` to request a styled surface. Images accept file paths or
+`file://` paths. Fades multiply primitive alpha; they are not offscreen
+subtree/group compositing.
+
+Component files execute separately with their filenames in errors. Changes
+are detected from the complete file manifest and contents, including removals.
+A replacement library is validated before use; an invalid edit keeps the last
+working library. Notification queue changes refresh widgets and open center
+popups immediately.
+
+## Declarative Lua runtime: M0 demo
+
+```bash
+nix develop --command cargo run -- lua-demo
+nix develop --command cargo run -- lua-demo --script ./scripts/main.lua
+```
+
+The tested software-renderer launch in this Nix environment supplies the
+runtime Wayland libraries explicitly:
+
+```bash
+nix develop --command bash -c '
+  export LD_LIBRARY_PATH="$(pkg-config --variable=libdir wayland-client):$(pkg-config --variable=libdir xkbcommon):${LD_LIBRARY_PATH:-}"
+  ICED_BACKEND=tiny-skia cargo run -- lua-demo --script ./scripts/main.lua
+'
+```
+
+`src/lua/mod.rs` hosts one Lua VM for this application. The embedded
+`scripts/main.lua` returns an app table with an `app:view(window_id)` method;
+an explicit script path, or `~/.config/riced/main.lua` when present, overrides
+the embedded script. Changes to an override reload live. Invalid scripts and
+runaway handlers become an error banner with a reload button, retaining the
+last successful view.
+
+The host uses protected Lua calls, a 64 MiB VM allocation limit, an instruction
+budget per entry, and incremental GC on its idle tick. Each app load gets a
+fresh environment with the shared `ui`/`iced` and `riced` API. Lua produces
+description tables; Rust decodes them into owned IR, caches it by window and
+version, and realizes Elements in iced's pure view function. Named host events
+carry owned JSON payloads via mlua serialization. `riced.invalidate()` records
+an effect; handlers also conservatively invalidate the cached view.
+
+Bundled Lua sources live in `scripts/widgets/` and `scripts/components/`,
+and seed installed copies on startup. Widget and notification modules return
+app tables; the shell calls their methods through the registry. Global
+`render()` scripts are rejected, and no global compatibility exports are generated.
+
+This is **M0**, the first runnable migration milestone. It reuses the existing
+owned node decoder/realizer as an adapter. The shell still hosts separate
+widget VMs; the shared application host has one VM. Dedicated `ui::ir`/`RealizeCtx`
+with the borrowed `StateStore` belongs to M1; callback generations belong to
+M2; task effects, user subscriptions, and layer-window control belong to M4.
+The demo's static Lua tree does not register interactive closure callbacks.
 
 ## Notifications
 
@@ -153,7 +240,7 @@ timeout_ms = 5000
   internal events — config/widgets parse errors, template failures,
   theme-regen results (critical ones persist until clicked).
 - **Lua layout**: `widgets/notifications.lua` defines
-  `render(n)` over `{ id, app, title, body, icon, urgency, actions,
+  `app:view(n)` over `{ id, app, title, body, icon, urgency, actions,
   has_image }`
   (`actions` is a 1-based array of `{ key, label }` tables, empty when
   the sender offers none) with the full `ui.*` set; edits re-render

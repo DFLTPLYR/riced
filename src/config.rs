@@ -724,13 +724,13 @@ pub fn config_path() -> PathBuf {
 ///
 /// ## Lifecycle
 ///
-/// Each widget owns a sandboxed Lua state, created on first render and
-/// kept across ticks (globals persist — use them as the cache). Every
+/// Each widget returns an app table with app:view, loaded into a sandboxed
+/// Lua state. Put mutable state and caches on the app instance (self). Every
 /// `interval` seconds (clamped to >= 0.25) the engine publishes fresh
-/// `sysinfo`/`gfxinfo` tables and calls `render()`; when the output
+/// `sysinfo`/`gfxinfo` tables and calls `app:view()`; when the output
 /// (text or tree) differs from the last tick, the bar repaints. Editing
 /// the `.lua` file reloads it live (mtime watch) — including
-/// `popup()`/`on_action()`: opening a menu always uses the saved
+/// `app:popup()`/`app:on_action()`: opening a menu always uses the saved
 /// file, and an open menu refreshes within a tick of saving (broken
 /// edits keep the last good menu and log once); editing
 /// `widgets.toml` rebuilds all states. Errors log once per message,
@@ -747,28 +747,33 @@ pub fn config_path() -> PathBuf {
 /// ## Globals
 ///
 /// - `sysinfo`: `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total`
-///   (bytes), `mem_usage` (%). Refreshed before every due `render()`.
+///   (bytes), `mem_usage` (%). Refreshed before every due `app:view()`.
 /// - `gfxinfo`: `usage` (% or nil when the GPU exposes nothing).
 /// - `os.execute(cmd)` / `io.popen(cmd)`: native shell. Capture
 ///   stdout with `io.popen(cmd):read("*a")`; wrap slow calls in
-///   `pcall`, cache in a global, refresh hourly.
+///   `pcall`, cache on self, refresh hourly.
 /// - `ui.*`: composable node constructors (below). Cell text may also
 ///   embed `{icon:name}` placeholders for theme-aware Lucide icons,
 ///   e.g. `"{icon:cpu} " .. string.format("%.0f", sysinfo.cpu_usage)`.
 ///
-/// ## `render()`
+/// ## Returned app module
 ///
-/// Required. Returns either plain text (numbers/booleans coerce,
+/// `app:view()` is required. It returns either plain text (numbers/booleans coerce,
 /// `nil` is empty) or a `ui.*` tree. Trees refresh on the interval
 /// like text; switching shapes clears the other cache.
 ///
 /// ```lua
-/// function render()
+/// local app = {}
+/// function app:view()
 ///     return ui.row({ ui.icon("cpu"), ui.text("42%") })
 /// end
+/// return app
 /// ```
 ///
-/// ## `iced.*` constructors (`ui` is the same table, kept as alias)
+/// Scripts must return this table. Global render() scripts are rejected;
+/// methods are stored in the Lua registry, not exported to globals.
+///
+/// ## `ui.*` declarative constructors
 ///
 /// - `ui.text(s)`: themed text (icon placeholders resolved).
 /// - `ui.icon(name)`: full Lucide set by name (`"bot"`,
@@ -839,7 +844,7 @@ pub fn config_path() -> PathBuf {
 /// parsed once per diff:
 ///
 /// ```lua
-/// function transitions()
+/// function app:transitions()
 ///     return {
 ///         add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
 ///         remove = { x = { to = -200 }, opacity = { to = 0 }, duration = 250 },
@@ -863,7 +868,7 @@ pub fn config_path() -> PathBuf {
 /// seed) and dismiss with the `on_action` return convention:
 ///
 /// ```lua
-/// function on_action(key)
+/// function app:on_action(key)
 ///     local id = key:match("^dismiss:(%d+)$")
 ///     if id then return { dismiss = tonumber(id) } end
 /// end
@@ -885,9 +890,11 @@ pub fn config_path() -> PathBuf {
 ///     return iced.row({ iced.icon(props.icon), iced.text(props.value) })
 /// end)
 ///
-/// function render()
-///     return iced.use("stat", { icon = "cpu", value = "42%" }):width("fill")
+/// local app = {}
+/// function app:view()
+///     return ui.stat({ icon = "cpu", value = "42%" }):width("fill")
 /// end
+/// return app
 /// ```
 ///
 /// Components must return `iced.*` constructor values (chaining and
@@ -938,14 +945,17 @@ pub fn config_path() -> PathBuf {
 /// `on_press`).
 ///
 /// ```lua
-/// function popup()
+/// local app = { details = false }
+/// function app:view() return ui.text("Details") end
+/// function app:popup()
 ///     return { ui = ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) }),
 ///              width = 300, height = 200 }
 /// end
 ///
-/// function on_action(name)  -- popup items + cell buttons land here
-///     if name == "toggle" then details = not details end
+/// function app:on_action(name)  -- popup items + cell buttons land here
+///     if name == "toggle" then self.details = not self.details end
 /// end
+/// return app
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1062,244 +1072,54 @@ size = 13.0
 
 /// Seed Lua clock, written next to the seeded `widgets.toml`.
 /// Globals persist between calls; clicking the cell toggles the date menu.
-pub(crate) const SEED_CLOCK_LUA: &str = r#"-- Clock widget: time plus icon, composed with iced constructors.
--- Called every `interval` seconds. Clicking toggles the date menu.
-function render()
-    return iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) })
-end
-
-function popup()
-    return { ui = iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) }), width = 300 }
-end
-"#;
+pub(crate) const SEED_CLOCK_LUA: &str = include_str!("../scripts/widgets/clock.lua");
 
 /// Seed Lua label example, written next to the seeded `widgets.toml`.
-pub(crate) const SEED_HELLO_LUA: &str = r#"-- Label example: static text via iced.text. Uncomment its
--- [[widget]] entry in widgets.toml to use it.
-function render()
-    return iced.text("hello")
-end
-"#;
+pub(crate) const SEED_HELLO_LUA: &str = include_str!("../scripts/widgets/hello.lua");
 
 /// Seed stats example: icon + CPU + memory via the live tables.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_STATS_LUA: &str = r#"-- System stats: composed row with icons plus live CPU/memory.
--- Uncomment its [[widget]] entry in widgets.toml to use it.
--- Clicking toggles a menu with a details switch (custom size + action).
-local details = false
-
-function render()
-    local cpu = string.format("%.0f", sysinfo.cpu_usage)
-    local mem = string.format("%.0f", sysinfo.mem_usage)
-    return iced.row({
-        iced.icon("cpu"), iced.text(cpu .. "%"),
-        iced.icon("memory-stick"), iced.text(mem .. "%"),
-    })
-end
-
-function popup()
-    local cpu = string.format("%.1f%%", sysinfo.cpu_usage)
-    local mem = string.format("%.1f%%", sysinfo.mem_usage)
-    local lines = iced.column({
-        iced.row({ iced.icon("cpu"), iced.text("CPU  " .. cpu) }),
-        iced.row({ iced.icon("memory-stick"), iced.text("Mem  " .. mem) }),
-    })
-    if details then
-        lines = iced.column({
-            lines,
-            iced.row({ iced.icon("cpu"), iced.text("Cores " .. tostring(sysinfo.cpu_count)) }),
-        })
-    end
-    return {
-        ui = lines,
-        width = 300,
-        items = {
-            { label = details and "{icon:arrow-up} Less" or "{icon:arrow-down} More",
-              action = "toggle" },
-        },
-    }
-end
-
-function on_action(name)
-    if name == "toggle" then
-        details = not details
-    end
-end
-"#;
+pub(crate) const SEED_STATS_LUA: &str = include_str!("../scripts/widgets/stats.lua");
 
 /// Seed CPU usage: plain percent, no icon. Uncomment its
 /// `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_CPU_LUA: &str = r#"-- CPU usage as plain text, no icon.
--- Uncomment its [[widget]] entry in widgets.toml to use it.
-function render()
-    return iced.text(string.format("%.0f%%", sysinfo.cpu_usage))
-end
-"#;
+pub(crate) const SEED_CPU_LUA: &str = include_str!("../scripts/widgets/cpu.lua");
 
 /// Seed RAM usage: plain percent, no icon. Uncomment its
 /// `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_RAM_LUA: &str = r#"-- RAM usage as plain text, no icon.
--- Uncomment its [[widget]] entry in widgets.toml to use it.
-function render()
-    return iced.text(string.format("%.0f%%", sysinfo.mem_usage))
-end
-"#;
+pub(crate) const SEED_RAM_LUA: &str = include_str!("../scripts/widgets/ram.lua");
 
 /// Seed GPU usage: plain percent, no icon. Reads "--" when the GPU
 /// exposes nothing readable. Uncomment its `[[widget]]` entry in
 /// widgets.toml to use it.
-pub(crate) const SEED_GPU_LUA: &str = r#"-- GPU usage as plain text, no icon ("--" when unreadable).
--- Uncomment its [[widget]] entry in widgets.toml to use it.
-function render()
-    local usage = gfxinfo.usage
-    if usage == nil then
-        return iced.text("--")
-    end
-    return iced.text(string.format("%.0f%%", usage))
-end
-"#;
+pub(crate) const SEED_GPU_LUA: &str = include_str!("../scripts/widgets/gpu.lua");
 
 /// Seed session menu: power-icon cell, popup with suspend /
 /// poweroff / hibernate / reboot rows dispatching `systemctl`.
 /// `on_action` whitelists the four keys (never interpolates a raw
 /// key into shell). Uncomment its `[[widget]]` entry in widgets.toml
 /// to use it.
-pub(crate) const SEED_SYSTEM_LUA: &str = r#"-- Session menu: power cell, systemctl popup (native shell).
--- Uncomment its [[widget]] entry in widgets.toml to use it.
-function render()
-    return iced.icon("power")
-end
-
-function popup()
-    return {
-        ui = iced.use("card", {
-            title = "Session",
-            icon = "power",
-            body = iced.use("menu", { items = {
-                { label = "Suspend", action = "suspend" },
-                { label = "Hibernate", action = "hibernate" },
-                { label = "Reboot", action = "reboot" },
-                { label = "Power off", action = "poweroff" },
-            } }),
-        }),
-        width = 220,
-    }
-end
-
-function on_action(name)
-    local allowed = { suspend = true, hibernate = true, reboot = true, poweroff = true }
-    if allowed[name] then
-        os.execute("systemctl " .. name)
-    end
-end
-"#;
+pub(crate) const SEED_SYSTEM_LUA: &str = include_str!("../scripts/widgets/system.lua");
 
 /// Seed component library docs (`components/00-define.lua`): how
 /// `iced.define` / `iced.use` work. Pure documentation plus a trivial
 /// `spacer` — the file teaches the pattern every other component uses.
-pub(crate) const SEED_COMPONENT_DEFINE: &str = r#"-- Shared components: define once, use in any widget (or the
--- notification card). Files run alphabetically after `iced` is built,
--- so later files may use earlier ones. Edit live — every widget state
--- rebuilds on save. Delete a file to drop its components.
---
--- Define a component: props in, ui tree out. Return values MUST come
--- from `iced.*` constructors (plain tables lose chaining and fail to
--- parse). `iced.use` checks this and names the offender.
---
---     iced.define("stat", function(props)
---         props = props or {}
---         return iced.row({
---             iced.icon(props.icon or "info"),
---             iced.text(props.value or "--"),
---         })
---     end)
---
--- Use it anywhere a ui tree works (cells, popups, notifications):
---
---     return iced.use("stat", { icon = "cpu", value = "42%" }):width("fill")
---
--- Unknown names and non-node returns are eval errors naming the
--- component, so typos stay visible instead of rendering blank.
-iced.define("spacer", function(props)
-    props = props or {}
-    return iced.text(""):height(props.h or 8)
-end)
-"#;
+pub(crate) const SEED_COMPONENT_DEFINE: &str = include_str!("../scripts/components/00-define.lua");
 
 /// Seed `card` component (`components/10-card.lua`): titled card body,
 /// the shape behind notification cards and stats popups.
-pub(crate) const SEED_COMPONENT_CARD: &str = r#"-- Card: title row plus body, for popups and panels.
--- props: { title, body, icon } — body is text or a ui tree.
---     iced.use("card", { title = "Cline Pass", icon = "bot",
---                         body = iced.text("42%") })
-iced.define("card", function(props)
-    props = props or {}
-    local body = props.body
-    if type(body) == "string" then
-        body = iced.text(body)
-    end
-    local head = iced.text(props.title or ""):size(14)
-    if props.color then
-        head = head:color(props.color)
-    end
-    if props.icon then
-        head = iced.row({ iced.icon(props.icon), head })
-    end
-    return iced.column({
-        head,
-        iced.separator(),
-        body or iced.text(""),
-    })
-end)
-"#;
+pub(crate) const SEED_COMPONENT_CARD: &str = include_str!("../scripts/components/10-card.lua");
 
 /// Seed `menu` component (`components/20-menu.lua`): uniform action
 /// rows from `{ label, action }` items, the session-menu shape.
-pub(crate) const SEED_COMPONENT_MENU: &str = r#"-- Menu: one full-width button per { label, action } item.
--- Clicks land in the owning widget's on_action(action), exactly like
--- popup `items` rows.
---     iced.use("menu", { items = {
---         { label = "Reboot", action = "reboot" },
---     } })
-iced.define("menu", function(props)
-    props = props or {}
-    local rows = {}
-    for _, item in ipairs(props.items or {}) do
-        local b = iced.button(item.label or "?", item.action or ""):width("fill")
-        if props.color then
-            b = b:color(props.color)
-        end
-        rows[#rows + 1] = b
-    end
-    return iced.column(rows)
-end)
-"#;
+pub(crate) const SEED_COMPONENT_MENU: &str = include_str!("../scripts/components/20-menu.lua");
 
 /// Seed notification renderer: `render(n)` layouts one notification
 /// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
 /// visible cards re-render on save; delete the file to restore the
 /// built-in layout.
-pub(crate) const SEED_NOTIFICATIONS_LUA: &str = r#"-- Notification card layout. n = { id, app, title, body, icon, urgency, actions, has_image }.
--- urgency: 0 low, 1 normal, 2 critical. actions: 1-based array of
--- { key, label } (empty when the sender offers none). Critical cards
--- tint through theme.error (see the theme table). Edit live,
--- cards re-render on save.
-function render(n)
-    local head = n.app ~= "" and (n.app .. " — " .. n.title) or n.title
-    if n.urgency >= 2 then
-        head = "! " .. head
-    end
-    local title = iced.text(head):size(14)
-    if n.urgency >= 2 then
-        title = title:color(theme.error)
-    end
-    return iced.column({
-        iced.row({ iced.icon("bell"), title }),
-        iced.separator(),
-        iced.text(n.body),
-    })
-end
-"#;
+pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
+    include_str!("../scripts/widgets/notifications.lua");
 
 /// Seed notification-center widget: a bell cell counting the live
 /// queue, with a popup listing the newest notifications and a dismiss
@@ -1307,47 +1127,7 @@ end
 /// before every render) and dismisses via the `on_action` return
 /// convention (`{ dismiss = id }`). Uncomment its `[[widget]]` entry
 /// in widgets.toml to use it.
-pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = r#"-- Notification center: bell + unread count, popup lists the queue.
--- Uncomment its [[widget]] entry in widgets.toml to use it.
--- `notifications` is republished before every render (newest first,
--- each { id, app, title, body, urgency, has_image }).
-function render()
-    local n = #notifications
-    if n == 0 then
-        return iced.icon("bell")
-    end
-    return iced.row({ iced.icon("bell"), iced.text(tostring(n)) })
-end
-
-function popup()
-    if #notifications == 0 then
-        return { text = "No notifications", width = 300 }
-    end
-    local rows = {}
-    for _, item in ipairs(notifications) do
-        local label = item.title ~= "" and item.title or item.body
-        rows[#rows + 1] = iced.row({
-            iced.text(label):width(180),
-            iced.button("{icon:x}", "dismiss:" .. item.id):width(40),
-        })
-    end
-    return {
-        ui = iced.use("card", {
-            title = "Notifications", icon = "bell",
-            body = iced.column(rows),
-        }),
-        width = 320,
-    }
-end
-
-function on_action(name)
-    local id = name:match("^dismiss:(%d+)$")
-    if id then
-        -- Return convention: dismiss the matching card (reason 2).
-        return { dismiss = tonumber(id) }
-    end
-end
-"#;
+pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
 /// Seed Hyprland workspaces: polls `hyprctl workspaces -j` every
 /// interval (the engine is the loop — no async in Lua) and renders
@@ -1356,142 +1136,12 @@ end
 /// global workspace id; a `_ws_ids` global maps positions back to
 /// ids for dispatch. Clicks dispatch via `on_action`.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_HYPR_LUA: &str = r#"-- Hyprland workspaces via io.popen (native shell). Buttons are iced.* nodes.
--- Polls hyprctl every interval (the engine is the loop). Shows only
--- workspaces on the focused output; buttons are labeled by relative
--- position (1..N), not workspace id. Enter/exit transitions are
--- automatic: the row's buttons animate on add/remove, keyed by action.
-function render()
-    local ids_h = io.popen("hyprctl workspaces -j 2>/dev/null")
-    if not ids_h then
-        return iced.text("--")
-    end
-    local ids = ids_h:read("*a") or ""
-    ids_h:close()
-    local active_h = io.popen("hyprctl activeworkspace -j 2>/dev/null")
-    local active = active_h and active_h:read("*a") or nil
-    if active_h then active_h:close() end
-    -- Focused output (nil when the query fails -> show everything).
-    local output = active and active:match('"monitor"%s*:%s*"([^"]+)"') or nil
-    local current = active and active:match('"id"%s*:%s*(%d+)') or nil
-    local cells = {}
-    _ws_ids = {}
-    local pos = 0
-    -- Pair each workspace id with its monitor ([%s%S] spans the
-    -- pretty-printed JSON newlines). "monitorID" can't collide: the
-    -- pattern requires the closing quote after monitor.
-    for id, mon in ids:gmatch('"id"%s*:%s*(%d+)[%s%S]-"monitor"%s*:%s*"([^"]+)"') do
-        if (not output) or mon == output then
-            pos = pos + 1
-            _ws_ids[pos] = id
-            local label = (id == current) and ("[" .. pos .. "]") or tostring(pos)
-            cells[#cells + 1] = iced.button(label, "ws:" .. pos)
-        end
-    end
-    if #cells == 0 then
-        return iced.text("--")
-    end
-    return iced.row(cells)
-end
-
-function on_action(name)
-    local idx = name:match("^ws:(%d+)$")
-    local id = idx and _ws_ids and _ws_ids[tonumber(idx)]
-    if id then
-        os.execute("hyprctl dispatch 'hl.dsp.focus({workspace = " .. id .. "})' >/dev/null 2>&1")
-    end
-end
-"#;
+pub(crate) const SEED_HYPR_LUA: &str = include_str!("../scripts/widgets/hypr.lua");
 
 /// Seed Cline Pass usage: robot icon cell, popup with quota rows.
 /// Paste the API key into `API_KEY` below (no input widget exists —
 /// the file hot-reloads on save). Blank key renders a connect hint.
-pub(crate) const SEED_CLINEPASS_LUA: &str = r#"-- Cline Pass usage via io.popen (native shell).
--- Paste your key below (file hot-reloads on save).
-local API_KEY = ""
-
-local URL = "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
-
-function render()
-    return iced.icon("bot")
-end
-
-function popup()
-    if API_KEY == "" then
-        return {
-            ui = iced.use("card", {
-                title = "Cline Pass", icon = "bot",
-                body = "paste API_KEY into clinepass.lua",
-            }),
-            width = 300,
-        }
-    end
-    -- Lazy load: first open returns a spinner instantly (curl blocks
-    -- the tick), caches the body in a global; the refresh tick swaps
-    -- in real rows once cached. Stale cache renders while refetching.
-    if not _usage then
-        return {
-            ui = iced.use("card", {
-                title = "Cline Pass", icon = "bot",
-                body = iced.row({ iced.spinner(), iced.text("fetching…") }),
-            }),
-            width = 300,
-        }
-    end
-    local body = _usage
-    if body:match('"error"') then
-        return { text = "cline: unauthorized (bad key?)", width = 300 }
-    end
-    local rows = {}
-    -- Real shape: {"data":{"limits":[{"type":"five_hour",
-    -- "percentUsed":14,"resetsAt":"..."}]},"success":true}.
-    for kind, pct in body:gmatch('"type"%s*:%s*"([%w_%-]+)"%s*,%s*"percentUsed"%s*:%s*(%d+)') do
-        local p = tonumber(pct) or 0
-        local label = kind:gsub("_", " ")
-        rows[#rows + 1] = iced.row({
-            iced.text(label):width(80),
-            iced.progress(p / 100):height(8):width("fill"),
-            iced.text(p .. "%"):width(20),
-        })
-    end
-    if #rows == 0 then
-        rows[#rows + 1] = iced.text("no usage fields parsed")
-    end
-    return {
-        ui = iced.use("card", {
-            title = "Cline Pass", icon = "bot",
-            color = theme.primary,
-            body = iced.column(rows),
-        }),
-        width = 300,
-    }
-end
-
--- Background fetch on the render interval (globals persist): fills
--- _usage once, refreshes hourly. popup() never blocks on curl.
-local _last = 0
-function render()
-    if API_KEY ~= "" and (not _usage or (os.time() - _last) > 3600) then
-        local h = io.popen(
-            "curl -sS --max-time 10 -H 'Authorization: Bearer " .. API_KEY .. "' " .. URL
-                .. " 2>/dev/null"
-        )
-        if h then
-            local body = h:read("*a") or ""
-            h:close()
-            if body ~= "" then
-                _usage = body
-                _last = os.time()
-            elseif not _usage then
-                _usage = '{"error":"fetch failed"}'
-            end
-        elseif not _usage then
-            _usage = '{"error":"fetch failed"}'
-        end
-    end
-    return iced.icon("bot")
-end
-"#;
+pub(crate) const SEED_CLINEPASS_LUA: &str = include_str!("../scripts/widgets/clinepass.lua");
 
 /// `~/.config/riced/widgets.toml` (`$XDG_CONFIG_HOME` aware).
 pub fn widgets_path() -> PathBuf {
@@ -1521,8 +1171,38 @@ pub fn components_dir() -> PathBuf {
 /// Concatenated `components/*.lua` source (sorted by filename, tagged
 /// with `-- file:` separators for error lines), or `None` when the
 /// dir is missing/empty. Tested via [`components_source_in`].
-pub fn components_source() -> Option<String> {
-    components_source_in(&components_dir())
+/// Preserve individual chunk names so Lua errors name their source file.
+pub(crate) fn component_files() -> Vec<(PathBuf, String)> {
+    let installed: Vec<_> = lua_files_sorted(&components_dir())
+        .into_iter()
+        .filter_map(|path| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .map(|source| (path, source))
+        })
+        .collect();
+    if installed.is_empty() {
+        builtin_component_files()
+    } else {
+        installed
+    }
+}
+
+/// Bundled pure components used when no on-disk library has been installed.
+pub(crate) fn builtin_component_files() -> Vec<(PathBuf, String)> {
+    [
+        ("00-define.lua", SEED_COMPONENT_DEFINE),
+        ("10-card.lua", SEED_COMPONENT_CARD),
+        ("20-menu.lua", SEED_COMPONENT_MENU),
+    ]
+    .into_iter()
+    .map(|(name, source)| {
+        (
+            PathBuf::from("scripts/components").join(name),
+            source.to_owned(),
+        )
+    })
+    .collect()
 }
 
 /// Newest mtime across `components/*.lua` (folder hot-reload stamp),
@@ -1543,6 +1223,7 @@ fn lua_files_sorted(dir: &std::path::Path) -> Vec<PathBuf> {
     files
 }
 
+#[cfg(test)]
 fn components_source_in(dir: &std::path::Path) -> Option<String> {
     let files = lua_files_sorted(dir);
     if files.is_empty() {
@@ -1568,10 +1249,19 @@ fn components_source_in(dir: &std::path::Path) -> Option<String> {
 }
 
 fn components_mtime_in(dir: &std::path::Path) -> Option<SystemTime> {
-    lua_files_sorted(dir)
-        .iter()
-        .filter_map(|p| read_mtime(p))
-        .max()
+    use std::hash::{Hash, Hasher};
+    let files = lua_files_sorted(dir);
+    if files.is_empty() {
+        return None;
+    }
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    for path in files {
+        path.hash(&mut fingerprint);
+        std::fs::read(&path).ok().hash(&mut fingerprint);
+    }
+    // Opaque change stamp, rather than the newest file's mtime: detects
+    // edits to older files, additions, removals, and timestamp-preserving saves.
+    Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(fingerprint.finish()))
 }
 
 /// Hot-reload check for the components dir: fresh stamp when any
@@ -2326,7 +2016,7 @@ mod tests {
     }
 
     #[test]
-    fn components_mtime_tracks_newest_file() {
+    fn components_stamp_detects_content_changes_and_removals() {
         let dir =
             std::env::temp_dir().join(format!("riced-components-mtime-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2335,6 +2025,14 @@ mod tests {
         assert!(components_mtime_in(&dir).is_none());
         std::fs::write(dir.join("10-a.lua"), "a = 1\n").unwrap();
         assert!(components_mtime_in(&dir).is_some());
+        std::fs::write(dir.join("20-b.lua"), "b = 1\n").unwrap();
+        let before = components_mtime_in(&dir);
+        std::fs::write(dir.join("10-a.lua"), "a = 2\n").unwrap();
+        let changed = components_mtime_in(&dir);
+        assert_ne!(before, changed);
+        assert_eq!(changed, components_mtime_in(&dir));
+        std::fs::remove_file(dir.join("10-a.lua")).unwrap();
+        assert_ne!(changed, components_mtime_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

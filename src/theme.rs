@@ -56,6 +56,9 @@ struct ThemeFile {
 /// `None` (caller substitutes the fallback field color and logs once).
 pub(crate) fn parse_hex(s: &str) -> Option<Color> {
     let hex = s.trim().strip_prefix('#')?;
+    if !hex.is_ascii() {
+        return None;
+    }
     let (r, g, b, a) = match hex.len() {
         6 => (
             u8::from_str_radix(&hex[0..2], 16).ok()?,

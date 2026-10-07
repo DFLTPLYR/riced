@@ -1,7 +1,7 @@
 use super::background::Background;
 use super::top::{
-    Top, TopLocal, WidgetNode, build_node, call_lua_value, coerce_text, lua_has_func,
-    lua_value_kind, parse_node, publish_system_tables, publish_theme_tables, rich_text,
+    Top, TopLocal, WidgetNode, call_lua_value, coerce_text, lua_has_func, lua_value_kind,
+    parse_node, publish_system_tables, publish_theme_tables, rich_text,
 };
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::{Plant, TopEvent, WidgetEvent};
@@ -410,6 +410,13 @@ impl Popup {
                     | PopupConstraintAdjustment::SlideY,
             );
         let win_id = window::Id::unique();
+        if let Some(tree) = &body.tree
+            && let Err(error) =
+                super::top::sync_declared_lists(plots, &format!("popup:{win_id:?}"), None, tree)
+        {
+            Top::note_widget_error(plots, &name, error);
+            return None;
+        }
         let size_text = plots
             .widgets
             .iter()
@@ -438,7 +445,7 @@ impl Popup {
         }))
     }
 
-    pub fn view(&self) -> Element<'static, Plant> {
+    pub fn view(&self, plots: &Plots) -> Element<'static, Plant> {
         use crate::app::TopEvent;
         use iced::widget::{button, column, container};
         let win_id = self.win_id;
@@ -453,7 +460,14 @@ impl Popup {
             let msg = move |action: String| {
                 Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(win_id, action)))
             };
-            if let Ok(node) = build_node(tree, self.size, Some(&msg)) {
+            if let Ok(node) = super::top::build_with_lists(
+                tree,
+                &format!("popup:{win_id:?}"),
+                self.size,
+                Some(&msg),
+                &plots.anim_runtime,
+                &plots.widget_lists,
+            ) {
                 content = content.push(node);
             }
         }
@@ -481,6 +495,18 @@ impl Popup {
     /// Dismiss a popup: drop tracking + cursor state and close its window
     /// (idempotent, like every other layer close).
     pub(crate) fn handle_dismiss(plots: &mut Plots, id: window::Id) -> Command<Plant> {
+        let prefix = format!("popup:{id:?}/");
+        let keys: Vec<_> = plots
+            .widget_lists
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(mut list) = plots.widget_lists.remove(&key) {
+                list.clear_all(&mut plots.anim_runtime);
+            }
+        }
         plots.last_cursor.remove(&id);
         plots.popups.remove(&id);
         plots.ids.remove(&id);
@@ -561,6 +587,18 @@ impl Popup {
                         },
                         None => Self::content_size(1920.0, 1080.0, &content),
                     };
+                    let old = plots.popups.get(&pid).and_then(|popup| popup.tree.clone());
+                    if let Some(tree) = &content.tree
+                        && let Err(error) = super::top::sync_declared_lists(
+                            plots,
+                            &format!("popup:{pid:?}"),
+                            old.as_ref(),
+                            tree,
+                        )
+                    {
+                        Top::note_widget_error(plots, &name, error);
+                        continue;
+                    }
                     if let Some(popup) = plots.popups.get_mut(&pid)
                         && (popup.body != content.text
                             || popup.items != content.items
@@ -620,13 +658,7 @@ impl Popup {
                         super::notification::publish_notification_list(lua, plots)
                             .map_err(|e| e.to_string())
                     })
-                    .and_then(|()| {
-                        let on_action: mlua::Function =
-                            lua.globals().get("on_action").map_err(|e| e.to_string())?;
-                        on_action
-                            .call::<mlua::Value>(action)
-                            .map_err(|e| e.to_string())
-                    });
+                    .and_then(|()| super::top::call_lua_named_action(lua, &action));
                 Some(acted)
             }
             None => None,

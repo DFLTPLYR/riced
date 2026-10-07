@@ -7,17 +7,24 @@ mod colorgen;
 mod components;
 mod composables;
 mod config;
+mod lua;
 mod notify;
 mod theme;
 
 use app::{Plots, redraw_scope};
 use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
 
-pub fn main() -> Result<(), iced_exwlshell::Error> {
+pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
     let _ = tracing_log::LogTracer::init();
+    let command = cli::parse();
+    if let Some(cli::Commands::LuaDemo { script }) = command {
+        lua::demo::run(script)?;
+        return Ok(());
+    }
 
-    match cli::parse() {
+    let result = match command {
+        Some(cli::Commands::LuaDemo { .. }) => unreachable!("Lua demo handled above"),
         Some(cli::Commands::OpenSettings) => {
             if let Err(e) = cli::queue_open_settings() {
                 eprintln!("riced: cannot queue open-settings: {e}");
@@ -37,7 +44,8 @@ pub fn main() -> Result<(), iced_exwlshell::Error> {
         }
         // No subcommand: run the shell daemon.
         None => run_daemon(),
-    }
+    };
+    result.map_err(Into::into)
 }
 
 /// `riced apply-templates`: sys `change_theme` equivalent as a single-shot
