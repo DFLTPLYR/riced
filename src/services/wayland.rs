@@ -43,6 +43,7 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
         out_list.set(i + 1, entry)?;
     }
     table.set("outputs", out_list)?;
+    debug_geometry_table(&geometry);
 
     let ws_list = lua.create_table()?;
     let ws_rows: Vec<Workspace> = ctx.workspaces.snapshot();
@@ -66,6 +67,29 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     table.set("toplevels", tl_list)?;
 
     lua.globals().set("wayland", table)
+}
+
+/// Stderr the iced-side geometry table when it changes (debug only):
+/// the other half of the monitor match. Bounded: logs on change.
+fn debug_geometry_table(geometry: &[(String, [f32; 4])]) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<Vec<(String, [f32; 4])>>> = OnceLock::new();
+    let debug = std::env::var("RICED_DEBUG")
+        .map(|v| v.split(',').any(|s| s.trim() == "workspaces"))
+        .unwrap_or(false);
+    if !debug {
+        return;
+    }
+    let current: Vec<(String, [f32; 4])> = geometry.to_vec();
+    let mut last = LAST.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
+    if *last != current {
+        let summary: Vec<String> = current
+            .iter()
+            .map(|(n, g)| format!("{n}@{}, {}, {}, {}", g[0], g[1], g[2], g[3]))
+            .collect();
+        eprintln!("riced(workspaces): iced geometry [{}]", summary.join(" "));
+        *last = current;
+    }
 }
 
 /// Resolve a workspace's monitor by output geometry: each of its

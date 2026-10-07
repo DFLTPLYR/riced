@@ -185,7 +185,20 @@ impl Listener {
         if self.debug {
             let summary: Vec<String> = rows
                 .iter()
-                .map(|r| format!("{}!{}@{}", r.name, r.active as u8, r.monitor))
+                .map(|r| {
+                    let rects: Vec<String> = r
+                        .rects
+                        .iter()
+                        .map(|rc| format!("{},{},{},{}", rc[0], rc[1], rc[2], rc[3]))
+                        .collect();
+                    format!(
+                        "{}!{}@{}#[{}]",
+                        r.name,
+                        r.active as u8,
+                        r.monitor,
+                        rects.join("+")
+                    )
+                })
                 .collect();
             eprintln!("riced(workspaces): snapshot [{}]", summary.join(" "));
         }
