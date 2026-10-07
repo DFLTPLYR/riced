@@ -77,7 +77,7 @@ src/app/app.rs:454      redraw_scope: SelectionTick|Button => All, CursorMoved =
 Bar cells are Lua scripts in `~/.config/riced/widgets/`, declared in
 `~/.config/riced/widgets.toml` and referenced by name from `[[bar]]`
 `widgets` entries. First run seeds a clock plus commented
-hello/stats/cpu/ram/gpu/hypr/clinepass examples — uncomment a
+hello/stats/cpu/ram/gpu/wayland/clinepass examples — uncomment a
 `[[widget]]` entry to use it.
 
 ```toml
@@ -110,8 +110,9 @@ return app
   `os.remove` / `os.rename` and `require` stay blocked.
 - **Services**: `system` (cpu/mem/gpu or nil), `theme` (live iced
   palette hex for `:color()`), `notifications` (queue snapshot,
-  newest-first), `wayland` (`outputs`, `workspaces`, `toplevels`,
-  `active_workspace`), republished before every due render/popup/action.
+  newest-first), `wayland` (`outputs` plus native `toplevels` from
+  `ext-foreign-toplevel-list`; no workspaces, no focus),
+  republished before every due render/popup/action.
   `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`, `separator`).
   `ui.define(name, fn)` registers reusable builders called as `ui.name(props)`;

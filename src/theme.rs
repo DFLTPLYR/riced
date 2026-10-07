@@ -1033,7 +1033,7 @@ mod tests {
         let sys = sysinfo::System::new();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
-        let hypr = crate::services::HyprCache::default();
+        let toplevels = crate::services::ToplevelCache::default();
         let theme = ThemeConfig {
             name: "no-such-theme".to_string(),
             ..ThemeConfig::default()
@@ -1044,7 +1044,7 @@ mod tests {
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,
-            hypr: &hypr,
+            toplevels: &toplevels,
         };
         crate::services::publish_all(&ctx, &lua).expect("publish");
         let primary: String = lua.load("return theme.primary").eval().expect("eval");

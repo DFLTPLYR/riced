@@ -40,14 +40,14 @@ mod tests {
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
-        let hypr = super::super::HyprCache::default();
+        let toplevels = super::super::ToplevelCache::default();
         let ctx = ServiceCtx {
             sys: &sys,
             gpu: Some(42.0),
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,
-            hypr: &hypr,
+            toplevels: &toplevels,
         };
         publish(&ctx, &lua).expect("publish");
         let cpu: f32 = lua.load("return system.cpu_usage").eval().expect("cpu");

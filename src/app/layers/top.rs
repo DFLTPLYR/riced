@@ -3207,9 +3207,6 @@ impl Top {
         let now = Instant::now();
         plots.sysinfo.refresh_cpu_usage();
         plots.sysinfo.refresh_memory();
-        // One Hyprland socket round-trip per tick, shared by every
-        // widget state (see `crate::services::hypr::HyprCache`).
-        plots.hypr_cache.refresh();
         let gpu = Popup::gpu_usage_percent();
         let defs = plots.widgets.clone();
         let mut changed = false;
@@ -4347,14 +4344,14 @@ mod tests {
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
-        let hypr = crate::services::HyprCache::default();
+        let toplevels = crate::services::ToplevelCache::default();
         let ctx = crate::services::ServiceCtx {
             sys,
             gpu,
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,
-            hypr: &hypr,
+            toplevels: &toplevels,
         };
         crate::services::publish_all(&ctx, lua).expect("publish");
     }
@@ -4447,12 +4444,12 @@ mod tests {
 
     /// Seeds render through the full pipeline: parse plus build.
     /// Off-compositor services (Hyprland socket, outputs) degrade to
-    /// empty tables, so every seed renders — including hypr ("--").
+    /// empty tables, so every seed renders — including wayland ("--").
     #[test]
     fn seed_scripts_parse_and_build() {
         use crate::config::{
             SEED_CLINEPASS_LUA, SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA,
-            SEED_HYPR_LUA, SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA,
+            SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA, SEED_WAYLAND_LUA,
         };
         let mut sys = sysinfo::System::new();
         sys.refresh_cpu_usage();
@@ -4466,7 +4463,7 @@ mod tests {
             SEED_CPU_LUA,
             SEED_RAM_LUA,
             SEED_GPU_LUA,
-            SEED_HYPR_LUA,
+            SEED_WAYLAND_LUA,
             SEED_CLINEPASS_LUA,
             SEED_SYSTEM_LUA,
         ] {
@@ -4652,79 +4649,53 @@ mod tests {
     }
 
     #[test]
-    fn hypr_seed_shows_output_local_workspaces_by_position() {
-        use crate::config::SEED_HYPR_LUA;
-        // Ids 3 (DP-1), 4 (HDMI-1), 5 (DP-1); focused is 5 on DP-1.
-        // Positions must be 1..2 over DP-1 only — never raw ids.
-        let workspaces = r#"[{"id":3,"name":"3","monitor":"DP-1","monitorID":0,"windows":1},{"id":4,"name":"4","monitor":"HDMI-1","monitorID":1,"windows":0},{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}]"#;
-        let active = r#"{"id":5,"name":"5","monitor":"DP-1","monitorID":0,"windows":2}"#;
-        let clients = r#"[{"class":"foot","title":"shell","workspace":{"id":3,"name":"3"}}]"#;
+    fn wayland_seed_lists_native_toplevels_without_actions() {
+        use crate::config::SEED_WAYLAND_LUA;
+        use crate::services::{Toplevel, ToplevelCache};
         let lua = new_widget_lua().expect("sandbox");
-        // Feed the seed through the real `wayland` service: parse the
-        // compositor JSON the same way `HyprCache` does, publish, render.
+        // Feed the seed through the real `wayland` service from a
+        // canned native snapshot (no compositor needed).
         let sys = sysinfo::System::new();
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
-        let hypr = crate::services::HyprCache {
-            workspaces: crate::services::HyprCache::parse_workspaces(workspaces),
-            clients: crate::services::HyprCache::parse_clients(clients),
-            active_workspace: crate::services::HyprCache::parse_active(active),
-        };
+        let toplevels = ToplevelCache::from_rows(vec![
+            Toplevel {
+                app_id: "foot".to_string(),
+                title: "shell".to_string(),
+            },
+            Toplevel {
+                app_id: "firefox".to_string(),
+                title: "".to_string(),
+            },
+        ]);
         let ctx = crate::services::ServiceCtx {
             sys: &sys,
             gpu: None,
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,
-            hypr: &hypr,
+            toplevels: &toplevels,
         };
         crate::services::publish_all(&ctx, &lua).expect("publish");
-        // One known output so the seed filters to DP-1 (`OutputInfo`
-        // needs a live compositor; the service's own shape test covers
-        // the outputs table itself).
-        let wayland: mlua::Table = lua.globals().get("wayland").expect("wayland");
-        let outputs = lua.create_table().expect("outputs");
-        let first = lua.create_table().expect("first");
-        first.set("name", "DP-1").expect("name");
-        outputs.set(1, first).expect("set");
-        wayland.set("outputs", outputs).expect("outputs");
-        load_widget_script(&lua, "hypr", SEED_HYPR_LUA).expect("load");
-        // Bar strip: one button per workspace, active bracketed.
+        load_widget_script(&lua, "wayland", SEED_WAYLAND_LUA).expect("load");
+        // Bar shows the window count as plain text.
         let value = call_lua_value(&lua, "view").expect("view");
         let node = parse_node(&value).expect("parse");
         match node {
-            WidgetNode::Row { children, .. } => {
-                assert_eq!(children.len(), 2);
-                for (child, want) in children.iter().zip([("1", "ws:3"), ("[2]", "ws:5")]) {
-                    match child {
-                        WidgetNode::Button { label, action, .. } => {
-                            assert_eq!((label.as_str(), action.as_str()), want)
-                        }
-                        other => panic!("expected button, got {other:?}"),
-                    }
-                }
-            }
-            other => panic!("expected row, got {other:?}"),
+            WidgetNode::Text { content, .. } => assert_eq!(content, "2 windows"),
+            other => panic!("expected text, got {other:?}"),
         }
-        // Clicking dispatches a workspace focus (recorded, not spawned).
-        let os: mlua::Table = lua.globals().get("os").expect("os");
-        os.set(
-            "execute",
-            lua.create_function(|lua, cmd: String| {
-                lua.globals().set("_dispatched", cmd)?;
-                Ok(true)
-            })
-            .expect("exec"),
-        )
-        .expect("set execute");
-        call_lua_named_action(&lua, "ws:3").expect("action");
-        let dispatched: String = lua.load("return _dispatched").eval().expect("dispatched");
+        // The seed defines no actions at all (pure standard Wayland
+        // cannot focus other windows; nothing to dispatch).
+        let app: mlua::Table = lua.named_registry_value("riced.widget.app").expect("app");
+        let on_action: mlua::Value = app.get("on_action").expect("get");
         assert!(
-            dispatched.contains("workspace = 3"),
-            "dispatches focus, got {dispatched:?}"
+            matches!(on_action, mlua::Value::Nil),
+            "read-only: no on_action"
         );
-        // Popup is a listview: workspace headers plus toplevel rows.
+        // Popup is a listview with one row per toplevel; empty titles
+        // fall back to the app id.
         let popup = call_lua_value(&lua, "popup").expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("popup tree");
@@ -4732,7 +4703,6 @@ mod tests {
         let mut stack = vec![&tree];
         while let Some(node) = stack.pop() {
             match node {
-                WidgetNode::Button { label, .. } => labels.push(label.clone()),
                 WidgetNode::Text { content, .. } => labels.push(content.clone()),
                 WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
                     stack.extend(children.iter());
@@ -4744,14 +4714,14 @@ mod tests {
             }
         }
         assert!(
-            labels.iter().any(|t| t.contains("3 (DP-1)")),
-            "workspace header missing: {labels:?}"
-        );
-        assert!(
             labels
                 .iter()
                 .any(|t| t.contains("foot") && t.contains("shell")),
             "toplevel row missing: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|t| t == "firefox — firefox"),
+            "app-id fallback missing: {labels:?}"
         );
     }
 
@@ -5680,12 +5650,12 @@ mod tests {
     fn build_anim_list_merges_live_and_ghosts() {
         use super::super::listview::{Axis, ListView};
         use aura_anim::core::runtime::MotionRuntime;
-        // Live row like the hypr seed renders: two buttons, the first
-        // mid-enter, plus one exiting ghost at index 1.
+        // Live row of two buttons, the first mid-enter, plus one
+        // exiting ghost at index 1.
         let children = vec![
             WidgetNode::Button {
                 label: "1".to_string(),
-                action: "ws:1".to_string(),
+                action: "go:1".to_string(),
                 width: None,
                 height: None,
                 padding: None,
@@ -5693,7 +5663,7 @@ mod tests {
             },
             WidgetNode::Button {
                 label: "[2]".to_string(),
-                action: "ws:2".to_string(),
+                action: "go:2".to_string(),
                 width: None,
                 height: None,
                 padding: None,
@@ -5703,9 +5673,9 @@ mod tests {
         let mut rt = MotionRuntime::new();
         let duration = Duration::from_millis(150);
         let mut list: ListView<(String, String), WidgetNode> = ListView::new(32.0);
-        let ws1 = ("hypr".to_string(), "ws:1".to_string());
-        let ws2 = ("hypr".to_string(), "ws:2".to_string());
-        let ws9 = ("hypr".to_string(), "ws:9".to_string());
+        let ws1 = ("demo".to_string(), "go:1".to_string());
+        let ws2 = ("demo".to_string(), "go:2".to_string());
+        let ws9 = ("demo".to_string(), "go:9".to_string());
         // First button mid-enter, plus one exiting ghost at index 1.
         list.update(
             &mut rt,
@@ -5737,12 +5707,12 @@ mod tests {
         assert_eq!(list.ghosts_for(|_| true).len(), 1);
         let msg = |_: String| Plant::Tend;
         let mut lists = std::collections::HashMap::new();
-        lists.insert("hypr".to_string(), list);
+        lists.insert("demo".to_string(), list);
         // Live + ghost merge builds (ghost renders inert), rows and
         // columns alike.
         for is_row in [true, false] {
             let _ = build_anim_list(
-                "hypr",
+                "demo",
                 &children,
                 4.0,
                 NodeLength::Shrink,

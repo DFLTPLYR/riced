@@ -119,10 +119,9 @@ pub struct Plots {
     // Live system snapshot for the `system` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
     pub(crate) sysinfo: sysinfo::System,
-    // Tick-shared Hyprland snapshot backing `wayland.workspaces` and
-    // `wayland.toplevels` (refreshed once per widget tick, shared by
-    // every widget state — see `handle_widget_tick`).
-    pub(crate) hypr_cache: crate::services::HyprCache,
+    // Native toplevel listener backing `wayland.toplevels` (its own
+    // thread blocks on the compositor socket; ticks just snapshot).
+    pub(crate) toplevel_cache: crate::services::ToplevelCache,
     // Local-first staging: `Patch` mutates live memory every tick (smooth
     // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
     // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
@@ -242,7 +241,7 @@ impl Plots {
                 crate::app::layers::notification::CARD_PITCH,
             ),
             sysinfo,
-            hypr_cache: Default::default(),
+            toplevel_cache: crate::services::ToplevelCache::spawn(),
         };
         // Render Lua widgets once so bars populate on the first frame
         // instead of waiting out the first tick.

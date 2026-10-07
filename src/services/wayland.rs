@@ -1,19 +1,18 @@
-//! `wayland` service: outputs plus Hyprland workspaces/toplevels.
+//! `wayland` service: outputs plus native toplevels.
 //!
 //! Outputs come from the existing `output_infos` (no new IPC).
-//! Workspaces/toplevels come from the per-tick [`HyprCache`]; when the
-//! compositor isn't Hyprland (or the socket is unreachable) those
-//! tables are simply empty — same degrade stance as `gpu_usage` nil.
+//! Toplevels come from [`ToplevelCache`] (`ext-foreign-toplevel-list`);
+//! compositors without the protocol yield an empty list — same degrade
+//! stance as `gpu_usage` nil. No workspace or focus state exists here:
+//! standard Wayland defines neither, so there is nothing to publish.
 
+use super::Toplevel;
 use super::registry::ServiceCtx;
 use crate::app::layers::background::Background;
 
-/// Publish `wayland = { outputs = …, workspaces = …, toplevels = …,
-/// active_workspace = … }`:
+/// Publish `wayland = { outputs = …, toplevels = … }`:
 /// - `outputs`: `{name, x, y, w, h}` sorted by name (deterministic).
-/// - `workspaces`: `{id, name, monitor, windows}` in compositor order.
-/// - `toplevels`: `{class, title, workspace}` in compositor order.
-/// - `active_workspace`: focused workspace id, nil when unknown.
+/// - `toplevels`: `{app_id, title}`, sorted for stable order.
 pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     let table = lua.create_table()?;
 
@@ -37,31 +36,15 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     }
     table.set("outputs", out_list)?;
 
-    let ws_list = lua.create_table()?;
-    for (i, ws) in ctx.hypr.workspaces.iter().enumerate() {
-        let entry = lua.create_table()?;
-        entry.set("id", ws.id)?;
-        entry.set("name", ws.name.clone())?;
-        entry.set("monitor", ws.monitor.clone())?;
-        entry.set("windows", ws.windows)?;
-        ws_list.set(i + 1, entry)?;
-    }
-    table.set("workspaces", ws_list)?;
-
     let tl_list = lua.create_table()?;
-    for (i, c) in ctx.hypr.clients.iter().enumerate() {
+    let rows: Vec<Toplevel> = ctx.toplevels.snapshot();
+    for (i, tl) in rows.iter().enumerate() {
         let entry = lua.create_table()?;
-        entry.set("class", c.class.clone())?;
-        entry.set("title", c.title.clone())?;
-        entry.set("workspace", c.workspace)?;
+        entry.set("app_id", tl.app_id.clone())?;
+        entry.set("title", tl.title.clone())?;
         tl_list.set(i + 1, entry)?;
     }
     table.set("toplevels", tl_list)?;
-
-    match ctx.hypr.active_workspace {
-        Some(id) => table.set("active_workspace", id)?,
-        None => table.set("active_workspace", mlua::Value::Nil)?,
-    }
 
     lua.globals().set("wayland", table)
 }
@@ -69,52 +52,39 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::hypr::{HyprCache, HyprClient, HyprWorkspace};
+    use crate::services::{Toplevel, ToplevelCache};
 
     #[test]
-    fn wayland_tables_cover_outputs_and_hypr_rows() {
+    fn wayland_tables_cover_outputs_and_toplevels() {
         let lua = mlua::Lua::new();
         let sys = sysinfo::System::new();
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
-        let hypr = HyprCache {
-            workspaces: vec![HyprWorkspace {
-                id: 1,
-                name: "1".to_string(),
-                monitor: "DP-1".to_string(),
-                windows: 2,
-            }],
-            clients: vec![HyprClient {
-                class: "foot".to_string(),
-                title: "t".to_string(),
-                workspace: 1,
-            }],
-            active_workspace: Some(1),
-        };
+        let toplevels = ToplevelCache::from_rows(vec![Toplevel {
+            app_id: "foot".to_string(),
+            title: "shell".to_string(),
+        }]);
         let ctx = ServiceCtx {
             sys: &sys,
             gpu: None,
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,
-            hypr: &hypr,
+            toplevels: &toplevels,
         };
         publish(&ctx, &lua).expect("publish");
-        let mon: String = lua
-            .load("return wayland.workspaces[1].monitor")
-            .eval()
-            .expect("ws");
-        assert_eq!(mon, "DP-1");
-        let class: String = lua
-            .load("return wayland.toplevels[1].class")
+        let app_id: String = lua
+            .load("return wayland.toplevels[1].app_id")
             .eval()
             .expect("tl");
-        assert_eq!(class, "foot");
-        let active: i32 = lua
-            .load("return wayland.active_workspace")
+        assert_eq!(app_id, "foot");
+        let title: String = lua
+            .load("return wayland.toplevels[1].title")
             .eval()
-            .expect("active");
-        assert_eq!(active, 1);
+            .expect("title");
+        assert_eq!(title, "shell");
+        let count: i64 = lua.load("return #wayland.outputs").eval().expect("len");
+        assert_eq!(count, 0);
     }
 }

@@ -753,10 +753,9 @@ pub fn config_path() -> PathBuf {
 /// - `theme`: live palette hex pairs (`theme.primary`, ...).
 /// - `notifications`: queue snapshot, newest-first (`id`, `app`,
 ///   `title`, `body`, `urgency`, `has_image`).
-/// - `wayland`: `outputs` (`name`, `x`, `y`, `w`, `h`),
-///   `workspaces` (`id`, `name`, `monitor`, `windows`), `toplevels`
-///   (`class`, `title`, `workspace`), `active_workspace` (nil when
-///   unknown).
+/// - `wayland`: `outputs` (`name`, `x`, `y`, `w`, `h`) plus native
+///   `toplevels` (`app_id`, `title`) from `ext-foreign-toplevel-list`.
+///   No workspaces, no focus: standard Wayland defines neither.
 /// - `os.execute(cmd)` / `io.popen(cmd)`: native shell. Capture
 ///   stdout with `io.popen(cmd):read("*a")`; wrap slow calls in
 ///   `pcall`, cache on self, refresh hourly.
@@ -1044,11 +1043,11 @@ size = 13.0
 # interval = 2.0
 # size = 13.0
 
-# Basic Wayland overview (read-only): workspace strip in the bar,
-# workspaces plus toplevels in the popup. No window management.
+# Basic Wayland overview (read-only): window count in the bar,
+# every toplevel in a popup listview. No window management.
 # [[widget]]
-# name = "hypr"
-# file = "hypr.lua"
+# name = "wayland"
+# file = "wayland.lua"
 # interval = 0.5
 # size = 13.0
 
@@ -1137,14 +1136,12 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 /// in widgets.toml to use it.
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
-/// Seed Wayland overview: renders one button per workspace **on the
-/// first known output only**, bracketting the active one (`[2]`); the
-/// popup is a listview with one header row per workspace plus one row
-/// per toplevel (`class — title`). Clicks focus the workspace via
-/// `hyprctl dispatch 'hl.dsp.focus(...)'` — windows are never moved or
-/// closed from here.
+/// Seed Wayland overview (read-only): window count in the bar; the
+/// popup is a listview with one row per toplevel (`app_id — title`,
+/// from `ext-foreign-toplevel-list`). No `on_action` exists — windows
+/// are never focused, moved, or closed from here.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
-pub(crate) const SEED_HYPR_LUA: &str = include_str!("../scripts/widgets/hypr.lua");
+pub(crate) const SEED_WAYLAND_LUA: &str = include_str!("../scripts/widgets/wayland.lua");
 
 /// Seed Cline Pass usage: robot icon cell, popup with quota rows.
 /// Paste the API key into `API_KEY` below (no input widget exists —
@@ -1347,7 +1344,7 @@ impl WidgetsFile {
             ("cpu.lua", SEED_CPU_LUA),
             ("ram.lua", SEED_RAM_LUA),
             ("gpu.lua", SEED_GPU_LUA),
-            ("hypr.lua", SEED_HYPR_LUA),
+            ("wayland.lua", SEED_WAYLAND_LUA),
             ("clinepass.lua", SEED_CLINEPASS_LUA),
             ("system.lua", SEED_SYSTEM_LUA),
             ("notifications.lua", SEED_NOTIFICATIONS_LUA),
@@ -1967,7 +1964,7 @@ mod tests {
         assert!(dir.join("cpu.lua").is_file());
         assert!(dir.join("gpu.lua").is_file());
         assert!(dir.join("hello.lua").is_file());
-        assert!(dir.join("hypr.lua").is_file());
+        assert!(dir.join("wayland.lua").is_file());
         assert!(dir.join("clinepass.lua").is_file());
         assert!(dir.join("system.lua").is_file());
         assert!(dir.join("notifications.lua").is_file());

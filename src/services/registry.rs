@@ -4,7 +4,7 @@
 //! Adding a service means: new module implementing [`Service`], one
 //! line in `SERVICES` below, tests for its table shape.
 
-use super::hypr::HyprCache;
+use super::toplevels::ToplevelCache;
 use std::collections::{HashMap, VecDeque};
 
 /// Read-only snapshot inputs every service publishes from. All borrows
@@ -16,7 +16,7 @@ pub struct ServiceCtx<'a> {
     pub outputs:
         &'a HashMap<iced_wayland_subscriber::OutputId, iced_wayland_subscriber::OutputInfo>,
     pub notifications: &'a VecDeque<crate::app::layers::notification::Notification>,
-    pub hypr: &'a HyprCache,
+    pub toplevels: &'a ToplevelCache,
 }
 
 impl<'a> ServiceCtx<'a> {
@@ -29,7 +29,7 @@ impl<'a> ServiceCtx<'a> {
             theme: &plots.config.theme,
             outputs: &plots.output_infos,
             notifications: &plots.notifications,
-            hypr: &plots.hypr_cache,
+            toplevels: &plots.toplevel_cache,
         }
     }
 }
