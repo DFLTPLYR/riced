@@ -171,14 +171,34 @@ impl Listener {
     }
 
     fn publish(&self) {
+        // Outputs no group claims (the compositor never assigned
+        // them): lend their geometry to workspaces whose own group
+        // has none, so a missing `output_enter` degrades to
+        // best-effort placement instead of invisibility. On
+        // conforming compositors this set is empty (no-op).
+        let claimed: HashSet<u32> = self.group_outputs.values().flatten().copied().collect();
+        let mut unclaimed: Vec<[f32; 4]> = self
+            .outputs
+            .keys()
+            .filter(|id| !claimed.contains(id))
+            .filter_map(|id| self.output_rect(*id))
+            .collect();
+        unclaimed.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        unclaimed.dedup();
         let mut rows: Vec<Workspace> = self
             .workspaces
             .values()
-            .map(|row| Workspace {
-                name: row.name.clone(),
-                monitor: self.monitor_of(row.group),
-                active: row.active,
-                rects: self.group_rects(row.group),
+            .map(|row| {
+                let mut rects = self.group_rects(row.group);
+                if rects.is_empty() {
+                    rects.clone_from(&unclaimed);
+                }
+                Workspace {
+                    name: row.name.clone(),
+                    monitor: self.monitor_of(row.group),
+                    active: row.active,
+                    rects,
+                }
             })
             .collect();
         rows.sort_by(|a, b| (&a.monitor, &a.name).cmp(&(&b.monitor, &b.name)));
@@ -609,6 +629,40 @@ mod tests {
                 rects: vec![],
             }]
         );
+    }
+
+    #[test]
+    fn orphan_workspaces_inherit_unclaimed_output_geometry() {
+        let (mut st, shared) = listener();
+        // Group 1 claims output 10 only; output 11 is unclaimed.
+        st.groups.insert(1, HashSet::from([100]));
+        st.group_outputs.insert(1, HashSet::from([10]));
+        st.output_pos.insert(10, (0, 0));
+        st.output_size.insert(10, (2560, 1440));
+        st.output_pos.insert(11, (2560, 0));
+        st.output_size.insert(11, (1920, 1080));
+        st.workspaces.insert(
+            100,
+            WsRow {
+                name: "code".to_string(),
+                active: true,
+                group: Some(1),
+            },
+        );
+        st.workspaces.insert(
+            101,
+            WsRow {
+                name: "mail".to_string(),
+                active: false,
+                group: None,
+            },
+        );
+        st.publish();
+        let rows = shared.lock().unwrap();
+        let code = rows.iter().find(|r| r.name == "code").expect("code");
+        assert_eq!(code.rects, vec![[0.0, 0.0, 2560.0, 1440.0]]);
+        let mail = rows.iter().find(|r| r.name == "mail").expect("mail");
+        assert_eq!(mail.rects, vec![[2560.0, 0.0, 1920.0, 1080.0]]);
     }
 
     #[test]
