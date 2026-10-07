@@ -4,13 +4,24 @@
 local app = {}
 
 -- Workspaces on this bar's output (all of them while the bar's
--- output is unknown, e.g. off-compositor).
+-- output is unknown, e.g. off-compositor). Workspaces whose monitor
+-- is unresolvable (compositor never assigned their group to an
+-- output) show on every bar rather than vanishing.
 local function visible_workspaces()
     local output = bar.output
     local list = {}
     for _, ws in ipairs(wayland.workspaces) do
-        if not output or ws.monitor == output then
+        if ws.monitor == "" then
             list[#list + 1] = ws
+        elseif not output then
+            list[#list + 1] = ws
+        else
+            for mon in (ws.monitor .. ","):gmatch("([^,]*),") do
+                if mon == output then
+                    list[#list + 1] = ws
+                    break
+                end
+            end
         end
     end
     return list

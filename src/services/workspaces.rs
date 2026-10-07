@@ -19,12 +19,17 @@ use wayland_protocols::ext::workspace::v1::client::{
 };
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 
-/// One workspace: protocol metadata only, no handles.
+/// One workspace: protocol metadata only, no handles. `monitor` is
+/// the compositor-reported name (often wrong — see `rects`); Lua
+/// consumers should prefer geometry matching (see `wayland::publish`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Workspace {
     pub name: String,
     pub monitor: String,
     pub active: bool,
+    /// Output geometries (x, y, w, h, logical px) of the workspace's
+    /// group, from xdg-output. Empty while unknown.
+    pub rects: Vec<[f32; 4]>,
 }
 
 /// Tick-shared snapshot. `spawn()` starts the listener thread (once);
@@ -81,6 +86,10 @@ struct Listener {
     group_outputs: HashMap<u32, HashSet<u32>>,
     /// Output protocol id → connector name (`wl_output.name`).
     outputs: HashMap<u32, String>,
+    /// Output protocol id → logical position (xdg-output).
+    output_pos: HashMap<u32, (i32, i32)>,
+    /// Output protocol id → logical size (xdg-output).
+    output_size: HashMap<u32, (i32, i32)>,
     /// Output protocol id → logical name (`xdg-output name`, preferred:
     /// `wl_output.name` is duplicated on some compositors).
     xdg_names: HashMap<u32, String>,
@@ -131,6 +140,24 @@ impl Listener {
             .map(String::as_str)
     }
 
+    fn output_rect(&self, id: u32) -> Option<[f32; 4]> {
+        let (x, y) = self.output_pos.get(&id)?;
+        let (w, h) = self.output_size.get(&id)?;
+        Some([*x as f32, *y as f32, *w as f32, *h as f32])
+    }
+
+    fn group_rects(&self, group: Option<u32>) -> Vec<[f32; 4]> {
+        let mut rects: Vec<[f32; 4]> = group
+            .and_then(|g| self.group_outputs.get(&g))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.output_rect(*id))
+            .collect();
+        rects.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        rects.dedup();
+        rects
+    }
+
     fn monitor_of(&self, group: Option<u32>) -> String {
         let mut names: Vec<&str> = group
             .and_then(|g| self.group_outputs.get(&g))
@@ -151,6 +178,7 @@ impl Listener {
                 name: row.name.clone(),
                 monitor: self.monitor_of(row.group),
                 active: row.active,
+                rects: self.group_rects(row.group),
             })
             .collect();
         rows.sort_by(|a, b| (&a.monitor, &a.name).cmp(&(&b.monitor, &b.name)));
@@ -187,6 +215,8 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
         groups: HashMap::new(),
         group_outputs: HashMap::new(),
         outputs: HashMap::new(),
+        output_pos: HashMap::new(),
+        output_size: HashMap::new(),
         xdg_names: HashMap::new(),
         xdg_output_of: HashMap::new(),
         xdg_outputs: HashMap::new(),
@@ -301,12 +331,31 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for Listener {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let zxdg_output_v1::Event::Name { name } = event
-            && let Some(oid) = state.xdg_output_of.get(&proxy.id().protocol_id())
-        {
-            dtrace!(state, "output {oid}: xdg-name {name:?}");
-            state.xdg_names.insert(*oid, name);
-            state.publish();
+        let xid = proxy.id().protocol_id();
+        let oid = state.xdg_output_of.get(&xid).copied();
+        match &event {
+            zxdg_output_v1::Event::Name { name } => {
+                if let Some(oid) = oid {
+                    dtrace!(state, "output {oid}: xdg-name {name:?}");
+                    state.xdg_names.insert(oid, name.clone());
+                    state.publish();
+                }
+            }
+            zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                if let Some(oid) = oid {
+                    dtrace!(state, "output {oid}: pos {x},{y}");
+                    state.output_pos.insert(oid, (*x, *y));
+                    state.publish();
+                }
+            }
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                if let Some(oid) = oid {
+                    dtrace!(state, "output {oid}: size {width}x{height}");
+                    state.output_size.insert(oid, (*width, *height));
+                    state.publish();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -472,6 +521,8 @@ mod tests {
             groups: HashMap::new(),
             group_outputs: HashMap::new(),
             outputs: HashMap::from([(10, "DP-1".to_string()), (11, "HDMI-1".to_string())]),
+            output_pos: HashMap::new(),
+            output_size: HashMap::new(),
             xdg_names: HashMap::new(),
             xdg_output_of: HashMap::new(),
             xdg_outputs: HashMap::new(),
@@ -512,11 +563,13 @@ mod tests {
                     name: "code".to_string(),
                     monitor: "DP-1".to_string(),
                     active: true,
+                    rects: vec![],
                 },
                 Workspace {
                     name: "web".to_string(),
                     monitor: "DP-1".to_string(),
                     active: false,
+                    rects: vec![],
                 },
             ]
         );
@@ -540,6 +593,7 @@ mod tests {
                 name: "code".to_string(),
                 monitor: "".to_string(),
                 active: false,
+                rects: vec![],
             }]
         );
     }

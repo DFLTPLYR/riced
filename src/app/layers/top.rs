@@ -4763,19 +4763,22 @@ mod tests {
         let queue = std::collections::VecDeque::new();
         let workspaces = WorkspaceCache::from_rows(vec![
             Workspace {
-                name: "code".to_string(),
-                monitor: "DP-1".to_string(),
-                active: true,
-            },
-            Workspace {
                 name: "web".to_string(),
                 monitor: "".to_string(),
                 active: false,
+                rects: vec![],
+            },
+            Workspace {
+                name: "code".to_string(),
+                monitor: "DP-1".to_string(),
+                active: true,
+                rects: vec![[0.0, 0.0, 2560.0, 1440.0]],
             },
             Workspace {
                 name: "mail".to_string(),
                 monitor: "HDMI-1".to_string(),
                 active: false,
+                rects: vec![[2560.0, 0.0, 1920.0, 1080.0]],
             },
         ]);
         let toplevels = ToplevelCache::from_rows(vec![
@@ -4803,8 +4806,9 @@ mod tests {
         // table itself).
         crate::services::publish_bar(&lua, "DP-1").expect("bar");
         load_widget_script(&lua, "wayland", SEED_WAYLAND_LUA).expect("load");
-        // Bar is a horizontal strip over the local output only: `code`
-        // passes, `web` (unknown monitor) and `mail` (HDMI-1) do not.
+        // Bar is a horizontal strip over the local output: `code`
+        // passes by monitor, `web` (unresolvable monitor) shows as
+        // fallback, `mail` (HDMI-1) does not.
         let value = call_lua_value(&lua, "view").expect("view");
         let node = parse_node(&value).expect("parse");
         match node {
@@ -4823,7 +4827,7 @@ mod tests {
                         other => panic!("expected text, got {other:?}"),
                     })
                     .collect();
-                assert_eq!(labels, ["[code]"]);
+                assert_eq!(labels, ["web", "[code]"]);
             }
             other => panic!("expected listview, got {other:?}"),
         }

@@ -14,6 +14,9 @@ use crate::app::layers::background::Background;
 /// Publish `wayland = { outputs = …, workspaces = …, toplevels = … }`:
 /// - `outputs`: `{name, x, y, w, h}` sorted by name (deterministic).
 /// - `workspaces`: `{name, monitor, active}`, sorted for stable order.
+///   `monitor` resolves by output geometry (compositor names are
+///   unreliable); unresolvable workspaces keep the reported name,
+///   which may be empty.
 /// - `toplevels`: `{app_id, title}`, sorted for stable order.
 pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     let table = lua.create_table()?;
@@ -26,10 +29,13 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
             .cmp(b.1.name.as_deref().unwrap_or(""))
     });
     let out_list = lua.create_table()?;
+    let mut geometry: Vec<(String, [f32; 4])> = Vec::new();
     for (i, (_id, info)) in outputs.iter().enumerate() {
         let (x, y, w, h) = Background::output_geometry(info);
+        let name = info.name.clone().unwrap_or_default();
+        geometry.push((name.clone(), [x, y, w, h]));
         let entry = lua.create_table()?;
-        entry.set("name", info.name.clone().unwrap_or_default())?;
+        entry.set("name", name)?;
         entry.set("x", x)?;
         entry.set("y", y)?;
         entry.set("w", w)?;
@@ -43,7 +49,7 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     for (i, ws) in ws_rows.iter().enumerate() {
         let entry = lua.create_table()?;
         entry.set("name", ws.name.clone())?;
-        entry.set("monitor", ws.monitor.clone())?;
+        entry.set("monitor", resolve_monitor(ws, &geometry))?;
         entry.set("active", ws.active)?;
         ws_list.set(i + 1, entry)?;
     }
@@ -60,6 +66,31 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     table.set("toplevels", tl_list)?;
 
     lua.globals().set("wayland", table)
+}
+
+/// Resolve a workspace's monitor by output geometry: each of its
+/// rects is matched against known outputs (exact logical-rect
+/// equality — both sides originate as integers). Falls back to the
+/// compositor-reported name when nothing matches (wrong names or
+/// unassigned groups), which may itself be empty.
+pub(crate) fn resolve_monitor(ws: &Workspace, outputs: &[(String, [f32; 4])]) -> String {
+    let mut names: Vec<&str> = ws
+        .rects
+        .iter()
+        .filter_map(|rect| {
+            outputs
+                .iter()
+                .find(|(_, geo)| geo == rect)
+                .map(|(name, _)| name.as_str())
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        ws.monitor.clone()
+    } else {
+        names.join(",")
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +113,7 @@ mod tests {
             name: "code".to_string(),
             monitor: "DP-1".to_string(),
             active: true,
+            rects: vec![],
         }]);
         let ctx = ServiceCtx {
             sys: &sys,
@@ -115,5 +147,28 @@ mod tests {
         assert!(active);
         let count: i64 = lua.load("return #wayland.outputs").eval().expect("len");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn resolve_monitor_prefers_geometry_over_reported_names() {
+        let outputs = vec![
+            ("DP-1".to_string(), [0.0, 0.0, 2560.0, 1440.0]),
+            ("DP-2".to_string(), [2560.0, 0.0, 1920.0, 1080.0]),
+        ];
+        // Geometry match wins even when the reported name is wrong.
+        let ws = Workspace {
+            name: "code".to_string(),
+            monitor: "DP-1".to_string(),
+            active: true,
+            rects: vec![[2560.0, 0.0, 1920.0, 1080.0]],
+        };
+        assert_eq!(resolve_monitor(&ws, &outputs), "DP-2");
+        // No match falls back to the reported name (possibly empty).
+        let ws = Workspace {
+            monitor: "".to_string(),
+            rects: vec![],
+            ..ws
+        };
+        assert_eq!(resolve_monitor(&ws, &outputs), "");
     }
 }

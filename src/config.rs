@@ -756,8 +756,11 @@ pub fn config_path() -> PathBuf {
 /// - `wayland`: `outputs` (`name`, `x`, `y`, `w`, `h`), native
 ///   `workspaces` (`name`, `monitor`, `active`) from `ext-workspace`
 ///   plus native `toplevels` (`app_id`, `title`) from
-///   `ext-foreign-toplevel-list`. Compositors lacking those protocols
-///   yield empty lists. No focus: standard Wayland defines none.
+///   `ext-foreign-toplevel-list`. `monitor` resolves by output
+///   geometry (compositor names are unreliable); unresolvable
+///   monitors stay empty — show those everywhere rather than hiding
+///   them. Compositors lacking those protocols yield empty lists.
+///   No focus: standard Wayland defines none.
 /// - `bar`: where this render happens — `bar.output` is the bar's
 ///   connector name (nil while unknown). States are shared across
 ///   bars but trees render per bar, so filter per-bar content (e.g.
