@@ -4721,7 +4721,7 @@ mod tests {
         call_lua_named_action(&lua, "ws:3").expect("action");
         let dispatched: String = lua.load("return _dispatched").eval().expect("dispatched");
         assert!(
-            dispatched.contains("workspace 3"),
+            dispatched.contains("workspace = 3"),
             "dispatches focus, got {dispatched:?}"
         );
         // Popup is a listview: workspace headers plus toplevel rows.

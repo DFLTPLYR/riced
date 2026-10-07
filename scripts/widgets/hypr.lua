@@ -63,7 +63,7 @@ end
 
 function app:on_action(key)
     local id = key:match("^ws:(%d+)$")
-    if id then os.execute("hyprctl dispatch workspace " .. id .. " >/dev/null 2>&1") end
+    if id then os.execute("hyprctl dispatch 'hl.dsp.focus({workspace = " .. id .. "})' >/dev/null 2>&1") end
 end
 
 return app
