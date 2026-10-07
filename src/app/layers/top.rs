@@ -1502,6 +1502,68 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
     }
 }
 
+/// Rough vertical extent of a node tree in px, for popup window sizing.
+/// Layer surfaces need an upfront height and iced can't measure text, so
+/// this mirrors the built geometry closely enough to avoid clipping.
+pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
+    let base = size.max(1.0);
+    match node {
+        WidgetNode::Text { size: own, .. } => owned_size(*own, base) * 1.4,
+        WidgetNode::Icon { .. } | WidgetNode::Spinner => base * 1.5,
+        WidgetNode::Separator { height } => height.max(1.0),
+        WidgetNode::Button { padding, .. } => base * 1.4 + 2.0 * padding.unwrap_or(6.0).max(0.0),
+        WidgetNode::Progress { height, .. } => {
+            height.as_ref().map(|h| length_px(h, base)).unwrap_or(12.0)
+        }
+        WidgetNode::Space { height, .. } => length_px(height, base),
+        WidgetNode::Image { height, .. } => length_px(height, base).max(base),
+        WidgetNode::Row { children, .. } => children
+            .iter()
+            .map(|c| estimate_height(c, base))
+            .fold(0.0, f32::max),
+        WidgetNode::Column {
+            children, spacing, ..
+        } => {
+            let sum: f32 = children.iter().map(|c| estimate_height(c, base)).sum();
+            sum + spacing.max(0.0) * children.len().saturating_sub(1) as f32
+        }
+        WidgetNode::ListView {
+            items,
+            horizontal,
+            spacing,
+            ..
+        } => {
+            let heights: Vec<f32> = items
+                .iter()
+                .map(|(_, c)| estimate_height(c, base))
+                .collect();
+            if *horizontal {
+                heights.into_iter().fold(0.0, f32::max)
+            } else {
+                let sum: f32 = heights.iter().sum();
+                sum + spacing.max(0.0) * items.len().saturating_sub(1) as f32
+            }
+        }
+        WidgetNode::Container { child, padding, .. } => {
+            estimate_height(child, base) + 2.0 * padding.max(0.0)
+        }
+        WidgetNode::Scrollable { child, .. } => estimate_height(child, base),
+    }
+}
+
+/// Node text size, or the inherited `base` when unset.
+fn owned_size(own: Option<f32>, base: f32) -> f32 {
+    own.unwrap_or(base).max(1.0)
+}
+
+/// Resolve a [`NodeLength`] to a px estimate (`Fill`/`Shrink` fall back).
+fn length_px(length: &NodeLength, fallback: f32) -> f32 {
+    match length {
+        NodeLength::Fixed(px) => *px,
+        NodeLength::Fill | NodeLength::Shrink => fallback,
+    }
+}
+
 /// Build an iced element from a node tree. Pure Rust over owned data —
 /// views call this per redraw while Lua only runs on its interval.
 pub(crate) fn build_node(
@@ -4486,6 +4548,26 @@ mod tests {
             button_actions(tree, &mut actions);
         }
         assert_eq!(actions, vec!["suspend", "hibernate", "reboot", "poweroff"]);
+    }
+
+    #[test]
+    fn system_menu_popup_is_sized_to_fit_all_rows() {
+        use crate::config::SEED_SYSTEM_LUA;
+        let lua = new_widget_lua().expect("sandbox");
+        load_seed_components(&lua);
+        load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
+        let popup = call_lua_value(&lua, "popup").expect("popup");
+        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("parse");
+        let tree = content.tree.as_ref().expect("card tree");
+        // The card embeds a four-row menu; the window must be tall enough
+        // to show every row instead of clipping to a fixed row count.
+        let (_, height) = crate::app::layers::Popup::content_size(1920.0, 1080.0, &content);
+        let needed = estimate_height(tree, 13.0);
+        assert!(
+            height as f32 >= needed,
+            "popup {height}px clips {needed}px of content"
+        );
+        assert!(height > 150, "expected room for four rows, got {height}");
     }
 
     #[test]

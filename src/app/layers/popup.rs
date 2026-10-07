@@ -73,14 +73,24 @@ impl Popup {
     pub(crate) const WIDTH: f32 = 280.0;
 
     /// Box size for popup content: explicit dimensions win (clamped
-    /// into the output), otherwise width 280 and height from text
-    /// lines, one row per item, plus room for a composed tree.
+    /// into the output), otherwise width 280 and height estimated from
+    /// the text lines, item rows, and the composed tree's real shape.
     pub(crate) fn content_size(sw: f32, sh: f32, content: &PopupContent) -> (u32, u32) {
-        let mut rows = content.text.lines().count() as f32 + content.items.len() as f32;
-        if content.tree.is_some() {
-            rows += 3.0;
-        }
-        let auto_h = (44.0 + rows.max(1.0) * 24.0).clamp(80.0, 420.0);
+        let text_h = content.text.lines().count() as f32 * 24.0;
+        let items_h = content.items.len() as f32 * 24.0;
+        // Estimate the tree so nested menus/lists aren't clipped by the
+        // old row-count heuristic (which only saw the `items` shorthand).
+        let tree_h = content
+            .tree
+            .as_ref()
+            .map(|tree| super::top::estimate_height(tree, 13.0))
+            .unwrap_or(0.0);
+        let gaps = if content.tree.is_some() && !content.items.is_empty() {
+            8.0
+        } else {
+            0.0
+        };
+        let auto_h = (44.0 + text_h + items_h + tree_h + gaps).clamp(80.0, 720.0);
         let w = content
             .width
             .map(|w| w.clamp(80.0, sw))
@@ -714,6 +724,7 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::layers::top::NodeLength;
 
     #[test]
     fn slot_at_point_maps_cells_and_gaps() {
@@ -807,8 +818,8 @@ mod tests {
         };
         assert_eq!(Popup::content_size(1920.0, 1080.0, &custom), (500, 64));
         assert_eq!(Popup::content_size(200.0, 100.0, &custom), (200, 64));
-        // A composed tree reserves room even with no text or items.
-        let treed = PopupContent {
+        // A composed tree sizes to its real shape, not a fixed row count.
+        let single = PopupContent {
             tree: Some(WidgetNode::Text {
                 content: "hi".to_string(),
                 size: None,
@@ -818,7 +829,45 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(Popup::content_size(1920.0, 1080.0, &treed), (280, 116));
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &single), (280, 80));
+        // A four-row menu tree reserves enough height for every button.
+        let menu = PopupContent {
+            tree: Some(WidgetNode::ListView {
+                id: "session".to_string(),
+                items: (0..4)
+                    .map(|i| {
+                        (
+                            format!("a{i}"),
+                            WidgetNode::Button {
+                                label: format!("Row {i}"),
+                                action: format!("a{i}"),
+                                width: Some(NodeLength::Fill),
+                                height: None,
+                                padding: None,
+                                color: None,
+                            },
+                        )
+                    })
+                    .collect(),
+                horizontal: false,
+                pitch: 32.0,
+                spacing: 4.0,
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                transitions: Box::new((
+                    crate::app::layers::listview::Transition::slide_fade(16.0),
+                    crate::app::layers::listview::Transition::slide_fade_out(-16.0),
+                    crate::app::layers::listview::Transition {
+                        from: crate::app::layers::anim::ItemMotion::settled(),
+                        to: crate::app::layers::anim::ItemMotion::settled(),
+                        duration: None,
+                    },
+                )),
+            }),
+            ..Default::default()
+        };
+        let (_, menu_h) = Popup::content_size(1920.0, 1080.0, &menu);
+        assert!(menu_h > 150, "menu needs room for all rows, got {menu_h}");
     }
 
     #[test]
