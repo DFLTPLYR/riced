@@ -34,6 +34,7 @@ mod tests {
         let theme = crate::config::ThemeConfig::default();
         let sys = sysinfo::System::new();
         let outputs = std::collections::HashMap::new();
+        let workspaces = crate::services::WorkspaceCache::default();
         let toplevels = super::super::ToplevelCache::default();
         let mk = || {
             Notification::internal(
@@ -57,6 +58,7 @@ mod tests {
             outputs: &outputs,
             notifications: &queue,
             toplevels: &toplevels,
+            workspaces: &workspaces,
         };
         publish(&ctx, &lua).expect("publish");
         let first: u32 = lua.load("return notifications[1].id").eval().expect("id");

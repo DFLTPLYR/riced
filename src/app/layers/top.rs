@@ -4344,6 +4344,7 @@ mod tests {
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
+        let workspaces = crate::services::WorkspaceCache::default();
         let toplevels = crate::services::ToplevelCache::default();
         let ctx = crate::services::ServiceCtx {
             sys,
@@ -4352,6 +4353,7 @@ mod tests {
             outputs: &outputs,
             notifications: &queue,
             toplevels: &toplevels,
+            workspaces: &workspaces,
         };
         crate::services::publish_all(&ctx, lua).expect("publish");
     }
@@ -4651,7 +4653,7 @@ mod tests {
     #[test]
     fn wayland_seed_lists_native_toplevels_without_actions() {
         use crate::config::SEED_WAYLAND_LUA;
-        use crate::services::{Toplevel, ToplevelCache};
+        use crate::services::{Toplevel, ToplevelCache, Workspace, WorkspaceCache};
         let lua = new_widget_lua().expect("sandbox");
         // Feed the seed through the real `wayland` service from a
         // canned native snapshot (no compositor needed).
@@ -4659,6 +4661,18 @@ mod tests {
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
+        let workspaces = WorkspaceCache::from_rows(vec![
+            Workspace {
+                name: "code".to_string(),
+                monitor: "DP-1".to_string(),
+                active: true,
+            },
+            Workspace {
+                name: "web".to_string(),
+                monitor: "".to_string(),
+                active: false,
+            },
+        ]);
         let toplevels = ToplevelCache::from_rows(vec![
             Toplevel {
                 app_id: "foot".to_string(),
@@ -4676,6 +4690,7 @@ mod tests {
             outputs: &outputs,
             notifications: &queue,
             toplevels: &toplevels,
+            workspaces: &workspaces,
         };
         crate::services::publish_all(&ctx, &lua).expect("publish");
         load_widget_script(&lua, "wayland", SEED_WAYLAND_LUA).expect("load");
@@ -4694,8 +4709,9 @@ mod tests {
             matches!(on_action, mlua::Value::Nil),
             "read-only: no on_action"
         );
-        // Popup is a listview with one row per toplevel; empty titles
-        // fall back to the app id.
+        // Popup is a listview: workspace rows first (active
+        // bracketed), then one row per toplevel; empty titles fall back
+        // to the app id.
         let popup = call_lua_value(&lua, "popup").expect("popup");
         let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("popup tree");
@@ -4714,13 +4730,21 @@ mod tests {
             }
         }
         assert!(
+            labels.iter().any(|t| t == "[code (DP-1)]"),
+            "active workspace row missing: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|t| t == "web"),
+            "workspace row missing: {labels:?}"
+        );
+        assert!(
             labels
                 .iter()
                 .any(|t| t.contains("foot") && t.contains("shell")),
             "toplevel row missing: {labels:?}"
         );
         assert!(
-            labels.iter().any(|t| t == "firefox — firefox"),
+            labels.iter().any(|t| t == "  firefox — firefox"),
             "app-id fallback missing: {labels:?}"
         );
     }

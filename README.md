@@ -110,8 +110,9 @@ return app
   `os.remove` / `os.rename` and `require` stay blocked.
 - **Services**: `system` (cpu/mem/gpu or nil), `theme` (live iced
   palette hex for `:color()`), `notifications` (queue snapshot,
-  newest-first), `wayland` (`outputs` plus native `toplevels` from
-  `ext-foreign-toplevel-list`; no workspaces, no focus),
+  newest-first), `wayland` (`outputs`, native `workspaces` from
+  `ext-workspace` and `toplevels` from `ext-foreign-toplevel-list`;
+  empty where unsupported, no focus),
   republished before every due render/popup/action.
   `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`, `separator`).

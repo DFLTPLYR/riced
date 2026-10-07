@@ -1,0 +1,427 @@
+//! Native Wayland workspaces via `ext-workspace-v1`.
+//!
+//! Same shape as [`super::toplevels`]: a dedicated connection +
+//! listener thread (blocking dispatch, no polling) whose snapshots
+//! widget ticks clone. Compositors without the protocol (Sway, Mutter,
+//! KWin, …) yield empty tables. Published rows are `{name, monitor,
+//! active}` metadata only — no activate/deactivate/remove/create
+//! requests are ever sent, so this stays a read-only overview.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
+use wayland_client::backend::ObjectData;
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{wl_output, wl_registry};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
+
+/// One workspace: protocol metadata only, no handles.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Workspace {
+    pub name: String,
+    pub monitor: String,
+    pub active: bool,
+}
+
+/// Tick-shared snapshot. `spawn()` starts the listener thread (once);
+/// `snapshot()` clones the latest rows, sorted for deterministic Lua
+/// order. `from_rows` is the thread-free constructor for tests.
+#[derive(Debug, Default)]
+pub struct WorkspaceCache {
+    rows: Arc<Mutex<Vec<Workspace>>>,
+}
+
+impl WorkspaceCache {
+    pub fn spawn() -> Self {
+        let cache = Self::default();
+        std::thread::Builder::new()
+            .name("riced-workspaces".to_string())
+            .spawn({
+                let rows = cache.rows.clone();
+                move || listen(rows)
+            })
+            .ok();
+        cache
+    }
+
+    #[cfg(test)]
+    pub fn from_rows(rows: Vec<Workspace>) -> Self {
+        Self {
+            rows: Arc::new(Mutex::new(rows)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Workspace> {
+        self.rows
+            .lock()
+            .map(|rows| rows.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Per-workspace accumulation: protocol ids key everything (stable for
+/// the object's lifetime; the `workspace` event always resets the row
+/// first, so id reuse across objects is safe).
+#[derive(Debug, Default)]
+struct WsRow {
+    name: String,
+    active: bool,
+    group: Option<u32>,
+}
+
+struct Listener {
+    workspaces: HashMap<u32, WsRow>,
+    /// Group id → member workspace protocol ids.
+    groups: HashMap<u32, HashSet<u32>>,
+    /// Group id → output protocol ids currently assigned.
+    group_outputs: HashMap<u32, HashSet<u32>>,
+    /// Output protocol id → connector name (`wl_output.name`).
+    outputs: HashMap<u32, String>,
+    shared: Arc<Mutex<Vec<Workspace>>>,
+    /// Set on manager `finished` (revoked): loop exits, snapshot clears.
+    finished: bool,
+}
+
+impl Listener {
+    fn monitor_of(&self, group: Option<u32>) -> String {
+        let mut names: Vec<&str> = group
+            .and_then(|g| self.group_outputs.get(&g))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.outputs.get(id).map(String::as_str))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names.join(",")
+    }
+
+    fn publish(&self) {
+        let mut rows: Vec<Workspace> = self
+            .workspaces
+            .values()
+            .map(|row| Workspace {
+                name: row.name.clone(),
+                monitor: self.monitor_of(row.group),
+                active: row.active,
+            })
+            .collect();
+        rows.sort_by(|a, b| (&a.monitor, &a.name).cmp(&(&b.monitor, &b.name)));
+        if let Ok(mut shared) = self.shared.lock() {
+            *shared = rows;
+        }
+    }
+}
+
+/// Run the listener to socket death: connect fails (no session) or the
+/// protocol is unadvertised, and this returns with the snapshot left
+/// empty. Late-advertised globals are not picked up (bind once,
+/// except hotplugged outputs, which bind on registry arrival).
+fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
+    let Ok(conn) = Connection::connect_to_env() else {
+        return;
+    };
+    let mut listener = Listener {
+        workspaces: HashMap::new(),
+        groups: HashMap::new(),
+        group_outputs: HashMap::new(),
+        outputs: HashMap::new(),
+        shared,
+        finished: false,
+    };
+    let Ok((globals, mut queue)) = registry_queue_init::<Listener>(&conn) else {
+        return;
+    };
+    let qh = queue.handle();
+    if globals
+        .bind::<ext_workspace_manager_v1::ExtWorkspaceManagerV1, _, _>(&qh, 1..=1, ())
+        .is_err()
+    {
+        return;
+    }
+    // Outputs known at startup (hotplugged ones bind on registry arrival).
+    for global in globals.contents().clone_list() {
+        if global.interface == "wl_output" && global.version >= 2 {
+            let version = global.version.min(4);
+            globals
+                .bind::<wl_output::WlOutput, _, _>(&qh, version..=version, ())
+                .ok();
+        }
+    }
+    while queue.blocking_dispatch(&mut listener).is_ok() {
+        if listener.finished {
+            break;
+        }
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
+    fn event(
+        _: &mut Self,
+        proxy: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        // Hotplugged outputs: bind so `output_enter` ids stay known.
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+            && interface == "wl_output"
+            && version >= 2
+        {
+            let version = version.min(4);
+            let _ = proxy.bind::<wl_output::WlOutput, (), Self>(name, version, qhandle, ());
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for Listener {
+    fn event(
+        state: &mut Self,
+        proxy: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Name { name } = event {
+            state.outputs.insert(proxy.id().protocol_id(), name);
+            state.publish();
+        }
+    }
+}
+
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for Listener {
+    fn event(
+        state: &mut Self,
+        proxy: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_manager_v1::Event::WorkspaceGroup { workspace_group } => {
+                let id = workspace_group.id().protocol_id();
+                state.groups.entry(id).or_default();
+                state.group_outputs.entry(id).or_default();
+                state.publish();
+            }
+            ext_workspace_manager_v1::Event::Workspace { workspace } => {
+                state
+                    .workspaces
+                    .insert(workspace.id().protocol_id(), WsRow::default());
+                state.publish();
+            }
+            // Revoked: the server destroys the object right after.
+            // Clear back to the empty degrade and exit the loop.
+            ext_workspace_manager_v1::Event::Finished => {
+                state.workspaces.clear();
+                state.publish();
+                state.finished = true;
+            }
+            _ => {}
+        }
+        let _ = proxy;
+    }
+
+    /// Opcode 0 (`workspace_group`) and 1 (`workspace`) carry new ids.
+    fn event_created_child(opcode: u16, qhandle: &QueueHandle<Self>) -> Arc<dyn ObjectData> {
+        match opcode {
+            0 => qhandle
+                .make_data::<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()>(()),
+            1 => qhandle.make_data::<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()>(()),
+            _ => unreachable!("unexpected child-creating opcode {opcode}"),
+        }
+    }
+}
+
+impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for Listener {
+    fn event(
+        state: &mut Self,
+        proxy: &ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+        event: ext_workspace_group_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let id = proxy.id().protocol_id();
+        match event {
+            ext_workspace_group_handle_v1::Event::OutputEnter { output } => {
+                state
+                    .group_outputs
+                    .entry(id)
+                    .or_default()
+                    .insert(output.id().protocol_id());
+                state.publish();
+            }
+            ext_workspace_group_handle_v1::Event::OutputLeave { output } => {
+                if let Some(outputs) = state.group_outputs.get_mut(&id) {
+                    outputs.remove(&output.id().protocol_id());
+                }
+                state.publish();
+            }
+            ext_workspace_group_handle_v1::Event::WorkspaceEnter { workspace } => {
+                let ws = workspace.id().protocol_id();
+                state.groups.entry(id).or_default().insert(ws);
+                if let Some(row) = state.workspaces.get_mut(&ws) {
+                    row.group = Some(id);
+                }
+                state.publish();
+            }
+            ext_workspace_group_handle_v1::Event::WorkspaceLeave { workspace } => {
+                let ws = workspace.id().protocol_id();
+                if let Some(members) = state.groups.get_mut(&id) {
+                    members.remove(&ws);
+                }
+                if let Some(row) = state.workspaces.get_mut(&ws) {
+                    row.group = None;
+                }
+                state.publish();
+            }
+            // Spec guarantees all members left via `workspace_leave`
+            // first; drop the group shells defensively.
+            ext_workspace_group_handle_v1::Event::Removed => {
+                proxy.destroy();
+                state.groups.remove(&id);
+                state.group_outputs.remove(&id);
+                state.publish();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for Listener {
+    fn event(
+        state: &mut Self,
+        proxy: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        event: ext_workspace_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let id = proxy.id().protocol_id();
+        match event {
+            ext_workspace_handle_v1::Event::Name { name } => {
+                state.workspaces.entry(id).or_default().name = name;
+                state.publish();
+            }
+            ext_workspace_handle_v1::Event::State { state: bits } => {
+                // Bit 1 is `active`; anything else is ignored. Combined
+                // flags arrive as `Unknown`, hence the raw bit test.
+                let raw = match bits {
+                    WEnum::Value(flags) => flags.bits(),
+                    WEnum::Unknown(raw) => raw,
+                };
+                state.workspaces.entry(id).or_default().active = raw & 1 != 0;
+                state.publish();
+            }
+            // Spec guarantees removal only while unassigned; drop the
+            // row and its group link defensively.
+            ext_workspace_handle_v1::Event::Removed => {
+                proxy.destroy();
+                if let Some(row) = state.workspaces.remove(&id)
+                    && let Some(group) = row.group
+                    && let Some(members) = state.groups.get_mut(&group)
+                {
+                    members.remove(&id);
+                }
+                state.publish();
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listener() -> (Listener, Arc<Mutex<Vec<Workspace>>>) {
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let listener = Listener {
+            workspaces: HashMap::new(),
+            groups: HashMap::new(),
+            group_outputs: HashMap::new(),
+            outputs: HashMap::from([(10, "DP-1".to_string()), (11, "HDMI-1".to_string())]),
+            shared: shared.clone(),
+            finished: false,
+        };
+        (listener, shared)
+    }
+
+    #[test]
+    fn rows_carry_name_monitor_and_active() {
+        let (mut st, shared) = listener();
+        st.groups.insert(1, HashSet::from([100, 101]));
+        st.group_outputs.insert(1, HashSet::from([10]));
+        st.workspaces.insert(
+            100,
+            WsRow {
+                name: "code".to_string(),
+                active: true,
+                group: Some(1),
+            },
+        );
+        st.workspaces.insert(
+            101,
+            WsRow {
+                name: "web".to_string(),
+                active: false,
+                group: Some(1),
+            },
+        );
+        st.publish();
+        assert_eq!(
+            *shared.lock().unwrap(),
+            vec![
+                Workspace {
+                    name: "code".to_string(),
+                    monitor: "DP-1".to_string(),
+                    active: true,
+                },
+                Workspace {
+                    name: "web".to_string(),
+                    monitor: "DP-1".to_string(),
+                    active: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_outputs_degrade_to_empty_monitor() {
+        let (mut st, shared) = listener();
+        st.workspaces.insert(
+            100,
+            WsRow {
+                name: "code".to_string(),
+                active: false,
+                group: None,
+            },
+        );
+        st.publish();
+        assert_eq!(
+            *shared.lock().unwrap(),
+            vec![Workspace {
+                name: "code".to_string(),
+                monitor: "".to_string(),
+                active: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn spawn_without_a_session_stays_empty() {
+        // No compositor is required: failures leave empty tables.
+        let cache = WorkspaceCache::spawn();
+        let _ = cache.snapshot();
+    }
+}

@@ -5,6 +5,7 @@
 //! line in `SERVICES` below, tests for its table shape.
 
 use super::toplevels::ToplevelCache;
+use super::workspaces::WorkspaceCache;
 use std::collections::{HashMap, VecDeque};
 
 /// Read-only snapshot inputs every service publishes from. All borrows
@@ -17,8 +18,8 @@ pub struct ServiceCtx<'a> {
         &'a HashMap<iced_wayland_subscriber::OutputId, iced_wayland_subscriber::OutputInfo>,
     pub notifications: &'a VecDeque<crate::app::layers::notification::Notification>,
     pub toplevels: &'a ToplevelCache,
+    pub workspaces: &'a WorkspaceCache,
 }
-
 impl<'a> ServiceCtx<'a> {
     /// Snapshot every service input from live app state. `gpu` is the
     /// already-computed usage reading (`None` degrades to nil).
@@ -30,6 +31,7 @@ impl<'a> ServiceCtx<'a> {
             outputs: &plots.output_infos,
             notifications: &plots.notifications,
             toplevels: &plots.toplevel_cache,
+            workspaces: &plots.workspace_cache,
         }
     }
 }

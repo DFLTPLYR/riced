@@ -753,9 +753,11 @@ pub fn config_path() -> PathBuf {
 /// - `theme`: live palette hex pairs (`theme.primary`, ...).
 /// - `notifications`: queue snapshot, newest-first (`id`, `app`,
 ///   `title`, `body`, `urgency`, `has_image`).
-/// - `wayland`: `outputs` (`name`, `x`, `y`, `w`, `h`) plus native
-///   `toplevels` (`app_id`, `title`) from `ext-foreign-toplevel-list`.
-///   No workspaces, no focus: standard Wayland defines neither.
+/// - `wayland`: `outputs` (`name`, `x`, `y`, `w`, `h`), native
+///   `workspaces` (`name`, `monitor`, `active`) from `ext-workspace`
+///   plus native `toplevels` (`app_id`, `title`) from
+///   `ext-foreign-toplevel-list`. Compositors lacking those protocols
+///   yield empty lists. No focus: standard Wayland defines none.
 /// - `os.execute(cmd)` / `io.popen(cmd)`: native shell. Capture
 ///   stdout with `io.popen(cmd):read("*a")`; wrap slow calls in
 ///   `pcall`, cache on self, refresh hourly.
@@ -1044,7 +1046,7 @@ size = 13.0
 # size = 13.0
 
 # Basic Wayland overview (read-only): window count in the bar,
-# every toplevel in a popup listview. No window management.
+# workspaces plus toplevels in a popup listview. No management.
 # [[widget]]
 # name = "wayland"
 # file = "wayland.lua"
@@ -1137,9 +1139,10 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
 /// Seed Wayland overview (read-only): window count in the bar; the
-/// popup is a listview with one row per toplevel (`app_id — title`,
-/// from `ext-foreign-toplevel-list`). No `on_action` exists — windows
-/// are never focused, moved, or closed from here.
+/// popup is a listview with one row per workspace (`name (monitor)`,
+/// active bracketed) plus one row per toplevel (`app_id — title`).
+/// No `on_action` exists — windows are never focused, moved, or
+/// closed from here.
 /// Uncomment its `[[widget]]` entry in widgets.toml to use it.
 pub(crate) const SEED_WAYLAND_LUA: &str = include_str!("../scripts/widgets/wayland.lua");
 

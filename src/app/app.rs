@@ -122,6 +122,9 @@ pub struct Plots {
     // Native toplevel listener backing `wayland.toplevels` (its own
     // thread blocks on the compositor socket; ticks just snapshot).
     pub(crate) toplevel_cache: crate::services::ToplevelCache,
+    // Native workspace listener backing `wayland.workspaces` (same
+    // shape: own thread, tick snapshots).
+    pub(crate) workspace_cache: crate::services::WorkspaceCache,
     // Local-first staging: `Patch` mutates live memory every tick (smooth
     // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
     // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
@@ -242,6 +245,7 @@ impl Plots {
             ),
             sysinfo,
             toplevel_cache: crate::services::ToplevelCache::spawn(),
+            workspace_cache: crate::services::WorkspaceCache::spawn(),
         };
         // Render Lua widgets once so bars populate on the first frame
         // instead of waiting out the first tick.

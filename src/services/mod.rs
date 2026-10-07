@@ -14,6 +14,8 @@ mod system;
 mod theme;
 mod toplevels;
 mod wayland;
+mod workspaces;
 
 pub use registry::{ServiceCtx, publish_all};
 pub use toplevels::{Toplevel, ToplevelCache};
+pub use workspaces::{Workspace, WorkspaceCache};

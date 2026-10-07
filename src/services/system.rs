@@ -40,6 +40,7 @@ mod tests {
         let theme = crate::config::ThemeConfig::default();
         let outputs = std::collections::HashMap::new();
         let queue = std::collections::VecDeque::new();
+        let workspaces = crate::services::WorkspaceCache::default();
         let toplevels = super::super::ToplevelCache::default();
         let ctx = ServiceCtx {
             sys: &sys,
@@ -48,6 +49,7 @@ mod tests {
             outputs: &outputs,
             notifications: &queue,
             toplevels: &toplevels,
+            workspaces: &workspaces,
         };
         publish(&ctx, &lua).expect("publish");
         let cpu: f32 = lua.load("return system.cpu_usage").eval().expect("cpu");
