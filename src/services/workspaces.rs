@@ -83,6 +83,23 @@ struct Listener {
     shared: Arc<Mutex<Vec<Workspace>>>,
     /// Set on manager `finished` (revoked): loop exits, snapshot clears.
     finished: bool,
+    debug: bool,
+}
+
+/// `RICED_DEBUG=workspaces` (comma-separated with other scopes):
+/// stderr trace of every protocol event plus each published snapshot.
+fn debug_enabled() -> bool {
+    std::env::var("RICED_DEBUG")
+        .map(|v| v.split(',').any(|s| s.trim() == "workspaces"))
+        .unwrap_or(false)
+}
+
+macro_rules! dtrace {
+    ($st:expr, $($arg:tt)*) => {
+        if $st.debug {
+            eprintln!("riced(workspaces): {}", format!($($arg)*));
+        }
+    };
 }
 
 impl Listener {
@@ -109,6 +126,13 @@ impl Listener {
             })
             .collect();
         rows.sort_by(|a, b| (&a.monitor, &a.name).cmp(&(&b.monitor, &b.name)));
+        if self.debug {
+            let summary: Vec<String> = rows
+                .iter()
+                .map(|r| format!("{}!{}@{}", r.name, r.active as u8, r.monitor))
+                .collect();
+            eprintln!("riced(workspaces): snapshot [{}]", summary.join(" "));
+        }
         if let Ok(mut shared) = self.shared.lock() {
             *shared = rows;
         }
@@ -120,7 +144,14 @@ impl Listener {
 /// empty. Late-advertised globals are not picked up (bind once,
 /// except hotplugged outputs, which bind on registry arrival).
 fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
+    let debug = debug_enabled();
+    if debug {
+        eprintln!("riced(workspaces): listener starting");
+    }
     let Ok(conn) = Connection::connect_to_env() else {
+        if debug {
+            eprintln!("riced(workspaces): no Wayland connection");
+        }
         return;
     };
     let mut listener = Listener {
@@ -130,6 +161,7 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
         outputs: HashMap::new(),
         shared,
         finished: false,
+        debug,
     };
     let Ok((globals, mut queue)) = registry_queue_init::<Listener>(&conn) else {
         return;
@@ -139,7 +171,13 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
         .bind::<ext_workspace_manager_v1::ExtWorkspaceManagerV1, _, _>(&qh, 1..=1, ())
         .is_err()
     {
+        if debug {
+            eprintln!("riced(workspaces): ext-workspace-v1 not advertised");
+        }
         return;
+    }
+    if debug {
+        eprintln!("riced(workspaces): manager bound");
     }
     // Outputs known at startup (hotplugged ones bind on registry arrival).
     for global in globals.contents().clone_list() {
@@ -191,7 +229,9 @@ impl Dispatch<wl_output::WlOutput, ()> for Listener {
         _: &QueueHandle<Self>,
     ) {
         if let wl_output::Event::Name { name } = event {
-            state.outputs.insert(proxy.id().protocol_id(), name);
+            let id = proxy.id().protocol_id();
+            dtrace!(state, "output {id}: name {name:?}");
+            state.outputs.insert(id, name);
             state.publish();
         }
     }
@@ -209,14 +249,15 @@ impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for Listener 
         match event {
             ext_workspace_manager_v1::Event::WorkspaceGroup { workspace_group } => {
                 let id = workspace_group.id().protocol_id();
+                dtrace!(state, "new group {id}");
                 state.groups.entry(id).or_default();
                 state.group_outputs.entry(id).or_default();
                 state.publish();
             }
             ext_workspace_manager_v1::Event::Workspace { workspace } => {
-                state
-                    .workspaces
-                    .insert(workspace.id().protocol_id(), WsRow::default());
+                let id = workspace.id().protocol_id();
+                dtrace!(state, "new workspace {id}");
+                state.workspaces.insert(id, WsRow::default());
                 state.publish();
             }
             // Revoked: the server destroys the object right after.
@@ -254,21 +295,22 @@ impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for 
         let id = proxy.id().protocol_id();
         match event {
             ext_workspace_group_handle_v1::Event::OutputEnter { output } => {
-                state
-                    .group_outputs
-                    .entry(id)
-                    .or_default()
-                    .insert(output.id().protocol_id());
+                let out = output.id().protocol_id();
+                dtrace!(state, "group {id}: output_enter {out}");
+                state.group_outputs.entry(id).or_default().insert(out);
                 state.publish();
             }
             ext_workspace_group_handle_v1::Event::OutputLeave { output } => {
+                let out = output.id().protocol_id();
+                dtrace!(state, "group {id}: output_leave {out}");
                 if let Some(outputs) = state.group_outputs.get_mut(&id) {
-                    outputs.remove(&output.id().protocol_id());
+                    outputs.remove(&out);
                 }
                 state.publish();
             }
             ext_workspace_group_handle_v1::Event::WorkspaceEnter { workspace } => {
                 let ws = workspace.id().protocol_id();
+                dtrace!(state, "group {id}: workspace_enter {ws}");
                 state.groups.entry(id).or_default().insert(ws);
                 if let Some(row) = state.workspaces.get_mut(&ws) {
                     row.group = Some(id);
@@ -277,6 +319,7 @@ impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for 
             }
             ext_workspace_group_handle_v1::Event::WorkspaceLeave { workspace } => {
                 let ws = workspace.id().protocol_id();
+                dtrace!(state, "group {id}: workspace_leave {ws}");
                 if let Some(members) = state.groups.get_mut(&id) {
                     members.remove(&ws);
                 }
@@ -288,6 +331,7 @@ impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for 
             // Spec guarantees all members left via `workspace_leave`
             // first; drop the group shells defensively.
             ext_workspace_group_handle_v1::Event::Removed => {
+                dtrace!(state, "group {id}: removed");
                 proxy.destroy();
                 state.groups.remove(&id);
                 state.group_outputs.remove(&id);
@@ -310,6 +354,7 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for Listener {
         let id = proxy.id().protocol_id();
         match event {
             ext_workspace_handle_v1::Event::Name { name } => {
+                dtrace!(state, "ws {id}: name {name:?}");
                 state.workspaces.entry(id).or_default().name = name;
                 state.publish();
             }
@@ -320,12 +365,14 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for Listener {
                     WEnum::Value(flags) => flags.bits(),
                     WEnum::Unknown(raw) => raw,
                 };
+                dtrace!(state, "ws {id}: state {raw:#x}");
                 state.workspaces.entry(id).or_default().active = raw & 1 != 0;
                 state.publish();
             }
             // Spec guarantees removal only while unassigned; drop the
             // row and its group link defensively.
             ext_workspace_handle_v1::Event::Removed => {
+                dtrace!(state, "ws {id}: removed");
                 proxy.destroy();
                 if let Some(row) = state.workspaces.remove(&id)
                     && let Some(group) = row.group
@@ -353,6 +400,7 @@ mod tests {
             outputs: HashMap::from([(10, "DP-1".to_string()), (11, "HDMI-1".to_string())]),
             shared: shared.clone(),
             finished: false,
+            debug: false,
         };
         (listener, shared)
     }
