@@ -1,5 +1,5 @@
 use super::background::Background;
-use super::top::{SlotAlign, TopLocal};
+use super::top::{SlotAlign, Top, TopLocal};
 use crate::app::ConfigEvent;
 use crate::app::app::{PlotInfo, Plots};
 use crate::app::layers::ContextMenu;
@@ -11,6 +11,7 @@ use crate::config::{AnimationSpeed, BackgroundImage, ConfigPatch};
 use crate::theme;
 use iced::widget::{
     Checkbox, Space, button, column, container, row, rule, scrollable, slider, stack, text,
+    text_input,
 };
 use iced::window;
 use iced::{Element, Length, Task as Command};
@@ -38,6 +39,9 @@ pub struct Setting {
     /// Slot picked in the Panel page align row (`None` = first slot).
     /// Stored per-window like `selected_bar`.
     selected_slot: Option<usize>,
+    /// Placement picked in the Panel preview (`None` = none selected).
+    /// Stored per-window; cleared when its placement leaves the bar.
+    selected_placement: Option<String>,
 }
 
 /// Master-detail pages: nav buttons on the left switch this, the right pane
@@ -540,6 +544,7 @@ impl Setting {
                         names.clone(),
                         horizontal,
                         sel,
+                        self.selected_placement.clone(),
                         size.width,
                     )
                     .element()
@@ -548,14 +553,21 @@ impl Setting {
                 .height(Length::Shrink);
                 col = col.push(section(
                     "Arrange your panel",
-                    "Drag onto a widget to swap, or onto free slot space to move. Click a slot to edit its alignment. Escape cancels a drag.",
+                    "Drag onto a widget to swap, or onto free slot space to move. Click a widget to edit its settings below. Escape cancels a drag.",
                     preview.into(),
                 ));
                 if plots.widgets.is_empty() {
                     col = col.push(hint(
-                        "Add widget definitions in widgets.toml to fill the available-widget pool.",
+                        "Add .lua files to your widgets directory to fill the available-widget pool.",
                     ));
                 }
+                col = col.push(Self::placement_editor(
+                    wid,
+                    Top::output_name(plots, wid),
+                    top,
+                    self.selected_placement.as_deref(),
+                    plots,
+                ));
             }
 
             col = col.push(section_heading(
@@ -1110,6 +1122,7 @@ impl Setting {
     }
 
     /// Pick the bar the Panel page edits (`SettingEvent::SelectBar`).
+    /// Clears the placement pick (ids resolve per bar).
     pub(crate) fn handle_select_bar(
         plots: &mut Plots,
         id: window::Id,
@@ -1117,11 +1130,13 @@ impl Setting {
     ) -> Command<Plant> {
         if let Some(setting) = plots.settings.get_mut(&id) {
             setting.selected_bar = Some(bar);
+            setting.selected_placement = None;
         }
         Command::none()
     }
 
     /// Pick the slot the Panel page aligns (`SettingEvent::SelectSlot`).
+    /// Clears the placement pick so the editor follows chip clicks.
     pub(crate) fn handle_select_slot(
         plots: &mut Plots,
         id: window::Id,
@@ -1129,8 +1144,276 @@ impl Setting {
     ) -> Command<Plant> {
         if let Some(setting) = plots.settings.get_mut(&id) {
             setting.selected_slot = Some(pos);
+            setting.selected_placement = None;
         }
         Command::none()
+    }
+
+    /// Pick the placement the Panel page edits
+    /// (`SettingEvent::SelectPlacement`). Also selects its slot so the
+    /// align picker follows chip clicks. Unknown ids clear the editor
+    /// (stale click after a drag or reload).
+    pub(crate) fn handle_select_placement(
+        plots: &mut Plots,
+        id: window::Id,
+        bar: window::Id,
+        placement: String,
+    ) -> Command<Plant> {
+        let slot = plots.tops.get(&bar).and_then(|top| {
+            top.local
+                .widgets
+                .iter()
+                .position(|slot| slot.iter().any(|p| p.id == placement))
+        });
+        if let Some(setting) = plots.settings.get_mut(&id) {
+            setting.selected_slot = slot.or(setting.selected_slot);
+            setting.selected_placement = slot.map(|_| placement);
+        }
+        Command::none()
+    }
+
+    /// Per-placement settings editor below the preview: refresh
+    /// interval, text size, and custom properties, each showing the
+    /// inherited default with a Reset that clears the override.
+    /// Unknown ids (or missing definitions) render guidance instead.
+    fn placement_editor(
+        wid: window::Id,
+        output: String,
+        top: &Top,
+        selected: Option<&str>,
+        plots: &Plots,
+    ) -> Element<'static, Plant> {
+        let Some(sel_id) = selected else {
+            return hint(
+                "Click a widget chip above to edit its size, refresh rate, and custom properties.",
+            );
+        };
+        let found = top
+            .local
+            .widgets
+            .iter()
+            .enumerate()
+            .find_map(|(i, slot)| slot.iter().find(|p| p.id == sel_id).map(|p| (i, p.clone())));
+        let Some((slot_idx, placement)) = found else {
+            return hint("That widget left the bar — pick another chip to edit its settings.");
+        };
+        let pid = placement.id.clone();
+        let pid_msg = pid.clone();
+        let commit = std::rc::Rc::new(move |patch: crate::app::PlacementProp| {
+            Plant::TopPlot(TopEvent::Bar(BarEvent::WidgetProp {
+                bar: wid,
+                placement: pid_msg.clone(),
+                patch,
+            }))
+        });
+        let where_at = if output.is_empty() {
+            format!("Slot {}", slot_idx + 1)
+        } else {
+            format!("Slot {} · {output}", slot_idx + 1)
+        };
+        let Some(def) = plots.widgets.iter().find(|d| d.name == placement.name) else {
+            return section(
+                &format!("{} · {where_at}", placement.name),
+                "This placement references a widget with no definition file.",
+                hint("Add widgets/<name>.lua, or drag its chip to the pool to remove it."),
+            );
+        };
+        let def = def.clone();
+        let mut col = column![section_heading(
+            &format!("{} · {where_at}", placement.name),
+            "Overrides apply to this instance only. Reset returns to the widget default."
+        )]
+        .spacing(16);
+        // Refresh interval.
+        {
+            let effective = placement.effective_interval(&def.defaults);
+            let commit_interval = commit.clone();
+            let reset = placement
+                .interval
+                .is_some()
+                .then(|| commit_interval(crate::app::PlacementProp::Interval(None)));
+            let commit_value = commit.clone();
+            col = col.push(prop_row(
+                "Refresh interval".to_string(),
+                placement
+                    .interval
+                    .is_none()
+                    .then(|| format!("Widget default: {:.2}s", def.defaults.interval)),
+                spin_box(effective as f64, 0.25..=3600.0, 0.25, 2, move |v| {
+                    commit_value(crate::app::PlacementProp::Interval(Some(v as f32)))
+                })
+                .width(Length::Fill)
+                .into(),
+                reset,
+            ));
+        }
+        // Text size.
+        {
+            let effective = placement.effective_size(&def.defaults);
+            let commit_size = commit.clone();
+            let reset = placement
+                .size
+                .is_some()
+                .then(|| commit_size(crate::app::PlacementProp::Size(None)));
+            let commit_value = commit.clone();
+            col = col.push(prop_row(
+                "Text size".to_string(),
+                placement
+                    .size
+                    .is_none()
+                    .then(|| format!("Widget default: {:.1}px", def.defaults.size)),
+                spin_box(effective as f64, 1.0..=128.0, 0.5, 1, move |v| {
+                    commit_value(crate::app::PlacementProp::Size(Some(v as f32)))
+                })
+                .width(Length::Fill)
+                .into(),
+                reset,
+            ));
+        }
+        // Custom properties: union of default and override keys, sorted.
+        let mut keys: Vec<&String> = def
+            .defaults
+            .props
+            .keys()
+            .chain(placement.props.keys())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let has_props = !keys.is_empty();
+        for key in keys {
+            col = col.push(Self::prop_editor_row(
+                wid,
+                pid.clone(),
+                key.clone(),
+                &placement,
+                &def,
+            ));
+        }
+        if !has_props {
+            col = col.push(hint(
+                "This widget declares no custom properties — interval and size above are the knobs.",
+            ));
+        }
+        col.spacing(10).width(Length::Fill).into()
+    }
+
+    /// One custom-property row: schema-driven control (checkbox, spin,
+    /// text, or choice presets) with an inherited-value caption and a
+    /// Reset that clears the override.
+    fn prop_editor_row(
+        wid: window::Id,
+        pid: String,
+        key: String,
+        placement: &crate::config::WidgetPlacement,
+        def: &crate::config::WidgetDefinition,
+    ) -> Element<'static, Plant> {
+        use crate::config::PropValue;
+        let schema = def.schema.get(&key);
+        let default = def.defaults.props.get(&key);
+        let overridden = placement.props.get(&key);
+        let value = overridden.or(default);
+        let kind = schema
+            .and_then(|s| s.prop_type.as_deref())
+            .filter(|t| ["boolean", "number", "string"].contains(t))
+            .unwrap_or_else(|| {
+                default
+                    .map(PropValue::kind)
+                    .or_else(|| overridden.map(PropValue::kind))
+                    .unwrap_or("string")
+            });
+        let label = schema
+            .and_then(|s| s.label.clone())
+            .unwrap_or_else(|| key.clone());
+        let reset = overridden
+            .is_some()
+            .then(|| patch_prop_msg(wid, pid.clone(), key.clone(), None));
+        let inherited = default.map(|dflt| format!("Widget default: {}", prop_display(dflt)));
+        let subtitle = schema.and_then(|s| s.description.clone()).or(inherited);
+        match kind {
+            "boolean" => {
+                let checked = matches!(value, Some(PropValue::Bool(true)));
+                let (wid_b, pid_b, key_b) = (wid, pid.clone(), key.clone());
+                let control = Checkbox::new(checked)
+                    .label(label.clone())
+                    .on_toggle(move |b| {
+                        patch_prop_msg(
+                            wid_b,
+                            pid_b.clone(),
+                            key_b.clone(),
+                            Some(PropValue::Bool(b)),
+                        )
+                    })
+                    .width(Length::Fill)
+                    .into();
+                prop_row(label, subtitle, control, reset)
+            }
+            "number" => {
+                let current = match value {
+                    Some(PropValue::Number(n)) => *n,
+                    _ => 0.0,
+                };
+                let min = schema.and_then(|s| s.min).unwrap_or(0.0);
+                let max = schema.and_then(|s| s.max).unwrap_or(1_000_000.0);
+                let (wid_n, pid_n, key_n) = (wid, pid.clone(), key.clone());
+                let control = spin_box(current, min..=max, 1.0, 2, move |v| {
+                    patch_prop_msg(
+                        wid_n,
+                        pid_n.clone(),
+                        key_n.clone(),
+                        Some(PropValue::Number(v)),
+                    )
+                })
+                .width(Length::Fill)
+                .into();
+                prop_row(label, subtitle, control, reset)
+            }
+            _ => {
+                let choices = schema.map(|s| s.choices.clone()).unwrap_or_default();
+                if choices.is_empty() {
+                    let current = match value {
+                        Some(PropValue::Text(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let (wid_t, pid_t, key_t) = (wid, pid.clone(), key.clone());
+                    let control = text_input("", &current)
+                        .size(12)
+                        .width(Length::Fill)
+                        .padding(6)
+                        .style(prop_input_style)
+                        .on_input(move |typed| {
+                            patch_prop_msg(
+                                wid_t,
+                                pid_t.clone(),
+                                key_t.clone(),
+                                Some(PropValue::Text(typed)),
+                            )
+                        })
+                        .into();
+                    prop_row(label, subtitle, control, reset)
+                } else {
+                    let current = match value {
+                        Some(PropValue::Text(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let mut presets = row![].spacing(8);
+                    for choice in choices {
+                        let selected = *choice == current;
+                        presets = presets.push(
+                            button(text(choice.clone()).size(12).color(theme::text()))
+                                .on_press(patch_prop_msg(
+                                    wid,
+                                    pid.clone(),
+                                    key.clone(),
+                                    Some(PropValue::Text(choice)),
+                                ))
+                                .padding(6)
+                                .style(theme::nav_button(selected)),
+                        );
+                    }
+                    prop_row(label, subtitle, presets.into(), reset)
+                }
+            }
+        }
     }
 
     /// Pick the wallpaper image the editor below the map edits
@@ -1285,6 +1568,83 @@ fn section<'a>(title: &str, description: &str, body: Element<'a, Plant>) -> Elem
         .width(Length::Fill)
         .style(theme::menu_box)
         .into()
+}
+
+/// Settings-surface text input: card background, hairline border, theme
+/// text (mirrors the spin_box input).
+fn prop_input_style(_: &iced::Theme, _: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: iced::Background::Color(theme::card()),
+        border: iced::Border {
+            color: theme::border_color(),
+            width: theme::BORDER_WIDTH,
+            radius: theme::RADIUS.into(),
+        },
+        icon: theme::text_dim(),
+        placeholder: theme::text_dim(),
+        value: theme::text(),
+        selection: theme::text().scale_alpha(0.3),
+    }
+}
+
+/// Build a [`BarEvent::WidgetProp`] patch message for one placement
+/// property (shared by every editor control; keeps closures small).
+fn patch_prop_msg(
+    wid: window::Id,
+    pid: String,
+    key: String,
+    value: Option<crate::config::PropValue>,
+) -> Plant {
+    Plant::TopPlot(TopEvent::Bar(BarEvent::WidgetProp {
+        bar: wid,
+        placement: pid,
+        patch: crate::app::PlacementProp::Prop { key, value },
+    }))
+}
+
+/// Human-readable property value for inherited-value captions.
+fn prop_display(value: &crate::config::PropValue) -> String {
+    use crate::config::PropValue;
+    match value {
+        PropValue::Bool(b) => b.to_string(),
+        PropValue::Number(n) => {
+            if n.fract() == 0.0 {
+                format!("{n:.0}")
+            } else {
+                n.to_string()
+            }
+        }
+        PropValue::Text(s) => s.clone(),
+    }
+}
+
+/// One editor row: title, control, optional Reset (shown only for
+/// overrides), optional inherited-value caption.
+fn prop_row(
+    title: String,
+    inherited: Option<String>,
+    control: Element<'static, Plant>,
+    on_reset: Option<Plant>,
+) -> Element<'static, Plant> {
+    let mut header = row![
+        text(title)
+            .size(14)
+            .color(theme::text())
+            .width(Length::Fill)
+    ];
+    if let Some(reset) = on_reset {
+        header = header.push(
+            button(text("Reset").size(12).color(theme::button_text()))
+                .on_press(reset)
+                .padding(6)
+                .style(theme::menu_button(theme::RADIUS)),
+        );
+    }
+    let mut col = column![header.spacing(12), control].spacing(8);
+    if let Some(caption) = inherited {
+        col = col.push(hint(caption));
+    }
+    container(col).padding(12).width(Length::Fill).into()
 }
 
 /// Single palette swatch box for theme preview rows: fixed-size tile

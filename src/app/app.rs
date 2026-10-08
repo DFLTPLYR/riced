@@ -82,26 +82,31 @@ pub struct Plots {
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
-    // Declarative widgets (`widgets.toml`) + last seen file mtime.
-    // Bars reference entries by name; hot-reloaded like the config.
-    pub(crate) widgets: Vec<crate::config::WidgetDef>,
-    pub(crate) widgets_mtime: Option<std::time::SystemTime>,
+    // Discovered widget definitions (`widgets/*.lua`, name = file
+    // stem) + last seen dir mtime. Hot-rescanned like the config;
+    // per-file edits reload via `widget_script_mtime` below.
+    pub(crate) widgets: Vec<crate::config::WidgetDefinition>,
+    pub(crate) widgets_dir_mtime: Option<std::time::SystemTime>,
+    // `widgets.toml` is retired (values migrated into placements/Lua
+    // defaults on first sight); warn once if it reappears later.
+    pub(crate) widgets_toml_warned: bool,
     // Shared component library (`components/*.lua`) stamp: edits rebuild
     // every Lua state (widgets + notification renderer) on the next tick.
     pub(crate) components_mtime: Option<std::time::SystemTime>,
-    // Lua widget runtimes keyed by def name, last rendered text, last
-    // run tick, and last error (errors log only on change, never per
-    // tick). States are rebuilt on every widgets.toml hot-reload.
+    // Lua widget runtimes keyed by placement id (independent `self`
+    // per instance), last rendered text, last run tick, and last error
+    // (errors log only on change, never per tick). States are rebuilt
+    // on definition rescan.
     // States are shared across bars; rendered trees/outputs are per
-    // bar (keyed `(bar, name)`) so `bar.output` can differ per bar.
+    // bar (keyed `(bar, placement)`) so `bar.output` can differ per bar.
     pub(crate) widget_lua: HashMap<String, mlua::Lua>,
     pub(crate) widget_outputs: HashMap<(iced::window::Id, String), String>,
     pub(crate) widget_trees:
         HashMap<(iced::window::Id, String), crate::app::layers::top::WidgetNode>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
     pub(crate) widget_last_error: HashMap<String, String>,
-    // Script file mtimes per widget (live-reload on edit).
-    pub(crate) widget_script_mtime: HashMap<String, std::time::SystemTime>,
+    // Script file mtimes by resolved path (live-reload on edit).
+    pub(crate) widget_script_mtime: HashMap<std::path::PathBuf, std::time::SystemTime>,
     // Animated lists (see layers::listview): one aura runtime shared
     // by all surfaces, one ListView per (bar, widget, list) — owners
     // are `"{bar:?}/{widget}/{list}"` strings — plus the notification
@@ -192,7 +197,8 @@ impl Plots {
         crate::theme::sync(&config.theme);
         let mut wallpapers = HashMap::new();
         Self::sync_wallpapers(&config, &mut wallpapers);
-        let (widgets, widgets_mtime) = crate::config::WidgetsFile::load();
+        let widgets = Top::discover_widget_defs();
+        let widgets_dir_mtime = crate::config::widgets_dir_mtime();
         let mut sysinfo = sysinfo::System::new();
         sysinfo.refresh_cpu_usage();
         sysinfo.refresh_memory();
@@ -214,7 +220,8 @@ impl Plots {
             config,
             config_mtime,
             widgets,
-            widgets_mtime,
+            widgets_dir_mtime,
+            widgets_toml_warned: false,
             components_mtime: crate::config::components_mtime(),
             config_dirty: false,
             config_save_seq: 0,
@@ -252,7 +259,10 @@ impl Plots {
             workspace_cache: crate::services::WorkspaceCache::spawn(),
         };
         // Render Lua widgets once so bars populate on the first frame
-        // instead of waiting out the first tick.
+        // instead of waiting out the first tick. Retired widgets.toml
+        // values fold into placements first (needs discovered Lua
+        // defaults), so migrated bars render correctly immediately.
+        Top::migrate_widgets_toml(&mut plots);
         Top::init_widget_lua(&mut plots);
         plots
     }
@@ -924,14 +934,29 @@ impl Plots {
                         self.config.clone(),
                     )));
                 }
-                // Declarative widgets hot-reload on the same tick: fresh
-                // defs repaint every bar on the next frame.
-                if let Some((defs, mtime)) = crate::config::WidgetsFile::poll(&self.widgets_mtime) {
-                    self.widgets_mtime = mtime;
+                // Widget definitions hot-rescan on widgets-dir change:
+                // fresh defs repaint every bar on the next frame.
+                let dir_mtime = crate::config::widgets_dir_mtime();
+                if dir_mtime != self.widgets_dir_mtime {
+                    self.widgets_dir_mtime = dir_mtime;
                     return Command::batch(vec![
-                        Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(defs))),
+                        Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(
+                            Top::discover_widget_defs(),
+                        ))),
                         self.notify_parse_error(),
                     ]);
+                }
+                // Retired widgets.toml reappeared: warn once, never read.
+                if crate::config::widgets_path().exists() {
+                    if !self.widgets_toml_warned {
+                        self.widgets_toml_warned = true;
+                        eprintln!(
+                            "widgets: {} is retired (migrated to placements/Lua defaults) and ignored; remove it",
+                            crate::config::widgets_path().display()
+                        );
+                    }
+                } else {
+                    self.widgets_toml_warned = false;
                 }
                 // Shared components hot-reload the same way: any
                 // `components/*.lua` change rebuilds every Lua state
@@ -969,10 +994,10 @@ impl Plots {
                 Command::none()
             }
             Plant::Config(ConfigEvent::WidgetsReloaded(defs)) => {
-                // `widgets.toml` changed under us: swap the live registry
+                // Widgets dir changed under us: swap the live registry
                 // and rebuild Lua states (scripts may have changed too).
                 // Open menus reference dead states, so they close;
-                // bars re-resolve slot names on the next redraw (Scope::All).
+                // bars re-resolve placements on the next redraw (Scope::All).
                 self.widgets = defs;
                 Top::init_widget_lua(self);
                 let stale: Vec<iced::window::Id> = self.popups.keys().copied().collect();
@@ -1134,12 +1159,8 @@ impl Plots {
                 WidgetEvent::Anim => Top::handle_anim_frame(self),
                 WidgetEvent::Changed => Popup::refresh_bodies(self),
                 WidgetEvent::PopupSelect(id, action) => Popup::handle_select(self, id, action),
-                WidgetEvent::CellAction(bar, widget, action) => {
-                    Top::handle_cell_action(self, bar, widget, action)
-                }
-                // Widget-domain alias of `BarEvent::SlotWidget`: same handler.
-                WidgetEvent::SetSlotWidget(id, pos, widget, enabled) => {
-                    Top::handle_set_slot_widget(self, id, pos, widget, enabled)
+                WidgetEvent::CellAction(bar, placement, action) => {
+                    Top::handle_cell_action(self, bar, placement, action)
                 }
             },
             Plant::TopPlot(TopEvent::Bar(event)) => match event {
@@ -1149,14 +1170,16 @@ impl Plots {
                 BarEvent::SlotAlign(id, pos, align) => {
                     Top::handle_set_slot_align(self, id, pos, align)
                 }
-                BarEvent::SlotWidget(id, pos, widget, enabled) => {
-                    Top::handle_set_slot_widget(self, id, pos, widget, enabled)
-                }
                 BarEvent::WidgetLayout {
                     bar,
                     expected,
                     widgets,
                 } => Top::handle_widget_layout(self, bar, expected, widgets),
+                BarEvent::WidgetProp {
+                    bar,
+                    placement,
+                    patch,
+                } => Top::handle_widget_prop(self, bar, &placement, patch),
                 BarEvent::SlotPadding(id, value) => Top::handle_set_slot_padding(self, id, value),
                 BarEvent::SlotSpacing(id, value) => Top::handle_set_slot_spacing(self, id, value),
             },
@@ -1217,6 +1240,9 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::SelectSlot(id, pos)) => {
                 Setting::handle_select_slot(self, id, pos)
+            }
+            Plant::SettingPlot(SettingEvent::SelectPlacement(id, bar, placement)) => {
+                Setting::handle_select_placement(self, id, bar, placement)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
                 // Mouse drop ends the drag: the incoming view has drag None,
@@ -1320,6 +1346,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
             | SettingEvent::SelectBar(id, _)
             | SettingEvent::SelectImage(id, _)
             | SettingEvent::SelectSlot(id, _)
+            | SettingEvent::SelectPlacement(id, _, _)
             | SettingEvent::MapViewChanged { id, .. },
         ) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,

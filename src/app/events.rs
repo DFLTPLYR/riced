@@ -51,9 +51,9 @@ pub enum ConfigEvent {
     /// (empty errors) or the failure reasons. Always repaints so new
     /// colors apply on the next frame.
     ThemeRegenerated(Vec<String>),
-    /// `widgets.toml` changed on disk: fresh declarative widget defs.
-    /// Stored live and repainted (bars re-resolve slot names).
-    WidgetsReloaded(Vec<crate::config::WidgetDef>),
+    /// Widgets dir changed on disk: fresh discovered definitions.
+    /// Stored live and repainted (bars re-resolve placements).
+    WidgetsReloaded(Vec<crate::config::WidgetDefinition>),
 }
 
 /// Top-level bar/shell event routing enum. Kept small: raw input and
@@ -110,11 +110,6 @@ pub enum WidgetEvent {
     /// re-render that widget (a toggle flips its next output). Carries
     /// the origin bar so `on_action` sees that bar's `bar.output`.
     CellAction(Id, String, String),
-    /// Widget of one slot by `widgets.toml` name (position, not
-    /// label): checked appends the name, unchecked removes it. Applied
-    /// live, persisted. Accepted here as a widget-domain alias of
-    /// [`BarEvent::SlotWidget`]; both route to the same handler.
-    SetSlotWidget(Id, usize, String, bool),
 }
 
 /// Bar/layout configuration events: geometry and per-slot layout,
@@ -133,15 +128,19 @@ pub enum BarEvent {
     /// Child alignment of one slot (position, not label): applied live,
     /// persisted to the bar's `[[bar]] aligns` entry.
     SlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
-    /// Widget of one slot by `widgets.toml` name (position, not
-    /// label): checked appends the name, unchecked removes it. Applied
-    /// live, persisted to the bar's `[[bar]] widgets` entry.
-    SlotWidget(Id, usize, String, bool),
-    /// Atomic settings-preview drop; reject if the layout changed mid-drag.
+    /// Atomic settings-preview drop (placements carry ids); reject if
+    /// the layout changed mid-drag.
     WidgetLayout {
         bar: Id,
-        expected: Vec<Vec<String>>,
-        widgets: Vec<Vec<String>>,
+        expected: Vec<Vec<crate::config::WidgetPlacement>>,
+        widgets: Vec<Vec<crate::config::WidgetPlacement>>,
+    },
+    /// One placement property override (`None` clears back to inherit).
+    /// Applied to the live bar immediately and persisted.
+    WidgetProp {
+        bar: Id,
+        placement: String,
+        patch: PlacementProp,
     },
     /// Inset inside every slot cell (px): applied live, persisted to
     /// the bar's `[[bar]] slot_padding` entry.
@@ -149,6 +148,18 @@ pub enum BarEvent {
     /// Gap between slot cells and icon/text segments (px): applied
     /// live, persisted to the bar's `[[bar]] slot_spacing` entry.
     SlotSpacing(Id, f32),
+}
+
+/// One placement property edit for [`BarEvent::WidgetProp`].
+/// `None` values clear the override (inherit the definition default).
+#[derive(Debug, Clone)]
+pub enum PlacementProp {
+    Interval(Option<f32>),
+    Size(Option<f32>),
+    Prop {
+        key: String,
+        value: Option<crate::config::PropValue>,
+    },
 }
 
 /// Visual/appearance configuration events, applied live where possible
@@ -227,7 +238,7 @@ pub enum NotifyEvent {
     DBusUp,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SettingEvent {
     Select(Id, crate::app::layers::SettingPage),
     /// Pick the bar edited by the Panel page (`id` = settings window).
@@ -238,6 +249,10 @@ pub enum SettingEvent {
     /// Pick the slot the Panel page aligns (`id` = settings window,
     /// `usize` = position into the edited bar's slots).
     SelectSlot(Id, usize),
+    /// Pick the placement the Panel page edits (`settings` window,
+    /// bar, placement id). The handler also selects its slot so the
+    /// align picker follows chip clicks.
+    SelectPlacement(Id, Id, String),
     MapViewChanged {
         id: Id,
         view: crate::components::display_map::MapView,

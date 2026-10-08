@@ -74,25 +74,31 @@ src/app/app.rs:454      redraw_scope: SelectionTick|Button => All, CursorMoved =
 
 ## Widgets (Lua)
 
-Bar cells are Lua scripts in `~/.config/riced/widgets/`, declared in
-`~/.config/riced/widgets.toml` and referenced by name from `[[bar]]`
-`widgets` entries. First run seeds a clock plus commented
-hello/stats/cpu/ram/gpu/workspaces/clinepass examples — uncomment a
-`[[widget]]` entry to use it.
+Bar cells are Lua scripts in `~/.config/riced/widgets/` — each file
+is one widget named by its stem, placed by name from `[[bar]]`
+`widgets` entries. First run seeds clock plus commented
+hello/stats/cpu/ram/gpu/workspaces/clinepass examples — add a
+`[[bar]]` slot entry (or drag it in from the Settings pool) to use one.
 
 ```toml
-[[widget]]
-name = "clock"
-file = "clock.lua"
-interval = 1.0  # seconds between app:view() calls (>= 0.25)
-size = 13.0
+# [[bar]] widgets entry: bare name inherits everything, tables
+# override per instance.
+widgets = [[{ name = "clock", size = 16.0 }]]
 ```
 
 ```lua
 -- clock.lua: methods are bound to this returned app instance.
-local app = {}
+-- `defaults` declares interval/size/custom props (overridable per
+-- placement in Settings); `self.props` carries resolved values.
+local app = {
+    defaults = {
+        interval = 1.0,
+        size = 13.0,
+        props = { format = "%H:%M" },
+    },
+}
 function app:view()
-    return ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) })
+    return ui.row({ ui.icon("clock"), ui.text(os.date(self.props.format)) })
 end
 function app:popup()
     return { ui = ui.text(os.date("%A, %d %B %Y")), width = 300, height = 200 }
@@ -101,9 +107,11 @@ return app
 ```
 
 - **Lifecycle**: scripts return an app table with `app:view()`;
-  store caches and mutable state on `self`. `app:view()` re-runs every `interval`;
-  output changes repaint. `.lua` edits hot-reload, `widgets.toml`
-  edits rebuild all states, errors log once per message.
+  each placement gets an independent state (`self`). `app:view()`
+  re-runs every effective `interval` (definition default or placement
+  override); output changes repaint. `.lua` edits hot-reload,
+  definition add/remove rescans rebuild states, errors log once per
+  message. `self.props` carries resolved custom properties.
 - **Shell**: string/table/math/os/io with native shell —
   `os.execute(cmd)` runs, `io.popen(cmd):read("*a")` captures stdout.
   No allowlist (`;` chains work; owner-accepted risk). `os.exit` /
@@ -120,7 +128,7 @@ return app
   `ui.define(name, fn)` registers reusable builders called as `ui.name(props)`;
   components from `widgets/components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a
-  `widgets.toml` change.
+  widgets-dir rescan.
 - **Clicks**: `app:popup()` toggles a menu (`text`/`width`/`height`/
   `items`/`ui`); else `app:on_press()` runs. Cell `ui.button`s call
   that app's `app:on_action(key)` directly; popup rows do the same.

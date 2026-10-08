@@ -53,10 +53,12 @@ use std::time::{Duration, SystemTime};
 ///                    # child position per slot along the bar
 ///                    # (cross axis stays centered)
 /// widgets = [["cpu", "ram"], ["clock"]]
-///                    # widget names from widgets.toml by slot position;
-///                    # each slot renders its entries together. A bare
-///                    # "name" reads as ["name"] (`none`/unknown render
-///                    # empty)
+///                    # placements from discovered widgets by slot
+///                    # position; each slot renders its entries together.
+///                    # A bare "name" inherits all definition defaults;
+///                    # tables override per instance, e.g.
+///                    # `{ name = "clock", size = 16.0 }`.
+///                    # (`none`/unknown render empty)
 /// slot_padding = 4.0   # px inset inside every slot, around content
 /// slot_spacing = 4.0   # px gap between slots (also icon/text runs)
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
@@ -367,9 +369,11 @@ pub struct TopConfig {
     /// `center`). Shorter lists pad centered, longer ones truncate.
     #[serde(default)]
     pub aligns: Vec<String>,
-    /// Widget names per slot by position, resolved against
-    /// `widgets.toml`. Each slot renders its entries together;
-    /// shorter lists pad empty, longer ones truncate.
+    /// Widget placements per slot by position, resolved against
+    /// discovered `widgets/*.lua` definitions. Bare names inherit all
+    /// definition defaults; tables override per instance. Each slot
+    /// renders its entries together; shorter lists pad empty, longer
+    /// ones truncate.
     #[serde(default)]
     pub widgets: Vec<SlotWidgets>,
     /// Inset inside every slot cell, around the widget content (px,
@@ -429,14 +433,16 @@ impl Default for TopConfig {
     }
 }
 
-/// One slot's widgets: a single `"name"` or a `["first", "second"]`
-/// list (both read the same; saves always write lists). A `none`
-/// entry reads as an empty slot.
+/// One slot's widgets: a single `"name"`, a `["first", "second"]`
+/// list, or full placement tables with per-instance overrides, e.g.
+/// `{ name = "clock", size = 16.0, props = { show_seconds = true } }`
+/// (both read the same; saves write bare names for clean placements).
+/// A `none` entry reads as an empty slot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SlotWidgets {
     One(String),
-    Many(Vec<String>),
+    Many(Vec<SlotEntry>),
 }
 
 /// Wallpaper images under `[background.*]`, e.g.:
@@ -701,40 +707,37 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("riced.toml"))
 }
 
-/// Declarative bar widgets (`~/.config/riced/widgets.toml`,
-/// `$XDG_CONFIG_HOME` aware). Slots reference entries by `name`
-/// (see `[[bar]] widgets`); each entry is a Lua script with a global
-/// `render()` returning the cell text (`none` is reserved and always
-/// renders empty):
-/// Widgets: Lua scripts rendering bar cells (`~/.config/riced/widgets/`).
+/// Widget definitions: every `widgets/*.lua` file (`$XDG_CONFIG_HOME`
+/// aware, non-recursive — `components/` never becomes widgets) is one
+/// definition named by its file stem. Slots reference definitions by
+/// name (see `[[bar]] widgets`); each file is a Lua script returning an
+/// app table (below).
 ///
-/// ```toml
-/// [[widget]]
-/// name = "clock"   # slot reference
-/// file = "clock.lua" # relative to the widgets dir
-/// interval = 1.0   # seconds between render() calls
-/// size = 13.0
-///
-/// [[widget]]
-/// name = "hello"
-/// file = "hello.lua"
-/// interval = 60.0
-/// size = 13.0
+/// ```text
+/// widgets/
+///   clock.lua      → widget "clock"
+///   stats.lua      → widget "stats"
+///   components/    → shared library, not widgets
 /// ```
+///
+/// Discovery runs at startup and whenever the directory changes; new
+/// files appear in the Settings pool automatically, deleted files
+/// render blank (with a warning) until removed from their slots.
 ///
 /// ## Lifecycle
 ///
-/// Each widget returns an app table with app:view, loaded into a sandboxed
-/// Lua state. Put mutable state and caches on the app instance (self). Every
-/// `interval` seconds (clamped to >= 0.25) the engine republishes
-/// the service tables (`system`, `theme`, `notifications`, `wayland`
-/// — see `crate::services`) and calls `app:view()`; when the output
-/// (text or tree) differs from the last tick, the bar repaints. Editing
-/// the `.lua` file reloads it live (mtime watch) — including
-/// `app:popup()`/`app:on_action()`: opening a menu always uses the saved
-/// file, and an open menu refreshes within a tick of saving (broken
-/// edits keep the last good menu and log once); editing
-/// `widgets.toml` rebuilds all states. Errors log once per message,
+/// Each placement gets an independent Lua state (two clocks never
+/// share `self`). Every effective `interval` seconds (clamped to
+/// \>= 0.25) the engine republishes the service tables (see
+/// `crate::services`: `system`, `theme`, `notifications`, `wayland`),
+/// the bar's `bar.output`, and the placement's resolved `self.props`,
+/// then calls `app:view()`; when the output (text or tree) differs
+/// from the last tick, the bar repaints. Editing the `.lua` file
+/// reloads it live (mtime watch) — including `app:popup()`/
+///
+/// `app:on_action()`: opening a menu always uses the saved file, and
+/// an open menu refreshes within a tick of saving (broken edits keep
+/// the last good menu and log once). Errors log once per message,
 /// never per tick.
 ///
 /// ## Sandbox
@@ -789,6 +792,44 @@ pub fn config_path() -> PathBuf {
 ///
 /// Scripts must return this table. Global render() scripts are rejected;
 /// methods are stored in the Lua registry, not exported to globals.
+///
+/// ## Widget defaults and per-instance properties
+///
+/// A widget declares its own defaults in `app.defaults` (all optional;
+/// built-ins are `interval = 1.0`, `size = 13.0`, no custom props):
+///
+/// ```lua
+/// local app = {
+///     defaults = {
+///         interval = 1.0,
+///         size = 13.0,
+///         props = { format = "%H:%M", show_seconds = false },
+///     },
+///     property_schema = {
+///         format = { label = "Time format", type = "string" },
+///         show_seconds = { label = "Show seconds", type = "boolean" },
+///     },
+/// }
+/// function app:view()
+///     return ui.text(os.date(self.props.format))
+/// end
+/// return app
+/// ```
+///
+/// Each bar slot placement may override `interval`, `size`, and any
+/// `props` key (a bare `"clock"` string inherits everything):
+///
+/// ```toml
+/// widgets = [[{ name = "clock", size = 16.0, props = { show_seconds = true } }]]
+/// ```
+///
+/// Before every `view()`/`popup()`/`on_action()`, the engine sets
+/// `self.props` to the resolved table (definition defaults overlaid
+/// with placement overrides) — read per-instance values from there,
+/// never from `app.defaults` directly. `property_schema` is optional
+/// metadata for nicer Settings controls (`label`, `type` =
+/// boolean/number/string, `description`, `min`/`max`, `choices`);
+/// without it, controls are inferred from default value types.
 ///
 /// ## `ui.*` declarative constructors
 ///
@@ -919,7 +960,7 @@ pub fn config_path() -> PathBuf {
 /// naming the component. Seeds ship `spacer`, `card`, and `menu`
 /// (`00-define.lua`, `10-card.lua`, `20-menu.lua` — never overwritten).
 /// Editing any component rebuilds every Lua state on the next tick,
-/// like a `widgets.toml` change.
+/// like a widgets-dir change.
 ///
 /// ## Theme colors: the `theme` table
 ///
@@ -1003,7 +1044,220 @@ impl Default for WidgetDef {
     }
 }
 
-/// Whole `widgets.toml`: one `[[widget]]` entry per declarative widget.
+/// Scalar widget property: Lua booleans/numbers/strings round-trip.
+/// Tables are rejected — props stay flat so Settings can introspect
+/// and edit every value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PropValue {
+    Bool(bool),
+    Number(f64),
+    Text(String),
+}
+
+impl PropValue {
+    /// Best-effort type name for control selection (`"boolean"`,
+    /// `"number"`, `"string"`).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PropValue::Bool(_) => "boolean",
+            PropValue::Number(_) => "number",
+            PropValue::Text(_) => "string",
+        }
+    }
+}
+
+/// One widget property's Settings metadata, from the optional
+/// `app.property_schema` table. Every field is optional: absent
+/// entries fall back to the default value's type with the key as
+/// label.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PropSchema {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `"boolean"`, `"number"` or `"string"`. Unknown values are
+    /// ignored (the default's type wins instead).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub prop_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// String choices render as preset buttons; ignored otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
+}
+
+/// Author-declared defaults from a widget's `app.defaults` table:
+/// refresh interval, text size, and default custom properties.
+/// Missing pieces fall back to the built-in interval/size and an
+/// empty prop set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetDefaults {
+    #[serde(default = "default_widget_interval")]
+    pub interval: f32,
+    #[serde(default = "default_widget_size")]
+    pub size: f32,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub props: HashMap<String, PropValue>,
+}
+
+impl Default for WidgetDefaults {
+    fn default() -> Self {
+        Self {
+            interval: default_widget_interval(),
+            size: default_widget_size(),
+            props: HashMap::new(),
+        }
+    }
+}
+
+/// One discovered widget definition: a `widgets/*.lua` file (name =
+/// file stem) plus its author-declared defaults and property schema.
+/// Discovered at startup and on directory change; never hand-written.
+#[derive(Debug, Clone)]
+pub struct WidgetDefinition {
+    pub name: String,
+    pub file: PathBuf,
+    pub defaults: WidgetDefaults,
+    pub schema: HashMap<String, PropSchema>,
+}
+
+impl WidgetDefinition {
+    pub fn fallback(name: &str, file: PathBuf) -> Self {
+        Self {
+            name: name.to_string(),
+            file,
+            defaults: WidgetDefaults::default(),
+            schema: HashMap::new(),
+        }
+    }
+}
+
+/// One placed widget instance: `id` is stable per placement (it
+/// travels with drags and keys the Lua state); `widget` names the
+/// discovered definition; everything else is an optional override
+/// (`None`/empty = inherit the definition default). Serialized
+/// without `id` — ids are a runtime concern, regenerated on load.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetPlacement {
+    #[serde(skip)]
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub props: HashMap<String, PropValue>,
+}
+
+impl WidgetPlacement {
+    /// Effective refresh interval: placement override, else definition
+    /// default (clamped to >= 0.25 by the caller).
+    pub fn effective_interval(&self, defaults: &WidgetDefaults) -> f32 {
+        self.interval.unwrap_or(defaults.interval)
+    }
+
+    /// Effective text size: placement override, else definition default.
+    pub fn effective_size(&self, defaults: &WidgetDefaults) -> f32 {
+        self.size.unwrap_or(defaults.size)
+    }
+
+    /// Resolved custom properties: definition defaults overlaid with
+    /// placement overrides. Unknown override keys (no default, e.g.
+    /// after a widget update removed them) are kept — Settings shows
+    /// them as free-form values rather than dropping user data.
+    pub fn resolve_props(
+        &self,
+        defaults: &HashMap<String, PropValue>,
+    ) -> HashMap<String, PropValue> {
+        let mut out = defaults.clone();
+        out.extend(self.props.clone());
+        out
+    }
+
+    /// `true` when nothing is overridden (serializes as a bare name).
+    pub fn is_inherited(&self) -> bool {
+        self.file.is_none()
+            && self.interval.is_none()
+            && self.size.is_none()
+            && self.props.is_empty()
+    }
+}
+
+/// Fresh placement ids (`w1`, `w2`, …), process-unique. Assigned on
+/// load and on pool drops; never serialized.
+static PLACEMENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn fresh_placement_id() -> String {
+    format!(
+        "w{}",
+        PLACEMENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// Fill empty placement ids in place (legacy strings, pool drops).
+/// Existing ids are never reassigned.
+pub(crate) fn ensure_placement_ids(slots: &mut [Vec<WidgetPlacement>]) {
+    for slot in slots.iter_mut() {
+        for placement in slot.iter_mut() {
+            if placement.id.is_empty() {
+                placement.id = fresh_placement_id();
+            }
+        }
+    }
+}
+
+/// One slot entry in `[[bar]] widgets`: a bare `"name"` (inherit
+/// everything) or a full placement table with overrides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SlotEntry {
+    Name(String),
+    Full(WidgetPlacement),
+}
+
+impl SlotEntry {
+    /// Definition name this entry places (`""` when a table omits it;
+    /// callers treat that as unknown, like a typo).
+    pub fn widget_name(&self) -> &str {
+        match self {
+            SlotEntry::Name(name) => name,
+            SlotEntry::Full(placement) => &placement.name,
+        }
+    }
+}
+
+impl SlotWidgets {
+    /// Serialize one slot: clean placements (no overrides) write as
+    /// bare names so config files stay readable; customized ones keep
+    /// their tables (ids are runtime-only and never written).
+    pub fn from_placements(slot: &[WidgetPlacement]) -> Self {
+        SlotWidgets::Many(
+            slot.iter()
+                .map(|placement| {
+                    if placement.is_inherited() {
+                        SlotEntry::Name(placement.name.clone())
+                    } else {
+                        SlotEntry::Full(placement.clone())
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Retired `widgets.toml` registry: one `[[widget]]` entry per
+/// declarative widget. Read once for the placement migration, then the
+/// file is renamed to `widgets.toml.migrated` and never read again.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetsFile {
@@ -1011,109 +1265,34 @@ pub struct WidgetsFile {
     pub widget: Vec<WidgetDef>,
 }
 
-/// Seed written when `widgets.toml` does not exist yet (same idea as
-/// the theme/template seeds): a clock plus a commented hello example.
-const SEED_WIDGETS_TOML: &str = r#"# Riced widgets: declarative bar widgets referenced by [[bar]] `widgets`.
-# Each entry is a Lua script with a `render()` function returning the
-# cell text, called every `interval` seconds.
-
-[[widget]]
-name = "clock"
-file = "clock.lua"
-interval = 1.0
-size = 13.0
-
-# [[widget]]
-# name = "hello"
-# file = "hello.lua"
-# interval = 60.0
-# size = 13.0
-
-# [[widget]]
-# name = "stats"
-# file = "stats.lua"
-# interval = 2.0
-# size = 13.0
-
-# [[widget]]
-# name = "cpu"
-# file = "cpu.lua"
-# interval = 2.0
-# size = 13.0
-
-# [[widget]]
-# name = "ram"
-# file = "ram.lua"
-# interval = 2.0
-# size = 13.0
-
-# [[widget]]
-# name = "gpu"
-# file = "gpu.lua"
-# interval = 2.0
-# size = 13.0
-
-# Numbered workspace buttons on this bar's output; clicks use hyprctl.
-# [[widget]]
-# name = "workspaces"
-# file = "workspaces.lua"
-# interval = 0.5
-# size = 13.0
-
-# Cline Pass usage: robot cell, usage popup (paste API_KEY into
-# clinepass.lua first). Refresh every 5 min, not every tick.
-# [[widget]]
-# name = "clinepass"
-# file = "clinepass.lua"
-# interval = 300.0
-# size = 13.0
-
-# Session menu: power cell, systemctl popup (suspend, hibernate,
-# reboot, power off). Static render, no polling needed.
-# [[widget]]
-# name = "system"
-# file = "system.lua"
-# interval = 60.0
-# size = 13.0
-
-# Notification center: bell + unread count; popup lists the live queue
-# with a dismiss button per row. Reads the `notifications` global and
-# dismisses via the on_action return convention.
-# [[widget]]
-# name = "notifycenter"
-# file = "notifycenter.lua"
-# interval = 1.0
-# size = 13.0
-"#;
-
-/// Seed Lua clock, written next to the seeded `widgets.toml`.
+/// Seed Lua clock, written next to the other seed widgets.
 /// Globals persist between calls; clicking the cell toggles the date menu.
 pub(crate) const SEED_CLOCK_LUA: &str = include_str!("../scripts/widgets/clock.lua");
 
-/// Seed Lua label example, written next to the seeded `widgets.toml`.
+/// Seed Lua label example, written next to the other seed widgets.
 pub(crate) const SEED_HELLO_LUA: &str = include_str!("../scripts/widgets/hello.lua");
 
 /// Seed stats example: icon + CPU + memory via the live tables.
-/// Uncomment its `[[widget]]` entry in widgets.toml to use it.
+/// Place it in a bar slot (or the Settings pool) to use it.
 pub(crate) const SEED_STATS_LUA: &str = include_str!("../scripts/widgets/stats.lua");
 
 /// Seed CPU usage: plain percent, no icon. Uncomment its
-/// `[[widget]]` entry in widgets.toml to use it.
+/// bar slot entry to use it.
 pub(crate) const SEED_CPU_LUA: &str = include_str!("../scripts/widgets/cpu.lua");
 
 /// Seed RAM usage: plain percent, no icon. Uncomment its
-/// `[[widget]]` entry in widgets.toml to use it.
+/// bar slot entry to use it.
 pub(crate) const SEED_RAM_LUA: &str = include_str!("../scripts/widgets/ram.lua");
 
 /// Seed GPU usage: plain percent, no icon. Reads "--" when the GPU
 /// exposes nothing readable. Uncomment its `[[widget]]` entry in
-/// widgets.toml to use it.
+/// a bar slot to use it.
 pub(crate) const SEED_GPU_LUA: &str = include_str!("../scripts/widgets/gpu.lua");
 
 /// Seed session menu: power-icon cell, popup with suspend /
 /// poweroff / hibernate / reboot rows dispatching `systemctl`.
 /// `on_action` whitelists the four keys (never interpolates a raw
-/// key into shell). Uncomment its `[[widget]]` entry in widgets.toml
+/// key into shell). Place it in a bar slot to use it.
 /// to use it.
 pub(crate) const SEED_SYSTEM_LUA: &str = include_str!("../scripts/widgets/system.lua");
 
@@ -1142,13 +1321,13 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 /// button per row. Reads the `notifications` global (republished
 /// before every render) and dismisses via the `on_action` return
 /// convention (`{ dismiss = id }`). Uncomment its `[[widget]]` entry
-/// in widgets.toml to use it.
+/// in a bar slot to use it.
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
 
 /// Numbered horizontal workspace buttons filtered by `bar.output`.
 /// Native ext-workspace supplies metadata; clicks dispatch
 /// `hl.dsp.focus` through hyprctl using the actual workspace name.
-/// Uncomment its `[[widget]]` entry in widgets.toml to use it.
+/// Place it in a bar slot (or the Settings pool) to use it.
 pub(crate) const SEED_WORKSPACES_LUA: &str = include_str!("../scripts/widgets/workspaces.lua");
 
 /// Seed Cline Pass usage: robot icon cell, popup with quota rows.
@@ -1170,6 +1349,56 @@ pub fn widgets_dir() -> PathBuf {
         .parent()
         .map(|p| p.join("widgets"))
         .unwrap_or_else(|| PathBuf::from("widgets"))
+}
+
+/// Discovered widget files: `(name, path)` with name = file stem,
+/// sorted by name. Non-recursive (so `components/` never becomes
+/// widgets), `*.lua` only, dotfiles skipped.
+pub fn discover_widget_files() -> Vec<(String, PathBuf)> {
+    discover_widget_files_in(&widgets_dir())
+}
+
+pub(crate) fn discover_widget_files_in(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().is_none_or(|e| e != "lua") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.is_empty() || stem.starts_with('.') {
+            continue;
+        }
+        out.push((stem.to_string(), path));
+    }
+    out.sort();
+    out
+}
+
+/// Newest mtime of the widgets dir itself (add/remove/rename stamp),
+/// or `None` when unreadable. Content edits are covered by per-file
+/// mtimes; this only drives definition rescan.
+pub fn widgets_dir_mtime() -> Option<SystemTime> {
+    std::fs::metadata(widgets_dir())
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// Adopted `widgets.toml` after retirement: definitions came from it,
+/// values folded into placements or Lua defaults.
+pub fn widgets_migrated_path() -> PathBuf {
+    widgets_path()
+        .parent()
+        .map(|p| p.join("widgets.toml.migrated"))
+        .unwrap_or_else(|| PathBuf::from("widgets.toml.migrated"))
 }
 
 /// Shared component library dir (`~/.config/riced/widgets/components/`):
@@ -1318,15 +1547,89 @@ fn seed_components() {
 }
 
 impl WidgetsFile {
-    fn parse(content: &str) -> Vec<WidgetDef> {
-        match toml::from_str::<WidgetsFile>(content) {
-            Ok(file) => file.widget,
-            Err(e) => {
-                eprintln!("widgets: parse error, no widgets: {e}");
-                note_parse_error("widgets", &e);
-                Vec::new()
+    /// Parse retired `widgets.toml` content for the one-time
+    /// migration (the caller logs context).
+    pub(crate) fn parse(content: &str) -> Result<Vec<WidgetDef>, String> {
+        toml::from_str::<WidgetsFile>(content)
+            .map(|file| file.widget)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Fold retired defs into bar placements (pure; the caller persists
+    /// the bars and renames the file). For every slot entry naming a
+    /// migrated widget, stamp `interval`/`size`/`file` overrides that
+    /// differ from the widget's Lua defaults (builtin fallbacks when
+    /// its file is missing). Returns the stamped placement count.
+    /// Bare names stay bare when nothing differs, so clean configs
+    /// migrate to clean configs.
+    pub(crate) fn migrate_placements(
+        bars: &mut [TopConfig],
+        old_defs: &[WidgetDef],
+        lua_defaults: &HashMap<String, WidgetDefaults>,
+    ) -> usize {
+        let old_by_name: HashMap<&str, &WidgetDef> = old_defs
+            .iter()
+            .map(|def| (def.name.as_str(), def))
+            .collect();
+        let mut stamped = 0;
+        for bar in bars.iter_mut() {
+            for slot in bar.widgets.iter_mut() {
+                match slot {
+                    SlotWidgets::One(name) => {
+                        if let Some(full) = Self::stamp_placement(name, &old_by_name, lua_defaults)
+                        {
+                            *slot = SlotWidgets::Many(vec![SlotEntry::Full(full)]);
+                            stamped += 1;
+                        }
+                    }
+                    SlotWidgets::Many(entries) => {
+                        for entry in entries.iter_mut() {
+                            if let SlotEntry::Name(name) = entry
+                                && let Some(full) =
+                                    Self::stamp_placement(name, &old_by_name, lua_defaults)
+                            {
+                                *entry = SlotEntry::Full(full);
+                                stamped += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
+        stamped
+    }
+
+    /// Override placement for one legacy name, or `None` when the old
+    /// def matches the Lua defaults (clean inherit, nothing stamped).
+    /// When in doubt we preserve: absent TOML values read as the
+    /// built-in fallbacks, so an explicit `interval = 1.0` against a
+    /// Lua `interval = 2.0` still stamps (the old behavior wins).
+    fn stamp_placement(
+        name: &str,
+        old_by_name: &HashMap<&str, &WidgetDef>,
+        lua_defaults: &HashMap<String, WidgetDefaults>,
+    ) -> Option<WidgetPlacement> {
+        let old = old_by_name.get(name)?;
+        let defaults = lua_defaults.get(name).cloned().unwrap_or_default();
+        let mut placement = WidgetPlacement {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let mut touched = false;
+        if (old.interval - defaults.interval).abs() > f32::EPSILON {
+            placement.interval = Some(old.interval);
+            touched = true;
+        }
+        if (old.size - defaults.size).abs() > f32::EPSILON {
+            placement.size = Some(old.size);
+            touched = true;
+        }
+        let default_file = format!("{name}.lua");
+        if !old.file.trim().is_empty() && old.file.trim() != default_file {
+            placement.file = Some(old.file.clone());
+            touched = true;
+        }
+        touched.then_some(placement)
     }
 
     /// Seed one script file when missing (never overwrite).
@@ -1369,41 +1672,11 @@ impl WidgetsFile {
         seed_components();
     }
 
-    /// Load from [`widgets_path`]. Creates the seeded files (plus
-    /// parent dirs) when `widgets.toml` does not exist yet. Seed
-    /// scripts are also restored whenever missing (never overwritten),
-    /// so old installs missing `clock.lua` heal on restart.
-    pub fn load() -> (Vec<WidgetDef>, Option<SystemTime>) {
-        let path = widgets_path();
-        if !path.exists() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(&path, SEED_WIDGETS_TOML) {
-                eprintln!("widgets: cannot write {}: {e}", path.display());
-            }
-            Self::seed_all();
-            return (Self::parse(SEED_WIDGETS_TOML), read_mtime(&path));
-        }
+    /// Restore missing seed scripts (never overwrite, never touch
+    /// `widgets.toml`). Called before definition discovery so fresh
+    /// installs always have scripts to discover.
+    pub(crate) fn seed_widget_scripts() {
         Self::seed_all();
-        match std::fs::read_to_string(&path) {
-            Ok(content) => (Self::parse(&content), read_mtime(&path)),
-            Err(_) => (Vec::new(), None),
-        }
-    }
-
-    /// Hot-reload check for the poll tick: fresh defs when the file
-    /// changed since `known_mtime` (or appeared). Never fails.
-    pub fn poll(known_mtime: &Option<SystemTime>) -> Option<(Vec<WidgetDef>, Option<SystemTime>)> {
-        let path = widgets_path();
-        let mtime = read_mtime(&path);
-        if mtime != *known_mtime && path.exists() {
-            let (defs, mtime) = Self::load();
-            if mtime != *known_mtime {
-                return Some((defs, mtime));
-            }
-        }
-        None
     }
 }
 
@@ -1591,6 +1864,192 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_entries_read_names_and_tables() {
+        // Bare names inherit everything; tables carry overrides.
+        let cfg: Config = toml::from_str(
+            "[[bar]]\nanchor = \"top\"\nwidgets = [[\"clock\", { name = \"clock\", size = 16.0 }]]\n",
+        )
+        .unwrap();
+        assert!(matches!(cfg.bar[0].widgets[0], SlotWidgets::Many(_)));
+        let SlotWidgets::Many(entries) = &cfg.bar[0].widgets[0] else {
+            panic!("expected many");
+        };
+        assert!(matches!(entries[0], SlotEntry::Name(_)));
+        assert_eq!(entries[0].widget_name(), "clock");
+        match &entries[1] {
+            SlotEntry::Full(p) => {
+                assert_eq!(p.name, "clock");
+                assert_eq!(p.size, Some(16.0));
+                assert_eq!(p.interval, None);
+                // Integer TOML values coerce to float props.
+                assert!(p.props.is_empty());
+            }
+            SlotEntry::Name(_) => panic!("expected table"),
+        }
+        // Integer prop values and legacy string slots still parse.
+        let cfg: Config = toml::from_str(
+            "[[bar]]\nanchor = \"top\"\nwidgets = [[{ name = \"x\", props = { n = 2 } }], \"clock\"]\n",
+        )
+        .unwrap();
+        let SlotWidgets::Many(entries) = &cfg.bar[0].widgets[0] else {
+            panic!("expected many");
+        };
+        match &entries[0] {
+            SlotEntry::Full(p) => {
+                assert_eq!(
+                    p.props.get("n"),
+                    Some(&PropValue::Number(2.0)),
+                    "integer props coerce to float"
+                );
+            }
+            _ => panic!("expected table"),
+        }
+    }
+
+    #[test]
+    fn placement_inheritance_prefers_overrides() {
+        let mut defaults = WidgetDefaults::default();
+        defaults
+            .props
+            .insert("format".to_string(), PropValue::Text("%H:%M".to_string()));
+        let bare = WidgetPlacement {
+            name: "clock".to_string(),
+            ..Default::default()
+        };
+        assert!(bare.is_inherited());
+        assert_eq!(bare.effective_interval(&defaults), 1.0);
+        assert_eq!(bare.effective_size(&defaults), 13.0);
+        assert_eq!(
+            bare.resolve_props(&defaults.props)["format"],
+            PropValue::Text("%H:%M".to_string())
+        );
+        let custom = WidgetPlacement {
+            interval: Some(5.0),
+            props: [("format".to_string(), PropValue::Text("%H".to_string()))]
+                .into_iter()
+                .collect(),
+            ..bare.clone()
+        };
+        assert!(!custom.is_inherited());
+        assert_eq!(custom.effective_interval(&defaults), 5.0);
+        assert_eq!(custom.effective_size(&defaults), 13.0);
+        // Overrides win; unknown keys survive (no data loss on downgrade).
+        let mut resolved = custom.resolve_props(&defaults.props);
+        assert_eq!(resolved["format"], PropValue::Text("%H".to_string()));
+        resolved.insert("extra".to_string(), PropValue::Bool(true));
+        let extra = WidgetPlacement {
+            props: [("extra".to_string(), PropValue::Bool(true))]
+                .into_iter()
+                .collect(),
+            ..bare
+        };
+        assert_eq!(
+            extra.resolve_props(&defaults.props)["extra"],
+            PropValue::Bool(true)
+        );
+        let _ = resolved;
+    }
+
+    #[test]
+    fn slots_serialize_clean_placements_as_names() {
+        let clean = WidgetPlacement {
+            id: "w9".to_string(),
+            name: "clock".to_string(),
+            ..Default::default()
+        };
+        // Ids are runtime-only: clean placements write as bare names.
+        assert!(matches!(
+            SlotWidgets::from_placements(std::slice::from_ref(&clean)),
+            SlotWidgets::Many(ref entries)
+                if entries == &[SlotEntry::Name("clock".to_string())]
+        ));
+        let dirty = WidgetPlacement {
+            size: Some(16.0),
+            ..clean
+        };
+        match SlotWidgets::from_placements(&[dirty]) {
+            SlotWidgets::Many(entries) => match &entries[..] {
+                [SlotEntry::Full(p)] => {
+                    assert_eq!(p.size, Some(16.0));
+                    // Ids are runtime-only: skipped on serialize even
+                    // when the in-memory placement carries one.
+                    let value = toml::Value::try_from(p).unwrap();
+                    assert!(value.get("id").is_none(), "{value}");
+                    assert_eq!(value.get("size").and_then(|v| v.as_float()), Some(16.0));
+                }
+                _ => panic!("expected one full entry"),
+            },
+            _ => panic!("expected many"),
+        }
+    }
+
+    #[test]
+    fn discovery_skips_non_widgets() {
+        let dir = std::env::temp_dir().join(format!("riced-discover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("components")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for name in ["clock.lua", "stats.lua", ".hidden.lua", "README.md"] {
+            std::fs::write(dir.join(name), "-- x").unwrap();
+        }
+        std::fs::write(dir.join("components").join("card.lua"), "-- x").unwrap();
+        std::fs::write(dir.join("sub").join("y.lua"), "-- x").unwrap();
+        let found = discover_widget_files_in(&dir);
+        assert_eq!(
+            found.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            ["clock", "stats"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_stamps_only_differences() {
+        use std::collections::HashMap as Map;
+        let old = |name: &str, interval: f32, size: f32| WidgetDef {
+            name: name.to_string(),
+            file: String::new(),
+            interval,
+            size,
+        };
+        let old_defs = vec![old("clock", 1.0, 13.0), old("stats", 5.0, 13.0)];
+        // Lua declares clock at 2s; stats matches its old values.
+        let mut lua_defaults = Map::new();
+        lua_defaults.insert(
+            "clock".to_string(),
+            WidgetDefaults {
+                interval: 2.0,
+                ..Default::default()
+            },
+        );
+        lua_defaults.insert(
+            "stats".to_string(),
+            WidgetDefaults {
+                interval: 5.0,
+                ..Default::default()
+            },
+        );
+        let mut bars = vec![TopConfig {
+            widgets: vec![SlotWidgets::Many(vec![
+                SlotEntry::Name("clock".to_string()),
+                SlotEntry::Name("stats".to_string()),
+            ])],
+            ..Default::default()
+        }];
+        let stamped = WidgetsFile::migrate_placements(&mut bars, &old_defs, &lua_defaults);
+        // clock's old 1.0 differs from Lua's 2.0 → stamped; stats is
+        // clean → stays a bare name.
+        assert_eq!(stamped, 1);
+        let SlotWidgets::Many(entries) = &bars[0].widgets[0] else {
+            panic!("expected many");
+        };
+        match &entries[0] {
+            SlotEntry::Full(p) => assert_eq!(p.interval, Some(1.0)),
+            _ => panic!("clock should stamp"),
+        }
+        assert!(matches!(entries[1], SlotEntry::Name(_)));
+    }
 
     #[test]
     fn parses_composable_menu_section() {
@@ -1937,7 +2396,9 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cfg.bar[0].widgets[0],
-            SlotWidgets::Many(ref names) if names == &["cpu".to_string(), "ram".to_string()]
+            SlotWidgets::Many(ref entries)
+                if entries.iter().map(SlotEntry::widget_name).collect::<Vec<_>>()
+                    == ["cpu", "ram"]
         ));
         assert!(matches!(
             cfg.bar[0].widgets[1],

@@ -11,17 +11,28 @@ pub enum Site {
 }
 
 /// Drop on an occupied position swaps; drop at the end appends.
-/// Pool -> occupied inserts before it (the pool is not a placed position).
-pub fn rearrange(slots: &[Vec<String>], from: &Site, to: &Site) -> Option<Vec<Vec<String>>> {
+/// Pool -> occupied inserts before it (the pool is not a placed
+/// position). Moves whole placement objects so ids and per-instance
+/// overrides travel with the drag. Pool drops arrive with an empty id;
+/// the layout handler assigns a fresh one.
+pub fn rearrange(
+    slots: &[Vec<crate::config::WidgetPlacement>],
+    from: &Site,
+    to: &Site,
+) -> Option<Vec<Vec<crate::config::WidgetPlacement>>> {
+    use crate::config::WidgetPlacement;
     if from == to {
         return None;
     }
     let mut next = slots.to_vec();
-    let name = match from {
+    let moved: WidgetPlacement = match from {
         Site::Slot { slot, index } => slots.get(*slot)?.get(*index)?.clone(),
-        Site::Pool(name) => name.clone(),
+        Site::Pool(name) => WidgetPlacement {
+            name: name.clone(),
+            ..Default::default()
+        },
     };
-    if name.trim().is_empty() || name.eq_ignore_ascii_case("none") {
+    if moved.name.trim().is_empty() || moved.name.eq_ignore_ascii_case("none") {
         return None;
     }
     match to {
@@ -39,27 +50,29 @@ pub fn rearrange(slots: &[Vec<String>], from: &Site, to: &Site) -> Option<Vec<Ve
                 return None;
             }
             match from {
-                Site::Pool(_) => next[*target].insert(*at, name),
+                Site::Pool(_) => next[*target].insert(*at, moved),
                 Site::Slot {
                     slot: origin,
                     index,
                 } => {
                     if let Some(other) = slots[*target].get(*at) {
                         next[*origin][*index] = other.clone();
-                        next[*target][*at] = name;
+                        next[*target][*at] = moved;
                     } else {
                         next[*origin].remove(*index);
-                        next[*target].push(name);
+                        next[*target].push(moved);
                     }
                 }
             }
         }
     }
-    // Names may appear on multiple slots, but not twice within a slot.
-    if next
-        .iter()
-        .any(|slot| slot.iter().enumerate().any(|(i, n)| slot[..i].contains(n)))
-    {
+    // Widget names may appear on multiple slots, but not twice within
+    // one slot (motion keys derive from names and would collide).
+    if next.iter().any(|slot| {
+        slot.iter()
+            .enumerate()
+            .any(|(i, p)| slot[..i].iter().any(|other| other.name == p.name))
+    }) {
         return None;
     }
     (next != slots).then_some(next)
@@ -68,6 +81,8 @@ pub fn rearrange(slots: &[Vec<String>], from: &Site, to: &Site) -> Option<Vec<Ve
 #[derive(Clone)]
 struct Chip {
     site: Site,
+    /// Placement id for slot chips (`""` for pool chips, resolved by name).
+    placement: String,
     label: String,
     rect: Rectangle,
 }
@@ -75,12 +90,13 @@ struct Chip {
 pub struct Preview {
     settings: window::Id,
     bar: window::Id,
-    slots: Vec<Vec<String>>,
+    slots: Vec<Vec<crate::config::WidgetPlacement>>,
     regions: Vec<Rectangle>,
     chips: Vec<Chip>,
     pool: Rectangle,
     size: Size,
     selected: usize,
+    selected_placement: Option<String>,
 }
 
 #[derive(Default)]
@@ -94,17 +110,19 @@ struct Drag {
     label: String,
     start: Point,
     cursor: Point,
-    snapshot: Vec<Vec<String>>,
+    snapshot: Vec<Vec<crate::config::WidgetPlacement>>,
 }
 
 impl Preview {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: window::Id,
         bar: window::Id,
-        slots: Vec<Vec<String>>,
+        slots: Vec<Vec<crate::config::WidgetPlacement>>,
         names: Vec<String>,
         horizontal: bool,
         selected: usize,
+        selected_placement: Option<String>,
         width: f32,
     ) -> Self {
         let width = width.max(1.0);
@@ -130,11 +148,11 @@ impl Preview {
             let y = if horizontal { 0.0 } else { bottom + 8.0 };
             let mut cx = x + 12.0;
             let mut cy = y + 38.0;
-            for (index, name) in widgets.iter().enumerate() {
-                let label = if names.contains(name) {
-                    name.clone()
+            for (index, placement) in widgets.iter().enumerate() {
+                let label = if names.contains(&placement.name) {
+                    placement.name.clone()
                 } else {
-                    format!("{name} (missing)")
+                    format!("{} (missing)", placement.name)
                 };
                 let w = (label.chars().count() as f32 * 7.5 + 24.0)
                     .max(64.0)
@@ -145,6 +163,7 @@ impl Preview {
                 }
                 chips.push(Chip {
                     site: Site::Slot { slot, index },
+                    placement: placement.id.clone(),
                     label,
                     rect: Rectangle::new(Point::new(cx, cy), Size::new(w, 30.0)),
                 });
@@ -162,7 +181,7 @@ impl Preview {
         let mut y = pool_y + 58.0;
         for name in names
             .iter()
-            .filter(|name| !slots.iter().flatten().any(|placed| placed == *name))
+            .filter(|name| !slots.iter().flatten().any(|p| p.name == **name))
         {
             let w = (name.chars().count() as f32 * 7.5 + 24.0)
                 .max(64.0)
@@ -173,6 +192,7 @@ impl Preview {
             }
             chips.push(Chip {
                 site: Site::Pool(name.clone()),
+                placement: String::new(),
                 label: name.clone(),
                 rect: Rectangle::new(Point::new(x, y), Size::new(w, 30.0)),
             });
@@ -189,6 +209,7 @@ impl Preview {
             pool,
             size,
             selected,
+            selected_placement,
         }
     }
 
@@ -269,6 +290,21 @@ impl canvas::Program<Plant> for Preview {
                     return Some(Action::request_redraw());
                 };
                 if p.distance(drag.start) < 5.0 {
+                    // Plain click: slot chips select their placement
+                    // (the editor below follows); anything else keeps
+                    // the legacy slot selection.
+                    if let Some(chip) = self.chips.iter().find(|c| c.rect.contains(p))
+                        && !chip.placement.is_empty()
+                    {
+                        return Some(
+                            Action::publish(Plant::SettingPlot(SettingEvent::SelectPlacement(
+                                self.settings,
+                                self.bar,
+                                chip.placement.clone(),
+                            )))
+                            .and_capture(),
+                        );
+                    }
                     if let Site::Slot { slot, .. } = drag.from {
                         return Some(
                             Action::publish(Plant::SettingPlot(SettingEvent::SelectSlot(
@@ -379,7 +415,12 @@ impl canvas::Program<Plant> for Preview {
         });
         for chip in &self.chips {
             let picked = drag.is_some_and(|d| d.from == chip.site);
+            let selected = self
+                .selected_placement
+                .as_deref()
+                .is_some_and(|id| id == chip.placement && !chip.placement.is_empty());
             let highlight = target.as_ref() == Some(&chip.site)
+                || selected
                 || cursor
                     .position_in(bounds)
                     .is_some_and(|p| chip.rect.contains(p));
@@ -464,29 +505,67 @@ mod tests {
     fn slot(slot: usize, index: usize) -> Site {
         Site::Slot { slot, index }
     }
-    fn model() -> Vec<Vec<String>> {
-        vec![vec!["a".into(), "b".into()], vec!["c".into()], vec![]]
+    fn place(id: &str, widget: &str) -> crate::config::WidgetPlacement {
+        crate::config::WidgetPlacement {
+            id: id.to_string(),
+            name: widget.to_string(),
+            ..Default::default()
+        }
+    }
+    fn model() -> Vec<Vec<crate::config::WidgetPlacement>> {
+        vec![
+            vec![place("w1", "a"), place("w2", "b")],
+            vec![place("w3", "c")],
+            vec![],
+        ]
     }
     #[test]
     fn swap_move_add_remove_and_invalid_drop() {
         let s = model();
+        // Swap keeps both identities in place (ids travel with objects).
+        let swapped_within = rearrange(&s, &slot(0, 0), &slot(0, 1)).unwrap();
         assert_eq!(
-            rearrange(&s, &slot(0, 0), &slot(0, 1)).unwrap()[0],
-            ["b", "a"]
+            swapped_within[0]
+                .iter()
+                .map(|p| (p.id.as_str(), p.name.as_str()))
+                .collect::<Vec<_>>(),
+            [("w2", "b"), ("w1", "a")]
         );
         let swapped = rearrange(&s, &slot(0, 0), &slot(1, 0)).unwrap();
-        assert_eq!(swapped[0], ["c", "b"]);
-        assert_eq!(swapped[1], ["a"]);
-        let moved = rearrange(&s, &slot(0, 1), &slot(2, 0)).unwrap();
-        assert_eq!(moved[0], ["a"]);
-        assert_eq!(moved[2], ["b"]);
         assert_eq!(
-            rearrange(&s, &Site::Pool("d".into()), &slot(1, 0)).unwrap()[1],
-            ["d", "c"]
+            swapped[0].iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["w3", "w2"]
         );
         assert_eq!(
-            rearrange(&s, &slot(0, 0), &Site::Pool(String::new())).unwrap()[0],
-            ["b"]
+            swapped[1].iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["w1"]
+        );
+        let moved = rearrange(&s, &slot(0, 1), &slot(2, 0)).unwrap();
+        assert_eq!(
+            moved[0].iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["w1"]
+        );
+        assert_eq!(
+            moved[2].iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["w2"]
+        );
+        // Pool drops arrive id-less; overrides travel untouched.
+        let mut with_override = s.clone();
+        with_override[0][0].props.insert(
+            "format".to_string(),
+            crate::config::PropValue::Text("%H".to_string()),
+        );
+        let added = rearrange(&with_override, &Site::Pool("d".into()), &slot(1, 0)).unwrap();
+        assert_eq!(added[1].len(), 2);
+        assert_eq!(added[1][0].name, "d");
+        assert!(added[1][0].id.is_empty());
+        assert_eq!(added[0][0].props.len(), 1);
+        assert_eq!(
+            rearrange(&s, &slot(0, 0), &Site::Pool(String::new())).unwrap()[0]
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["w2"]
         );
         assert!(rearrange(&s, &slot(9, 0), &slot(0, 0)).is_none());
         assert!(rearrange(&s, &Site::Pool("a".into()), &slot(0, 0)).is_none());
@@ -503,6 +582,7 @@ mod tests {
                 vec!["a".into(), "b".into(), "c".into(), "d".into()],
                 horizontal,
                 0,
+                None,
                 600.0,
             );
             assert_eq!(
@@ -527,6 +607,7 @@ mod tests {
                 vec![],
                 true,
                 0,
+                None,
                 width,
             );
             assert!(
