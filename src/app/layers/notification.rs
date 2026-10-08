@@ -427,6 +427,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
                     height: None,
                     padding: None,
                     color: None,
+                    background: None,
                 })
                 .collect(),
             spacing: 4.0,

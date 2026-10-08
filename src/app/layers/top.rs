@@ -900,9 +900,13 @@ pub(crate) fn build_with_lists(
             padding,
             background,
             radius,
+            border,
+            border_width,
         } => {
             let background = background.map(iced::Background::Color);
             let radius = *radius;
+            let border = *border;
+            let border_width = *border_width;
             Ok(container(build_with_lists(
                 child, widget, size, message, runtime, lists,
             )?)
@@ -912,8 +916,9 @@ pub(crate) fn build_with_lists(
             .style(move |_| iced::widget::container::Style {
                 background,
                 border: iced::Border {
+                    color: border.unwrap_or_default(),
+                    width: border_width,
                     radius: radius.into(),
-                    ..Default::default()
                 },
                 ..Default::default()
             })
@@ -1123,6 +1128,11 @@ pub(crate) enum WidgetNode {
         padding: f32,
         background: Option<iced::Color>,
         radius: f32,
+        /// Explicit border color (`:border()`); `None` paints no border.
+        border: Option<iced::Color>,
+        /// Border width px (`:border_width()`); defaults to 1.0 when a
+        /// border color is set, else 0.
+        border_width: f32,
     },
     Scrollable {
         child: Box<WidgetNode>,
@@ -1175,22 +1185,35 @@ pub(crate) enum WidgetNode {
         height: Option<NodeLength>,
         padding: Option<f32>,
         /// Explicit label color (`:color()`); `None` uses the themed
-        /// button text (backgrounds always stay themed).
+        /// button text.
         color: Option<iced::Color>,
+        /// Explicit background (`:background()`); applies to the Active
+        /// status only — Hovered/Pressed keep themed surfaces so click
+        /// feedback still reads. `None` uses the themed background.
+        background: Option<iced::Color>,
     },
     Progress {
         value: f32,
         width: NodeLength,
         height: Option<NodeLength>,
+        /// Explicit fill color (`:color()`); `None` uses the themed fill.
+        color: Option<iced::Color>,
+        /// Explicit track color (`:background()`); `None` uses the
+        /// themed track.
+        background: Option<iced::Color>,
     },
     /// Loading placeholder: animated ring while a slow fetch resolves.
     /// Purely visual (no action) — scripts return it first, then swap
     /// in real content once cached data arrives.
     Spinner,
-    /// Horizontal hairline between items (`iced.separator()`), painted
-    /// in the theme border color. Always full-width (iced rules fill
-    /// their axis); only thickness (`height`, default 1px) chains.
-    Separator { height: f32 },
+    /// Horizontal hairline between items (`iced.separator()`).
+    /// Always full-width (iced rules fill their axis); only thickness
+    /// (`height`, default 1px) chains. Paint uses `:color()` when set,
+    /// else the theme border color.
+    Separator {
+        height: f32,
+        color: Option<iced::Color>,
+    },
 }
 
 /// Box sizing for `ui` nodes: a number is px (`Fixed`), `"fill"` /
@@ -1401,18 +1424,36 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         transitions: Box::new((enter, exit, displaced)),
                     })
                 }
-                "container" => Ok(WidgetNode::Container {
-                    child: Box::new(parse_node(
-                        &t.get::<Value>("child").map_err(|e| e.to_string())?,
-                    )?),
-                    width: opt_length(t, "width", "iced.container()")?
-                        .unwrap_or(NodeLength::Shrink),
-                    height: opt_length(t, "height", "iced.container()")?
-                        .unwrap_or(NodeLength::Shrink),
-                    padding: opt_number(t, "padding", "iced.container()")?.unwrap_or(0.0),
-                    radius: opt_number(t, "radius", "iced.container()")?.unwrap_or(0.0),
-                    background: opt_color(t, "background", "iced.container()")?,
-                }),
+                "container" => {
+                    let background = opt_color(t, "background", "iced.container()")?;
+                    let border = opt_color(t, "border", "iced.container()")?;
+                    // A border color implies 1px; an explicit width
+                    // (including 0) always wins; no color paints nothing.
+                    let border_width = match opt_number(t, "border_width", "iced.container()")? {
+                        Some(w) => w.max(0.0),
+                        None => {
+                            if border.is_some() {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                    };
+                    Ok(WidgetNode::Container {
+                        child: Box::new(parse_node(
+                            &t.get::<Value>("child").map_err(|e| e.to_string())?,
+                        )?),
+                        width: opt_length(t, "width", "iced.container()")?
+                            .unwrap_or(NodeLength::Shrink),
+                        height: opt_length(t, "height", "iced.container()")?
+                            .unwrap_or(NodeLength::Shrink),
+                        padding: opt_number(t, "padding", "iced.container()")?.unwrap_or(0.0),
+                        radius: opt_number(t, "radius", "iced.container()")?.unwrap_or(0.0),
+                        background,
+                        border,
+                        border_width,
+                    })
+                }
                 "scrollable" => Ok(WidgetNode::Scrollable {
                     child: Box::new(parse_node(
                         &t.get::<Value>("child").map_err(|e| e.to_string())?,
@@ -1519,6 +1560,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         height: opt_length(t, "height", "ui.button()")?,
                         padding: opt_number(t, "padding", "ui.button()")?,
                         color: opt_color(t, "color", "ui.button()")?,
+                        background: opt_color(t, "background", "ui.button()")?,
                     })
                 }
                 "progress" => {
@@ -1545,6 +1587,8 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         value,
                         width,
                         height: opt_length(t, "height", "ui.progress()")?,
+                        color: opt_color(t, "color", "ui.progress()")?,
+                        background: opt_color(t, "background", "ui.progress()")?,
                     })
                 }
                 "spinner" => Ok(WidgetNode::Spinner),
@@ -1552,6 +1596,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                     height: opt_number(t, "height", "ui.separator()")?
                         .unwrap_or(1.0)
                         .max(1.0),
+                    color: opt_color(t, "color", "ui.separator()")?,
                 }),
                 other => Err(format!("unknown ui node type {other:?}")),
             }
@@ -1574,7 +1619,7 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
     match node {
         WidgetNode::Text { size: own, .. } => owned_size(*own, base) * 1.4,
         WidgetNode::Icon { .. } | WidgetNode::Spinner => base * 1.5,
-        WidgetNode::Separator { height } => height.max(1.0),
+        WidgetNode::Separator { height, .. } => height.max(1.0),
         WidgetNode::Button { padding, .. } => base * 1.4 + 2.0 * padding.unwrap_or(6.0).max(0.0),
         WidgetNode::Progress { height, .. } => {
             height.as_ref().map(|h| length_px(h, base)).unwrap_or(12.0)
@@ -1680,10 +1725,14 @@ pub(crate) fn build_node_opacity(
             padding,
             background,
             radius,
+            border,
+            border_width,
         } => {
             let background =
                 background.map(|color| iced::Background::Color(color.scale_alpha(opacity)));
             let radius = *radius;
+            let border = border.map(|color| color.scale_alpha(opacity));
+            let border_width = *border_width;
             Ok(
                 container(build_node_opacity(child, size, button_msg, opacity)?)
                     .width(width.clone().iced())
@@ -1692,8 +1741,9 @@ pub(crate) fn build_node_opacity(
                     .style(move |_| iced::widget::container::Style {
                         background,
                         border: iced::Border {
+                            color: border.unwrap_or_default(),
+                            width: border_width,
                             radius: radius.into(),
-                            ..Default::default()
                         },
                         ..Default::default()
                     })
@@ -1814,26 +1864,34 @@ pub(crate) fn build_node_opacity(
             height,
             padding,
             color,
+            background,
         } => {
             let mut item = button(rich_text(label.clone(), size, 4.0))
                 .padding(padding.unwrap_or(6.0).max(0.0));
-            // Label tint only: surfaces stay themed in every status.
-            if let Some(c) = color {
-                item = item.style(theme::menu_button_tinted(theme::RADIUS, *c));
-            } else {
-                item = item.style(theme::menu_button(theme::RADIUS));
-            }
-            if opacity < 1.0 {
-                let tint = *color;
-                item = item.style(move |theme, status| {
-                    let mut style = theme::menu_button(theme::RADIUS)(theme, status);
+            // Label tint and custom background compose: tint picks the
+            // label style, background overrides the Active surface only
+            // (Hovered/Pressed stay themed so clicks still read).
+            let tint = *color;
+            let custom = *background;
+            item = item.style(move |theme, status| {
+                let mut style = if let Some(c) = tint {
+                    theme::menu_button_tinted(theme::RADIUS, c)(theme, status)
+                } else {
+                    theme::menu_button(theme::RADIUS)(theme, status)
+                };
+                if matches!(status, iced::widget::button::Status::Active)
+                    && let Some(bg) = custom
+                {
+                    style.background = Some(bg.into());
+                }
+                if opacity < 1.0 {
                     style.text_color = tint.unwrap_or(style.text_color).scale_alpha(opacity);
                     style.background = style.background.map(|bg| bg.scale_alpha(opacity));
                     style.border.color = style.border.color.scale_alpha(opacity);
                     style.shadow.color = style.shadow.color.scale_alpha(opacity);
-                    style
-                });
-            }
+                }
+                style
+            });
             if let Some(w) = width {
                 // Buttons keep a 20px floor on Fixed widths so chained
                 // typos can't collapse the hit area; Fill/Shrink pass.
@@ -1855,6 +1913,8 @@ pub(crate) fn build_node_opacity(
             value,
             width,
             height,
+            color,
+            background,
         } => {
             // iced's progress_bar has length + girth (thickness), no
             // height: :height() maps to girth so Lua stays iced-spelled
@@ -1867,8 +1927,16 @@ pub(crate) fn build_node_opacity(
             if let Some(h) = height {
                 bar = bar.girth(h.clone().iced());
             }
+            let fill = *color;
+            let track = *background;
             bar = bar.style(move |theme| {
                 let mut style = iced::widget::progress_bar::primary(theme);
+                if let Some(fill) = fill {
+                    style.bar = iced::Background::Color(fill);
+                }
+                if let Some(track) = track {
+                    style.background = iced::Background::Color(track);
+                }
                 style.background = style.background.scale_alpha(opacity);
                 style.bar = style.bar.scale_alpha(opacity);
                 style.border.color = style.border.color.scale_alpha(opacity);
@@ -1885,15 +1953,19 @@ pub(crate) fn build_node_opacity(
         )
         .opacity(opacity)
         .into()),
-        // Hairline: theme border color, full-width by rule design.
-        WidgetNode::Separator { height } => Ok(iced::widget::rule::horizontal(height.max(1.0))
-            .style(move |_| iced::widget::rule::Style {
-                color: theme::border_color().scale_alpha(opacity),
-                radius: 0.0.into(),
-                fill_mode: iced::widget::rule::FillMode::Full,
-                snap: true,
-            })
-            .into()),
+        // Hairline: themed border color unless :color() overrides.
+        // Full-width by rule design.
+        WidgetNode::Separator { height, color } => {
+            let color = color.unwrap_or_else(theme::border_color);
+            Ok(iced::widget::rule::horizontal(height.max(1.0))
+                .style(move |_| iced::widget::rule::Style {
+                    color: color.scale_alpha(opacity),
+                    radius: 0.0.into(),
+                    fill_mode: iced::widget::rule::FillMode::Full,
+                    snap: true,
+                })
+                .into())
+        }
     }
 }
 
@@ -2042,6 +2114,8 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
             "padding",
             "color",
             "background",
+            "border",
+            "border_width",
             "radius",
             "id",
             "key",
@@ -2079,12 +2153,26 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
                     &["text", "row", "column", "button", "progress"],
                 )?,
             ),
-            ("color", setter(lua, "color", &["text", "icon", "button"])?),
+            (
+                "color",
+                setter(
+                    lua,
+                    "color",
+                    &["text", "icon", "button", "progress", "separator"],
+                )?,
+            ),
         ],
     )?;
     let mt_icon = mt_for(
         lua,
-        &[("color", setter(lua, "color", &["text", "icon", "button"])?)],
+        &[(
+            "color",
+            setter(
+                lua,
+                "color",
+                &["text", "icon", "button", "progress", "separator"],
+            )?,
+        )],
     )?;
     let mt_rowcol = mt_for(
         lua,
@@ -2128,7 +2216,18 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
                 )?,
             ),
             ("padding", setter(lua, "padding", &["button"])?),
-            ("color", setter(lua, "color", &["text", "icon", "button"])?),
+            (
+                "background",
+                setter(lua, "background", &["container", "button", "progress"])?,
+            ),
+            (
+                "color",
+                setter(
+                    lua,
+                    "color",
+                    &["text", "icon", "button", "progress", "separator"],
+                )?,
+            ),
         ],
     )?;
     let mt_progress = mt_for(
@@ -2150,10 +2249,35 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
                     &["text", "row", "column", "button", "progress"],
                 )?,
             ),
+            (
+                "color",
+                setter(
+                    lua,
+                    "color",
+                    &["text", "icon", "button", "progress", "separator"],
+                )?,
+            ),
+            (
+                "background",
+                setter(lua, "background", &["container", "button", "progress"])?,
+            ),
         ],
     )?;
     let mt_bare = mt_for(lua, &[])?;
-    let mt_separator = mt_for(lua, &[("height", setter(lua, "height", &["separator"])?)])?;
+    let mt_separator = mt_for(
+        lua,
+        &[
+            ("height", setter(lua, "height", &["separator"])?),
+            (
+                "color",
+                setter(
+                    lua,
+                    "color",
+                    &["text", "icon", "button", "progress", "separator"],
+                )?,
+            ),
+        ],
+    )?;
     lua.globals().set("_riced_ui_mt_text", mt_text.clone())?;
     lua.globals()
         .set("_riced_ui_mt_rowcol", mt_rowcol.clone())?;
@@ -2223,8 +2347,13 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
         if kind == "container" {
             methods.extend([
                 ("padding", setter(lua, "padding", &["container"])?),
-                ("background", setter(lua, "background", &["container"])?),
+                (
+                    "background",
+                    setter(lua, "background", &["container", "button", "progress"])?,
+                ),
                 ("radius", setter(lua, "radius", &["container"])?),
+                ("border", setter(lua, "border", &["container"])?),
+                ("border_width", setter(lua, "border_width", &["container"])?),
             ]);
         }
         let mt = mt_for(lua, &methods)?;
@@ -5779,6 +5908,8 @@ mod tests {
                 value: 0.5,
                 width: NodeLength::Fixed(200.0),
                 height: None,
+                color: None,
+                background: None,
             }
         );
         let value: mlua::Value = lua
@@ -5809,6 +5940,7 @@ mod tests {
                 height: None,
                 padding: Some(4.0),
                 color: None,
+                background: None,
             }
         );
         // Chained setter AFTER a failing pcall in the same state:
@@ -5863,6 +5995,8 @@ mod tests {
                 value: 0.5,
                 width: NodeLength::Fixed(200.0),
                 height: Some(NodeLength::Fixed(12.0)),
+                color: None,
+                background: None,
             }
         );
         let value: mlua::Value = lua
@@ -5904,6 +6038,8 @@ mod tests {
                 value: 0.5,
                 width: NodeLength::Fill,
                 height: None,
+                color: None,
+                background: None,
             }
         );
         // Case-insensitive; chains on row/text too.
@@ -5968,6 +6104,8 @@ mod tests {
             value: 0.5,
             width: NodeLength::Fill,
             height: Some(NodeLength::Fill),
+            color: None,
+            background: None,
         };
         let _ = build_node(&fill, 13.0, None).expect("builds");
     }
@@ -6141,6 +6279,8 @@ mod tests {
                     value: 0.5,
                     width: NodeLength::Fixed(120.0),
                     height: None,
+                    color: None,
+                    background: None,
                 }],
                 width: NodeLength::Shrink,
                 height: NodeLength::Shrink,
@@ -6158,6 +6298,8 @@ mod tests {
                 value: 0.5,
                 width: NodeLength::Fixed(200.0),
                 height: None,
+                color: None,
+                background: None,
             }
         );
         let bad: Table = lua
@@ -6303,6 +6445,7 @@ mod tests {
                         height: None,
                         padding: None,
                         color: None,
+                        background: None,
                     },
                     WidgetNode::Text {
                         content: "7".to_string(),
@@ -6375,13 +6518,19 @@ mod tests {
                 height: None,
                 padding: None,
                 color: None,
+                background: None,
             },
             WidgetNode::Progress {
                 value: 1.5,
                 width: NodeLength::Fixed(120.0),
                 height: None,
+                color: None,
+                background: None,
             },
-            WidgetNode::Separator { height: 2.0 },
+            WidgetNode::Separator {
+                height: 2.0,
+                color: None,
+            },
         ] {
             let _ = build_node(&node, size, no_msg).expect("builds");
         }
@@ -6393,6 +6542,7 @@ mod tests {
             height: None,
             padding: None,
             color: None,
+            background: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
     }
@@ -6410,8 +6560,123 @@ mod tests {
         ] {
             let value: Value = lua.load(src).eval().expect("eval");
             let node = parse_node(&value).expect("parse");
-            assert_eq!(node, WidgetNode::Separator { height }, "{src}");
+            assert_eq!(
+                node,
+                WidgetNode::Separator {
+                    height,
+                    color: None
+                },
+                "{src}"
+            );
         }
+    }
+
+    #[test]
+    fn style_setters_parse_build_and_gate_by_type() {
+        use iced::Color;
+        let lua = new_widget_lua().expect("sandbox");
+        // Container border: color implies 1px, explicit width wins,
+        // bare width without color paints nothing (width kept, no color).
+        for (src, width, has_color) in [
+            (
+                r##"return ui.container(ui.text("x")):border("#ff0000")"##,
+                1.0,
+                true,
+            ),
+            (
+                r##"return ui.container(ui.text("x")):border("#ff0000"):border_width(3)"##,
+                3.0,
+                true,
+            ),
+            (
+                r##"return ui.container(ui.text("x")):border_width(3)"##,
+                3.0,
+                false,
+            ),
+        ] {
+            let value: Value = lua.load(src).eval().expect("eval");
+            match parse_node(&value).expect("parse") {
+                WidgetNode::Container {
+                    border,
+                    border_width,
+                    ..
+                } => {
+                    assert_eq!(border_width, width, "{src}");
+                    assert_eq!(border.is_some(), has_color, "{src}");
+                    if has_color {
+                        assert_eq!(border, Some(Color::from_rgb(1.0, 0.0, 0.0)));
+                    }
+                }
+                other => panic!("expected container, got {other:?}"),
+            }
+        }
+        // Button background, progress fill/track, separator color parse.
+        let value: Value = lua
+            .load(r##"return ui.button("go", "run"):background("#00ff00")"##)
+            .eval()
+            .expect("eval");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Button {
+                background: Some(_),
+                ..
+            }
+        ));
+        let value: Value = lua
+            .load(r##"return ui.progress(0.5):color("#ff0000"):background("#0000ff")"##)
+            .eval()
+            .expect("eval");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Progress {
+                color: Some(_),
+                background: Some(_),
+                ..
+            }
+        ));
+        let value: Value = lua
+            .load(r##"return ui.separator():color({r=1, g=0, b=0})"##)
+            .eval()
+            .expect("eval");
+        assert!(matches!(
+            parse_node(&value).expect("parse"),
+            WidgetNode::Separator { color: Some(_), .. }
+        ));
+        // Styled trees build headless (exercises the new style closures).
+        for src in [
+            r##"return ui.container(ui.text("x")):background("#112233"):border("#ff0000"):radius(8)"##,
+            r##"return ui.button("go", "run"):background("#00ff00"):color("#000000")"##,
+            r##"return ui.progress(0.5):color("#ff0000"):background("#0000ff")"##,
+            r##"return ui.separator():color("#ff0000")"##,
+        ] {
+            let value: Value = lua.load(src).eval().expect("eval");
+            let node = parse_node(&value).expect("parse");
+            let _ = build_node(&node, 13.0, None).expect("builds");
+        }
+        // Wrong-type style values error naming the field (setter
+        // exists, so eval succeeds and parse rejects).
+        let value: Value = lua
+            .load(r##"return ui.button("go", "run"):background(42)"##)
+            .eval()
+            .expect("eval");
+        assert!(parse_node(&value).is_err());
+        let value: Value = lua
+            .load(r##"return ui.separator():color(42)"##)
+            .eval()
+            .expect("eval");
+        assert!(parse_node(&value).is_err());
+        // Setters stay type-gated: background isn't a text setter,
+        // border isn't a button setter (eval-time errors).
+        assert!(
+            lua.load(r##"return ui.text("x"):background("#fff")"##)
+                .eval::<Value>()
+                .is_err()
+        );
+        assert!(
+            lua.load(r##"return ui.button("go", "run"):border("#fff")"##)
+                .eval::<Value>()
+                .is_err()
+        );
     }
 
     #[test]
@@ -6701,6 +6966,7 @@ mod tests {
                 height: None,
                 padding: None,
                 color: None,
+                background: None,
             },
             WidgetNode::Button {
                 label: "[2]".to_string(),
@@ -6709,6 +6975,7 @@ mod tests {
                 height: None,
                 padding: None,
                 color: None,
+                background: None,
             },
         ];
         let mut rt = MotionRuntime::new();
@@ -6742,6 +7009,7 @@ mod tests {
                     height: None,
                     padding: None,
                     color: None,
+                    background: None,
                 },
             )],
         );

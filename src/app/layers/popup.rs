@@ -942,6 +942,7 @@ mod tests {
                                 height: None,
                                 padding: None,
                                 color: None,
+                                background: None,
                             },
                         )
                     })

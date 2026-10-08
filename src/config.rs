@@ -843,11 +843,20 @@ pub fn config_path() -> PathBuf {
 /// - `ui.button(label, action)`: per-widget MouseArea — clicking calls
 ///   that widget's `on_action(action)` directly (missing `on_action`
 ///   is a silent no-op), never the slot popup/`on_press` fallback.
+///   `:background()` repaints the resting surface; hover/press stay
+///   themed so clicks still read.
 /// - `ui.progress(0.0-1.0 [, width])`: bar, clamped, 120px default.
+///   `:color()` repaints the fill, `:background()` the track.
 /// - `ui.spinner()`: loading ring for slow fetches — return it first,
 ///   swap in cached data on later ticks (see clinepass seed).
-/// - `ui.separator()`: horizontal hairline in the theme border color.
-///   Always full-width; only `:height()` chains (thickness, 1px default).
+/// - `ui.separator()`: horizontal hairline, theme border color
+///   unless `:color()` overrides. Always full-width.
+/// - `ui.container(child)`: the styling base — `:background()`,
+///   `:border()` (implies 1px; `:border_width()` adjusts, bare width
+///   without a color paints nothing), `:radius()`, `:padding()`.
+///   Compose it (directly or via `iced.define`) for cards, chips and
+///   panels: `ui.container(body):background(theme.surface)`
+///   `:border(theme.outline):radius(8)`.
 ///
 /// ## Chaining (iced-spelled setters)
 ///
@@ -872,13 +881,16 @@ pub fn config_path() -> PathBuf {
 /// Setters per type: `text` → `:size()`, `:width()`, `:height()`,
 /// `:color()`; `row`/`column` → `:spacing()`, `:width()`, `:height()`;
 /// `button` → `:width()`, `:height()`, `:padding()`, `:color()` (label
-/// tint only — surfaces stay themed); `progress` → `:width()` (same as
-/// the second constructor arg), `:height()` (bar thickness = iced
-/// `girth`); `separator` → `:height()` only; `icon` → `:color()` only
-/// (tint via surrounding text color). `:color()` takes `"#rgb"` /
-/// `"#rrggbb"` / `"#rrggbbaa"` or `{r, g, b[, a]}` 0–1 tables;
-/// unset stays themed. Calling a setter the type doesn't own (e.g.
-/// `:padding()` on progress) fails at eval — typos stay visible.
+/// tint), `:background()` (resting surface); `progress` → `:width()`
+/// (same as the second constructor arg), `:height()` (bar thickness =
+/// iced `girth`), `:color()` (fill), `:background()` (track);
+/// `separator` → `:height()`, `:color()`; `container` → `:width()`,
+/// `:height()`, `:padding()`, `:background()`, `:radius()`,
+/// `:border()`, `:border_width()`; `icon` → `:color()` only (tint via
+/// surrounding text color). `:color()`/`:background()`/`:border()`
+/// take `"#rgb"` / `"#rrggbb"` / `"#rrggbbaa"` or `{r, g, b[, a]}` 0–1
+/// tables; unset stays themed. Calling a setter the type doesn't own
+/// (e.g. `:padding()` on progress) fails at eval — typos stay visible.
 /// Wrong-typed values error at parse naming the field.
 ///
 /// ## List transitions (QML-`ListView` add/remove)
