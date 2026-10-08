@@ -551,6 +551,7 @@ impl Setting {
                 })
                 .width(Length::Fill)
                 .height(Length::Shrink);
+                col = col.push(Space::new().height(Length::Fixed(8.0)));
                 col = col.push(section(
                     "Arrange your panel",
                     "Drag onto a widget to swap, or onto free slot space to move. Click a widget to edit its settings below. Escape cancels a drag.",

@@ -356,6 +356,13 @@ impl canvas::Program<Plant> for Preview {
             .filter(|d| d.bar == self.bar && d.snapshot == self.slots);
         let target = drag.and_then(|d| self.hit(d.cursor));
         let paint = |frame: &mut Frame, rect: Rectangle, fill, outline| {
+            // Inset by 1px: the 1.5px stroke is centered on the path, so
+            // without this the outer half is clipped by the canvas edge
+            // and corner arcs on border regions look cut off.
+            let rect = Rectangle::new(
+                Point::new(rect.x + 1.0, rect.y + 1.0),
+                Size::new((rect.width - 2.0).max(1.0), (rect.height - 2.0).max(1.0)),
+            );
             let path = Path::rounded_rectangle(rect.position(), rect.size(), 8.0.into());
             frame.fill(&path, fill);
             frame.stroke(&path, Stroke::default().with_color(outline).with_width(1.5));
