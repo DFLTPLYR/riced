@@ -4066,6 +4066,7 @@ dependencies = [
  "material-colors",
  "mlua",
  "regex",
+ "resvg",
  "rfd",
  "serde",
  "serde_json",

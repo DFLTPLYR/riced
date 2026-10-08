@@ -17,8 +17,8 @@
 //! Icon theme lookup follows the freedesktop layout (`$XDG_DATA_HOME`
 //! and `$XDG_DATA_DIRS` `icons/` trees, legacy `~/.icons`, legacy
 //! `/usr/share/pixmaps`), every theme with `hicolor` last as the
-//! mandated fallback. `scalable/` (SVG) is skipped — nothing here
-//! rasterizes vectors, so those entries can never decode.
+//! mandated fallback. SVG entries rasterize via resvg (no system
+//! fonts — text inside icons may not render, which is fine for glyphs).
 
 use crate::app::{NotifyEvent, Plant};
 use iced::{Task as Command, futures::channel::mpsc};
@@ -154,12 +154,20 @@ fn hint_image_data(
 }
 
 /// Plain image file (`image-path` hint or `app_icon`): absolute paths
-/// (and `file://` URIs) only. Bare theme names go through
-/// [`theme_icon_file`] instead.
+/// (and `file://` URIs) only. SVG goes through [`rasterize_svg`];
+/// bare theme names go through [`theme_icon_file`] instead.
 fn image_file(path: &str) -> Option<iced::widget::image::Handle> {
     let path = path.strip_prefix("file://").unwrap_or(path);
     if !path.starts_with('/') {
         return None;
+    }
+    if std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext == "svg")
+    {
+        return std::fs::read(path)
+            .ok()
+            .and_then(|data| rasterize_svg(&data));
     }
     let img = image::open(path).ok()?;
     let rgba = img.to_rgba8();
@@ -171,6 +179,68 @@ fn image_file(path: &str) -> Option<iced::widget::image::Handle> {
         w,
         h,
         bytes::Bytes::from(rgba.into_raw()),
+    ))
+}
+
+/// Convert premultiplied RGBA (tiny-skia's working space) to straight
+/// RGBA in place. Returns whether any pixel is visible; fully
+/// transparent buffers report `false` so callers can fall back.
+fn straighten_rgba(rgba: &mut [u8]) -> bool {
+    let mut visible = false;
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        visible = true;
+        if a != 255 {
+            px[0] = ((px[0] as u32 * 255 + a / 2) / a).min(255) as u8;
+            px[1] = ((px[1] as u32 * 255 + a / 2) / a).min(255) as u8;
+            px[2] = ((px[2] as u32 * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
+    visible
+}
+/// Rasterize SVG bytes to an iced image handle, fitting within 96px.
+/// `None` on parse/render failure or degenerate sizing. No system
+/// fonts are loaded (matching the `resvg/text` feature set already in
+/// the tree), so text inside icons may come out empty — acceptable for
+/// glyphs, which is what notification icons are.
+fn rasterize_svg(data: &[u8]) -> Option<iced::widget::image::Handle> {
+    let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return None;
+    }
+    const FIT: f32 = 96.0;
+    let scale = (FIT / size.width()).min(FIT / size.height());
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let (w, h) = (
+        (size.width() * scale).ceil() as u32,
+        (size.height() * scale).ceil() as u32,
+    );
+    if w == 0 || h == 0 || w > 512 || h > 512 {
+        return None;
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    // tiny-skia works premultiplied; unpremultiply to straight RGBA.
+    let mut rgba = pixmap.take();
+    if !straighten_rgba(&mut rgba) {
+        // Nothing painted (empty document, display:none, …) — callers
+        // fall back to text instead of an empty image box.
+        return None;
+    }
+    Some(iced::widget::image::Handle::from_rgba(
+        w,
+        h,
+        bytes::Bytes::from(rgba),
     ))
 }
 
@@ -222,9 +292,10 @@ const THEME_SIZES: [&str; 9] = [
     "48x48", "32x32", "64x64", "24x24", "22x22", "16x16", "128x128", "256x256", "512x512",
 ];
 const THEME_CONTEXTS: [&str; 2] = ["apps", "mimetypes"];
-/// Raster formats only — `image::open` decides, so anything it can't
-/// decode (SVG, corrupt files) just misses.
-const THEME_EXTS: [&str; 2] = ["png", "xpm"];
+/// PNG first (exact pixels, cheapest), then SVG (rasterized below),
+/// then legacy XPM — `image_file`/`rasterize_svg` decide per format,
+/// so anything undecodable just misses.
+const THEME_EXTS: [&str; 3] = ["png", "svg", "xpm"];
 
 /// Resolve a freedesktop icon theme *name* (e.g. `firefox` — never a
 /// path) to a file: flat legacy files first, then every theme with
@@ -509,9 +580,9 @@ mod tests {
         assert!(image_of(&HashMap::new(), "themed-name").is_none());
         assert!(image_of(&HashMap::new(), "").is_none());
     }
-
     /// Fake icon tree for lookup tests: `$base/<theme>/48x48/apps/<name>.png`
-    /// plus a legacy `$base/pixmaps.png`, all real decodable PNGs.
+    /// plus a legacy `$base/pixmaps.png`, all real decodable PNGs, plus
+    /// an SVG-only icon to prove the rasterize chain.
     /// One tree per test — the suite runs tests in parallel.
     fn theme_fixture(tag: &str) -> std::path::PathBuf {
         let base = std::env::temp_dir().join(format!("riced-icons-{}-{tag}", std::process::id()));
@@ -523,10 +594,55 @@ mod tests {
                 .save(dir.join("testicon.png"))
                 .unwrap();
         }
+        // An icon present as both PNG and SVG resolves to the PNG
+        // (exact pixels beat re-rasterized vectors).
+        image::RgbImage::new(8, 8)
+            .save(
+                base.join("custom")
+                    .join("48x48")
+                    .join("apps")
+                    .join("vectors.png"),
+            )
+            .unwrap();
+        std::fs::write(
+            base
+                .join("custom")
+                .join("48x48")
+                .join("apps")
+                .join("vectors.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16" fill="red"/></svg>"#,
+        )
+        .unwrap();
         image::RgbImage::new(8, 8)
             .save(base.join("legacy.png"))
             .unwrap();
         base
+    }
+
+    #[test]
+    fn straighten_rgba_unpremultiplies_and_reports_visibility() {
+        // Half-transparent premultiplied red -> straight red, kept alpha.
+        let mut half = vec![128u8, 0, 0, 128];
+        assert!(straighten_rgba(&mut half));
+        assert_eq!(half, vec![255, 0, 0, 128]);
+        // Opaque pixels pass through untouched.
+        let mut opaque = vec![10u8, 20, 30, 255];
+        assert!(straighten_rgba(&mut opaque));
+        assert_eq!(opaque, vec![10, 20, 30, 255]);
+        // Fully transparent buffers report invisible.
+        let mut empty = vec![0u8, 0, 0, 0];
+        assert!(!straighten_rgba(&mut empty));
+    }
+
+    #[test]
+    fn rasterize_svg_renders_and_rejects() {
+        // 16x16 red square scales to fit 96px.
+        let square = br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16" fill="red"/></svg>"#;
+        assert!(rasterize_svg(square).is_some());
+        // Malformed input and empty documents never panic.
+        assert!(rasterize_svg(b"not svg at all").is_none());
+        assert!(rasterize_svg(b"").is_none());
+        assert!(rasterize_svg(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).is_none());
     }
 
     #[test]
@@ -540,6 +656,26 @@ mod tests {
         assert!(theme_icon_path_in("legacy", &bases).is_some());
         // Theme-specific hits win over hicolor.
         assert!(found.starts_with(base.join("custom")));
+        // PNG wins over SVG for the same icon name.
+        let vectors = theme_icon_path_in("vectors", &bases).expect("vectors hit");
+        assert_eq!(
+            vectors.extension().and_then(|ext| ext.to_str()),
+            Some("png")
+        );
+        // SVG-only icons resolve and rasterize end to end.
+        std::fs::remove_file(
+            base.join("custom")
+                .join("48x48")
+                .join("apps")
+                .join("vectors.png"),
+        )
+        .unwrap();
+        let svg_only = theme_icon_path_in("vectors", &bases).expect("svg hit");
+        assert_eq!(
+            svg_only.extension().and_then(|ext| ext.to_str()),
+            Some("svg")
+        );
+        assert!(image_file(&svg_only.to_string_lossy()).is_some());
         let _ = std::fs::remove_dir_all(&base);
     }
 
