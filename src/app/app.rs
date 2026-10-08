@@ -988,10 +988,29 @@ impl Plots {
                     cfg.theme.name == "dynamic" && self.config.theme.name != "dynamic";
                 self.config = cfg;
                 Self::sync_wallpapers(&self.config, &mut self.wallpapers);
-                if images_changed || switched_to_dynamic {
-                    return self.arm_regen_theme();
+                // Bars resolve [[bar]] entries once at spawn; re-resolve
+                // here so slot/align/geometry edits apply live (anchor
+                // changes still need a respawn). On-disk wins by contract.
+                // Placement ids regenerate, so Lua states rebuild below
+                // (like WidgetsReloaded) and open popups dismiss.
+                let bars = Top::resync_bars_from_config(self);
+                let mut cmds = Vec::new();
+                for bar_id in bars {
+                    cmds.push(Top::apply_layout(self, bar_id));
                 }
-                Command::none()
+                Top::init_widget_lua(self);
+                for id in self.popups.keys().copied().collect::<Vec<_>>() {
+                    cmds.push(Popup::handle_dismiss(self, id));
+                }
+                if images_changed || switched_to_dynamic {
+                    cmds.push(self.arm_regen_theme());
+                    return Command::batch(cmds);
+                }
+                if cmds.is_empty() {
+                    Command::none()
+                } else {
+                    Command::batch(cmds)
+                }
             }
             Plant::Config(ConfigEvent::WidgetsReloaded(defs)) => {
                 // Widgets dir changed under us: swap the live registry

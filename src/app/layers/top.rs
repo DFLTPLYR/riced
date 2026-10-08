@@ -3735,6 +3735,25 @@ impl Top {
         }
     }
 
+    /// Re-resolve every live bar from its `[[bar]]` config entry
+    /// (slot widgets, aligns, geometry). Bars whose entry vanished keep
+    /// their current layout. Returns the touched bar ids. Pure
+    /// state-sync (no rendering); callers follow with `apply_layout`
+    /// + `init_widget_lua` since placement ids regenerate.
+    pub(crate) fn resync_bars_from_config(plots: &mut Plots) -> Vec<window::Id> {
+        let bars: Vec<window::Id> = plots.tops.keys().copied().collect();
+        for bar_id in &bars {
+            let entry = plots
+                .tops
+                .get(bar_id)
+                .and_then(|top| plots.config.bar.get(top.bar_index).cloned());
+            if let (Some(entry), Some(top)) = (entry, plots.tops.get_mut(bar_id)) {
+                top.local = TopLocal::from(&entry);
+            }
+        }
+        bars
+    }
+
     /// (Re)build runtimes for every placement and render once, so
     /// bars populate immediately. Called at startup and after every
     /// definition rescan (which clears the old states).
@@ -5191,6 +5210,52 @@ mod tests {
         let ids: Vec<&String> = local.widgets.iter().flatten().map(|p| &p.id).collect();
         assert_eq!(ids.len(), 3);
         assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+
+    #[test]
+    fn resync_bars_applies_edited_slot_widgets() {
+        use crate::app::Plots;
+        use iced_wayland_subscriber::shell::channel;
+        let (_tx, rx) = channel();
+        let mut plots = Plots::new(rx);
+        let bar = window::Id::unique();
+        plots
+            .tops
+            .insert(bar, Top::with_config(0, Anchor::Top, TopLocal::default()));
+        // Edited config: clock with an override plus a bare stats entry.
+        plots.config.bar = vec![crate::config::TopConfig {
+            slots: 2,
+            widgets: vec![
+                crate::config::SlotWidgets::Many(vec![crate::config::SlotEntry::Full(
+                    crate::config::WidgetPlacement {
+                        name: "clock".to_string(),
+                        size: Some(16.0),
+                        ..Default::default()
+                    },
+                )]),
+                crate::config::SlotWidgets::Many(vec![crate::config::SlotEntry::Name(
+                    "stats".to_string(),
+                )]),
+            ],
+            ..Default::default()
+        }];
+        assert_eq!(Top::resync_bars_from_config(&mut plots), vec![bar]);
+        let top = plots.tops.get(&bar).expect("bar kept");
+        assert_eq!(top.local.widgets.len(), 2);
+        let clock = &top.local.widgets[0][0];
+        assert_eq!(clock.name, "clock");
+        assert_eq!(clock.size, Some(16.0));
+        assert!(!clock.id.is_empty(), "placements get stable ids");
+        let stats = &top.local.widgets[1][0];
+        assert_eq!(stats.name, "stats");
+        assert!(!stats.id.is_empty());
+        // Unknown bar index keeps its layout instead of clearing.
+        plots.tops.get_mut(&bar).expect("bar kept").bar_index = 99;
+        Top::resync_bars_from_config(&mut plots);
+        assert_eq!(
+            plots.tops.get(&bar).expect("bar kept").local.widgets.len(),
+            2
+        );
     }
 
     fn node_has_icon(node: &WidgetNode) -> bool {
