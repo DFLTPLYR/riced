@@ -50,20 +50,18 @@ pub struct Setting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingPage {
     #[default]
-    Menu,
-    Panel,
     ContextMenu,
+    Panel,
     Wallpaper,
     Theme,
     Animation,
 }
 
 impl SettingPage {
-    fn all() -> [Self; 6] {
+    fn all() -> [Self; 5] {
         [
-            Self::Menu,
-            Self::Panel,
             Self::ContextMenu,
+            Self::Panel,
             Self::Wallpaper,
             Self::Theme,
             Self::Animation,
@@ -72,7 +70,6 @@ impl SettingPage {
 
     fn title(self) -> &'static str {
         match self {
-            Self::Menu => "Menu",
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
             Self::Wallpaper => "Wallpaper",
@@ -83,7 +80,6 @@ impl SettingPage {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Menu => "Size and style the shell's menu controls.",
             Self::Panel => "Choose a bar, arrange its widgets, and fine-tune its appearance.",
             Self::ContextMenu => "Customize the menu opened by right-clicking the wallpaper.",
             Self::Wallpaper => "Arrange images across your displays and adjust their placement.",
@@ -170,7 +166,6 @@ impl Setting {
     /// via `ConfigEvent::Patch`, so every layer updates on the next redraw.
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
-            SettingPage::Menu => self.menu_content(plots),
             SettingPage::Panel => self.panel_content(id, plots),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),
@@ -179,54 +174,18 @@ impl Setting {
         }
     }
 
-    fn menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        let c = &plots.config.composable;
+    fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
+        use crate::config::ComposableKind;
         column![
             section(
-                "Dimensions",
-                "Overall size of the menu control.",
-                column![
-                    slider_row(
-                        "Width (px)".into(),
-                        c.menu.width,
-                        80.0..=400.0,
-                        ConfigPatch::MenuWidth
-                    ),
-                    slider_row(
-                        "Height (px)".into(),
-                        c.menu.height,
-                        40.0..=200.0,
-                        ConfigPatch::MenuHeight
-                    ),
-                ]
-                .spacing(16)
-                .into()
+                "Menu surface",
+                "Lua supplies sizing and appearance; Rust supplies the entries.",
+                Self::composable_editor(plots, ComposableKind::ContextMenu)
             ),
             section(
-                "Spacing & corners",
-                "Padding is the inside inset; spacing separates child controls.",
-                column![
-                    slider_row(
-                        "Inside padding (px)".into(),
-                        c.menu.padding,
-                        0.0..=32.0,
-                        ConfigPatch::MenuPadding
-                    ),
-                    slider_row(
-                        "Child spacing (px)".into(),
-                        c.menu.spacing,
-                        0.0..=32.0,
-                        ConfigPatch::MenuSpacing
-                    ),
-                    slider_row(
-                        "Corner radius (px)".into(),
-                        c.menu.rounding,
-                        0.0..=20.0,
-                        ConfigPatch::MenuRounding
-                    ),
-                ]
-                .spacing(16)
-                .into()
+                "Menu entries",
+                "Each entry is rendered by this Lua app with label/action host props.",
+                Self::composable_editor(plots, ComposableKind::ContextMenuItem)
             ),
         ]
         .spacing(16)
@@ -234,65 +193,96 @@ impl Setting {
         .into()
     }
 
-    fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        let c = &plots.config.composable;
-        column![
-            section(
-                "Menu surface",
-                "Control the overall width, inside padding, and gaps between entries.",
-                column![
-                    slider_row(
-                        "Width (px)".into(),
-                        c.context_menu.width,
-                        80.0..=400.0,
-                        ConfigPatch::ContextMenuWidth
-                    ),
-                    slider_row(
-                        "Inside padding (px)".into(),
-                        c.context_menu.padding,
-                        0.0..=32.0,
-                        ConfigPatch::ContextMenuPadding
-                    ),
-                    slider_row(
-                        "Entry spacing (px)".into(),
-                        c.context_menu.spacing,
-                        0.0..=32.0,
-                        ConfigPatch::ContextMenuSpacing
-                    ),
-                    slider_row(
-                        "Corner radius (px)".into(),
-                        c.context_menu.rounding,
-                        0.0..=20.0,
-                        ConfigPatch::ContextMenuRounding
-                    ),
-                ]
-                .spacing(16)
-                .into()
-            ),
-            section(
-                "Menu entries",
-                "Adjust the padding and corners of individual clickable items.",
-                column![
-                    slider_row(
-                        "Item padding (px)".into(),
-                        c.context_menu_item.padding,
-                        0.0..=32.0,
-                        ConfigPatch::ContextMenuItemPadding
-                    ),
-                    slider_row(
-                        "Item corner radius (px)".into(),
-                        c.context_menu_item.rounding,
-                        0.0..=20.0,
-                        ConfigPatch::ContextMenuItemRounding
-                    ),
-                ]
-                .spacing(16)
-                .into()
-            ),
-        ]
-        .spacing(8)
-        .width(Length::Fill)
-        .into()
+    fn composable_editor(
+        plots: &Plots,
+        kind: crate::config::ComposableKind,
+    ) -> Element<'static, Plant> {
+        use crate::config::{ComposableKind, PropValue};
+        let config = plots.config.composable.get(kind);
+        let host = match kind {
+            ComposableKind::ContextMenu => {
+                super::background::context_menu_host(&plots.config.composable.context_menu_item)
+            }
+            _ => serde_json::json!({ "label": "Preview", "action": "preview" }),
+        };
+        let rendered = plots.composable_runtime.borrow_mut().render(
+            &format!("settings/{kind:?}"),
+            config,
+            host,
+            &plots.config.theme,
+            plots.components_mtime,
+        );
+        let mut props = config.props.clone();
+        if let Some(rendered) = rendered
+            && let Some(values) = rendered.props.as_object()
+        {
+            for (key, value) in values {
+                if ["label", "action", "_item_revision"].contains(&key.as_str()) {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_value::<PropValue>(value.clone()) {
+                    props.entry(key.clone()).or_insert(value);
+                }
+            }
+        }
+        let source = text_input("component.lua", &config.src)
+            .padding(6)
+            .style(prop_input_style)
+            .on_input(move |src| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::ComposableSource(kind, src)))
+            });
+        let mut col = column![prop_row(
+            "Source".into(),
+            Some("Relative to components/; absolute paths also work.".into()),
+            source.into(),
+            None
+        ),]
+        .spacing(10);
+        for (key, value) in props {
+            let reset = config.props.contains_key(&key).then(|| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::ComposableProp(
+                    kind,
+                    key.clone(),
+                    None,
+                )))
+            });
+            let key_for_control = key.clone();
+            let patch = move |value| {
+                Plant::Config(ConfigEvent::Patch(ConfigPatch::ComposableProp(
+                    kind,
+                    key_for_control.clone(),
+                    Some(value),
+                )))
+            };
+            let control: Element<'static, Plant> = match value {
+                PropValue::Bool(value) => Checkbox::new(value)
+                    .on_toggle(move |v| patch(PropValue::Bool(v)))
+                    .into(),
+                PropValue::Number(value) => {
+                    let minimum = if key == "width" || key == "height" {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    spin_box(value, minimum..=1_000_000.0, 1.0, 2, move |v| {
+                        patch(PropValue::Number(v))
+                    })
+                    .into()
+                }
+                PropValue::Text(value) => text_input("", &value)
+                    .padding(6)
+                    .style(prop_input_style)
+                    .on_input(move |v| patch(PropValue::Text(v)))
+                    .into(),
+            };
+            let subtitle = if key == "height" && matches!(kind, ComposableKind::ContextMenu) {
+                "Fixed height when auto_sizing is off. Reset inherits the Lua default."
+            } else {
+                "Reset clears the override and inherits the Lua default."
+            };
+            col = col.push(prop_row(key, Some(subtitle.into()), control, reset));
+        }
+        col.width(Length::Fill).into()
     }
 
     /// Panel page: picker row of bars on top, controls for the picked bar
@@ -1662,45 +1652,8 @@ fn swatch(color: iced::Color, border: iced::Color) -> Element<'static, Plant> {
     .into()
 }
 
-/// Label + slider bound to one config leaf: reads the live value, writes back
-/// via `ConfigEvent::Patch`. Fully owned element, so pages compose freely.
-/// The variant constructor doubles as the patch fn (`ConfigPatch::MenuWidth`
-/// is `fn(f32) -> ConfigPatch`).
-fn slider_row(
-    label: String,
-    value: f32,
-    range: RangeInclusive<f64>,
-    ctor: fn(f32) -> ConfigPatch,
-) -> Element<'static, Plant> {
-    let on_change = move |v: f64| Plant::Config(ConfigEvent::Patch(ctor(v as f32)));
-    container(
-        column![
-            row![
-                text(label)
-                    .size(14)
-                    .color(theme::text())
-                    .width(Length::Fill),
-                spin_box(value as f64, range.clone(), 1.0, 0, on_change)
-                    .width(Length::Fixed(120.0))
-            ]
-            .spacing(12)
-            .align_y(iced::Alignment::Center),
-            slider(range, value as f64, move |v| {
-                Plant::Config(ConfigEvent::Patch(ctor(v as f32)))
-            })
-            // Drags preview in live memory; release persists to the config file.
-            .on_release(Plant::Config(ConfigEvent::SaveNow))
-            .width(Length::Fill),
-        ]
-        .spacing(10),
-    )
-    .padding(12)
-    .width(Length::Fill)
-    .into()
-}
-
 /// Label + slider emitting a [`Plant`] directly (per-bar Top controls).
-/// Unlike [`slider_row`], the message is built by closure so any event fits.
+/// The message is built by closure so any event fits.
 /// `release` fires once when the drag ends (currently unused by bars,
 /// which apply live — kept for future release-gated controls).
 fn plant_slider_row(

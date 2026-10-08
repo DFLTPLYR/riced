@@ -2,9 +2,9 @@ use crate::app::app::{PlotInfo, Plots};
 use crate::app::{BackgroundEvent, ConfigEvent, Plant, TopEvent};
 use iced::mouse::Button;
 use iced::widget::image::Image;
-use iced::widget::{Space, button, column, container, stack, text};
+use iced::widget::{Space, container, stack};
 use iced::window;
-use iced::{Element, Fill, Length, Point, Task as Command};
+use iced::{Element, Length, Point, Rectangle, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
@@ -12,7 +12,7 @@ use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::components::contextmenu::contextmenu;
+use super::top::{NodeLength, WidgetNode};
 use crate::composables::panel::panel;
 use crate::composables::panel_window::background_window;
 use crate::theme;
@@ -32,6 +32,234 @@ pub struct SelectionRect {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ComposableConfig, PropValue, SourceComposable, ThemeConfig};
+    use serde_json::json;
+
+    fn seeded_menu(auto_sizing: bool) -> WidgetNode {
+        seeded_menu_props(json!({"auto_sizing": auto_sizing}))
+    }
+
+    fn seeded_menu_props(overrides: serde_json::Value) -> WidgetNode {
+        let mut runtime = crate::lua::LuaRuntime::new().unwrap();
+        let theme = ThemeConfig::default();
+        runtime.publish_theme(&theme).unwrap();
+        runtime.load(crate::config::SEED_CONTEXT_MENU).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/components/context_menu_item.lua");
+        let mut item = SourceComposable::new(&path.to_string_lossy());
+        item.props.insert("padding".into(), PropValue::Number(7.0));
+        let (node, props) = runtime
+            .component_view(&overrides, &context_menu_host(&item), &theme)
+            .unwrap();
+        assert_eq!(
+            props["width"],
+            overrides.get("width").cloned().unwrap_or(json!(178))
+        );
+        node
+    }
+
+    #[test]
+    fn lua_menu_has_fixed_or_automatic_layout_and_host_actions_are_clickable() {
+        use iced::advanced::{Layout, Shell, layout, renderer::Headless, widget::Tree};
+        for auto_sizing in [false, true] {
+            let node = seeded_menu(auto_sizing);
+            validate_menu_size(&node).unwrap();
+            if let WidgetNode::Container { child, .. } = &node {
+                let WidgetNode::Column { children, .. } = child.as_ref() else {
+                    panic!("column")
+                };
+                assert!(
+                    matches!(&children[0], WidgetNode::Button {label, action, padding: Some(7.0), radius: Some(3.0), ..} if label == "Add Top" && action == "add-top")
+                );
+            }
+            let mut element = super::super::top::build_node(
+                &node,
+                12.0,
+                Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
+            )
+            .unwrap();
+            let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                iced::Font::DEFAULT,
+                iced::Pixels(12.0),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            let mut state = Tree::new(&element);
+            let layout = element.as_widget_mut().layout(
+                &mut state,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(800.0, 600.0)),
+            );
+            assert_eq!(layout.size().width, 178.0);
+            if auto_sizing {
+                assert!(layout.size().height > 0.0 && layout.size().height < 92.0);
+            } else {
+                assert_eq!(layout.size().height, 92.0);
+            }
+            let column = &layout.children()[0];
+            let mut messages = Vec::new();
+            let viewport = Rectangle::with_size(iced::Size::new(800.0, 600.0));
+            for child in column.children() {
+                let point = Point::new(
+                    column.bounds().x + child.bounds().x + child.size().width / 2.0,
+                    column.bounds().y + child.bounds().y + child.size().height / 2.0,
+                );
+                for event in [
+                    iced::mouse::Event::ButtonPressed(Button::Left),
+                    iced::mouse::Event::ButtonReleased(Button::Left),
+                ] {
+                    element.as_widget_mut().update(
+                        &mut state,
+                        &iced::Event::Mouse(event),
+                        Layout::new(&layout),
+                        iced::mouse::Cursor::Available(point),
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut Shell::new(&mut messages),
+                        &viewport,
+                    );
+                }
+            }
+            assert!(matches!(
+                &messages[..],
+                [Plant::TopPlot(TopEvent::Sow), Plant::Sprout]
+            ));
+            assert!(context_menu_message("unknown").is_none());
+        }
+    }
+
+    #[test]
+    fn native_fallback_supports_both_sizing_modes() {
+        let mut config = ComposableConfig::default();
+        config
+            .context_menu
+            .props
+            .insert("width".into(), PropValue::Number(250.0));
+        config
+            .context_menu
+            .props
+            .insert("height".into(), PropValue::Number(120.0));
+        let automatic = Background::native_context_menu_node(&config);
+        validate_menu_size(&automatic).unwrap();
+        assert!(matches!(
+            automatic,
+            WidgetNode::Container {
+                height: NodeLength::Shrink,
+                ..
+            }
+        ));
+        config
+            .context_menu
+            .props
+            .insert("auto_sizing".into(), PropValue::Bool(false));
+        assert_eq!(
+            fixed_menu_size(&Background::native_context_menu_node(&config)).unwrap(),
+            (250.0, 120.0)
+        );
+        assert!(
+            fixed_menu_size(&WidgetNode::Space {
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn actual_layout_bounds_control_anchor_clamping_and_hit_testing() {
+        use iced::advanced::{Layout, Shell, layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(12.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        for (auto_sizing, auto_width, available) in [
+            (true, false, iced::Size::new(800.0, 600.0)),
+            (true, true, iced::Size::new(800.0, 600.0)),
+            (false, false, iced::Size::new(80.0, 40.0)),
+        ] {
+            let menu = if auto_width {
+                seeded_menu_props(json!({"width": "auto"}))
+            } else {
+                seeded_menu(auto_sizing)
+            };
+            validate_menu_size(&menu).unwrap();
+            let content = super::super::top::build_node(
+                &menu,
+                12.0,
+                Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
+            )
+            .unwrap();
+            let bounds: crate::composables::anchored::Bounds = Default::default();
+            let mut element = crate::composables::anchored::anchored(
+                content,
+                Point::new(790.0, 590.0),
+                Point::new(300.0, 100.0),
+                bounds.clone(),
+            );
+            let mut state = Tree::new(&element);
+            let layout = element.as_widget_mut().layout(
+                &mut state,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, available),
+            );
+            let child = &layout.children()[0];
+            let actual = bounds.lock().unwrap().unwrap();
+            assert_eq!(actual.size(), child.size());
+            assert_eq!(actual.x, 300.0 + available.width - child.size().width);
+            assert_eq!(actual.y, 100.0 + available.height - child.size().height);
+            assert!(actual.width <= available.width && actual.height <= available.height);
+            if auto_width {
+                assert!(actual.width > 0.0 && actual.width < 178.0);
+            }
+            assert!(actual.contains(Point::new(
+                actual.x + actual.width / 2.0,
+                actual.y + actual.height / 2.0
+            )));
+            assert!(!actual.contains(Point::new(actual.x - 1.0, actual.y)));
+            if auto_sizing {
+                let column = &child.children()[0];
+                let mut messages = Vec::new();
+                for button in column.children() {
+                    let point = Point::new(
+                        child.bounds().x
+                            + column.bounds().x
+                            + button.bounds().x
+                            + button.size().width / 2.0,
+                        child.bounds().y
+                            + column.bounds().y
+                            + button.bounds().y
+                            + button.size().height / 2.0,
+                    );
+                    for event in [
+                        iced::mouse::Event::ButtonPressed(Button::Left),
+                        iced::mouse::Event::ButtonReleased(Button::Left),
+                    ] {
+                        element.as_widget_mut().update(
+                            &mut state,
+                            &iced::Event::Mouse(event),
+                            Layout::new(&layout),
+                            iced::mouse::Cursor::Available(point),
+                            &renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut Shell::new(&mut messages),
+                            &Rectangle::with_size(available),
+                        );
+                    }
+                }
+                assert!(matches!(
+                    &messages[..],
+                    [Plant::TopPlot(TopEvent::Sow), Plant::Sprout]
+                ));
+            }
+        }
+    }
 }
 
 impl SelectionRect {
@@ -73,6 +301,61 @@ pub struct ContextMenu {
     pub y: f32, // global
     pub open: bool,
     pub output: Option<OutputId>,
+    pub bounds: crate::composables::anchored::Bounds,
+}
+
+fn validate_menu_size(node: &WidgetNode) -> Result<(), String> {
+    let valid = |length: &NodeLength| {
+        matches!(length, NodeLength::Shrink)
+            || matches!(length, NodeLength::Fixed(value) if value.is_finite() && *value > 0.0)
+    };
+    if let WidgetNode::Container { width, height, .. } = node
+        && valid(width)
+        && valid(height)
+    {
+        return Ok(());
+    }
+    Err(
+        "context menu must return a container with positive fixed dimensions or shrink sizing"
+            .into(),
+    )
+}
+
+#[cfg(test)]
+fn fixed_menu_size(node: &WidgetNode) -> Result<(f32, f32), String> {
+    if let WidgetNode::Container {
+        width: NodeLength::Fixed(width),
+        height: NodeLength::Fixed(height),
+        ..
+    } = node
+        && width.is_finite()
+        && height.is_finite()
+        && *width > 0.0
+        && *height > 0.0
+    {
+        return Ok((*width, *height));
+    }
+    Err("context menu must return a container with finite positive fixed width and height".into())
+}
+
+pub(crate) fn context_menu_host(item: &crate::config::SourceComposable) -> serde_json::Value {
+    let path = crate::lua::composable::source_path(&item.src);
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .map(|m| format!("{:?}/{}", m.modified().ok(), m.len()));
+    serde_json::json!({
+        "items": [{ "label": "Add Top", "action": "add-top" }, { "label": "Open Settings", "action": "open-settings" }],
+        "item_component": item,
+        "_item_revision": stamp,
+    })
+}
+
+fn context_menu_message(action: &str) -> Option<Plant> {
+    match action {
+        "add-top" => Some(Plant::TopPlot(TopEvent::Sow)),
+        "open-settings" => Some(Plant::Sprout),
+        _ => None,
+    }
 }
 
 pub(crate) static LAST_CURSOR_GLOBAL: std::sync::LazyLock<
@@ -350,19 +633,36 @@ impl Background {
                     })
                 })
             });
-        let (menu_x, menu_y) = if let Some((_, (ax, ay, aw, ah))) = menu_avail {
-            let lx = cm.x - ax;
-            let ly = cm.y - ay;
-            let clamped_lx = lx.clamp(0.0, (aw - plots.config.composable.menu.width).max(0.0));
-            let clamped_ly = ly.clamp(0.0, (ah - plots.config.composable.menu.height).max(0.0));
-            (ax + clamped_lx, ay + clamped_ly)
-        } else {
-            (cm.x, cm.y)
+        let Some((_, avail)) = menu_avail else {
+            return false;
         };
-        gp.x >= menu_x
-            && gp.x <= menu_x + plots.config.composable.menu.width
-            && gp.y >= menu_y
-            && gp.y <= menu_y + plots.config.composable.menu.height
+        let bounds = *cm.bounds.lock().expect("menu layout bounds");
+        bounds.is_some_and(|bounds| bounds.contains(gp))
+            && Rectangle::new(
+                Point::new(avail.0, avail.1),
+                iced::Size::new(avail.2, avail.3),
+            )
+            .contains(gp)
+    }
+
+    pub(crate) fn handle_context_menu_action(
+        plots: &mut Plots,
+        output: OutputId,
+        action: &str,
+    ) -> Command<Plant> {
+        let Some(cm) = &mut plots.context_menu else {
+            return Command::none();
+        };
+        if !cm.open || cm.output != Some(output) {
+            return Command::none();
+        }
+        if let Some(message) = context_menu_message(action) {
+            cm.open = false;
+            Command::done(message)
+        } else {
+            eprintln!("context menu: unknown action {action:?}");
+            Command::none()
+        }
     }
 
     pub(crate) fn handle_right_press(plots: &mut Plots, id: window::Id) -> Command<Plant> {
@@ -381,6 +681,7 @@ impl Background {
             y: gp.y,
             open: true,
             output,
+            bounds: Default::default(),
         });
         println!("right click context menu at {gp:?} (local {pos:?}) output {output:?}");
         Command::none()
@@ -577,7 +878,100 @@ impl Background {
 
     /// "Add Top" menu for *this* Background's available rect.
     /// Owns clamping + content; `view` just positions it in the stack.
-    fn context_menu_overlay(plots: &Plots, avail: (f32, f32, f32, f32)) -> Element<'_, Plant> {
+    fn context_menu_node(
+        plots: &Plots,
+        output: OutputId,
+        avail: (f32, f32, f32, f32),
+    ) -> WidgetNode {
+        let mut host = context_menu_host(&plots.config.composable.context_menu_item);
+        host["output"] =
+            serde_json::json!({"x": avail.0, "y": avail.1, "width": avail.2, "height": avail.3});
+        if let Some(rendered) = plots.composable_runtime.borrow_mut().render_checked(
+            &format!("context-menu/{output:?}"),
+            &plots.config.composable.context_menu,
+            host,
+            &plots.config.theme,
+            plots.components_mtime,
+            |rendered| validate_menu_size(&rendered.node),
+        ) {
+            return rendered.node;
+        }
+        Self::native_context_menu_node(&plots.config.composable)
+    }
+
+    fn native_context_menu_node(config: &crate::config::ComposableConfig) -> WidgetNode {
+        let automatic = |key: &str| {
+            matches!(config.context_menu.props.get(key),
+            Some(crate::config::PropValue::Text(value)) if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("shrink"))
+        };
+        let auto_width = automatic("width");
+        let number =
+            |source: &crate::config::SourceComposable, key: &str, fallback: f32| match source
+                .props
+                .get(key)
+            {
+                Some(crate::config::PropValue::Number(value))
+                    if value.is_finite() && *value >= 0.0 && *value <= f32::MAX as f64 =>
+                {
+                    *value as f32
+                }
+                _ => fallback,
+            };
+        let children = [("Add Top", "add-top"), ("Open Settings", "open-settings")]
+            .into_iter()
+            .map(|(label, action)| WidgetNode::Button {
+                label: label.into(),
+                action: action.into(),
+                width: Some(if auto_width {
+                    NodeLength::Shrink
+                } else {
+                    NodeLength::Fill
+                }),
+                height: None,
+                padding: Some(number(&config.context_menu_item, "padding", 5.0)),
+                radius: Some(number(&config.context_menu_item, "rounding", 3.0)),
+                color: None,
+                background: None,
+            })
+            .collect();
+        WidgetNode::Container {
+            child: Box::new(WidgetNode::Column {
+                children,
+                spacing: number(&config.context_menu, "spacing", 5.0),
+                width: if auto_width {
+                    NodeLength::Shrink
+                } else {
+                    NodeLength::Fill
+                },
+                height: NodeLength::Shrink,
+            }),
+            width: if auto_width {
+                NodeLength::Shrink
+            } else {
+                NodeLength::Fixed(number(&config.context_menu, "width", 178.0).max(1.0))
+            },
+            height: if matches!(
+                config.context_menu.props.get("auto_sizing"),
+                Some(crate::config::PropValue::Bool(false))
+            ) && !automatic("height")
+            {
+                NodeLength::Fixed(number(&config.context_menu, "height", 92.0).max(1.0))
+            } else {
+                NodeLength::Shrink
+            },
+            padding: number(&config.context_menu, "padding", 4.0),
+            radius: number(&config.context_menu, "rounding", 3.0),
+            background: Some(theme::card()),
+            border: Some(theme::border_color()),
+            border_width: 1.0,
+        }
+    }
+
+    fn context_menu_overlay(
+        plots: &Plots,
+        output: OutputId,
+        avail: (f32, f32, f32, f32),
+    ) -> Element<'_, Plant> {
         let (ax, ay, aw, ah) = avail;
         let cm = match &plots.context_menu {
             Some(cm) if cm.open => cm,
@@ -586,39 +980,21 @@ impl Background {
         let lx = cm.x - ax;
         let ly = cm.y - ay;
         // only show on the Background whose available rect contains the click
-        let in_screen = lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
+        let in_screen = cm.output == Some(output) && lx >= 0.0 && ly >= 0.0 && lx < aw && ly < ah;
         if !in_screen {
             return Space::new().width(0).height(0).into();
         }
-        let clamped_lx = lx.clamp(0.0, (aw - plots.config.composable.menu.width).max(0.0));
-        let clamped_ly = ly.clamp(0.0, (ah - plots.config.composable.menu.height).max(0.0));
-        contextmenu(
-            plots.config.composable.context_menu.width,
-            clamped_lx,
-            clamped_ly,
+        let node = Self::context_menu_node(plots, output, avail);
+        let message =
+            |action| Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action));
+        let content =
+            super::top::build_node(&node, 12.0, Some(&message)).expect("validated menu tree");
+        crate::composables::anchored::anchored(
+            content,
+            Point::new(lx, ly),
+            Point::new(ax, ay),
+            cm.bounds.clone(),
         )
-        .padding(plots.config.composable.context_menu.padding)
-        .content(
-            column![
-                button(text("Add Top").size(12).color(theme::button_text()))
-                    .on_press(Plant::TopPlot(TopEvent::Sow))
-                    .padding(plots.config.composable.context_menu_item.padding)
-                    .style(theme::menu_button(
-                        plots.config.composable.context_menu_item.rounding
-                    ))
-                    .width(Fill),
-                button(text("Open Settings").size(12).color(theme::button_text()))
-                    .on_press(Plant::Sprout)
-                    .padding(plots.config.composable.context_menu_item.padding)
-                    .style(theme::menu_button(
-                        plots.config.composable.context_menu_item.rounding
-                    ))
-                    .width(Fill)
-            ]
-            .spacing(plots.config.composable.context_menu.spacing)
-            .width(Fill),
-        )
-        .into()
     }
 
     pub(crate) fn view(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
@@ -628,7 +1004,7 @@ impl Background {
         // the debug label, selection, and menu overlays on top.
         let mut layers = Self::wallpaper_views(plots, avail);
         layers.push(Self::selection_overlay(plots, output, avail));
-        layers.push(Self::context_menu_overlay(plots, avail));
+        layers.push(Self::context_menu_overlay(plots, output, avail));
 
         // Content lives in the helpers above; the panel owns Fill + events.
         background_window(id).content(stack(layers)).into()

@@ -1191,6 +1191,7 @@ pub(crate) enum WidgetNode {
         /// status only — Hovered/Pressed keep themed surfaces so click
         /// feedback still reads. `None` uses the themed background.
         background: Option<iced::Color>,
+        radius: Option<f32>,
     },
     Progress {
         value: f32,
@@ -1318,7 +1319,7 @@ fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<iced::Color>, 
 }
 
 /// Optional box size from a node table: numbers are px, `"fill"` /
-/// `"shrink"` (any case) are the iced modes, unset (nil — or the
+/// `"shrink"` / `"auto"` (any case) are the iced modes, unset (nil — or the
 /// setter function sharing the field namespace) means `None`.
 /// Anything else errors naming the field.
 fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<NodeLength>, String> {
@@ -1328,13 +1329,13 @@ fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<NodeLength>, 
         Value::Number(n) => Ok(Some(NodeLength::Fixed(n as f32))),
         Value::String(s) => match s.to_string_lossy().to_lowercase().as_str() {
             "fill" => Ok(Some(NodeLength::Fill)),
-            "shrink" => Ok(Some(NodeLength::Shrink)),
+            "shrink" | "auto" => Ok(Some(NodeLength::Shrink)),
             other => Err(format!(
-                "{what} {field} must be a number, \"fill\", or \"shrink\", got {other:?}"
+                "{what} {field} must be a number, \"fill\", \"shrink\", or \"auto\", got {other:?}"
             )),
         },
         other => Err(format!(
-            "{what} {field} must be a number, \"fill\", or \"shrink\", got {}",
+            "{what} {field} must be a number, \"fill\", \"shrink\", or \"auto\", got {}",
             lua_value_kind(&other)
         )),
     }
@@ -1561,6 +1562,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                         padding: opt_number(t, "padding", "ui.button()")?,
                         color: opt_color(t, "color", "ui.button()")?,
                         background: opt_color(t, "background", "ui.button()")?,
+                        radius: opt_number(t, "radius", "ui.button()")?.map(|r| r.max(0.0)),
                     })
                 }
                 "progress" => {
@@ -1865,6 +1867,7 @@ pub(crate) fn build_node_opacity(
             padding,
             color,
             background,
+            radius,
         } => {
             let mut item = button(rich_text(label.clone(), size, 4.0))
                 .padding(padding.unwrap_or(6.0).max(0.0));
@@ -1873,11 +1876,12 @@ pub(crate) fn build_node_opacity(
             // (Hovered/Pressed stay themed so clicks still read).
             let tint = *color;
             let custom = *background;
+            let radius = radius.unwrap_or(theme::RADIUS);
             item = item.style(move |theme, status| {
                 let mut style = if let Some(c) = tint {
-                    theme::menu_button_tinted(theme::RADIUS, c)(theme, status)
+                    theme::menu_button_tinted(radius, c)(theme, status)
                 } else {
-                    theme::menu_button(theme::RADIUS)(theme, status)
+                    theme::menu_button(radius)(theme, status)
                 };
                 if matches!(status, iced::widget::button::Status::Active)
                     && let Some(bg) = custom
@@ -2216,6 +2220,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
                 )?,
             ),
             ("padding", setter(lua, "padding", &["button"])?),
+            ("radius", setter(lua, "radius", &["button", "container"])?),
             (
                 "background",
                 setter(lua, "background", &["container", "button", "progress"])?,
@@ -5936,6 +5941,7 @@ mod tests {
                 padding: Some(4.0),
                 color: None,
                 background: None,
+                radius: None,
             }
         );
         // Chained setter AFTER a failing pcall in the same state:
@@ -6441,6 +6447,7 @@ mod tests {
                         padding: None,
                         color: None,
                         background: None,
+                        radius: None,
                     },
                     WidgetNode::Text {
                         content: "7".to_string(),
@@ -6514,6 +6521,7 @@ mod tests {
                 padding: None,
                 color: None,
                 background: None,
+                radius: None,
             },
             WidgetNode::Progress {
                 value: 1.5,
@@ -6538,6 +6546,7 @@ mod tests {
             padding: None,
             color: None,
             background: None,
+            radius: None,
         };
         let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
     }
@@ -6972,6 +6981,7 @@ mod tests {
                 padding: None,
                 color: None,
                 background: None,
+                radius: None,
             },
             WidgetNode::Button {
                 label: "[2]".to_string(),
@@ -6981,6 +6991,7 @@ mod tests {
                 padding: None,
                 color: None,
                 background: None,
+                radius: None,
             },
         ];
         let mut rt = MotionRuntime::new();
@@ -7015,6 +7026,7 @@ mod tests {
                     padding: None,
                     color: None,
                     background: None,
+                    radius: None,
                 },
             )],
         );

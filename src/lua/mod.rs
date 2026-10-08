@@ -106,6 +106,41 @@ impl LuaRuntime {
                 .exec()?;
         }
         let api = lua.create_table()?;
+        lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
+        api.set(
+            "component",
+            lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
+                let path = composable::source_path(&src);
+                let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
+                let modules: Table = lua.named_registry_value("riced.component_modules")?;
+                let cached: Option<Table> = modules.get(src.as_str())?;
+                let app: Table = if let Some(cached) = &cached
+                    && cached.get::<String>("source")? == source
+                {
+                    cached.get("app")?
+                } else {
+                    let env = lua.create_table()?;
+                    let meta = lua.create_table()?;
+                    meta.set("__index", lua.globals())?;
+                    env.set_metatable(Some(meta))?;
+                    env.set("_G", env.clone())?;
+                    lua.load(&source)
+                        .set_name(format!("@{}", path.display()))
+                        .set_environment(env)
+                        .eval()?
+                };
+                let props = component_props(lua, &app, overrides, host)?;
+                app.set("props", props.clone())?;
+                let view: Function = app.get("view")?;
+                let node: Value = view.call((app.clone(), props))?;
+                parse_node(&node).map_err(mlua::Error::RuntimeError)?;
+                let entry = lua.create_table()?;
+                entry.set("source", source)?;
+                entry.set("app", app)?;
+                modules.set(src, entry)?;
+                Ok(node)
+            })?,
+        )?;
         api.set(
             "invalidate",
             lua.create_function(|lua, ()| {
@@ -259,29 +294,18 @@ impl LuaRuntime {
                 self.lua.registry_value(self.app.as_ref().ok_or_else(|| {
                     mlua::Error::RuntimeError("No composable app loaded".into())
                 })?)?;
-            let defaults: Value = app.get("defaults")?;
-            let mut props = if defaults == Value::Nil {
-                serde_json::Map::new()
-            } else {
-                let Value::Table(defaults) = defaults else {
-                    return Err(mlua::Error::RuntimeError(
-                        "composable defaults must be a props table".into(),
-                    ));
-                };
-                let mut props = serde_json::Map::new();
-                for entry in defaults.pairs::<String, Value>() {
-                    let (key, value) = entry?;
-                    props.insert(key, self.lua.from_value(value)?);
-                }
-                props
-            };
-            for source in [overrides, host] {
-                if let Some(values) = source.as_object() {
-                    props.extend(values.clone());
-                }
+            let props = component_props(
+                &self.lua,
+                &app,
+                self.lua.to_value(overrides)?,
+                self.lua.to_value(host)?,
+            )?;
+            let mut resolved = serde_json::Map::new();
+            for pair in props.pairs::<String, Value>() {
+                let (key, value) = pair?;
+                resolved.insert(key, self.lua.from_value(value)?);
             }
-            let resolved = serde_json::Value::Object(props);
-            let props = self.lua.to_value(&resolved)?;
+            let resolved = serde_json::Value::Object(resolved);
             app.set("props", props.clone())?;
             let view: Function = app.get("view")?;
             let returned: Value = view.call((app, props))?;
@@ -318,6 +342,27 @@ impl LuaRuntime {
             let _ = self.finish::<()>("gc", Err(error));
         }
     }
+}
+
+fn component_props(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua::Result<Table> {
+    let props = lua.create_table()?;
+    for value in [app.get::<Value>("defaults")?, overrides, host] {
+        match value {
+            Value::Nil => {}
+            Value::Table(table) => {
+                for pair in table.pairs::<String, Value>() {
+                    let (key, value) = pair?;
+                    props.set(key, value)?;
+                }
+            }
+            _ => {
+                return Err(mlua::Error::RuntimeError(
+                    "composable props and defaults must be tables".into(),
+                ));
+            }
+        }
+    }
+    Ok(props)
 }
 
 #[cfg(test)]

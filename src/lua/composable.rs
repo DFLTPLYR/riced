@@ -21,6 +21,7 @@ struct Revision {
     length: Option<u64>,
     library: Option<SystemTime>,
     overrides: Value,
+    dependencies: Value,
 }
 
 #[derive(Default)]
@@ -63,6 +64,18 @@ impl ComposableRuntime {
         theme: &ThemeConfig,
         library: Option<SystemTime>,
     ) -> Option<Rendered> {
+        self.render_checked(instance, config, host, theme, library, |_| Ok(()))
+    }
+
+    pub(crate) fn render_checked(
+        &mut self,
+        instance: &str,
+        config: &SourceComposable,
+        host: Value,
+        theme: &ThemeConfig,
+        library: Option<SystemTime>,
+        validate: impl Fn(&Rendered) -> Result<(), String>,
+    ) -> Option<Rendered> {
         let path = source_path(&config.src);
         let metadata = std::fs::metadata(&path).ok();
         let overrides = serde_json::to_value(&config.props).ok()?;
@@ -72,6 +85,10 @@ impl ComposableRuntime {
             length: metadata.as_ref().map(|m| m.len()),
             library,
             overrides: overrides.clone(),
+            dependencies: serde_json::json!({
+                "item_component": host.get("item_component"),
+                "item_revision": host.get("_item_revision"),
+            }),
         };
         let input = serde_json::json!({
             "overrides": overrides, "host": host,
@@ -90,7 +107,9 @@ impl ComposableRuntime {
                 runtime.publish_theme(theme)?;
                 runtime.load_named(&source, &path.display().to_string())?;
                 let (node, props) = runtime.component_view(&overrides, &host, theme)?;
-                Ok((runtime, Rendered { node, props }))
+                let rendered = Rendered { node, props };
+                validate(&rendered).map_err(mlua::Error::RuntimeError)?;
+                Ok((runtime, rendered))
             })();
             match candidate {
                 Ok((runtime, rendered)) => {
@@ -107,7 +126,13 @@ impl ComposableRuntime {
         // invoke the old app with the new host geometry and current theme.
         if let Some(runtime) = &mut state.runtime {
             match runtime.component_view(&overrides, &host, theme) {
-                Ok((node, props)) => state.rendered = Some(Rendered { node, props }),
+                Ok((node, props)) => {
+                    let rendered = Rendered { node, props };
+                    match validate(&rendered) {
+                        Ok(()) => state.rendered = Some(rendered),
+                        Err(error) => report_error(state, &path, error),
+                    }
+                }
                 Err(error) => report_error(state, &path, error.to_string()),
             }
         }
@@ -198,6 +223,77 @@ mod tests {
             .render("one", &config, json!({"width": 80}), &theme, None)
             .unwrap();
         assert!(matches!(repaired.node, WidgetNode::Text {content, ..} if content == "recovered"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nested_item_source_recovers_and_invalid_geometry_keeps_last_good() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-context-dependencies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let frame_path = dir.join("frame.lua");
+        let item_path = dir.join("item.lua");
+        let _ = std::fs::remove_file(&item_path);
+        std::fs::write(&frame_path, crate::config::SEED_CONTEXT_MENU).unwrap();
+        let mut frame = SourceComposable::new(&frame_path.to_string_lossy());
+        frame
+            .props
+            .insert("auto_sizing".into(), PropValue::Bool(false));
+        let item = SourceComposable::new(&item_path.to_string_lossy());
+        let host = || crate::app::layers::background::context_menu_host(&item);
+        let validate = |rendered: &Rendered| match &rendered.node {
+            WidgetNode::Container {
+                width: crate::app::layers::top::NodeLength::Fixed(w),
+                height: crate::app::layers::top::NodeLength::Fixed(h),
+                ..
+            } if *w > 0.0 && *h > 0.0 => Ok(()),
+            WidgetNode::Container {
+                width: crate::app::layers::top::NodeLength::Fixed(w),
+                height: crate::app::layers::top::NodeLength::Shrink,
+                ..
+            } if *w > 0.0 => Ok(()),
+            _ => Err("fixed or automatic geometry required".into()),
+        };
+        let theme = ThemeConfig::default();
+        let mut engine = ComposableRuntime::default();
+        assert!(
+            engine
+                .render_checked("menu", &frame, host(), &theme, None, validate)
+                .is_none()
+        );
+        std::fs::write(&item_path, crate::config::SEED_CONTEXT_MENU_ITEM).unwrap();
+        let initial = engine
+            .render_checked("menu", &frame, host(), &theme, None, validate)
+            .unwrap();
+        assert_eq!(initial.props["width"], 178);
+        // The item is outside the shared-library directory; its dependency
+        // revision must recover the failed app without a parent-file edit.
+        std::fs::write(
+            &item_path,
+            "return {view=function(self,p) error('bad item reload') end}",
+        )
+        .unwrap();
+        let retained = engine
+            .render_checked("menu", &frame, host(), &theme, None, validate)
+            .unwrap();
+        assert_eq!(retained.node, initial.node);
+        std::fs::write(&item_path, crate::config::SEED_CONTEXT_MENU_ITEM).unwrap();
+        engine
+            .render_checked("menu", &frame, host(), &theme, None, validate)
+            .unwrap();
+        std::fs::write(&frame_path, "return {view=function(self,p) return ui.container(ui.text('invalid')):width(p.width):height('fill') end}").unwrap();
+        frame.props.insert("width".into(), PropValue::Number(220.0));
+        let retained = engine
+            .render_checked("menu", &frame, host(), &theme, None, validate)
+            .unwrap();
+        assert!(matches!(
+            retained.node,
+            WidgetNode::Container {
+                width: crate::app::layers::top::NodeLength::Fixed(220.0),
+                height: crate::app::layers::top::NodeLength::Fixed(92.0),
+                ..
+            }
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

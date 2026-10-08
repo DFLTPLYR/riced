@@ -238,14 +238,14 @@ The styled builders accept props and support subsequent setter chaining:
 
 ```lua
 ui.surface({ body = ui.text("Hello"), background = theme.surface,
-             border = theme.outline, border_width = 1, radius = 8, padding = 10 })
+             border = theme.secondary, border_width = 1, radius = 8, padding = 10 })
 ui.styled_button({ label = "Go", action = "go", background = theme.surface })
-ui.styled_progress({ value = 0.5, color = theme.outline, background = theme.surface })
-ui.styled_separator({ color = theme.outline, height = 2 })
+ui.styled_progress({ value = 0.5, color = theme.primary, background = theme.surface })
+ui.styled_separator({ color = theme.secondary, height = 2 })
 ```
 
 `surface` forwards container sizing and styling, `styled_button` forwards
-button sizing, padding, label color and resting background, and
+button sizing, padding, radius, label color and resting background, and
 `styled_progress` forwards sizing, fill color and track background.
 `card` also accepts `border`, `border_width`, and `separator_color`;
 `menu` accepts button `background` and `padding` alongside `color`.
@@ -293,10 +293,74 @@ the previous app and keep rendering it with current drag geometry. If no
 working app exists, the native selection appearance is used. Entries use
 the bounded Lua host (instruction budget and memory limit).
 
-Context menus, popup/bar/notification frames, and interactive settings
-components still use their current Rust paths; they are the next migration
-stages. Existing `[composable.menu]` and `[composable.context_menu*]` scalar
-settings remain active until those surfaces are migrated.
+### Lua context menu
+
+The background right-click menu and its entries are also app-backed:
+
+```toml
+[composable.context_menu]
+src = "context_menu.lua"
+
+[composable.context_menu_item]
+src = "context_menu_item.lua"
+```
+
+The seeded frame declares `width = 178`, `height = 92`, `auto_sizing = true`, `padding = 4`,
+`spacing = 5`, and `rounding = 3` in `app.defaults`. Entry defaults are
+`padding = 5` and `rounding = 3`. Change those defaults in Lua or use sparse
+`[composable.context_menu.props]` / `[composable.context_menu_item.props]`
+overrides. Settings exposes the source paths and resolved scalar properties;
+Reset removes an override so it inherits from the Lua app again.
+
+Rust supplies the frame's `props.items`:
+
+```lua
+{
+    { label = "Add Top", action = "add-top" },
+    { label = "Open Settings", action = "open-settings" },
+}
+```
+
+It also supplies `props.item_component = { src = ..., props = ... }` and an
+`output` geometry table. The frame uses
+`riced.component(props.item_component.src, props.item_component.props, item)`
+to invoke the item app's `app:view(props)`. Nested apps share the parent's
+live theme and instruction/memory limits; their defaults are merged before
+config overrides and host `label`/`action` props.
+
+With `auto_sizing = true`, the seeded menu's height fits its entries, padding,
+and spacing. Disable it to use the numeric `height` property. Width stays
+178px by default; set `width = "auto"` to fit the labels as well:
+
+```toml
+[composable.context_menu.props]
+auto_sizing = true
+width = "auto"
+```
+
+Lua containers accept `:width("auto")` / `:height("auto")` as aliases for
+`"shrink"`. In an existing frame script that uses `:height(props.height)`,
+setting `height = "auto"` enables content-height sizing directly. Seed files
+are not overwritten, so existing frame scripts must opt into the new
+`auto_sizing` flag themselves if they do not already use it.
+
+The frame must return a container with positive numeric dimensions or
+`"auto"` / `"shrink"` sizing. Iced measures the actual child layout before
+positioning it; output-edge clamping and click containment use those measured
+bounds, including when a menu is constrained by a small output. Rust owns opening, outside-click dismissal,
+and the two action handlers; unknown actions are ignored with a diagnostic.
+Broken sources or invalid geometry keep the last working tree, with a native
+menu fallback supporting automatic and fixed sizing when no working tree exists.
+
+Legacy context-menu scalar settings migrate on load into sparse overrides,
+and `[composable.menu]` is removed. Context-menu width takes precedence over
+generic menu width; generic height transfers when no context-menu height
+override exists. Unused generic padding/spacing/rounding are retired. Before
+rewriting the config, migration preserves `config.toml.pre-composable`.
+The shared `ui.menu` list builder is independent of this retired config table.
+
+Popup/bar/notification frames and interactive settings components remain the
+next migration stages.
 
 This is **M0**, the first runnable migration milestone. It reuses the existing
 owned node decoder/realizer as an adapter. The shell still hosts separate

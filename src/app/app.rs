@@ -905,6 +905,9 @@ impl Plots {
                 Command::none()
             }
             Plant::BackgroundPlot(BackgroundEvent::Repaint) => Background::repaint(self),
+            Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action)) => {
+                Background::handle_context_menu_action(self, output, &action)
+            }
             Plant::BackgroundPlot(BackgroundEvent::PickWallpaper) => {
                 Background::handle_pick_wallpaper()
             }
@@ -1309,6 +1312,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // PanelWindow press/release changes selecting/context_menu/hold → All.
         // A Graft release also ends selection via the safety net → All.
         Plant::BackgroundPlot(BackgroundEvent::Pressed(..))
+        | Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(..))
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
         // Accept re-emits as a Patch (already Scope::All); cancel is silent.
         | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(Some(_))) => Scope::All,

@@ -13,7 +13,7 @@ end)
 ui.define("styled_button", function(props)
     props = props or {}
     local node = ui.button(props.label or "", props.action or "")
-    for _, key in ipairs({ "width", "height", "padding", "color", "background" }) do
+    for _, key in ipairs({ "width", "height", "padding", "color", "background", "radius" }) do
         if props[key] ~= nil then node = node[key](node, props[key]) end
     end
     return node

@@ -201,6 +201,7 @@ pub enum Corner {
 #[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 pub enum BackgroundEvent {
+    ContextMenuAction(iced_wayland_subscriber::OutputId, String),
     SelectionTick,
     Repaint,
     Pressed(Id, Button),

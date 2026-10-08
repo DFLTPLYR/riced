@@ -943,6 +943,7 @@ mod tests {
                                 padding: None,
                                 color: None,
                                 background: None,
+                                radius: None,
                             },
                         )
                     })
