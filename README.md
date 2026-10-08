@@ -126,7 +126,7 @@ return app
   `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
   `button`, `progress`, `spinner`, `separator`).
   `ui.define(name, fn)` registers reusable builders called as `ui.name(props)`;
-  components from `widgets/components/*.lua` (seeded `spacer`,
+  components from `components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a
   widgets-dir rescan.
 - **Clicks**: `app:popup()` toggles a menu (`text`/`width`/`height`/
@@ -225,6 +225,78 @@ Bundled Lua sources live in `scripts/widgets/` and `scripts/components/`,
 and seed installed copies on startup. Widget and notification modules return
 app tables; the shell calls their methods through the registry. Global
 `render()` scripts are rejected, and no global compatibility exports are generated.
+
+Shared components are installed in `~/.config/riced/components/` (or
+`$XDG_CONFIG_HOME/riced/components/`), alongside `widgets/`. Startup migrates
+Lua files from the former `widgets/components/` directory, preserving any
+existing root-level files. The library is loaded in filename order and hot-reloaded.
+Unnumbered overrides (`define.lua`, `styled.lua`, `card.lua`, `menu.lua`)
+replace their corresponding numbered seed files during loading; startup also
+skips seeding those numbered copies when the override exists.
+
+The styled builders accept props and support subsequent setter chaining:
+
+```lua
+ui.surface({ body = ui.text("Hello"), background = theme.surface,
+             border = theme.outline, border_width = 1, radius = 8, padding = 10 })
+ui.styled_button({ label = "Go", action = "go", background = theme.surface })
+ui.styled_progress({ value = 0.5, color = theme.outline, background = theme.surface })
+ui.styled_separator({ color = theme.outline, height = 2 })
+```
+
+`surface` forwards container sizing and styling, `styled_button` forwards
+button sizing, padding, label color and resting background, and
+`styled_progress` forwards sizing, fill color and track background.
+`card` also accepts `border`, `border_width`, and `separator_color`;
+`menu` accepts button `background` and `padding` alongside `color`.
+
+### App-backed shell composables
+
+The first migrated shell surface is the drag-selection rectangle:
+
+```toml
+[composable.selection_rect]
+src = "selection_rect.lua"
+```
+
+Relative `src` paths resolve under `~/.config/riced/components/`; absolute
+paths are also supported. The bundled file is seeded without overwriting
+existing files. App-backed modules start with `-- riced:composable` so they
+are excluded from automatic shared-builder loading, and return an app table:
+
+```lua
+-- riced:composable
+local app = { defaults = { radius = 4, border_width = 1 } }
+
+function app:view(props)
+    return ui.container(ui.space())
+        :width(props.width):height(props.height)
+        :background(theme.surface)
+        :border(theme.primary):border_width(props.border_width):radius(props.radius)
+end
+
+return app
+```
+
+`props` and `self.props` are the same resolved table: Lua `app.defaults`, then
+optional `[composable.selection_rect.props]` scalar overrides, then host-owned
+state. Rust supplies `width`, `height`, output-local `x`/`y`, `opacity`,
+`selecting`, and an `output` geometry table. The host positions and fades the
+returned tree, so the component should not apply `opacity` a second time.
+The bundled appearance defaults (`radius`, `border_width`, `fill_alpha`) live
+in Lua. Read `theme.primary` and other theme values inside `view` to follow
+live theme changes.
+
+Views are cached per output and re-evaluated when props or the theme change.
+Source and shared-library edits reload automatically; failed reloads retain
+the previous app and keep rendering it with current drag geometry. If no
+working app exists, the native selection appearance is used. Entries use
+the bounded Lua host (instruction budget and memory limit).
+
+Context menus, popup/bar/notification frames, and interactive settings
+components still use their current Rust paths; they are the next migration
+stages. Existing `[composable.menu]` and `[composable.context_menu*]` scalar
+settings remain active until those surfaces are migrated.
 
 This is **M0**, the first runnable migration milestone. It reuses the existing
 owned node decoder/realizer as an adapter. The shell still hosts separate

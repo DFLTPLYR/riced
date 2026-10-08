@@ -65,6 +65,7 @@ pub struct Plots {
     pub(crate) last_cursor: HashMap<iced::window::Id, Point>,
     // global selection rect (single, like Background.selectionRect)
     pub(crate) selection_rect: SelectionRect,
+    pub(crate) composable_runtime: std::cell::RefCell<crate::lua::composable::ComposableRuntime>,
     // fade animation after select end (QML Behavior on opacity, InOutQuad
     // over the global animation speed)
     pub(crate) fade_rect: Option<SelectionRect>,
@@ -213,6 +214,7 @@ impl Plots {
             last_cursor: HashMap::new(),
             output_infos: HashMap::new(),
             selection_rect: SelectionRect::default(),
+            composable_runtime: Default::default(),
             fade_rect: None,
             fade_start: None,
             context_menu: None,

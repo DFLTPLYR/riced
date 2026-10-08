@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -271,9 +271,28 @@ impl Default for ThemeConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComposableConfig {
+    pub selection_rect: SourceComposable,
     pub menu: MenuConfig,
     pub context_menu: ContextMenuConfig,
     pub context_menu_item: ContextMenuItemConfig,
+}
+
+/// A Lua app module under components/, with sparse property overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceComposable {
+    pub src: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub props: BTreeMap<String, PropValue>,
+}
+
+impl Default for SourceComposable {
+    fn default() -> Self {
+        Self {
+            src: "selection_rect.lua".into(),
+            props: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -717,7 +736,7 @@ pub fn config_path() -> PathBuf {
 /// widgets/
 ///   clock.lua      → widget "clock"
 ///   stats.lua      → widget "stats"
-///   components/    → shared library, not widgets
+/// components/      → shared library, sibling of widgets/
 /// ```
 ///
 /// Discovery runs at startup and whenever the directory changes; new
@@ -970,7 +989,7 @@ pub fn config_path() -> PathBuf {
 /// Components must return `iced.*` constructor values (chaining and
 /// parsing keep working); unknown names and non-node returns error
 /// naming the component. Seeds ship `spacer`, `card`, and `menu`
-/// (`00-define.lua`, `10-card.lua`, `20-menu.lua` — never overwritten).
+/// (`00-define.lua`, `05-styled.lua`, `10-card.lua`, `20-menu.lua` — never overwritten).
 /// Editing any component rebuilds every Lua state on the next tick,
 /// like a widgets-dir change.
 ///
@@ -1335,6 +1354,11 @@ pub(crate) const SEED_SYSTEM_LUA: &str = include_str!("../scripts/widgets/system
 /// `spacer` — the file teaches the pattern every other component uses.
 pub(crate) const SEED_COMPONENT_DEFINE: &str = include_str!("../scripts/components/00-define.lua");
 
+pub(crate) const SEED_COMPONENT_STYLED: &str = include_str!("../scripts/components/05-styled.lua");
+
+pub(crate) const SEED_SELECTION_RECT: &str =
+    include_str!("../scripts/components/selection_rect.lua");
+
 /// Seed `card` component (`components/10-card.lua`): titled card body,
 /// the shape behind notification cards and stats popups.
 pub(crate) const SEED_COMPONENT_CARD: &str = include_str!("../scripts/components/10-card.lua");
@@ -1435,13 +1459,16 @@ pub fn widgets_migrated_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("widgets.toml.migrated"))
 }
 
-/// Shared component library dir (`~/.config/riced/widgets/components/`):
+/// Shared component library dir (`~/.config/riced/components/`):
 /// every `*.lua` file (sorted) is concatenated and executed in each
 /// widget state after `iced` is built, so `iced.define` components are
 /// available to all widgets and the notification renderer. No
 /// `require` needed (and none available — the sandbox nils it).
 pub fn components_dir() -> PathBuf {
-    widgets_dir().join("components")
+    widgets_dir()
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("components")
 }
 
 /// Concatenated `components/*.lua` source (sorted by filename, tagged
@@ -1449,14 +1476,7 @@ pub fn components_dir() -> PathBuf {
 /// dir is missing/empty. Tested via [`components_source_in`].
 /// Preserve individual chunk names so Lua errors name their source file.
 pub(crate) fn component_files() -> Vec<(PathBuf, String)> {
-    let installed: Vec<_> = lua_files_sorted(&components_dir())
-        .into_iter()
-        .filter_map(|path| {
-            std::fs::read_to_string(&path)
-                .ok()
-                .map(|source| (path, source))
-        })
-        .collect();
+    let installed = shared_component_files_in(&components_dir());
     if installed.is_empty() {
         builtin_component_files()
     } else {
@@ -1464,10 +1484,46 @@ pub(crate) fn component_files() -> Vec<(PathBuf, String)> {
     }
 }
 
+fn shared_component_files_in(dir: &std::path::Path) -> Vec<(PathBuf, String)> {
+    installed_component_paths(dir)
+        .into_iter()
+        .filter_map(|path| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .filter(|source| !source.trim_start().starts_with("-- riced:composable"))
+                .map(|source| (path, source))
+        })
+        .collect()
+}
+
+/// Unnumbered user copies override the corresponding bundled seed file.
+/// Keep both files on disk, but execute only one definition of each builder.
+fn installed_component_paths(dir: &std::path::Path) -> Vec<PathBuf> {
+    lua_files_sorted(dir)
+        .into_iter()
+        .filter(|path| {
+            let name = path.file_name().and_then(|name| name.to_str());
+            !component_seed_aliases()
+                .iter()
+                .any(|(seed, alias)| name == Some(*seed) && dir.join(alias).is_file())
+        })
+        .collect()
+}
+
+fn component_seed_aliases() -> [(&'static str, &'static str); 4] {
+    [
+        ("00-define.lua", "define.lua"),
+        ("05-styled.lua", "styled.lua"),
+        ("10-card.lua", "card.lua"),
+        ("20-menu.lua", "menu.lua"),
+    ]
+}
+
 /// Bundled pure components used when no on-disk library has been installed.
 pub(crate) fn builtin_component_files() -> Vec<(PathBuf, String)> {
     [
         ("00-define.lua", SEED_COMPONENT_DEFINE),
+        ("05-styled.lua", SEED_COMPONENT_STYLED),
         ("10-card.lua", SEED_COMPONENT_CARD),
         ("20-menu.lua", SEED_COMPONENT_MENU),
     ]
@@ -1568,16 +1624,48 @@ fn seed_component(dir: &std::path::Path, name: &str, content: &str) {
 fn seed_components_in(dir: &std::path::Path) {
     for (name, content) in [
         ("00-define.lua", SEED_COMPONENT_DEFINE),
+        ("05-styled.lua", SEED_COMPONENT_STYLED),
         ("10-card.lua", SEED_COMPONENT_CARD),
         ("20-menu.lua", SEED_COMPONENT_MENU),
+        ("selection_rect.lua", SEED_SELECTION_RECT),
     ] {
+        if component_seed_aliases()
+            .iter()
+            .any(|(seed, alias)| name == *seed && dir.join(alias).is_file())
+        {
+            continue;
+        }
         seed_component(dir, name, content);
     }
 }
 
 /// Restore seed components under the live components dir.
 fn seed_components() {
+    migrate_components_in(&widgets_dir().join("components"), &components_dir());
     seed_components_in(&components_dir());
+}
+
+/// Move legacy library files, preserving existing root-level overrides.
+fn migrate_components_in(legacy: &std::path::Path, target: &std::path::Path) {
+    let files = lua_files_sorted(legacy);
+    if files.is_empty() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(target) {
+        eprintln!("components: cannot create {}: {e}", target.display());
+        return;
+    }
+    for path in files {
+        let destination = target.join(path.file_name().expect("Lua file name"));
+        if destination.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&path, &destination) {
+            eprintln!("components: cannot migrate {}: {e}", path.display());
+        }
+    }
+    // Only removes an empty directory; conflicting files remain available.
+    let _ = std::fs::remove_dir(legacy);
 }
 
 impl WidgetsFile {
@@ -2513,6 +2601,110 @@ mod tests {
             "-- mine"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selection_composable_uses_src_and_sparse_props() {
+        let config: Config = toml::from_str(
+            r##"
+            [composable.selection_rect]
+            src = "custom-selection.lua"
+            [composable.selection_rect.props]
+            radius = 4.0
+            color = "#ff0000"
+        "##,
+        )
+        .unwrap();
+        assert_eq!(config.composable.selection_rect.src, "custom-selection.lua");
+        assert_eq!(
+            config.composable.selection_rect.props["radius"],
+            PropValue::Number(4.0)
+        );
+        let saved = toml::to_string(&config.composable.selection_rect).unwrap();
+        let reloaded: SourceComposable = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.props, config.composable.selection_rect.props);
+        assert_eq!(SourceComposable::default().src, "selection_rect.lua");
+        assert!(SourceComposable::default().props.is_empty());
+    }
+
+    #[test]
+    fn app_components_are_not_executed_as_shared_library_definitions() {
+        let dir = std::env::temp_dir().join(format!("riced-chrome-library-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("app.lua"),
+            "-- riced:composable\nerror('only the host should load me')",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("builder.lua"),
+            "ui.define('example', function(props) return ui.text('ok') end)",
+        )
+        .unwrap();
+        let files = shared_component_files_in(&dir);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, dir.join("builder.lua"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn component_aliases_replace_seeds_without_duplicate_loading() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-components-aliases-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (_, alias) in component_seed_aliases() {
+            std::fs::write(dir.join(alias), "-- user component").unwrap();
+        }
+        seed_components_in(&dir);
+        assert_eq!(lua_files_sorted(&dir).len(), 5);
+        // An earlier release may already have seeded the numbered copies.
+        for (seed, _) in component_seed_aliases() {
+            std::fs::write(dir.join(seed), "-- seed component").unwrap();
+        }
+        let paths = installed_component_paths(&dir);
+        assert_eq!(paths.len(), 5);
+        assert!(paths.iter().all(|path| {
+            !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(|c: char| c.is_ascii_digit())
+        }));
+        assert_eq!(lua_files_sorted(&dir).len(), 9);
+        // Removing an override makes its seed available again.
+        std::fs::remove_file(dir.join("styled.lua")).unwrap();
+        assert!(installed_component_paths(&dir).contains(&dir.join("05-styled.lua")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn components_migration_preserves_root_overrides() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-components-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let legacy = dir.join("widgets/components");
+        let target = dir.join("components");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(legacy.join("custom.lua"), "-- custom").unwrap();
+        std::fs::write(legacy.join("card.lua"), "-- legacy").unwrap();
+        std::fs::write(target.join("card.lua"), "-- root").unwrap();
+        migrate_components_in(&legacy, &target);
+        assert_eq!(
+            std::fs::read_to_string(target.join("custom.lua")).unwrap(),
+            "-- custom"
+        );
+        assert!(!legacy.join("custom.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join("card.lua")).unwrap(),
+            "-- root"
+        );
+        assert!(legacy.join("card.lua").exists());
+        migrate_components_in(&legacy, &target);
+        seed_components_in(&target);
+        assert!(target.join("05-styled.lua").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

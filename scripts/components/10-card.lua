@@ -10,11 +10,14 @@ ui.define("card", function(props)
         if props.color then icon = icon:color(props.color) end
         title = ui.row({ icon, title })
     end
-    local children = { title, ui.separator(), body or ui.space() }
+    local children = { title, ui.styled_separator({ color = props.separator_color }), body or ui.space() }
     if props.footer then children[#children + 1] = props.footer end
     local content = ui.column(children):spacing(props.spacing or 4)
-    if props.background or props.padding or props.radius then
-        return ui.container(content):padding(props.padding or 10):radius(props.radius or 6):background(props.background)
+    if props.background or props.padding or props.radius or props.border or props.border_width then
+        return ui.surface({
+            body = content, padding = props.padding or 10, radius = props.radius or 6,
+            background = props.background, border = props.border, border_width = props.border_width,
+        })
     end
     return content
 end)

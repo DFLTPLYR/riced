@@ -4996,12 +4996,7 @@ mod tests {
     /// injects them via `components_source()` from disk; tests seed
     /// them directly so seed widgets using `iced.use` resolve).
     fn load_seed_components(lua: &Lua) {
-        use crate::config::{SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_MENU};
-        for source in [
-            SEED_COMPONENT_DEFINE,
-            SEED_COMPONENT_CARD,
-            SEED_COMPONENT_MENU,
-        ] {
+        for (_, source) in crate::config::builtin_component_files() {
             lua.load(source).exec().expect("seed component");
         }
     }
@@ -6782,17 +6777,15 @@ mod tests {
 
     #[test]
     fn seed_components_define_working_builders() {
-        use crate::config::{SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_MENU};
         let lua = new_widget_lua().expect("sandbox");
-        for source in [
-            SEED_COMPONENT_DEFINE,
-            SEED_COMPONENT_CARD,
-            SEED_COMPONENT_MENU,
-        ] {
-            lua.load(source).exec().expect("seed loads");
-        }
+        load_seed_components(&lua);
         // spacer from the docs file, card and menu from their files.
         for src in [
+            r##"return ui.surface({body = "x", border = "#f00", border_width = 0})"##,
+            r##"return ui.styled_button({label = "Go", action = "go", background = "#123"})"##,
+            r##"return ui.styled_progress({value = 0.5, color = "#f00", background = "#123"})"##,
+            r##"return ui.styled_separator({height = 2, color = "#f00"})"##,
+            r##"return ui.card({title = "T", border = "#f00", separator_color = "#123"})"##,
             r#"return iced.use("spacer", { h = 4 })"#,
             r#"return iced.use("card", { title = "T", body = "b" })"#,
             r#"return iced.use("menu", { items = { { label = "Go", action = "go" } } })"#,
@@ -6800,6 +6793,18 @@ mod tests {
             let value: Value = lua.load(src).eval().expect("use");
             parse_node(&value).expect("parses");
         }
+        let value: Value = lua
+            .load(r##"return ui.surface({body = "x", border = "#f00", border_width = 0})"##)
+            .eval()
+            .unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Container {
+                border: Some(_),
+                border_width: 0.0,
+                ..
+            }
+        ));
         // menu carries the action key through to a button.
         let value: Value = lua
             .load(r#"return iced.use("menu", { items = { { label = "Go", action = "go" } } })"#)

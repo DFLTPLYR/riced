@@ -4,6 +4,7 @@
 //! cached IR. Lua never receives an iced Element. The first milestone
 //! reuses the existing owned WidgetNode decoder/realizer; M1 replaces
 //! that adapter with ui::ir/RealizeCtx and designs borrowed widget state.
+pub mod composable;
 pub mod demo;
 
 use crate::app::layers::top::{WidgetNode as Node, inject_ui_base, parse_node};
@@ -67,6 +68,12 @@ pub struct LuaRuntime {
 
 impl LuaRuntime {
     pub fn new() -> mlua::Result<Self> {
+        Self::with_components(crate::config::builtin_component_files())
+    }
+
+    pub(crate) fn with_components(
+        components: Vec<(std::path::PathBuf, String)>,
+    ) -> mlua::Result<Self> {
         let lua = Lua::new_with(
             StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
             LuaOptions::default(),
@@ -92,7 +99,8 @@ impl LuaRuntime {
         inject_ui_base(&lua)?;
         // The application host shares the same bundled pure component
         // definitions as the shell's module widgets.
-        for (path, source) in crate::config::builtin_component_files() {
+        for (path, source) in components {
+            budget.store(INSTRUCTION_LIMIT, Ordering::Relaxed);
             lua.load(&source)
                 .set_name(format!("@{}", path.display()))
                 .exec()?;
@@ -234,6 +242,62 @@ impl LuaRuntime {
 
     pub fn cached_view(&self, window: WindowId) -> Option<&Node> {
         self.views.get(&window).map(|(_, node)| node)
+    }
+
+    /// Composable entry: Lua defaults < config overrides < host-owned state.
+    /// The same resolved table is available as both `props` and `self.props`.
+    pub(crate) fn component_view(
+        &mut self,
+        overrides: &serde_json::Value,
+        host: &serde_json::Value,
+        theme: &crate::config::ThemeConfig,
+    ) -> mlua::Result<(Node, serde_json::Value)> {
+        let result = (|| {
+            self.begin()?;
+            self.publish_theme(theme)?;
+            let app: Table =
+                self.lua.registry_value(self.app.as_ref().ok_or_else(|| {
+                    mlua::Error::RuntimeError("No composable app loaded".into())
+                })?)?;
+            let defaults: Value = app.get("defaults")?;
+            let mut props = if defaults == Value::Nil {
+                serde_json::Map::new()
+            } else {
+                let Value::Table(defaults) = defaults else {
+                    return Err(mlua::Error::RuntimeError(
+                        "composable defaults must be a props table".into(),
+                    ));
+                };
+                let mut props = serde_json::Map::new();
+                for entry in defaults.pairs::<String, Value>() {
+                    let (key, value) = entry?;
+                    props.insert(key, self.lua.from_value(value)?);
+                }
+                props
+            };
+            for source in [overrides, host] {
+                if let Some(values) = source.as_object() {
+                    props.extend(values.clone());
+                }
+            }
+            let resolved = serde_json::Value::Object(props);
+            let props = self.lua.to_value(&resolved)?;
+            app.set("props", props.clone())?;
+            let view: Function = app.get("view")?;
+            let returned: Value = view.call((app, props))?;
+            let node = parse_node(&returned).map_err(mlua::Error::RuntimeError)?;
+            Ok((node, resolved))
+        })();
+        // The chrome host deduplicates errors across animation ticks.
+        result
+    }
+
+    pub(crate) fn publish_theme(&self, theme: &crate::config::ThemeConfig) -> mlua::Result<()> {
+        let palette = self.lua.create_table()?;
+        for (key, color) in crate::theme::lua_palette(theme) {
+            palette.set(key, color)?;
+        }
+        self.lua.globals().set("theme", palette)
     }
 
     pub fn has_handler(&self, name: &str) -> bool {

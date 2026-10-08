@@ -465,7 +465,11 @@ impl Background {
     /// Selection/fade box for *this* Background window, unclamped: full global
     /// size at its window-local offset, surface-clipped by the compositor.
     /// Owns the rect math + styling; `view` just positions it in the stack.
-    fn selection_overlay(plots: &Plots, avail: (f32, f32, f32, f32)) -> Element<'_, Plant> {
+    fn selection_overlay(
+        plots: &Plots,
+        output: OutputId,
+        avail: (f32, f32, f32, f32),
+    ) -> Element<'_, Plant> {
         let (ax, ay, aw, ah) = avail;
         let fade_ms = plots.config.animation.speed.duration().as_millis() as f32;
         // active rect is either selecting rect or fading rect (speed-scaled InOutQuad)
@@ -507,6 +511,37 @@ impl Background {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         };
         if cw > 1.0 && ch > 1.0 && op > 0.01 {
+            let rendered = plots.composable_runtime.borrow_mut().render(
+                &format!("selection/{output:?}"),
+                &plots.config.composable.selection_rect,
+                serde_json::json!({
+                    "width": cw, "height": ch, "x": cx, "y": cy,
+                    "opacity": op, "selecting": plots.selection_rect.selecting,
+                    "output": { "x": ax, "y": ay, "width": aw, "height": ah },
+                }),
+                &plots.config.theme,
+                plots.components_mtime,
+            );
+            if let Some(rendered) = rendered {
+                let opacity = rendered
+                    .props
+                    .get("opacity")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(op as f64) as f32;
+                if let Ok(content) =
+                    super::top::build_node_opacity(&rendered.node, 13.0, None, opacity)
+                {
+                    return panel()
+                        .content(content)
+                        .padding(iced::Padding {
+                            top: cy,
+                            left: cx,
+                            right: 0.0,
+                            bottom: 0.0,
+                        })
+                        .into();
+                }
+            }
             // Round only the corners that land inside this output's surface.
             // Corners past the edge would be hard-clipped mid-radius by the
             // compositor (the window can't paint outside itself), which reads
@@ -592,7 +627,7 @@ impl Background {
         // Bottom of the stack is wallpaper images (QML `Background`), then
         // the debug label, selection, and menu overlays on top.
         let mut layers = Self::wallpaper_views(plots, avail);
-        layers.push(Self::selection_overlay(plots, avail));
+        layers.push(Self::selection_overlay(plots, output, avail));
         layers.push(Self::context_menu_overlay(plots, avail));
 
         // Content lives in the helpers above; the panel owns Fill + events.
