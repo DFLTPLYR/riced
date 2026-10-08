@@ -1139,10 +1139,13 @@ impl WidgetDefinition {
 }
 
 /// One placed widget instance: `id` is stable per placement (it
-/// travels with drags and keys the Lua state); `widget` names the
-/// discovered definition; everything else is an optional override
-/// (`None`/empty = inherit the definition default). Serialized
-/// without `id` — ids are a runtime concern, regenerated on load.
+/// travels with drags and keys the Lua state); `name` selects the
+/// discovered definition; `interval`/`size`/`props`/`file` override the
+/// definition defaults when present. Serialized without `id` — ids are
+/// a runtime concern, regenerated on load. Saved placements always
+/// write the full table with effective values materialized, so the
+/// file shows (and pins) exactly what the bar renders; a bare `"name"`
+/// string in hand-written config still means "inherit everything".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetPlacement {
@@ -1182,6 +1185,20 @@ impl WidgetPlacement {
         let mut out = defaults.clone();
         out.extend(self.props.clone());
         out
+    }
+
+    /// Materialize effective values: overrides win, missing pieces fill
+    /// from the definition defaults. Saved placements always persist in
+    /// this form so the file shows exactly what the bar renders.
+    pub fn materialized(&self, defaults: &WidgetDefaults) -> WidgetPlacement {
+        WidgetPlacement {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            file: self.file.clone(),
+            interval: Some(self.effective_interval(defaults)),
+            size: Some(self.effective_size(defaults)),
+            props: self.resolve_props(&defaults.props),
+        }
     }
 
     /// `true` when nothing is overridden (serializes as a bare name).
@@ -1237,9 +1254,11 @@ impl SlotEntry {
 }
 
 impl SlotWidgets {
-    /// Serialize one slot: clean placements (no overrides) write as
-    /// bare names so config files stay readable; customized ones keep
-    /// their tables (ids are runtime-only and never written).
+    /// Serialize one slot: placements always write full tables with
+    /// effective values materialized (see
+    /// [`WidgetPlacement::materialized`]) — except placements already
+    /// bare, which stay bare strings. Ids are runtime-only and never
+    /// written.
     pub fn from_placements(slot: &[WidgetPlacement]) -> Self {
         SlotWidgets::Many(
             slot.iter()
@@ -1950,6 +1969,37 @@ mod tests {
             PropValue::Bool(true)
         );
         let _ = resolved;
+    }
+
+    #[test]
+    fn materialized_fills_effective_values() {
+        let mut defaults = WidgetDefaults::default();
+        defaults
+            .props
+            .insert("format".to_string(), PropValue::Text("%H:%M".to_string()));
+        // Bare placement materializes everything from defaults.
+        let bare = WidgetPlacement {
+            id: "w1".to_string(),
+            name: "clock".to_string(),
+            ..Default::default()
+        };
+        let full = bare.materialized(&defaults);
+        assert_eq!(full.interval, Some(1.0));
+        assert_eq!(full.size, Some(13.0));
+        assert_eq!(full.props["format"], PropValue::Text("%H:%M".to_string()));
+        // Overrides win; unknown keys survive.
+        let custom = WidgetPlacement {
+            interval: Some(5.0),
+            props: [("extra".to_string(), PropValue::Bool(true))]
+                .into_iter()
+                .collect(),
+            ..bare
+        };
+        let full = custom.materialized(&defaults);
+        assert_eq!(full.interval, Some(5.0));
+        assert_eq!(full.size, Some(13.0));
+        assert_eq!(full.props["format"], PropValue::Text("%H:%M".to_string()));
+        assert_eq!(full.props["extra"], PropValue::Bool(true));
     }
 
     #[test]

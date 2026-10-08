@@ -4167,6 +4167,30 @@ impl Top {
             .unwrap_or_default()
     }
 
+    /// Serialize one bar's slots with effective values materialized,
+    /// so the file always shows exactly what the bar renders.
+    /// Placements of unknown widgets persist as written.
+    fn serialize_slots(
+        plots: &Plots,
+        widgets: &[Vec<crate::config::WidgetPlacement>],
+    ) -> Vec<crate::config::SlotWidgets> {
+        widgets
+            .iter()
+            .map(|slot| {
+                let materialized: Vec<crate::config::WidgetPlacement> = slot
+                    .iter()
+                    .map(|placement| {
+                        match plots.widgets.iter().find(|def| def.name == placement.name) {
+                            Some(def) => placement.materialized(&def.defaults),
+                            None => placement.clone(),
+                        }
+                    })
+                    .collect();
+                crate::config::SlotWidgets::from_placements(&materialized)
+            })
+            .collect()
+    }
+
     /// Write the bar's current state back to its `[[bar]]` entry and
     /// arm a coalesced config save (same idle-write as `ConfigPatch`
     /// drags). Entries are matched by index; out-of-range indices push.
@@ -4185,11 +4209,7 @@ impl Top {
             .iter()
             .map(|a| a.as_str().to_string())
             .collect();
-        let widgets: Vec<crate::config::SlotWidgets> = local
-            .widgets
-            .iter()
-            .map(|slot| crate::config::SlotWidgets::from_placements(slot))
-            .collect();
+        let widgets: Vec<crate::config::SlotWidgets> = Self::serialize_slots(plots, &local.widgets);
         let entry = crate::config::TopConfig {
             anchor,
             output,
@@ -4691,11 +4711,7 @@ impl Top {
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
             let l = top.local.clone();
             let aligns: Vec<String> = l.aligns.iter().map(|a| a.as_str().to_string()).collect();
-            let widgets: Vec<crate::config::SlotWidgets> = l
-                .widgets
-                .iter()
-                .map(|slot| crate::config::SlotWidgets::from_placements(slot))
-                .collect();
+            let widgets: Vec<crate::config::SlotWidgets> = Top::serialize_slots(plots, &l.widgets);
             plots.config.bar.push(crate::config::TopConfig {
                 anchor: anchor_name(anchor).to_lowercase(),
                 output,

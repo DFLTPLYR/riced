@@ -1223,51 +1223,41 @@ impl Setting {
             &format!("{} · {where_at}", placement.name),
             "Overrides apply to this instance only. Reset returns to the widget default."
         )]
-        .spacing(16);
+        .spacing(8);
         // Refresh interval.
         {
             let effective = placement.effective_interval(&def.defaults);
             let commit_interval = commit.clone();
-            let reset = placement
-                .interval
-                .is_some()
-                .then(|| commit_interval(crate::app::PlacementProp::Interval(None)));
+            let reset = commit_interval(crate::app::PlacementProp::Interval(Some(
+                def.defaults.interval,
+            )));
             let commit_value = commit.clone();
             col = col.push(prop_row(
                 "Refresh interval".to_string(),
-                placement
-                    .interval
-                    .is_none()
-                    .then(|| format!("Widget default: {:.2}s", def.defaults.interval)),
+                Some(format!("Widget default: {:.2}s", def.defaults.interval)),
                 spin_box(effective as f64, 0.25..=3600.0, 0.25, 2, move |v| {
                     commit_value(crate::app::PlacementProp::Interval(Some(v as f32)))
                 })
                 .width(Length::Fill)
                 .into(),
-                reset,
+                Some(reset),
             ));
         }
         // Text size.
         {
             let effective = placement.effective_size(&def.defaults);
             let commit_size = commit.clone();
-            let reset = placement
-                .size
-                .is_some()
-                .then(|| commit_size(crate::app::PlacementProp::Size(None)));
+            let reset = commit_size(crate::app::PlacementProp::Size(Some(def.defaults.size)));
             let commit_value = commit.clone();
             col = col.push(prop_row(
                 "Text size".to_string(),
-                placement
-                    .size
-                    .is_none()
-                    .then(|| format!("Widget default: {:.1}px", def.defaults.size)),
+                Some(format!("Widget default: {:.1}px", def.defaults.size)),
                 spin_box(effective as f64, 1.0..=128.0, 0.5, 1, move |v| {
                     commit_value(crate::app::PlacementProp::Size(Some(v as f32)))
                 })
                 .width(Length::Fill)
                 .into(),
-                reset,
+                Some(reset),
             ));
         }
         // Custom properties: union of default and override keys, sorted.
@@ -1324,9 +1314,15 @@ impl Setting {
         let label = schema
             .and_then(|s| s.label.clone())
             .unwrap_or_else(|| key.clone());
-        let reset = overridden
-            .is_some()
-            .then(|| patch_prop_msg(wid, pid.clone(), key.clone(), None));
+        // Reset restores the widget default explicitly (or clears a
+        // custom key with no default to inherit from). Everything
+        // persists materialized, so there is no separate inherit mode.
+        let reset = Some(patch_prop_msg(
+            wid,
+            pid.clone(),
+            key.clone(),
+            default.cloned(),
+        ));
         let inherited = default.map(|dflt| format!("Widget default: {}", prop_display(dflt)));
         let subtitle = schema.and_then(|s| s.description.clone()).or(inherited);
         match kind {
