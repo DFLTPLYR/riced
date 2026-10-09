@@ -1,3 +1,11 @@
+//! Persisted configuration, initialization, and migration.
+mod io;
+mod paths;
+mod seed;
+#[cfg(test)]
+use io::parse;
+pub(crate) use io::take_parse_error;
+use seed::{initialize_scripts_in, seed_marker};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -737,11 +745,7 @@ pub enum ConfigPatch {
 }
 
 /// `~/.config/riced/config.toml` (`$XDG_CONFIG_HOME` aware).
-pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .map(|d| d.join("riced").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from("riced.toml"))
-}
+pub use paths::config_path;
 
 /// Widget definitions: every `widgets/*.lua` file (`$XDG_CONFIG_HOME`
 /// aware, non-recursive — `components/` never becomes widgets) is one
@@ -1337,62 +1341,65 @@ pub struct WidgetsFile {
 
 /// Seed Lua clock, written next to the other seed widgets.
 /// Globals persist between calls; clicking the cell toggles the date menu.
-pub(crate) const SEED_CLOCK_LUA: &str = include_str!("../scripts/widgets/clock.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_CLOCK_LUA;
 
 /// Seed Lua label example, written next to the other seed widgets.
-pub(crate) const SEED_HELLO_LUA: &str = include_str!("../scripts/widgets/hello.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_HELLO_LUA;
 
 /// Seed stats example: icon + CPU + memory via the live tables.
 /// Place it in a bar slot (or the Settings pool) to use it.
-pub(crate) const SEED_STATS_LUA: &str = include_str!("../scripts/widgets/stats.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_STATS_LUA;
 
 /// Seed CPU usage: plain percent, no icon. Uncomment its
 /// bar slot entry to use it.
-pub(crate) const SEED_CPU_LUA: &str = include_str!("../scripts/widgets/cpu.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_CPU_LUA;
 
 /// Seed RAM usage: plain percent, no icon. Uncomment its
 /// bar slot entry to use it.
-pub(crate) const SEED_RAM_LUA: &str = include_str!("../scripts/widgets/ram.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_RAM_LUA;
 
 /// Seed GPU usage: plain percent, no icon. Reads "--" when the GPU
 /// exposes nothing readable. Uncomment its `[[widget]]` entry in
 /// a bar slot to use it.
-pub(crate) const SEED_GPU_LUA: &str = include_str!("../scripts/widgets/gpu.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_GPU_LUA;
 
 /// Seed session menu: power-icon cell, popup with suspend /
 /// poweroff / hibernate / reboot rows dispatching `systemctl`.
 /// `on_action` whitelists the four keys (never interpolates a raw
 /// key into shell). Place it in a bar slot to use it.
 /// to use it.
-pub(crate) const SEED_SYSTEM_LUA: &str = include_str!("../scripts/widgets/system.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_SYSTEM_LUA;
 
 /// Seed component library docs (`components/00-define.lua`): how
 /// `iced.define` / `iced.use` work. Pure documentation plus a trivial
 /// `spacer` — the file teaches the pattern every other component uses.
-pub(crate) const SEED_COMPONENT_DEFINE: &str = include_str!("../scripts/components/00-define.lua");
+pub(crate) use seed::SEED_COMPONENT_DEFINE;
 
-pub(crate) const SEED_COMPONENT_STYLED: &str = include_str!("../scripts/components/05-styled.lua");
+pub(crate) use seed::SEED_COMPONENT_STYLED;
 
-pub(crate) const SEED_SELECTION_RECT: &str =
-    include_str!("../scripts/components/selection_rect.lua");
-pub(crate) const SEED_CONTEXT_MENU: &str = include_str!("../scripts/components/context_menu.lua");
-pub(crate) const SEED_CONTEXT_MENU_ITEM: &str =
-    include_str!("../scripts/components/context_menu_item.lua");
+pub(crate) use seed::{SEED_CONTEXT_MENU, SEED_CONTEXT_MENU_ITEM, SEED_SELECTION_RECT};
 
 /// Seed `card` component (`components/10-card.lua`): titled card body,
 /// the shape behind notification cards and stats popups.
-pub(crate) const SEED_COMPONENT_CARD: &str = include_str!("../scripts/components/10-card.lua");
+pub(crate) use seed::SEED_COMPONENT_CARD;
 
 /// Seed `menu` component (`components/20-menu.lua`): uniform action
 /// rows from `{ label, action }` items, the session-menu shape.
-pub(crate) const SEED_COMPONENT_MENU: &str = include_str!("../scripts/components/20-menu.lua");
+pub(crate) use seed::SEED_COMPONENT_MENU;
 
 /// Seed notification renderer: `render(n)` layouts one notification
 /// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
 /// visible cards re-render on save; delete the file to restore the
 /// built-in layout.
-pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
-    include_str!("../scripts/widgets/notifications.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_NOTIFICATIONS_LUA;
 
 /// Seed notification-center widget: a bell cell counting the live
 /// queue, with a popup listing the newest notifications and a dismiss
@@ -1400,34 +1407,28 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 /// before every render) and dismisses via the `on_action` return
 /// convention (`{ dismiss = id }`). Uncomment its `[[widget]]` entry
 /// in a bar slot to use it.
-pub(crate) const SEED_NOTIFY_CENTER_LUA: &str = include_str!("../scripts/widgets/notifycenter.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_NOTIFY_CENTER_LUA;
 
 /// Numbered horizontal workspace buttons filtered by `bar.output`.
 /// Native ext-workspace supplies metadata; clicks dispatch
 /// `hl.dsp.focus` through hyprctl using the actual workspace name.
 /// Place it in a bar slot (or the Settings pool) to use it.
-pub(crate) const SEED_WORKSPACES_LUA: &str = include_str!("../scripts/widgets/workspaces.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_WORKSPACES_LUA;
 
 /// Seed Cline Pass usage: robot icon cell, popup with quota rows.
 /// Paste the API key into `API_KEY` below (no input widget exists —
 /// the file hot-reloads on save). Blank key renders a connect hint.
-pub(crate) const SEED_CLINEPASS_LUA: &str = include_str!("../scripts/widgets/clinepass.lua");
+#[cfg(test)]
+pub(crate) use seed::SEED_CLINEPASS_LUA;
 
 /// `~/.config/riced/widgets.toml` (`$XDG_CONFIG_HOME` aware).
-pub fn widgets_path() -> PathBuf {
-    dirs::config_dir()
-        .map(|d| d.join("riced").join("widgets.toml"))
-        .unwrap_or_else(|| PathBuf::from("widgets.toml"))
-}
+pub use paths::widgets_path;
 
 /// Directory Lua `file` entries resolve against
 /// (`~/.config/riced/widgets/`).
-pub fn widgets_dir() -> PathBuf {
-    widgets_path()
-        .parent()
-        .map(|p| p.join("widgets"))
-        .unwrap_or_else(|| PathBuf::from("widgets"))
-}
+pub use paths::widgets_dir;
 
 /// Discovered widget files: `(name, path)` with name = file stem,
 /// sorted by name. Non-recursive (so `components/` never becomes
@@ -1472,32 +1473,26 @@ pub fn widgets_dir_mtime() -> Option<SystemTime> {
 
 /// Adopted `widgets.toml` after retirement: definitions came from it,
 /// values folded into placements or Lua defaults.
-pub fn widgets_migrated_path() -> PathBuf {
-    widgets_path()
-        .parent()
-        .map(|p| p.join("widgets.toml.migrated"))
-        .unwrap_or_else(|| PathBuf::from("widgets.toml.migrated"))
-}
+pub use paths::widgets_migrated_path;
 
 /// Shared component library dir (`~/.config/riced/components/`):
 /// every `*.lua` file (sorted) is concatenated and executed in each
 /// widget state after `iced` is built, so `iced.define` components are
 /// available to all widgets and the notification renderer. No
 /// `require` needed (and none available — the sandbox nils it).
-pub fn components_dir() -> PathBuf {
-    widgets_dir()
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("components")
-}
+pub use paths::components_dir;
 
 /// Concatenated `components/*.lua` source (sorted by filename, tagged
 /// with `-- file:` separators for error lines), or `None` when the
 /// dir is missing/empty. Tested via [`components_source_in`].
 /// Preserve individual chunk names so Lua errors name their source file.
 pub(crate) fn component_files() -> Vec<(PathBuf, String)> {
-    let installed = shared_component_files_in(&components_dir());
-    if installed.is_empty() {
+    component_files_in(&components_dir())
+}
+
+fn component_files_in(dir: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let installed = shared_component_files_in(dir);
+    if installed.is_empty() && !dir.exists() && !seed_marker(dir).exists() {
         builtin_component_files()
     } else {
         installed
@@ -1640,7 +1635,7 @@ fn seed_component(dir: &std::path::Path, name: &str, content: &str) {
     }
 }
 
-/// Restore every seed component that is missing (never overwrite).
+/// Populate a fresh component library without overwriting existing files.
 fn seed_components_in(dir: &std::path::Path) {
     for (name, content) in [
         ("00-define.lua", SEED_COMPONENT_DEFINE),
@@ -1661,10 +1656,13 @@ fn seed_components_in(dir: &std::path::Path) {
     }
 }
 
-/// Restore seed components under the live components dir.
+/// Initialize shared components once, preserving intentional deletions.
 fn seed_components() {
+    if seed_marker(&components_dir()).exists() {
+        return;
+    }
     migrate_components_in(&widgets_dir().join("components"), &components_dir());
-    seed_components_in(&components_dir());
+    initialize_scripts_in(&components_dir(), seed_components_in);
 }
 
 /// Move legacy library files, preserving existing root-level overrides.
@@ -1776,84 +1774,23 @@ impl WidgetsFile {
         touched.then_some(placement)
     }
 
-    /// Seed one script file when missing (never overwrite).
-    fn seed_script(dir: &std::path::Path, name: &str, content: &str) {
-        let script_path = dir.join(name);
-        if script_path.exists() {
-            return;
-        }
-        if let Some(parent) = script_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&script_path, content) {
-            eprintln!("widgets: cannot write {}: {e}", script_path.display());
-        }
-    }
-
-    /// Restore every seed script that is missing (never overwrite).
+    /// Populate a fresh widget library without overwriting existing files.
+    #[cfg(test)]
     fn seed_all_in(dir: &std::path::Path) {
-        for (name, content) in [
-            ("clock.lua", SEED_CLOCK_LUA),
-            ("hello.lua", SEED_HELLO_LUA),
-            ("stats.lua", SEED_STATS_LUA),
-            ("cpu.lua", SEED_CPU_LUA),
-            ("ram.lua", SEED_RAM_LUA),
-            ("gpu.lua", SEED_GPU_LUA),
-            ("workspaces.lua", SEED_WORKSPACES_LUA),
-            ("clinepass.lua", SEED_CLINEPASS_LUA),
-            ("system.lua", SEED_SYSTEM_LUA),
-            ("notifications.lua", SEED_NOTIFICATIONS_LUA),
-            ("notifycenter.lua", SEED_NOTIFY_CENTER_LUA),
-        ] {
-            Self::seed_script(dir, name, content);
-        }
+        seed::seed_widgets_in(dir);
     }
 
-    /// Restore every seed script under the live widgets dir, plus the
-    /// shared components.
+    /// Initialize fresh widget/component libraries; existing libraries are
+    /// user-owned, including files that were intentionally removed.
     fn seed_all() {
-        Self::seed_all_in(&widgets_dir());
+        initialize_scripts_in(&widgets_dir(), seed::seed_widgets_in);
         seed_components();
     }
 
-    /// Restore missing seed scripts (never overwrite, never touch
-    /// `widgets.toml`). Called before definition discovery so fresh
-    /// installs always have scripts to discover.
+    /// Seed fresh installs once before discovery. Rescans and restarts do
+    /// not restore removed scripts or touch `widgets.toml`.
     pub(crate) fn seed_widget_scripts() {
         Self::seed_all();
-    }
-}
-
-fn read_mtime(path: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-/// Latest TOML parse failure (`source`, `message`), set alongside the
-/// `eprintln!` at both parse sites. The daemon takes it on `ConfigTick`
-/// and mirrors fresh failures as critical notifications (take-once, so
-/// one bad save notifies once, not every tick). Process-global like the
-/// cursor/throttle statics; tests never touch it.
-static LAST_PARSE_ERROR: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
-
-/// Take a pending parse failure, if any.
-pub(crate) fn take_parse_error() -> Option<(String, String)> {
-    LAST_PARSE_ERROR.lock().ok()?.take()
-}
-
-fn note_parse_error(source: &str, err: &impl std::fmt::Display) {
-    if let Ok(mut slot) = LAST_PARSE_ERROR.lock() {
-        *slot = Some((source.to_string(), err.to_string()));
-    }
-}
-
-fn parse(content: &str) -> Config {
-    match toml::from_str(content) {
-        Ok(cfg) => migrate_legacy_top(cfg),
-        Err(e) => {
-            eprintln!("config: parse error, keeping defaults: {e}");
-            note_parse_error("config", &e);
-            Config::default()
-        }
     }
 }
 
@@ -1895,69 +1832,6 @@ fn migrate_legacy_top(mut cfg: Config) -> Config {
 }
 
 impl Config {
-    /// Load from `path`, or defaults on any error (missing/unparseable).
-    pub fn load_from(path: &std::path::Path) -> (Self, Option<SystemTime>) {
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                let cfg = parse(&content);
-                if has_legacy_composables(&content) && toml::from_str::<Config>(&content).is_ok() {
-                    let backup = path.with_extension("toml.pre-composable");
-                    let migrated = (|| -> Result<(), Box<dyn std::error::Error>> {
-                        if !backup.exists() {
-                            std::fs::copy(path, &backup)?;
-                        }
-                        std::fs::write(path, toml::to_string_pretty(&cfg)?)?;
-                        Ok(())
-                    })();
-                    if let Err(error) = migrated {
-                        eprintln!("config: cannot persist composable migration: {error}");
-                    }
-                }
-                (cfg, read_mtime(path))
-            }
-            Err(_) => (Config::default(), None),
-        }
-    }
-
-    /// Load from [`config_path`]. Creates the file with defaults
-    /// (plus parent dirs) when it does not exist yet.
-    pub fn load() -> (Self, Option<SystemTime>) {
-        let path = config_path();
-        if !path.exists() {
-            let cfg = Config::default();
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match toml::to_string_pretty(&cfg) {
-                Ok(text) => {
-                    if let Err(e) = std::fs::write(&path, text) {
-                        eprintln!("config: cannot write {}: {e}", path.display());
-                    }
-                }
-                Err(e) => eprintln!("config: cannot serialize defaults: {e}"),
-            }
-            return (cfg, read_mtime(&path));
-        }
-        Self::load_from(&path)
-    }
-
-    /// Hot-reload check for the poll tick: returns the fresh config
-    /// when the file changed since `known_mtime` (or appeared).
-    /// Never fails — parse errors keep serving the old config.
-    pub fn poll(known_mtime: &Option<SystemTime>) -> Option<(Self, Option<SystemTime>)> {
-        let path = config_path();
-        let mtime = read_mtime(&path);
-        if mtime != *known_mtime && path.exists() {
-            let (cfg, mtime) = Self::load_from(&path);
-            // Only report when the mtime actually advanced; a failed
-            // read keeps the old stamp so we retry next tick.
-            if mtime != *known_mtime {
-                return Some((cfg, mtime));
-            }
-        }
-        None
-    }
-
     /// Apply a runtime [`ConfigPatch`] to the live config in place.
     pub fn apply(&mut self, patch: ConfigPatch) {
         let c = &mut self.composable;
@@ -2014,26 +1888,6 @@ impl Config {
                 if index < images.len() {
                     images.remove(index);
                 }
-            }
-        }
-    }
-
-    /// Persist the live config to [`config_path`], returning the new mtime
-    /// (so the hot-reload poll doesn't immediately "reload" what we wrote).
-    /// Best-effort: failures log and keep serving memory state.
-    pub fn save(&self) -> Option<SystemTime> {
-        let path = config_path();
-        match toml::to_string_pretty(self) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(&path, text) {
-                    eprintln!("config: cannot write {}: {e}", path.display());
-                    return read_mtime(&path);
-                }
-                read_mtime(&path)
-            }
-            Err(e) => {
-                eprintln!("config: cannot serialize: {e}");
-                None
             }
         }
     }
@@ -2738,7 +2592,68 @@ mod tests {
     }
 
     #[test]
-    fn widgets_seeds_restore_missing_scripts_without_overwriting() {
+    fn lua_libraries_seed_once_and_respect_deleted_files_and_directories() {
+        let root = std::env::temp_dir().join(format!("riced-seed-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, seed, removed) in [
+            (
+                "widgets",
+                WidgetsFile::seed_all_in as fn(&std::path::Path),
+                "hello.lua",
+            ),
+            (
+                "components",
+                seed_components_in as fn(&std::path::Path),
+                "10-card.lua",
+            ),
+        ] {
+            let dir = root.join(name);
+            initialize_scripts_in(&dir, seed);
+            assert!(dir.join(removed).exists());
+            assert!(seed_marker(&dir).exists());
+            std::fs::write(dir.join("custom.lua"), "-- user content").unwrap();
+            std::fs::remove_file(dir.join(removed)).unwrap();
+            initialize_scripts_in(&dir, seed);
+            assert!(!dir.join(removed).exists());
+            assert_eq!(
+                std::fs::read_to_string(dir.join("custom.lua")).unwrap(),
+                "-- user content"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+            initialize_scripts_in(&dir, seed);
+            assert!(!dir.exists());
+            if name == "components" {
+                assert!(component_files_in(&dir).is_empty());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_lua_libraries_are_adopted_without_restoring_missing_seeds() {
+        let root = std::env::temp_dir().join(format!("riced-seed-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let widgets = root.join("widgets");
+        std::fs::create_dir_all(&widgets).unwrap();
+        std::fs::write(widgets.join("clock.lua"), "-- my clock").unwrap();
+        initialize_scripts_in(&widgets, WidgetsFile::seed_all_in);
+        assert!(!widgets.join("hello.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(widgets.join("clock.lua")).unwrap(),
+            "-- my clock"
+        );
+        assert!(seed_marker(&widgets).exists());
+        let components = root.join("components");
+        std::fs::create_dir_all(&components).unwrap();
+        initialize_scripts_in(&components, seed_components_in);
+        assert!(shared_component_files_in(&components).is_empty());
+        assert!(component_files_in(&components).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundled_widget_seeds_do_not_overwrite_custom_files() {
         // Hermetic temp dir (no env manipulation: parallel tests share
         // process-global env, so seeds take an explicit dir instead).
         let dir = std::env::temp_dir().join(format!("riced-widgets-{}", std::process::id()));

@@ -20,21 +20,6 @@ pub struct ServiceCtx<'a> {
     pub toplevels: &'a ToplevelCache,
     pub workspaces: &'a WorkspaceCache,
 }
-impl<'a> ServiceCtx<'a> {
-    /// Snapshot every service input from live app state. `gpu` is the
-    /// already-computed usage reading (`None` degrades to nil).
-    pub fn from_plots(plots: &'a crate::app::app::Plots, gpu: Option<f32>) -> Self {
-        Self {
-            sys: &plots.sysinfo,
-            gpu,
-            theme: &plots.config.theme,
-            outputs: &plots.output_infos,
-            notifications: &plots.notifications,
-            toplevels: &plots.toplevel_cache,
-            workspaces: &plots.workspace_cache,
-        }
-    }
-}
 
 /// One namespaced Lua table (`system`, `theme`, …).
 pub trait Service {

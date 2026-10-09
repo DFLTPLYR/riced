@@ -1565,20 +1565,7 @@ fn section<'a>(title: &str, description: &str, body: Element<'a, Plant>) -> Elem
 
 /// Settings-surface text input: card background, hairline border, theme
 /// text (mirrors the spin_box input).
-fn prop_input_style(_: &iced::Theme, _: text_input::Status) -> text_input::Style {
-    text_input::Style {
-        background: iced::Background::Color(theme::card()),
-        border: iced::Border {
-            color: theme::border_color(),
-            width: theme::BORDER_WIDTH,
-            radius: theme::RADIUS.into(),
-        },
-        icon: theme::text_dim(),
-        placeholder: theme::text_dim(),
-        value: theme::text(),
-        selection: theme::text().scale_alpha(0.3),
-    }
-}
+use crate::ui::style::input_style as prop_input_style;
 
 /// Build a [`BarEvent::WidgetProp`] patch message for one placement
 /// property (shared by every editor control; keeps closures small).

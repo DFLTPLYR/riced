@@ -221,8 +221,15 @@ version, and realizes Elements in iced's pure view function. Named host events
 carry owned JSON payloads via mlua serialization. `riced.invalidate()` records
 an effect; handlers also conservatively invalidate the cached view.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for Rust module ownership, data flow,
+and the remaining restructuring stages. Run `just check` for the full checks.
+
 Bundled Lua sources live in `scripts/widgets/` and `scripts/components/`,
-and seed installed copies on startup. Widget and notification modules return
+and seed installed copies once on a fresh installation. Existing directories
+are treated as user-owned: deleted Lua files stay deleted across rescans and
+restarts. Initialization is recorded outside the directories in
+`.widgets-initialized` and `.components-initialized`, so deleting a whole
+library directory does not trigger reseeding either. Widget and notification modules return
 app tables; the shell calls their methods through the registry. Global
 `render()` scripts are rejected, and no global compatibility exports are generated.
 

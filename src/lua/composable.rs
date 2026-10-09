@@ -2,8 +2,8 @@
 //! source/library reloads replace it only after a successful view decode.
 use super::LuaRuntime;
 use crate::{
-    app::layers::top::WidgetNode,
     config::{SourceComposable, ThemeConfig},
+    ui::node::WidgetNode,
 };
 use serde_json::Value;
 use std::{collections::HashMap, path::PathBuf, time::SystemTime};

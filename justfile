@@ -2,6 +2,13 @@
 default:
     @just --list
 
+# Required checks for structural changes (uses the same system libraries as build).
+check:
+    nix develop --command cargo fmt --all -- --check
+    nix develop --command cargo test
+    nix develop --command cargo clippy --all-targets
+    git diff --check
+
 # Build the release binary (inside the flake dev shell:
 # system libs like xkbcommon only resolve via its pkg-config).
 # Also embeds the nix store lib dirs as rpath: wayland-client dlopens

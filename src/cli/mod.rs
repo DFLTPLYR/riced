@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+pub mod commands;
 use std::io;
 use std::path::{Path, PathBuf};
 

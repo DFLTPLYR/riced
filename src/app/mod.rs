@@ -1,10 +1,4 @@
-#[allow(clippy::module_inception)]
-pub mod app;
-pub mod events;
-pub mod layers;
-
-pub use app::{Plots, redraw_scope};
-pub use events::{
-    BackgroundEvent, BarEvent, ConfigEvent, Corner, Edge, LandEvent, NotifyEvent, PlacementProp,
-    Plant, SettingEvent, StyleEvent, TopEvent, WidgetEvent,
-};
+//! Temporary import facade while callers move to the shell namespace.
+pub use crate::shell::screens as layers;
+pub use crate::shell::state as app;
+pub use crate::shell::*;

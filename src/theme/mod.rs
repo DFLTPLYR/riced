@@ -1,8 +1,9 @@
+//! Theme storage, palette snapshots, and iced styling.
+mod schema;
+use schema::{ThemeFile, VariantRaw};
 use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
-
-use serde::Deserialize;
 
 use iced::widget::{button, container};
 use iced::{Border, Color, Theme, theme::Palette};
@@ -12,45 +13,6 @@ use crate::config::ThemeConfig;
 // ---------------------------------------------------------------------------
 // Reshell schema
 // ---------------------------------------------------------------------------
-
-/// One `dark`/`light` variant of a reshell theme file. Colors are `#rrggbb`
-/// hex. The reshell `terminal` block is ignored by serde (unknown fields
-/// pass through) — riced has no terminal. `alias`es accept the unseparated
-/// spelling some reshell files use (`onprimary` in `ayu-blue.json`).
-#[derive(Debug, Clone, Deserialize)]
-struct VariantRaw {
-    primary: String,
-    #[serde(alias = "onprimary")]
-    on_primary: String,
-    secondary: String,
-    #[serde(alias = "onsecondary")]
-    on_secondary: String,
-    tertiary: String,
-    #[serde(alias = "ontertiary")]
-    on_tertiary: String,
-    error: String,
-    #[serde(alias = "onerror")]
-    on_error: String,
-    surface: String,
-    #[serde(alias = "onsurface")]
-    on_surface: String,
-    #[serde(alias = "surfacevariant")]
-    surface_variant: String,
-    #[serde(alias = "onsurfacevariant")]
-    on_surface_variant: String,
-    outline: String,
-    shadow: String,
-    hover: String,
-    #[serde(alias = "onhover")]
-    on_hover: String,
-}
-
-/// A reshell theme file: `{ "dark": {...}, "light": {...} }`.
-#[derive(Debug, Clone, Deserialize)]
-struct ThemeFile {
-    dark: VariantRaw,
-    light: VariantRaw,
-}
 
 /// Parse `#rrggbb` / `#rrggbbaa` into an iced [`Color`]. Anything else is
 /// `None` (caller substitutes the fallback field color and logs once).
@@ -232,17 +194,17 @@ impl ActiveTheme {
 /// (`dynamic` is deliberately absent: it is generated from the wallpaper
 /// views via `riced generate-theme`, never a static snapshot.)
 const BUILTINS: &[(&str, &str)] = &[
-    ("ayu", include_str!("../themes/ayu.json")),
-    ("ayu-blue", include_str!("../themes/ayu-blue.json")),
-    ("catppuccin", include_str!("../themes/catppuccin.json")),
-    ("dracula", include_str!("../themes/dracula.json")),
-    ("eldritch", include_str!("../themes/eldritch.json")),
-    ("ferra", include_str!("../themes/ferra.json")),
-    ("gruvbox", include_str!("../themes/gruvbox.json")),
-    ("kanagawa", include_str!("../themes/kanagawa.json")),
-    ("nord", include_str!("../themes/nord.json")),
-    ("rosepine", include_str!("../themes/rosepine.json")),
-    ("tokyo-night", include_str!("../themes/tokyo-night.json")),
+    ("ayu", include_str!("../../themes/ayu.json")),
+    ("ayu-blue", include_str!("../../themes/ayu-blue.json")),
+    ("catppuccin", include_str!("../../themes/catppuccin.json")),
+    ("dracula", include_str!("../../themes/dracula.json")),
+    ("eldritch", include_str!("../../themes/eldritch.json")),
+    ("ferra", include_str!("../../themes/ferra.json")),
+    ("gruvbox", include_str!("../../themes/gruvbox.json")),
+    ("kanagawa", include_str!("../../themes/kanagawa.json")),
+    ("nord", include_str!("../../themes/nord.json")),
+    ("rosepine", include_str!("../../themes/rosepine.json")),
+    ("tokyo-night", include_str!("../../themes/tokyo-night.json")),
 ];
 
 const GENERATED: &[&str] = &["dynamic"];

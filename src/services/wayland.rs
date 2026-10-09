@@ -9,7 +9,7 @@
 
 use super::registry::ServiceCtx;
 use super::{Toplevel, Workspace};
-use crate::app::layers::background::Background;
+use crate::shared::geometry::output_geometry;
 
 /// Publish `wayland = { outputs = …, workspaces = …, toplevels = … }`:
 /// - `outputs`: `{name, x, y, w, h}` sorted by name (deterministic).
@@ -31,7 +31,7 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     let out_list = lua.create_table()?;
     let mut geometry: Vec<(String, [f32; 4])> = Vec::new();
     for (i, (_id, info)) in outputs.iter().enumerate() {
-        let (x, y, w, h) = Background::output_geometry(info);
+        let (x, y, w, h) = output_geometry(info);
         let name = info.name.clone().unwrap_or_default();
         geometry.push((name.clone(), [x, y, w, h]));
         let entry = lua.create_table()?;

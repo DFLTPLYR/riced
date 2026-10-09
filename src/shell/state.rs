@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
-use super::layers::{Background, ContextMenu, Notification, Popup, SelectionRect, Setting, Top};
+use super::screens::{Background, ContextMenu, Notification, Popup, SelectionRect, Setting, Top};
 use super::{
     BackgroundEvent, BarEvent, ConfigEvent, Corner, Edge, LandEvent, NotifyEvent, Plant,
     SettingEvent, StyleEvent, TopEvent, WidgetEvent,
@@ -633,7 +633,9 @@ impl Plots {
                 .get(&id)
                 .map(|p| p.view(self))
                 .unwrap_or_else(|| Space::new().into()),
-            Some(PlotInfo::Notification(output)) => super::layers::notification::view(self, output),
+            Some(PlotInfo::Notification(output)) => {
+                super::screens::notification::view(self, output)
+            }
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
         }

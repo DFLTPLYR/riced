@@ -21,3 +21,4 @@ pub use bar::publish as publish_bar;
 pub use registry::{ServiceCtx, publish_all};
 pub use toplevels::{Toplevel, ToplevelCache};
 pub use workspaces::{Workspace, WorkspaceCache};
+pub(crate) mod gpu;

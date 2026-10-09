@@ -69,20 +69,7 @@ pub fn spin_box(
 }
 
 /// Settings-surface input: card background, hairline border, theme text.
-fn input_style(_: &iced::Theme, _: text_input::Status) -> text_input::Style {
-    text_input::Style {
-        background: iced::Background::Color(theme::card()),
-        border: iced::Border {
-            color: theme::border_color(),
-            width: theme::BORDER_WIDTH,
-            radius: theme::RADIUS.into(),
-        },
-        icon: theme::text_dim(),
-        placeholder: theme::text_dim(),
-        value: theme::text(),
-        selection: theme::text().scale_alpha(0.3),
-    }
-}
+use crate::ui::style::input_style;
 
 #[cfg(test)]
 mod tests {

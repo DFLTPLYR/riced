@@ -7,7 +7,7 @@ use crate::composables::panel_window::top_window;
 use crate::config::WidgetDefinition;
 use crate::theme;
 use iced::mouse::Button;
-use iced::widget::{Space, button, column, container, progress_bar, row, text};
+use iced::widget::{Space, column, container, row, text};
 use iced::window;
 use iced::{Element, Fill, Point, Task as Command};
 use iced_exwlshell::reexport::{
@@ -16,7 +16,7 @@ use iced_exwlshell::reexport::{
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::{OutputId, OutputInfo};
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value};
+use mlua::{Function, Lua, Table, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -325,81 +325,11 @@ impl From<&crate::config::TopConfig> for TopLocal {
 /// guarantee as lucide-iced itself — no hand list, no checked-in
 /// table) plus short aliases (`mem`, `vol`, `up`...). Unknown names
 /// render as literal text so typos stay visible.
-fn icon_bytes(name: &str) -> Option<&'static [u8]> {
-    let key: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_lowercase();
-    generated_icon_bytes(&key)
-}
-
-// Build-generated full-set lookup (see build.rs): one match arm per
-// Lucide icon, derived from lucide-iced's own build output.
-include!(concat!(env!("OUT_DIR"), "/lucide_lookup.rs"));
-
-/// One piece of widget text: plain text or an `{icon:name}` reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Segment<'a> {
-    Text(&'a str),
-    Icon(&'a str),
-}
-
-/// Split widget text on `{icon:name}` placeholders. Unterminated
-/// `{icon:` tails stay literal text.
-fn icon_segments(output: &str) -> Vec<Segment<'_>> {
-    let mut segments = Vec::new();
-    let mut rest = output;
-    while let Some(start) = rest.find("{icon:") {
-        if start > 0 {
-            segments.push(Segment::Text(&rest[..start]));
-        }
-        let after = &rest[start + "{icon:".len()..];
-        match after.find('}') {
-            Some(end) => {
-                segments.push(Segment::Icon(after[..end].trim()));
-                rest = &after[end + 1..];
-            }
-            None => {
-                segments.push(Segment::Text(&rest[start..]));
-                rest = "";
-            }
-        }
-    }
-    if !rest.is_empty() {
-        segments.push(Segment::Text(rest));
-    }
-    segments
-}
-
-/// Widget text with `{icon:name}` placeholders resolved to theme-aware
-/// Lucide icons (they inherit the surrounding text color, so they
-/// follow the theme like text does). Plain text without placeholders
-/// renders as a single text element, exactly like before.
-pub(crate) fn rich_text(output: String, size: f32, spacing: f32) -> Element<'static, Plant> {
-    let size = size.max(1.0);
-    if !output.contains("{icon:") {
-        return text(output).size(size).into();
-    }
-    let mut row = row![]
-        .spacing(spacing.max(0.0))
-        .align_y(iced::Alignment::Center)
-        .width(iced::Length::Shrink)
-        .height(iced::Length::Shrink);
-    for segment in icon_segments(&output) {
-        match segment {
-            Segment::Text(text_) if !text_.is_empty() => {
-                row = row.push(text(text_.to_owned()).size(size));
-            }
-            Segment::Icon(name) => match icon_bytes(name) {
-                Some(bytes) => row = row.push(lucide_iced::themed_icon(bytes, size)),
-                None => row = row.push(text(format!("{{icon:{name}}}")).size(size)),
-            },
-            _ => {}
-        }
-    }
-    row.into()
-}
+#[cfg(test)]
+use crate::ui::icons::icon_bytes;
+pub(crate) use crate::ui::icons::rich_text;
+#[cfg(test)]
+use crate::ui::icons::{Segment, icon_segments};
 
 /// Empty cell for slots with no widget (unknown names land here too).
 fn empty_slot() -> Element<'static, Plant> {
@@ -973,121 +903,7 @@ pub(crate) fn parse_transitions(
     parse_transition_value(spec, enter, exit, displaced)
 }
 
-fn parse_transition_value(
-    spec: Value,
-    enter: &Transition,
-    exit: &Transition,
-    displaced: &Transition,
-) -> Result<(Transition, Transition, Transition, bool), String> {
-    fn num(value: &Value) -> Option<f32> {
-        match value {
-            Value::Integer(i) => Some(*i as f32),
-            Value::Number(n) => Some(*n as f32),
-            _ => None,
-        }
-        .filter(|value| value.is_finite())
-    }
-    fn axis_number(
-        slot: &Table,
-        slot_name: &str,
-        axis: &str,
-        field: &str,
-        keep: f32,
-    ) -> Result<f32, String> {
-        let axis_value: Value = slot.get(axis).map_err(|e| e.to_string())?;
-        let axis_table = match axis_value {
-            Value::Nil => return Ok(keep),
-            Value::Table(t) => t,
-            other => {
-                return Err(format!(
-                    "transitions().{slot_name}.{axis} must be a table like {{ from = 0, to = 1 }}, got {}",
-                    lua_value_kind(&other)
-                ));
-            }
-        };
-        match axis_table.get::<Value>(field).map_err(|e| e.to_string())? {
-            Value::Nil => Ok(keep),
-            v => num(&v).ok_or_else(|| {
-                format!(
-                    "transitions().{slot_name}.{axis}.{field} must be a number, got {}",
-                    lua_value_kind(&v)
-                )
-            }),
-        }
-    }
-    fn slot_duration(
-        slot: &Table,
-        slot_name: &str,
-        keep: Option<Duration>,
-    ) -> Result<Option<Duration>, String> {
-        match slot.get::<Value>("duration").map_err(|e| e.to_string())? {
-            Value::Nil => Ok(keep),
-            v => num(&v)
-                .filter(|n| *n >= 0.0)
-                .map(|n| Some(Duration::from_millis(n.clamp(0.0, 5000.0) as u64)))
-                .ok_or_else(|| {
-                    format!(
-                        "transitions().{slot_name}.duration must be a non-negative number of milliseconds, got {}",
-                        lua_value_kind(&v)
-                    )
-                }),
-        }
-    }
-    let spec_table = match spec {
-        Value::Nil => return Ok((enter.clone(), exit.clone(), displaced.clone(), false)),
-        Value::Table(t) => t,
-        other => {
-            return Err(format!(
-                "transitions() must return a table, got {}",
-                lua_value_kind(&other)
-            ));
-        }
-    };
-    let mut out_enter = enter.clone();
-    let mut out_exit = exit.clone();
-    let mut out_displaced = displaced.clone();
-    let custom_enter = matches!(
-        spec_table.get::<Value>("add").map_err(|e| e.to_string())?,
-        Value::Table(_)
-    );
-    for (slot_name, is_exit, is_displaced) in [
-        ("add", false, false),
-        ("remove", true, false),
-        ("displaced", false, true),
-    ] {
-        let slot_value: Value = spec_table.get(slot_name).map_err(|e| e.to_string())?;
-        let Value::Table(slot) = slot_value else {
-            if slot_value == Value::Nil {
-                continue;
-            }
-            return Err(format!(
-                "transitions().{slot_name} must be a table, got {}",
-                lua_value_kind(&slot_value)
-            ));
-        };
-        if is_displaced {
-            out_displaced.duration = slot_duration(&slot, slot_name, displaced.duration)?;
-            continue;
-        }
-        if is_exit {
-            out_exit.to.x = axis_number(&slot, slot_name, "x", "to", exit.to.x)?;
-            out_exit.to.y = axis_number(&slot, slot_name, "y", "to", exit.to.y)?;
-            out_exit.to.opacity = axis_number(&slot, slot_name, "opacity", "to", exit.to.opacity)?;
-            out_exit.duration = slot_duration(&slot, slot_name, exit.duration)?;
-        } else {
-            out_enter.from.x = axis_number(&slot, slot_name, "x", "from", enter.from.x)?;
-            out_enter.from.y = axis_number(&slot, slot_name, "y", "from", enter.from.y)?;
-            out_enter.from.opacity =
-                axis_number(&slot, slot_name, "opacity", "from", enter.from.opacity)?;
-            out_enter.to.x = axis_number(&slot, slot_name, "x", "to", enter.to.x)?;
-            out_enter.to.y = axis_number(&slot, slot_name, "y", "to", enter.to.y)?;
-            out_enter.to.opacity =
-                axis_number(&slot, slot_name, "opacity", "to", enter.to.opacity)?;
-            out_enter.duration = slot_duration(&slot, slot_name, enter.duration)?;
-        }
-    }
-    Ok((out_enter, out_exit, out_displaced, custom_enter))
-}
+use crate::lua::transitions::parse_transition_value;
 
 /// Last script output (text, size) by placement id (`None` = empty
 /// cell). Split out so the cache lookup stays testable without rendering.
@@ -1104,139 +920,7 @@ fn lua_cell_text(
         .map(|text| (text, placement.effective_size(&def.defaults)))
 }
 
-/// One composable UI node, built in Lua via the `ui` table and
-/// interpreted here into iced widgets. Lua never holds real widgets —
-/// it composes these descriptions, which is the entire expressive
-/// range (nesting is free; new primitives add one constructor plus one
-/// match arm below).
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum WidgetNode {
-    ListView {
-        id: String,
-        items: Vec<(String, WidgetNode)>,
-        horizontal: bool,
-        pitch: f32,
-        spacing: f32,
-        width: NodeLength,
-        height: NodeLength,
-        transitions: Box<(Transition, Transition, Transition)>,
-    },
-    Container {
-        child: Box<WidgetNode>,
-        width: NodeLength,
-        height: NodeLength,
-        padding: f32,
-        background: Option<iced::Color>,
-        radius: f32,
-        /// Explicit border color (`:border()`); `None` paints no border.
-        border: Option<iced::Color>,
-        /// Border width px (`:border_width()`); defaults to 1.0 when a
-        /// border color is set, else 0.
-        border_width: f32,
-    },
-    Scrollable {
-        child: Box<WidgetNode>,
-        width: NodeLength,
-        height: NodeLength,
-    },
-    Space {
-        width: NodeLength,
-        height: NodeLength,
-    },
-    Image {
-        path: String,
-        width: NodeLength,
-        height: NodeLength,
-    },
-    Text {
-        content: String,
-        size: Option<f32>,
-        width: Option<NodeLength>,
-        height: Option<NodeLength>,
-        /// Explicit label color (`:color()`); `None` inherits the theme.
-        color: Option<iced::Color>,
-    },
-    Icon {
-        name: String,
-        /// Tint (`:color()`); `None` inherits surrounding text color.
-        color: Option<iced::Color>,
-    },
-    Row {
-        children: Vec<WidgetNode>,
-        spacing: f32,
-        width: NodeLength,
-        height: NodeLength,
-    },
-    Column {
-        children: Vec<WidgetNode>,
-        spacing: f32,
-        width: NodeLength,
-        height: NodeLength,
-    },
-    /// Label plus `on_action()` key. In cells each button is a
-    /// per-widget MouseArea (`CellAction` carries the owner, so clicks
-    /// route to that widget's `on_action` — never the slot-wide
-    /// popup/`on_press` fallback). In popups buttons route like `items`
-    /// rows (`PopupSelect` carries the popup, same `on_action` key).
-    Button {
-        label: String,
-        action: String,
-        width: Option<NodeLength>,
-        height: Option<NodeLength>,
-        padding: Option<f32>,
-        /// Explicit label color (`:color()`); `None` uses the themed
-        /// button text.
-        color: Option<iced::Color>,
-        /// Explicit background (`:background()`); applies to the Active
-        /// status only — Hovered/Pressed keep themed surfaces so click
-        /// feedback still reads. `None` uses the themed background.
-        background: Option<iced::Color>,
-        radius: Option<f32>,
-    },
-    Progress {
-        value: f32,
-        width: NodeLength,
-        height: Option<NodeLength>,
-        /// Explicit fill color (`:color()`); `None` uses the themed fill.
-        color: Option<iced::Color>,
-        /// Explicit track color (`:background()`); `None` uses the
-        /// themed track.
-        background: Option<iced::Color>,
-    },
-    /// Loading placeholder: animated ring while a slow fetch resolves.
-    /// Purely visual (no action) — scripts return it first, then swap
-    /// in real content once cached data arrives.
-    Spinner,
-    /// Horizontal hairline between items (`iced.separator()`).
-    /// Always full-width (iced rules fill their axis); only thickness
-    /// (`height`, default 1px) chains. Paint uses `:color()` when set,
-    /// else the theme border color.
-    Separator {
-        height: f32,
-        color: Option<iced::Color>,
-    },
-}
-
-/// Box sizing for `ui` nodes: a number is px (`Fixed`), `"fill"` /
-/// `"shrink"` are the iced `Length` modes. Unset means `Shrink`
-/// everywhere except progress width (`Fixed(120)`), so old scripts
-/// render identically.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum NodeLength {
-    Fill,
-    Shrink,
-    Fixed(f32),
-}
-
-impl NodeLength {
-    pub(crate) fn iced(self) -> iced::Length {
-        match self {
-            Self::Fill => iced::Length::Fill,
-            Self::Shrink => iced::Length::Shrink,
-            Self::Fixed(px) => iced::Length::Fixed(px.max(1.0)),
-        }
-    }
-}
+pub(crate) use crate::ui::node::{NodeLength, WidgetNode};
 
 /// Optional numeric field from a node table. Unset reads as nil —
 /// but so do the chainable setter *methods* (same namespace: `t.size`
@@ -1244,734 +928,18 @@ impl NodeLength {
 /// functions read as unset too. Real numbers pass; anything else
 /// (strings, tables) errors naming the field. Both constructor args
 /// and chained setters share this path.
-fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
-    if let Ok(properties) = t.raw_get::<Table>("_properties") {
-        return properties.raw_get(field);
-    }
-    t.get(field)
-}
-
-fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
-    match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
-        Value::Integer(i) => Ok(Some(i as f32)),
-        Value::Number(n) => Ok(Some(n as f32)),
-        other => Err(format!(
-            "{what} {field} must be a number, got {}",
-            lua_value_kind(&other)
-        )),
-    }
-}
-
-/// Optional color from a node table: `"#rgb"` / `"#rrggbb"` /
-/// `"#rrggbbaa"` strings or `{r, g, b[, a]}` 0–1 tables (named or
-/// positional keys). Unset (nil — or the setter function sharing the
-/// field namespace) means `None`. Anything else errors naming the
-/// field, so typos stay visible.
-fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<iced::Color>, String> {
-    fn num(v: &Value) -> Option<f32> {
-        match v {
-            Value::Integer(i) => Some(*i as f32),
-            Value::Number(n) => Some(*n as f32),
-            _ => None,
-        }
-    }
-    match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
-        Value::String(s) => {
-            let raw = s.to_string_lossy();
-            // Expand `#rgb` to `#rrggbb` before the theme parser.
-            let expanded = if raw.len() == 4 && raw.starts_with('#') {
-                let c: Vec<char> = raw.chars().collect();
-                format!("#{}{}{}{}{}{}", c[1], c[1], c[2], c[2], c[3], c[3])
-            } else {
-                raw.to_string()
-            };
-            crate::theme::parse_hex(&expanded).ok_or_else(|| {
-                format!("{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table, got {raw:?}")
-            }).map(Some)
-        }
-        Value::Table(rgb) => {
-            let chan = |k: &str, i: i32| -> Option<f32> {
-                rgb.get::<Value>(k)
-                    .ok()
-                    .as_ref()
-                    .and_then(num)
-                    .or_else(|| rgb.get::<Value>(i).ok().as_ref().and_then(num))
-            };
-            match (chan("r", 1), chan("g", 2), chan("b", 3)) {
-                (Some(r), Some(g), Some(b)) => Ok(Some(iced::Color::from_rgba(
-                    r.clamp(0.0, 1.0),
-                    g.clamp(0.0, 1.0),
-                    b.clamp(0.0, 1.0),
-                    chan("a", 4).unwrap_or(1.0).clamp(0.0, 1.0),
-                ))),
-                _ => Err(format!(
-                    "{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table"
-                )),
-            }
-        }
-        other => Err(format!(
-            "{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table, got {}",
-            lua_value_kind(&other)
-        )),
-    }
-}
-
-/// Optional box size from a node table: numbers are px, `"fill"` /
-/// `"shrink"` / `"auto"` (any case) are the iced modes, unset (nil — or the
-/// setter function sharing the field namespace) means `None`.
-/// Anything else errors naming the field.
-fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<NodeLength>, String> {
-    match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
-        Value::Integer(i) => Ok(Some(NodeLength::Fixed(i as f32))),
-        Value::Number(n) => Ok(Some(NodeLength::Fixed(n as f32))),
-        Value::String(s) => match s.to_string_lossy().to_lowercase().as_str() {
-            "fill" => Ok(Some(NodeLength::Fill)),
-            "shrink" | "auto" => Ok(Some(NodeLength::Shrink)),
-            other => Err(format!(
-                "{what} {field} must be a number, \"fill\", \"shrink\", or \"auto\", got {other:?}"
-            )),
-        },
-        other => Err(format!(
-            "{what} {field} must be a number, \"fill\", \"shrink\", or \"auto\", got {}",
-            lua_value_kind(&other)
-        )),
-    }
-}
+#[cfg(test)]
+use crate::ui::decode::node_property;
 
 /// Parse a `render()` table return into a node tree. Scalars coerce to
 /// text like before; malformed structure is an error (logged
 /// once-per-message by the caller, cell renders empty).
-pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
-    match value {
-        Value::Table(t) => {
-            let kind: String = match t.get::<Value>("type").map_err(|e| e.to_string())? {
-                Value::String(s) => s.to_string_lossy(),
-                Value::Nil => {
-                    return Err("ui node table needs a type field".to_string());
-                }
-                other => {
-                    return Err(format!(
-                        "ui node type must be a string, got {}",
-                        lua_value_kind(&other)
-                    ));
-                }
-            };
-            match kind.as_str() {
-                "listview" => {
-                    let id = match node_property(t, "id").map_err(|e| e.to_string())? {
-                        Value::String(s) => s.to_string_lossy(),
-                        _ => return Err("iced.listview needs :id('stable-name')".into()),
-                    };
-                    let key_field = match node_property(t, "key").map_err(|e| e.to_string())? {
-                        Value::String(s) => s.to_string_lossy(),
-                        _ => return Err("iced.listview needs :key('field')".into()),
-                    };
-                    let delegate = match node_property(t, "delegate").map_err(|e| e.to_string())? {
-                        Value::Function(f) => f,
-                        _ => {
-                            return Err(
-                                "iced.listview needs :delegate(function(item) ... end)".into()
-                            );
-                        }
-                    };
-                    let data: Table = t.get("data").map_err(|e| e.to_string())?;
-                    let mut items = Vec::new();
-                    let mut seen = std::collections::HashSet::new();
-                    for item in data.sequence_values::<Table>() {
-                        let item = item.map_err(|e| e.to_string())?;
-                        let key = match item
-                            .get::<Value>(key_field.as_str())
-                            .map_err(|e| e.to_string())?
-                        {
-                            Value::String(s) => s.to_string_lossy(),
-                            Value::Integer(n) => n.to_string(),
-                            _ => {
-                                return Err(format!(
-                                    "listview {id:?} key must be a string or integer"
-                                ));
-                            }
-                        };
-                        if !seen.insert(key.clone()) {
-                            return Err(format!("listview {id:?} duplicate key {key:?}"));
-                        }
-                        let value: Value = delegate.call(item).map_err(|e| e.to_string())?;
-                        items.push((key, parse_node(&value)?));
-                    }
-                    let defaults: super::listview::ListView<String, WidgetNode> =
-                        super::listview::ListView::default();
-                    let (enter, exit, displaced, _) = parse_transition_value(
-                        t.get("transitions").map_err(|e| e.to_string())?,
-                        &defaults.enter_spec(),
-                        &defaults.exit_spec(),
-                        &defaults.displaced_spec(),
-                    )?;
-                    Ok(WidgetNode::ListView {
-                        id,
-                        items,
-                        horizontal: matches!(node_property(t, "axis").map_err(|e| e.to_string())?, Value::String(s) if s.to_string_lossy() == "horizontal"),
-                        pitch: opt_number(t, "pitch", "iced.listview()")?
-                            .unwrap_or(32.0)
-                            .max(1.0),
-                        spacing: opt_number(t, "spacing", "iced.listview()")?
-                            .unwrap_or(4.0)
-                            .max(0.0),
-                        width: opt_length(t, "width", "iced.listview()")?
-                            .unwrap_or(NodeLength::Shrink),
-                        height: opt_length(t, "height", "iced.listview()")?
-                            .unwrap_or(NodeLength::Shrink),
-                        transitions: Box::new((enter, exit, displaced)),
-                    })
-                }
-                "container" => {
-                    let background = opt_color(t, "background", "iced.container()")?;
-                    let border = opt_color(t, "border", "iced.container()")?;
-                    // A border color implies 1px; an explicit width
-                    // (including 0) always wins; no color paints nothing.
-                    let border_width = match opt_number(t, "border_width", "iced.container()")? {
-                        Some(w) => w.max(0.0),
-                        None => {
-                            if border.is_some() {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }
-                    };
-                    Ok(WidgetNode::Container {
-                        child: Box::new(parse_node(
-                            &t.get::<Value>("child").map_err(|e| e.to_string())?,
-                        )?),
-                        width: opt_length(t, "width", "iced.container()")?
-                            .unwrap_or(NodeLength::Shrink),
-                        height: opt_length(t, "height", "iced.container()")?
-                            .unwrap_or(NodeLength::Shrink),
-                        padding: opt_number(t, "padding", "iced.container()")?.unwrap_or(0.0),
-                        radius: opt_number(t, "radius", "iced.container()")?.unwrap_or(0.0),
-                        background,
-                        border,
-                        border_width,
-                    })
-                }
-                "scrollable" => Ok(WidgetNode::Scrollable {
-                    child: Box::new(parse_node(
-                        &t.get::<Value>("child").map_err(|e| e.to_string())?,
-                    )?),
-                    width: opt_length(t, "width", "iced.scrollable()")?.unwrap_or(NodeLength::Fill),
-                    height: opt_length(t, "height", "iced.scrollable()")?
-                        .unwrap_or(NodeLength::Fill),
-                }),
-                "space" => Ok(WidgetNode::Space {
-                    width: opt_length(t, "width", "iced.space()")?.unwrap_or(NodeLength::Shrink),
-                    height: opt_length(t, "height", "iced.space()")?.unwrap_or(NodeLength::Shrink),
-                }),
-                "image" => Ok(WidgetNode::Image {
-                    path: t.get("path").map_err(|e| e.to_string())?,
-                    width: opt_length(t, "width", "iced.image()")?.unwrap_or(NodeLength::Shrink),
-                    height: opt_length(t, "height", "iced.image()")?.unwrap_or(NodeLength::Shrink),
-                }),
-                "text" => Ok(WidgetNode::Text {
-                    content: coerce_text(
-                        t.get::<Value>("text").map_err(|e| e.to_string())?,
-                        "ui.text()",
-                    )?,
-                    // Chained :size(14) overrides the widget default.
-                    size: opt_number(t, "size", "ui.text()")?,
-                    width: opt_length(t, "width", "ui.text()")?,
-                    height: opt_length(t, "height", "ui.text()")?,
-                    color: opt_color(t, "color", "ui.text()")?,
-                }),
-                "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
-                    Value::String(s) => Ok(WidgetNode::Icon {
-                        name: s.to_string_lossy(),
-                        color: opt_color(t, "color", "ui.icon()")?,
-                    }),
-                    Value::Nil => Err("ui.icon() needs a name".to_string()),
-                    other => Err(format!(
-                        "ui.icon() name must be a string, got {}",
-                        lua_value_kind(&other)
-                    )),
-                },
-                "row" | "column" => {
-                    let children = match t.get::<Value>("children").map_err(|e| e.to_string())? {
-                        Value::Table(list) => list
-                            .sequence_values::<Value>()
-                            .map(|child| {
-                                child
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|child| parse_node(&child))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        Value::Nil => Vec::new(),
-                        other => {
-                            return Err(format!(
-                                "ui.{}() children must be an array, got {}",
-                                kind,
-                                lua_value_kind(&other)
-                            ));
-                        }
-                    };
-                    let spacing = match node_property(t, "spacing").map_err(|e| e.to_string())? {
-                        Value::Nil | Value::Function(_) => 4.0,
-                        Value::Integer(i) => i as f32,
-                        Value::Number(n) => n as f32,
-                        other => {
-                            return Err(format!(
-                                "ui.{}() spacing must be a number, got {}",
-                                kind,
-                                lua_value_kind(&other)
-                            ));
-                        }
-                    };
-                    if kind == "row" {
-                        Ok(WidgetNode::Row {
-                            children,
-                            spacing,
-                            width: opt_length(t, "width", "ui.row()")?
-                                .unwrap_or(NodeLength::Shrink),
-                            height: opt_length(t, "height", "ui.row()")?
-                                .unwrap_or(NodeLength::Shrink),
-                        })
-                    } else {
-                        Ok(WidgetNode::Column {
-                            children,
-                            spacing,
-                            width: opt_length(t, "width", "ui.column()")?
-                                .unwrap_or(NodeLength::Shrink),
-                            height: opt_length(t, "height", "ui.column()")?
-                                .unwrap_or(NodeLength::Shrink),
-                        })
-                    }
-                }
-                "button" => {
-                    let label = coerce_text(
-                        t.get::<Value>("label").map_err(|e| e.to_string())?,
-                        "ui.button() label",
-                    )?;
-                    let action = coerce_text(
-                        t.get::<Value>("action").map_err(|e| e.to_string())?,
-                        "ui.button() action",
-                    )?;
-                    Ok(WidgetNode::Button {
-                        label,
-                        action,
-                        width: opt_length(t, "width", "ui.button()")?,
-                        height: opt_length(t, "height", "ui.button()")?,
-                        padding: opt_number(t, "padding", "ui.button()")?,
-                        color: opt_color(t, "color", "ui.button()")?,
-                        background: opt_color(t, "background", "ui.button()")?,
-                        radius: opt_number(t, "radius", "ui.button()")?.map(|r| r.max(0.0)),
-                    })
-                }
-                "progress" => {
-                    let value = match t.get::<Value>("value").map_err(|e| e.to_string())? {
-                        Value::Nil => 0.0,
-                        Value::Integer(i) => i as f32,
-                        Value::Number(n) => n as f32,
-                        other => {
-                            return Err(format!(
-                                "ui.progress() value must be a number, got {}",
-                                lua_value_kind(&other)
-                            ));
-                        }
-                    };
-                    // Width via constructor arg or :width() chain
-                    // (number, "fill", or "shrink"). Unset reads as
-                    // the setter *function* (same namespace via
-                    // __index) — treat functions as unset, not error.
-                    let width = match opt_length(t, "width", "ui.progress()")? {
-                        Some(l) => l,
-                        None => NodeLength::Fixed(120.0),
-                    };
-                    Ok(WidgetNode::Progress {
-                        value,
-                        width,
-                        height: opt_length(t, "height", "ui.progress()")?,
-                        color: opt_color(t, "color", "ui.progress()")?,
-                        background: opt_color(t, "background", "ui.progress()")?,
-                    })
-                }
-                "spinner" => Ok(WidgetNode::Spinner),
-                "separator" => Ok(WidgetNode::Separator {
-                    height: opt_number(t, "height", "ui.separator()")?
-                        .unwrap_or(1.0)
-                        .max(1.0),
-                    color: opt_color(t, "color", "ui.separator()")?,
-                }),
-                other => Err(format!("unknown ui node type {other:?}")),
-            }
-        }
-        _ => Ok(WidgetNode::Text {
-            content: coerce_text(value.clone(), "ui node")?,
-            size: None,
-            width: None,
-            height: None,
-            color: None,
-        }),
-    }
-}
+pub(crate) use crate::ui::decode::parse_node;
 
 /// Rough vertical extent of a node tree in px, for popup window sizing.
 /// Layer surfaces need an upfront height and iced can't measure text, so
 /// this mirrors the built geometry closely enough to avoid clipping.
-pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
-    let base = size.max(1.0);
-    match node {
-        WidgetNode::Text { size: own, .. } => owned_size(*own, base) * 1.4,
-        WidgetNode::Icon { .. } | WidgetNode::Spinner => base * 1.5,
-        WidgetNode::Separator { height, .. } => height.max(1.0),
-        WidgetNode::Button { padding, .. } => base * 1.4 + 2.0 * padding.unwrap_or(6.0).max(0.0),
-        WidgetNode::Progress { height, .. } => {
-            height.as_ref().map(|h| length_px(h, base)).unwrap_or(12.0)
-        }
-        WidgetNode::Space { height, .. } => length_px(height, base),
-        WidgetNode::Image { height, .. } => length_px(height, base).max(base),
-        WidgetNode::Row { children, .. } => children
-            .iter()
-            .map(|c| estimate_height(c, base))
-            .fold(0.0, f32::max),
-        WidgetNode::Column {
-            children, spacing, ..
-        } => {
-            let sum: f32 = children.iter().map(|c| estimate_height(c, base)).sum();
-            sum + spacing.max(0.0) * children.len().saturating_sub(1) as f32
-        }
-        WidgetNode::ListView {
-            items,
-            horizontal,
-            spacing,
-            ..
-        } => {
-            let heights: Vec<f32> = items
-                .iter()
-                .map(|(_, c)| estimate_height(c, base))
-                .collect();
-            if *horizontal {
-                heights.into_iter().fold(0.0, f32::max)
-            } else {
-                let sum: f32 = heights.iter().sum();
-                sum + spacing.max(0.0) * items.len().saturating_sub(1) as f32
-            }
-        }
-        WidgetNode::Container { child, padding, .. } => {
-            estimate_height(child, base) + 2.0 * padding.max(0.0)
-        }
-        WidgetNode::Scrollable { child, .. } => estimate_height(child, base),
-    }
-}
-
-/// Node text size, or the inherited `base` when unset.
-fn owned_size(own: Option<f32>, base: f32) -> f32 {
-    own.unwrap_or(base).max(1.0)
-}
-
-/// Resolve a [`NodeLength`] to a px estimate (`Fill`/`Shrink` fall back).
-fn length_px(length: &NodeLength, fallback: f32) -> f32 {
-    match length {
-        NodeLength::Fixed(px) => *px,
-        NodeLength::Fill | NodeLength::Shrink => fallback,
-    }
-}
-
-/// Build an iced element from a node tree. Pure Rust over owned data —
-/// views call this per redraw while Lua only runs on its interval.
-pub(crate) fn build_node(
-    node: &WidgetNode,
-    size: f32,
-    button_msg: Option<&dyn Fn(String) -> Plant>,
-) -> Result<Element<'static, Plant>, String> {
-    build_node_opacity(node, size, button_msg, 1.0)
-}
-
-/// Render supported primitives with alpha applied to explicit colors
-/// as well as inherited colors. This is primitive alpha, not group compositing.
-pub(crate) fn build_node_opacity(
-    node: &WidgetNode,
-    size: f32,
-    button_msg: Option<&dyn Fn(String) -> Plant>,
-    opacity: f32,
-) -> Result<Element<'static, Plant>, String> {
-    match node {
-        WidgetNode::ListView {
-            items,
-            horizontal,
-            spacing,
-            width,
-            height,
-            ..
-        } => {
-            let children = items.iter().map(|(_, child)| child.clone()).collect();
-            let layout = if *horizontal {
-                WidgetNode::Row {
-                    children,
-                    spacing: *spacing,
-                    width: width.clone(),
-                    height: height.clone(),
-                }
-            } else {
-                WidgetNode::Column {
-                    children,
-                    spacing: *spacing,
-                    width: width.clone(),
-                    height: height.clone(),
-                }
-            };
-            build_node_opacity(&layout, size, button_msg, opacity)
-        }
-        WidgetNode::Container {
-            child,
-            width,
-            height,
-            padding,
-            background,
-            radius,
-            border,
-            border_width,
-        } => {
-            let background =
-                background.map(|color| iced::Background::Color(color.scale_alpha(opacity)));
-            let radius = *radius;
-            let border = border.map(|color| color.scale_alpha(opacity));
-            let border_width = *border_width;
-            Ok(
-                container(build_node_opacity(child, size, button_msg, opacity)?)
-                    .width(width.clone().iced())
-                    .height(height.clone().iced())
-                    .padding(padding.max(0.0))
-                    .style(move |_| iced::widget::container::Style {
-                        background,
-                        border: iced::Border {
-                            color: border.unwrap_or_default(),
-                            width: border_width,
-                            radius: radius.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .into(),
-            )
-        }
-        WidgetNode::Scrollable {
-            child,
-            width,
-            height,
-        } => Ok(
-            iced::widget::scrollable(build_node_opacity(child, size, button_msg, opacity)?)
-                .width(width.clone().iced())
-                .height(height.clone().iced())
-                .into(),
-        ),
-        WidgetNode::Space { width, height } => Ok(Space::new()
-            .width(width.clone().iced())
-            .height(height.clone().iced())
-            .into()),
-        WidgetNode::Image {
-            path,
-            width,
-            height,
-        } => {
-            let path = path.strip_prefix("file://").unwrap_or(path);
-            match crate::config::decode_handle(std::path::Path::new(path)) {
-                Some((_, _, handle)) => Ok(iced::widget::image::Image::new(handle)
-                    .width(width.clone().iced())
-                    .height(height.clone().iced())
-                    .opacity(opacity)
-                    .into()),
-                None => Ok(Space::new()
-                    .width(width.clone().iced())
-                    .height(height.clone().iced())
-                    .into()),
-            }
-        }
-        WidgetNode::Text {
-            content,
-            size: own,
-            width,
-            height,
-            color,
-        } => {
-            let s = own.unwrap_or(size).max(1.0);
-            let mut t = text(content.clone()).size(s);
-            if let Some(w) = width {
-                t = t.width(w.clone().iced());
-            }
-            if let Some(h) = height {
-                t = t.height(h.clone().iced());
-            }
-            if color.is_some() || opacity < 1.0 {
-                t = t.color(color.unwrap_or_else(theme::text).scale_alpha(opacity));
-            }
-            Ok(t.into())
-        }
-        WidgetNode::Icon { name, color } => {
-            let base: Element<'static, Plant> = match icon_bytes(name) {
-                Some(bytes) => lucide_iced::themed_icon(bytes, size.max(1.0)),
-                None => text(format!("{{icon:{name}}}")).size(size.max(1.0)).into(),
-            };
-            match color {
-                // Icons inherit text color as their tint: a
-                // shrink-wrapped text_color scope tints without
-                // disturbing layout.
-                _ if color.is_some() || opacity < 1.0 => {
-                    let tint = color.unwrap_or_else(theme::text).scale_alpha(opacity);
-                    Ok(container(base)
-                        .width(iced::Length::Shrink)
-                        .height(iced::Length::Shrink)
-                        .style(move |_| iced::widget::container::Style {
-                            text_color: Some(tint),
-                            ..Default::default()
-                        })
-                        .into())
-                }
-                _ => Ok(base),
-            }
-        }
-        WidgetNode::Row {
-            children,
-            spacing,
-            width,
-            height,
-        } => {
-            let mut row = row![]
-                .spacing(spacing.max(0.0))
-                .align_y(iced::Alignment::Center)
-                .width(width.clone().iced())
-                .height(height.clone().iced());
-            for child in children {
-                row = row.push(build_node_opacity(child, size, button_msg, opacity)?);
-            }
-            Ok(row.into())
-        }
-        WidgetNode::Column {
-            children,
-            spacing,
-            width,
-            height,
-        } => {
-            let mut column = column![]
-                .spacing(spacing.max(0.0))
-                .align_x(iced::Alignment::Center)
-                .width(width.clone().iced())
-                .height(height.clone().iced());
-            for child in children {
-                column = column.push(build_node_opacity(child, size, button_msg, opacity)?);
-            }
-            Ok(column.into())
-        }
-        WidgetNode::Button {
-            label,
-            action,
-            width,
-            height,
-            padding,
-            color,
-            background,
-            radius,
-        } => {
-            let mut item = button(rich_text(label.clone(), size, 4.0))
-                .padding(padding.unwrap_or(6.0).max(0.0));
-            // Label tint and custom background compose: tint picks the
-            // label style, background overrides the Active surface only
-            // (Hovered/Pressed stay themed so clicks still read).
-            let tint = *color;
-            let custom = *background;
-            let radius = radius.unwrap_or(theme::RADIUS);
-            item = item.style(move |theme, status| {
-                let mut style = if let Some(c) = tint {
-                    theme::menu_button_tinted(radius, c)(theme, status)
-                } else {
-                    theme::menu_button(radius)(theme, status)
-                };
-                if matches!(status, iced::widget::button::Status::Active)
-                    && let Some(bg) = custom
-                {
-                    style.background = Some(bg.into());
-                }
-                if opacity < 1.0 {
-                    style.text_color = tint.unwrap_or(style.text_color).scale_alpha(opacity);
-                    style.background = style.background.map(|bg| bg.scale_alpha(opacity));
-                    style.border.color = style.border.color.scale_alpha(opacity);
-                    style.shadow.color = style.shadow.color.scale_alpha(opacity);
-                }
-                style
-            });
-            if let Some(w) = width {
-                // Buttons keep a 20px floor on Fixed widths so chained
-                // typos can't collapse the hit area; Fill/Shrink pass.
-                let w = match w {
-                    NodeLength::Fixed(px) => iced::Length::Fixed(px.max(20.0)),
-                    other => other.clone().iced(),
-                };
-                item = item.width(w);
-            }
-            if let Some(h) = height {
-                item = item.height(h.clone().iced());
-            }
-            if let Some(make_msg) = button_msg {
-                item = item.on_press(make_msg(action.clone()));
-            }
-            Ok(item.into())
-        }
-        WidgetNode::Progress {
-            value,
-            width,
-            height,
-            color,
-            background,
-        } => {
-            // iced's progress_bar has length + girth (thickness), no
-            // height: :height() maps to girth so Lua stays iced-spelled
-            // in intent (vertical size) if not in method name.
-            let length = match width {
-                NodeLength::Fixed(px) => iced::Length::Fixed(px.max(20.0)),
-                other => other.clone().iced(),
-            };
-            let mut bar = progress_bar(0.0..=1.0, value.clamp(0.0, 1.0)).length(length);
-            if let Some(h) = height {
-                bar = bar.girth(h.clone().iced());
-            }
-            let fill = *color;
-            let track = *background;
-            bar = bar.style(move |theme| {
-                let mut style = iced::widget::progress_bar::primary(theme);
-                if let Some(fill) = fill {
-                    style.bar = iced::Background::Color(fill);
-                }
-                if let Some(track) = track {
-                    style.background = iced::Background::Color(track);
-                }
-                style.background = style.background.scale_alpha(opacity);
-                style.bar = style.bar.scale_alpha(opacity);
-                style.border.color = style.border.color.scale_alpha(opacity);
-                style
-            });
-            Ok(bar.into())
-        }
-        // Animated ring: iced has no spinner widget, so a rotating
-        // loader icon approximates one (redrawn every frame while
-        // visible — popups repaint on cursor/tick activity).
-        WidgetNode::Spinner => Ok(lucide_iced::ThemedIcon::new(
-            iced::advanced::svg::Handle::from_memory(lucide_iced::bytes::LOADER_CIRCLE),
-            size.max(1.0) * 1.5,
-        )
-        .opacity(opacity)
-        .into()),
-        // Hairline: themed border color unless :color() overrides.
-        // Full-width by rule design.
-        WidgetNode::Separator { height, color } => {
-            let color = color.unwrap_or_else(theme::border_color);
-            Ok(iced::widget::rule::horizontal(height.max(1.0))
-                .style(move |_| iced::widget::rule::Style {
-                    color: color.scale_alpha(opacity),
-                    radius: 0.0.into(),
-                    fill_mode: iced::widget::rule::FillMode::Full,
-                    snap: true,
-                })
-                .into())
-        }
-    }
-}
+pub(crate) use crate::ui::build::{build_node, build_node_opacity, estimate_height};
 
 /// Lua state for one widget: string/table/math/os/io with native
 /// shell (`os.execute`, `io.popen` live — owner-accepted risk, no
@@ -1986,19 +954,7 @@ pub(crate) fn new_widget_lua() -> mlua::Result<Lua> {
 }
 
 fn empty_widget_lua() -> mlua::Result<Lua> {
-    let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::OS | StdLib::IO,
-        LuaOptions::default(),
-    )?;
-    let globals = lua.globals();
-    for key in ["dofile", "loadfile", "require"] {
-        globals.set(key, Value::Nil)?;
-    }
-    let os: Table = globals.get("os")?;
-    for key in ["exit", "remove", "rename", "setlocale"] {
-        os.set(key, Value::Nil)?;
-    }
-    Ok(lua)
+    crate::lua::sandbox::new_lua(crate::lua::sandbox::Profile::Widget)
 }
 
 /// The `iced` constructors table (plus legacy `ui` alias), present in
@@ -2064,7 +1020,12 @@ pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
+// Compatibility entry point; all production hosts use the shared binding module.
+pub(crate) use crate::ui::dsl::inject_ui_base;
+
+// Kept only as a migration oracle until the historical DSL tests are relocated.
+#[cfg(test)]
+fn reference_inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     /// One setter: store properties separately from methods so repeated
     /// calls never shadow the method itself.
     /// NOTE: the type gate below is near-dead — method lookup via
@@ -2744,53 +1705,13 @@ pub(crate) fn prop_value_from_lua(value: &Value) -> Option<crate::config::PropVa
     }
 }
 
-/// [`PropValue`](crate::config::PropValue) → Lua scalar for `self.props`.
-pub(crate) fn prop_value_to_lua(
-    lua: &Lua,
-    value: &crate::config::PropValue,
-) -> mlua::Result<Value> {
-    use crate::config::PropValue;
-    match value {
-        PropValue::Bool(b) => Ok(Value::Boolean(*b)),
-        PropValue::Number(n) => Ok(Value::Number(*n)),
-        PropValue::Text(s) => Ok(Value::String(lua.create_string(s)?)),
-    }
-}
-
 /// Publish resolved custom properties as the app table's `props`
 /// field, so methods read per-placement values via `self.props`.
 /// Overwrites any author-assigned `props` each render on purpose:
 /// the field is engine-managed.
-pub(crate) fn publish_props(
-    lua: &Lua,
-    props: &HashMap<String, crate::config::PropValue>,
-) -> mlua::Result<()> {
-    let app: Table = lua.named_registry_value("riced.widget.app")?;
-    let table = lua.create_table()?;
-    let mut keys: Vec<&String> = props.keys().collect();
-    keys.sort();
-    for key in keys {
-        table.set(key.clone(), prop_value_to_lua(lua, &props[key])?)?;
-    }
-    app.set("props", table)
-}
+pub(crate) use crate::lua::props::publish_props;
 
-pub(crate) fn lua_value_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Nil => "nil",
-        Value::Boolean(_) => "boolean",
-        Value::LightUserData(_) => "light userdata",
-        Value::Integer(_) => "integer",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Table(_) => "table",
-        Value::Function(_) => "function",
-        Value::Thread(_) => "thread",
-        Value::UserData(_) => "userdata",
-        Value::Error(_) => "error",
-        _ => "other",
-    }
-}
+pub(crate) use crate::lua::value::lua_value_kind;
 
 /// Invoke a registered app method with self bound; return values are
 /// decoded immediately and never stored in the Rust IR.
@@ -2813,19 +1734,7 @@ pub(crate) fn call_lua_value(lua: &Lua, func: &str) -> Result<Value, String> {
 
 /// Coerce a Lua return value to cell text (numbers and booleans
 /// stringify, `nil` is empty). Anything else is an error naming `what`.
-pub(crate) fn coerce_text(value: Value, what: &str) -> Result<String, String> {
-    match value {
-        Value::String(s) => Ok(s.to_string_lossy()),
-        Value::Integer(i) => Ok(i.to_string()),
-        Value::Number(n) => Ok(n.to_string()),
-        Value::Boolean(b) => Ok(b.to_string()),
-        Value::Nil => Ok(String::new()),
-        other => Err(format!(
-            "{what} must return a string, got {}",
-            lua_value_kind(&other)
-        )),
-    }
-}
+pub(crate) use crate::lua::value::coerce_text;
 
 /// Call a widget script function, tolerantly coerced to text.
 /// Test-only since the popup-select refresh went tree-aware (prod
@@ -4979,6 +3888,29 @@ impl Top {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracted_dsl_preserves_description_shapes() {
+        let old = empty_widget_lua().unwrap();
+        let new = empty_widget_lua().unwrap();
+        reference_inject_ui_base(&old).unwrap();
+        inject_ui_base(&new).unwrap();
+        for source in [
+            "return ui.text('x'):size(14):size(16):width('auto')",
+            "return ui.row({ui.icon('cpu'), ui.text('x')}):spacing(5)",
+            "return ui.container(ui.column({ui.button('go','go'):radius(3),ui.progress(0.4,100)})):padding(4)",
+            "return ui.listview({{id=1}}):id('test'):key('id'):delegate(function(item) return ui.text(item.id) end)",
+            "ui.define('custom', function(p) return ui.separator():height(p.h) end); return ui.custom({h=2})",
+        ] {
+            let old: Value = old.load(source).eval().unwrap();
+            let new: Value = new.load(source).eval().unwrap();
+            assert_eq!(
+                parse_node(&old).unwrap(),
+                parse_node(&new).unwrap(),
+                "{source}"
+            );
+        }
+    }
 
     fn lua_widget_def(name: &str) -> crate::config::WidgetDefinition {
         crate::config::WidgetDefinition {

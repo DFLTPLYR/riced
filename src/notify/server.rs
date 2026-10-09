@@ -91,46 +91,12 @@ fn parse_actions(flat: Vec<String>) -> Vec<(String, String)> {
 
 /// Hard ceiling for icon pixels per side (abuse guard: a malicious
 /// sender could otherwise push megapixel pixbufs through the bus).
-const MAX_ICON_PX: i32 = 512;
+use super::images::decode_pixbuf;
 
 /// Decode a freedesktop `image-data` pixbuf `(width, height, rowstride,
 /// has_alpha, bits_per_sample, channels, data)` into an iced image
 /// handle. Only 8-bit RGB/RGBA; rowstride padding is stripped per row.
 /// Anything malformed is `None` (the card renders text-only).
-fn decode_pixbuf(
-    width: i32,
-    height: i32,
-    rowstride: i32,
-    bps: i32,
-    channels: i32,
-    data: &[u8],
-) -> Option<iced::widget::image::Handle> {
-    if bps != 8 || !(1..=MAX_ICON_PX).contains(&width) || !(1..=MAX_ICON_PX).contains(&height) {
-        return None;
-    }
-    let (w, h) = (width as usize, height as usize);
-    let stride = rowstride as usize;
-    let ch = channels as usize;
-    if (ch != 3 && ch != 4) || stride < w * ch || data.len() < stride * h {
-        return None;
-    }
-    let mut rgba = Vec::with_capacity(w * h * 4);
-    for y in 0..h {
-        let base = y * stride;
-        for x in 0..w {
-            let p = base + x * ch;
-            rgba.push(data[p]);
-            rgba.push(data[p + 1]);
-            rgba.push(data[p + 2]);
-            rgba.push(if ch == 4 { data[p + 3] } else { 255 });
-        }
-    }
-    Some(iced::widget::image::Handle::from_rgba(
-        w as u32,
-        h as u32,
-        bytes::Bytes::from(rgba),
-    ))
-}
 /// `image-data` hint struct to pixels (`None` on any shape/type
 /// mismatch — senders vary, never trust the bus).
 fn hint_image_data(

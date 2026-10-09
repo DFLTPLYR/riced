@@ -1,4 +1,2 @@
-pub mod anchored;
-pub mod panel;
-pub mod panel_window;
-pub mod spin_box;
+//! Compatibility facade; reusable Rust widgets live in ui/widgets/.
+pub use crate::ui::widgets::{anchored, panel, panel_window, spin_box};

@@ -1,2 +1,2 @@
-pub mod display_map;
-pub mod panel_preview;
+//! Compatibility facade; editor canvases live in ui/widgets/.
+pub use crate::ui::widgets::{display_map, panel_preview};
