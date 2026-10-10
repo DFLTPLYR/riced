@@ -24,8 +24,8 @@ impl<'a> From<&'a Plots> for Context<'a> {
         Self {
             config: &plots.config.composable,
             theme: &plots.config.theme,
-            runtime: &plots.composable_runtime,
-            revision: plots.components_mtime,
+            runtime: &plots.desktop.composable_runtime,
+            revision: plots.catalog.library_revision,
         }
     }
 }

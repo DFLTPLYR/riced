@@ -67,6 +67,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lua_sandbox_blocks_escapes_but_keeps_time() {
+        let lua = new_lua(Profile::Widget).unwrap();
+        assert!(matches!(
+            lua.load("return os.execute").eval::<mlua::Value>().unwrap(),
+            mlua::Value::Function(_)
+        ));
+        for key in ["exit", "remove", "rename"] {
+            assert!(
+                matches!(
+                    lua.load(format!("return os.{key}"))
+                        .eval::<mlua::Value>()
+                        .unwrap(),
+                    mlua::Value::Nil
+                ),
+                "{key} blocked"
+            );
+        }
+        assert!(matches!(
+            lua.load("return require").eval::<mlua::Value>().unwrap(),
+            mlua::Value::Nil
+        ));
+        assert_eq!(
+            lua.load("return os.date('%H')")
+                .eval::<String>()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn os_execute_is_native_shell() {
+        let lua = new_lua(Profile::Widget).unwrap();
+        assert!(
+            lua.load("return os.execute('true')")
+                .eval::<bool>()
+                .unwrap()
+        );
+        let output: String = lua
+            .load(r#"local h=io.popen('echo hi'); local s=h:read('*a'); h:close(); return s"#)
+            .eval()
+            .unwrap();
+        assert_eq!(output.trim(), "hi");
+        let output: String = lua
+            .load(
+                r#"local h=io.popen('echo a; echo b'); local s=h:read('*a'); h:close(); return s"#,
+            )
+            .eval()
+            .unwrap();
+        assert!(output.contains('a') && output.contains('b'));
+    }
+
+    #[test]
     fn execution_budget_is_shared_and_recovers_for_both_profiles() {
         for profile in [Profile::App, Profile::Widget] {
             let lua = new_lua(profile).unwrap();

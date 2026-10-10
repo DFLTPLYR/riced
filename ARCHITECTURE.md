@@ -7,17 +7,29 @@ src/
   main.rs              CLI dispatch and daemon bootstrap
   cli/                 arguments, IPC, headless command execution
   shell/
-    state.rs           window/state ownership and event dispatch
+    state.rs           domain coordination and event dispatch
+    windows.rs         surface registries, output identity and idempotent detachment
     context.rs         host-to-service snapshot adapter
     input.rs           owned window cursors, global cursor and press identity
+    desktop.rs         selection/fade lifecycle, context menu, chrome runtimes, wallpapers
+    catalog.rs         discovered widget definitions and library change stamps
+    animation.rs       shared motion clock and widget-list lifetime
+    notifications.rs   notification queue, renderer and per-output presentation state
     events.rs          host messages
     jobs.rs            persistence and theme-regeneration job ownership
     screens/           bar, wallpaper/menu, popup, notification, settings hosts
-      top/             bar host, placement scheduling, list-animation context
+      top/             bar host
+        scheduling.rs  due placement selection and execution with an injected clock
+        runtime.rs     placement revision/render/ingest adapter with explicit borrows
+        render.rs      bar and slot composition over cached placement views
+        input.rs       bar input identity, slot hit-testing and press matching
+        edit.rs        live geometry/slot edits and sparse persistence snapshots
+        animation.rs   list-animation synchronization context
       setting/         Settings host, explicit page snapshots and shared controls
         context_menu.rs source-backed chrome property page
         wallpaper.rs   wallpaper map and image-property composition
-        panel.rs       immutable bar/catalog/output context
+        panel.rs       Panel composition and immutable bar/catalog/output context
+        placement.rs   placement properties and catalog-based editor
         editors.rs     schema-driven scalar/choice controls and reset rows
   ui/
     node.rs            owned description IR
@@ -39,6 +51,8 @@ src/
     props.rs           property merging and publication adapters
     bridge.rs          palette snapshot publication
     composable.rs      source-backed chrome instances and last-good reloads
+    widgets.rs         placement VMs, entry publication and per-window render caches
+    metadata.rs        widget author defaults and property-schema decoding
     transitions.rs     transition decoding
     value.rs           scalar coercion and diagnostics
     demo.rs            development host
@@ -101,6 +115,14 @@ Only outer entries reset fuel; nested components share the outer budget.
 Budget failures are recoverable, and library validation uses the same limits.
 VMs remain separate per placement/chrome instance.
 
+Passive daemon, bar, background and notification surfaces request no keyboard
+focus. Notification surfaces are warmed per output and remain mapped with an
+empty input region when idle; arrivals reuse the existing surface/renderer,
+avoiding creation-time fullscreen/XWayland focus handoffs. Card masks are
+installed after native surface creation and refreshed as the stack changes.
+Mask commits only fire when the card rects actually move, and the passive
+keyboard policy is asserted once per native surface — never on every update.
+
 ## Assets and migrations
 
 Bundled assets remain in `scripts/`, `themes/`, and `templates/`. Installed
@@ -114,8 +136,8 @@ Legacy config conversion and backups retain their existing semantics.
 The structural foundation is in place: shared UI code no longer belongs to
 the bar layer, shell modules have a distinct namespace, CLI execution is
 outside bootstrap, and palette/props/geometry/input-style duplicates have
-shared owners. The old DSL implementation is retained **only in tests** as
-a temporary compatibility oracle for the extracted binding implementation.
+shared owners. The historical DSL oracle has been removed; representative
+builder descriptions assert expected owned IR directly in `ui/dsl.rs`.
 
 Completed in the continuation:
 
@@ -134,17 +156,65 @@ Completed in the continuation:
 - Library validation, last-good selection, Lua diagnostics, call binding,
   and execution budgets use shared implementations with regression coverage.
 - Compatibility import facades have been removed after migrating callers.
+- Panel and placement editor composition, including slider/image reset rows,
+  have moved out of the Settings lifecycle host.
+- Placement VMs and their caches have a shared owner in `lua/widgets.rs`;
+  VM construction, library installation, app validation, entry publication
+  and script-revision invalidation live alongside it. Render/action/press
+  entries publish fresh services, `bar.output` and `self.props` through an
+  explicit `EntryContext`; stale host messages are ignored. Regression
+  coverage checks independent placement state, failed-load cleanup,
+  shared-path revision invalidation and fresh entry publication.
+- Desktop selection/fade lifecycle, context-menu state, composable runtimes
+  and pre-decoded wallpaper handles are grouped in `shell/desktop.rs`,
+  shared by background and Settings hosts.
+- Discovered widget definitions, directory/library change stamps and the
+  retired-file warning have a catalog owner in `shell/catalog.rs`.
+- The shared motion clock and widget-list lifetime moved to
+  `shell/animation.rs`; notification queue, renderer, sizes,
+  scroll, exit images and trees moved to `shell/notifications.rs`, with the
+  stack view taking a read-only snapshot context.
+- Bar scheduling selects due placements against injected last-run, popup and
+  clock inputs; execution, revision sync and render ingestion run through
+  `top/runtime.rs` with explicit placement/catalog/animation/service borrows.
+  Bar composition moved to `top/render.rs`, and input identity, slot
+  hit-testing and press matching to `top/input.rs`.
+- Widget author defaults and property-schema decoding moved to
+  `lua/metadata.rs`. Popup/background/notification hosts import shared Lua
+  and UI machinery from its canonical modules instead of the bar host.
+- Builder and icon regression tests moved to `ui/dsl.rs` and `ui/icons.rs`
+  alongside their implementations.
+- Bar geometry, visual settings, slot layout and placement-property edits
+  now use `top/edit.rs::EditContext`, borrowing only the bar registry,
+  output identities/geometry, catalog definitions and saved bar entries.
+  The shell coordinates rendering and coalesced-save commands. Regression
+  coverage checks sparse property persistence, stable bar entry indices,
+  sentinel layout behavior and stale edits.
+- Widget contracts, self binding, sandbox restrictions/native shell,
+  author metadata, property publication and transition invocation tests
+  have moved from the bar host to their Lua owners. Tree-decoding and
+  rich-text realization tests moved to `ui/decode.rs` and `ui/icons.rs`.
+  Transition entry invocation now lives in `lua/transitions.rs`.
+- Surface identities, bar/popup/Settings/background registries, output
+  geometry and notification-window bindings now belong to `WindowState` in
+  `shell/windows.rs`. The old flat registry fields and per-screen output
+  removal helpers have been removed after migrating every caller.
+- Surface detachment coordinates input, per-window placement caches and
+  bar/popup animation scope cleanup. Compositor bar closes dismiss child
+  popups without deleting saved bar entries; output removal preserves other
+  outputs and Settings windows. Notification output teardown releases ghost
+  images and motion immediately. Tests cover repeated detachment, replacement
+  background protection, child/cache cleanup and output isolation.
+- Primitive realization, spinner composition and tinted-node rendering
+  tests moved to `ui/build.rs`, using shared constructors directly.
 
 Remaining work:
 
-1. Move the remaining Panel composition and placement/image helper rows out
-   of the Settings host. Wallpaper and Context Menu composition and common
-   schema controls have already moved; finish the remaining bar render
-   adapters and placement-runtime management extraction.
-2. Continue replacing the flat window/widget/notification fields in `Plots`
-   and broad handler borrows with domain-owned state and narrow contexts.
-3. Relocate remaining historical DSL tests and remove their test-only oracle.
-   Keep file-size targets advisory until these extractions land.
+1. Continue narrowing cross-domain window creation, popup/input dispatch
+   and notification arrival/render/action handlers into explicit contexts.
+2. Relocate the remaining shared Lua/UI tests still living in the bar host
+   to their canonical modules, and drop the test-only re-exports left in
+   the bar host. Keep file-size targets advisory until these land.
 
 ## Verification
 

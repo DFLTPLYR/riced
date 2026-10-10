@@ -67,3 +67,55 @@ pub(crate) fn rich_text(output: String, size: f32, spacing: f32) -> Element<'sta
     }
     row.into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rich_text_builds_without_a_renderer() {
+        let _ = rich_text("12%".into(), 13.0, 4.0);
+        let _ = rich_text("{icon:cpu} 12%".into(), 13.0, 4.0);
+        let _ = rich_text("{icon:nope}".into(), 13.0, 4.0);
+    }
+
+    #[test]
+    fn icon_segments_split_placeholders() {
+        use Segment::{Icon, Text};
+        assert_eq!(icon_segments("12%"), vec![Text("12%")]);
+        assert_eq!(
+            icon_segments("{icon:cpu} 12%"),
+            vec![Icon("cpu"), Text(" 12%")]
+        );
+        assert_eq!(
+            icon_segments("{icon:cpu}{icon:mem}"),
+            vec![Icon("cpu"), Icon("mem")]
+        );
+        assert_eq!(icon_segments("{icon:cpu"), vec![Text("{icon:cpu")]);
+        assert_eq!(icon_segments("{icon:}"), vec![Icon("")]);
+        assert_eq!(icon_segments(""), Vec::new());
+    }
+
+    #[test]
+    fn icon_bytes_resolves_names_case_insensitively() {
+        for name in [
+            "cpu",
+            "CPU",
+            "Heart",
+            "memory-stick",
+            "memory_stick",
+            "MemoryStick",
+            "mem",
+            "disk",
+            "bot",
+            "Bot",
+            "robot-vacuum",
+            "house",
+            "power",
+        ] {
+            assert!(icon_bytes(name).is_some(), "{name}");
+        }
+        assert!(icon_bytes("nope").is_none());
+        assert!(icon_bytes("").is_none());
+    }
+}

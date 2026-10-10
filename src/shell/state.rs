@@ -5,21 +5,19 @@ use iced::{Element, Event, Point, Task as Command};
 use iced_exwlshell::redraw::Scope;
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use iced_wayland_subscriber::OutputId;
 use iced_wayland_subscriber::shell::{ShellEvent, ShellReceiver};
 
-use super::screens::{Background, ContextMenu, Notification, Popup, SelectionRect, Setting, Top};
+use super::screens::{Background, Notification, Popup, Setting, Top};
+use super::windows::PlotInfo;
 use super::{
     BackgroundEvent, BarEvent, ConfigEvent, Corner, Edge, LandEvent, NotifyEvent, Plant,
     SettingEvent, StyleEvent, TopEvent, WidgetEvent,
 };
 use crate::config::{Config, ConfigPatch};
-use iced_wayland_subscriber::OutputInfo;
 
 static LAST_MOUSE_MOVE: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 
@@ -54,26 +52,11 @@ fn throttled_graft(
 
 #[derive(Debug)]
 pub struct Plots {
-    pub(crate) ids: HashMap<iced::window::Id, PlotInfo>,
-    pub(crate) tops: HashMap<iced::window::Id, Top>,
-    pub(crate) popups: HashMap<iced::window::Id, Popup>,
-    pub(crate) settings: HashMap<iced::window::Id, Setting>,
-    pub(crate) backgrounds: HashMap<OutputId, Background>,
-    pub(crate) background_ids: HashMap<OutputId, iced::window::Id>,
+    pub(crate) windows: super::windows::WindowState,
     pub(crate) shell_events: ShellReceiver,
     // per-window cursor
     pub(crate) input: super::input::InputState,
-    // global selection rect (single, like Background.selectionRect)
-    pub(crate) selection_rect: SelectionRect,
-    pub(crate) composable_runtime: std::cell::RefCell<crate::lua::composable::ComposableRuntime>,
-    // fade animation after select end (QML Behavior on opacity, InOutQuad
-    // over the global animation speed)
-    pub(crate) fade_rect: Option<SelectionRect>,
-    pub(crate) fade_start: Option<Instant>,
-    // per-output geometry for clipping (panel.screen)
-    pub(crate) output_infos: HashMap<OutputId, OutputInfo>,
-    // context menu state (global, like Background contextMenu)
-    pub(crate) context_menu: Option<ContextMenu>,
+    pub(crate) desktop: super::desktop::DesktopState,
     // press target per bar window for click matching: (slot, widget
     // or gap-None, press time). Presses on a widget area record the
     // widget; gap presses record None; releases act only on a matching
@@ -82,45 +65,22 @@ pub struct Plots {
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
-    // Discovered widget definitions (`widgets/*.lua`, name = file
-    // stem) + last seen dir mtime. Hot-rescanned like the config;
-    // per-file edits reload via `widget_script_mtime` below.
-    pub(crate) widgets: Vec<crate::config::WidgetDefinition>,
-    pub(crate) widgets_dir_mtime: Option<std::time::SystemTime>,
-    // `widgets.toml` is retired (values migrated into placements/Lua
-    // defaults on first sight); warn once if it reappears later.
-    pub(crate) widgets_toml_warned: bool,
-    // Shared component library (`components/*.lua`) stamp: edits rebuild
-    // every Lua state (widgets + notification renderer) on the next tick.
-    pub(crate) components_mtime: Option<std::time::SystemTime>,
+    pub(crate) catalog: super::catalog::WidgetCatalog,
     // Lua widget runtimes keyed by placement id (independent `self`
     // per instance), last rendered text, last run tick, and last error
     // (errors log only on change, never per tick). States are rebuilt
     // on definition rescan.
     // States are shared across bars; rendered trees/outputs are per
     // bar (keyed `(bar, placement)`) so `bar.output` can differ per bar.
-    pub(crate) widget_lua: HashMap<String, mlua::Lua>,
-    pub(crate) widget_outputs: HashMap<(iced::window::Id, String), String>,
-    pub(crate) widget_trees: HashMap<(iced::window::Id, String), crate::ui::node::WidgetNode>,
-    pub(crate) widget_last_run: HashMap<String, Instant>,
-    pub(crate) widget_last_error: HashMap<String, String>,
+    pub(crate) placements: crate::lua::widgets::WidgetState,
     // Script file mtimes by resolved path (live-reload on edit).
-    pub(crate) widget_script_mtime: HashMap<std::path::PathBuf, std::time::SystemTime>,
     // Animated lists (see layers::listview): one aura runtime shared
     // by all surfaces, one ListView per (bar, widget, list) — owners
     // are `"{bar:?}/{widget}/{list}"` strings — plus the notification
     // stack. Widget cell rows keyed (owner, key), notifications keyed
     // (output, id). Per-list runtimes let each list own its Lua
     // `transitions()` spec without bars animating each other.
-    pub(crate) anim_runtime: crate::ui::anim::AnimRuntime,
-    pub(crate) widget_lists: HashMap<
-        String,
-        crate::ui::listview::ListView<(String, String), crate::ui::node::WidgetNode>,
-    >,
-    pub(crate) notif_list: crate::ui::listview::ListView<
-        (iced_wayland_subscriber::OutputId, u32),
-        crate::ui::node::WidgetNode,
-    >,
+    pub(crate) animation: super::animation::AnimationState,
     // Live system snapshot for the `system` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
     pub(crate) services: crate::services::state::ServiceState,
@@ -135,15 +95,6 @@ pub struct Plots {
     // mtime of the active theme file (`theme::poll`); `None` tracks the
     // vendored fallback. A change re-emits the config so every view repaints.
     pub(crate) theme_mtime: Option<std::time::SystemTime>,
-    // Pre-decoded wallpaper pixels keyed by resolved path. File-backed
-    // handles decode on a worker whose completion redraw the shell drops,
-    // leaving first paint blank — serving `from_rgba` instead loads
-    // synchronously, so pixels exist on the very first frame. Synced from
-    // `config.background.image` on load/reload/patch (below).
-    pub(crate) wallpapers: HashMap<PathBuf, Handle>,
-    // Generation bumped by every `BackgroundEvent::Repaint` heal so the
-    // delayed redraw is a real state transition, not a silent no-op.
-    pub(crate) repaint_seq: u64,
     // Dynamic-theme regen: discrete touches (drops, add/remove/scale,
     // file edits) arm a 2s one-shot timer; panel close fires immediately.
     // `seq` invalidates superseded timers, `running` guards overlap.
@@ -151,90 +102,45 @@ pub struct Plots {
     // Notification layer (D-Bus server + internal events): queued
     // plain-data notifications, one layer window per showing output,
     // last-known global cursor for mouse-output placement.
-    pub(crate) notifications: std::collections::VecDeque<crate::shell::screens::Notification>,
-    pub(crate) notif_windows: HashMap<OutputId, iced::window::Id>,
-    pub(crate) notif_sizes: HashMap<OutputId, u32>,
-    pub(crate) notif_scroll: HashMap<OutputId, f32>,
-    pub(crate) notif_exit_images: HashMap<u32, iced::widget::image::Handle>,
-    pub(crate) notif_next_id: u32,
-    // Notification Lua renderer (`notifications.lua`): separate state
-    // from widgets, same sandbox + constructors. Trees cached per id
-    // (rendered update-side, never per frame).
-    pub(crate) notify_lua: Option<mlua::Lua>,
-    pub(crate) notify_mtime: Option<std::time::SystemTime>,
-    pub(crate) notify_last_error: Option<String>,
-    pub(crate) notif_trees: HashMap<u32, crate::ui::node::WidgetNode>,
+    pub(crate) notification: super::notifications::NotificationState,
     // Last mirrored TOML parse failure (`source: message`); a repeat of
     // the same message notifies only once.
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum PlotInfo {
-    Setting,
-    Background(OutputId),
-    Top(OutputId),
-    Popup(OutputId),
-    Notification(OutputId),
-}
-
 impl Plots {
+    /// Detach surface resources; native close commands and saved-bar changes
+    /// remain host operations so compositor removal does not delete config.
+    pub(crate) fn forget_window(&mut self, id: iced::window::Id) -> Option<PlotInfo> {
+        self.input.cursors.remove(&id);
+        self.input.presses.remove(&id);
+        self.placements.forget_window(id);
+        self.animation.forget_window(id);
+        self.windows.forget(id)
+    }
+
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
         crate::theme::ensure_user_themes();
         crate::theme_gen::ensure_user_templates();
         let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);
         crate::theme::sync(&config.theme);
-        let mut wallpapers = HashMap::new();
-        Self::sync_wallpapers(&config, &mut wallpapers);
+        let mut desktop = super::desktop::DesktopState::default();
+        desktop.sync_wallpapers(&config);
         let widgets = Top::discover_widget_defs();
-        let widgets_dir_mtime = crate::config::widgets_dir_mtime();
         let mut plots = Self {
-            ids: HashMap::new(),
-            tops: HashMap::new(),
-            popups: HashMap::new(),
-            settings: HashMap::new(),
-            backgrounds: HashMap::new(),
-            background_ids: HashMap::new(),
+            windows: Default::default(),
             shell_events,
             input: Default::default(),
-            output_infos: HashMap::new(),
-            selection_rect: SelectionRect::default(),
-            composable_runtime: Default::default(),
-            fade_rect: None,
-            fade_start: None,
-            context_menu: None,
+            desktop,
             config,
             config_mtime,
-            widgets,
-            widgets_dir_mtime,
-            widgets_toml_warned: false,
-            components_mtime: crate::config::components_mtime(),
+            catalog: super::catalog::WidgetCatalog::new(widgets),
             config_jobs: Default::default(),
             theme_mtime,
-            wallpapers,
-            repaint_seq: 0,
             theme_jobs: Default::default(),
-            notifications: std::collections::VecDeque::new(),
-            notif_windows: HashMap::new(),
-            notif_sizes: HashMap::new(),
-            notif_scroll: HashMap::new(),
-            notif_exit_images: HashMap::new(),
-            notif_next_id: 1,
-            notify_lua: None,
-            notify_mtime: None,
-            notify_last_error: None,
-            notif_trees: HashMap::new(),
-            widget_lua: HashMap::new(),
-            widget_outputs: HashMap::new(),
-            widget_trees: HashMap::new(),
-            widget_last_run: HashMap::new(),
-            widget_last_error: HashMap::new(),
-            widget_script_mtime: HashMap::new(),
-            anim_runtime: crate::ui::anim::AnimRuntime::default(),
-            widget_lists: HashMap::new(),
-            notif_list: crate::ui::listview::ListView::new(
-                crate::shell::screens::notification::CARD_PITCH,
-            ),
+            notification: Default::default(),
+            placements: Default::default(),
+            animation: Default::default(),
             services: crate::services::state::ServiceState::new(),
         };
         // Render Lua widgets once so bars populate on the first frame
@@ -246,54 +152,10 @@ impl Plots {
         plots
     }
 
-    fn sync_wallpapers(config: &Config, wallpapers: &mut HashMap<PathBuf, Handle>) {
-        let live: Vec<PathBuf> = config
-            .background
-            .image
-            .iter()
-            .map(|img| img.local_path())
-            .collect();
-        wallpapers.retain(|path, _| live.contains(path));
-        let mut missing: Vec<PathBuf> = Vec::new();
-        for img in &config.background.image {
-            let path = img.local_path();
-            if path.as_os_str().is_empty()
-                || wallpapers.contains_key(&path)
-                || missing.contains(&path)
-            {
-                continue;
-            }
-            missing.push(path);
-        }
-        if missing.is_empty() {
-            return;
-        }
-        std::thread::scope(|s| {
-            let jobs: Vec<_> = missing
-                .into_iter()
-                .map(|path| {
-                    s.spawn(move || {
-                        let decoded = crate::config::decode_handle(&path);
-                        (path, decoded)
-                    })
-                })
-                .collect();
-            for job in jobs {
-                match job.join() {
-                    Ok((path, Some((_w, _h, handle)))) => {
-                        wallpapers.insert(path, handle);
-                    }
-                    Ok((_, None)) => {}
-                    Err(_) => eprintln!("riced: wallpaper decode thread failed, skipping"),
-                }
-            }
-        });
-    }
-
     /// Pre-warmed [`Handle`] for an image entry, or `None` when its file
     /// failed to decode (caller skips the entry, same as before).
     pub(crate) fn wallpaper_handle(&self, img: &crate::config::BackgroundImage) -> Option<Handle> {
-        self.wallpapers.get(&img.local_path()).cloned()
+        self.desktop.wallpapers.get(&img.local_path()).cloned()
     }
 
     /// sys `change_theme` equivalent as an iced command: render the
@@ -390,9 +252,10 @@ impl Plots {
         // sorted for a deterministic seed; empty headless → per-image
         // rects, like the CLI.
         let mut rects: Vec<(f32, f32, f32, f32)> = self
+            .windows
             .backgrounds
             .keys()
-            .filter_map(|o| Background::available_rect(*o, &self.output_infos))
+            .filter_map(|o| Background::available_rect(*o, &self.windows.output_infos))
             .collect();
         rects.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
         if rects.is_empty() {
@@ -470,7 +333,7 @@ impl Plots {
     }
 
     pub fn id_info(&self, id: iced::window::Id) -> Option<PlotInfo> {
-        self.ids.get(&id).copied()
+        self.windows.ids.get(&id).copied()
     }
 
     pub fn namespace() -> String {
@@ -513,7 +376,7 @@ impl Plots {
 
         // List enter/exit transitions tick at 60fps only while a
         // motion is active (aura runtime idles to zero wakeups).
-        if self.anim_runtime.has_active() {
+        if self.animation.motion.has_active() {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Anim))),
@@ -523,7 +386,7 @@ impl Plots {
         // Notification expiry sweep, gated on a non-empty queue like
         // Widget(WidgetEvent::Tick) (repaint on expiry comes from
         // Scope::All below).
-        if !self.notifications.is_empty() {
+        if !self.notification.queue.is_empty() {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::Notify(NotifyEvent::Tick)),
@@ -543,7 +406,7 @@ impl Plots {
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
         // QML Behavior InOutQuad on opacity (over the animation speed) needs
         // 60fps ticks only while fading
-        if self.fade_start.is_some() {
+        if self.desktop.fade_start.is_some() {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Plant::BackgroundPlot(BackgroundEvent::SelectionTick)),
@@ -552,7 +415,7 @@ impl Plots {
 
         // Lua widgets re-render on their own intervals (250ms cadence,
         // each script runs only when due). No timer at all without them.
-        if !self.widgets.is_empty() {
+        if !self.catalog.definitions.is_empty() {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Tick))),
@@ -583,33 +446,39 @@ impl Plots {
         // Background windows render their own selection/context overlays clipped
         // Top windows render the bar. Daemon's tiny 1x1 window: empty.
         // Settings (XDG toplevel) renders its own panel (see layers/setting.rs).
-        if let Some(setting) = self.settings.get(&id) {
+        if let Some(setting) = self.windows.settings.get(&id) {
             return setting.view(id, self);
         }
         match self.id_info(id) {
             Some(PlotInfo::Background(output)) => Background::view(self, id, output),
             Some(PlotInfo::Top(_output)) => self
+                .windows
                 .tops
                 .get(&id)
                 .map(|t| {
                     t.view(
                         id,
-                        &self.widgets,
-                        &self.widget_outputs,
-                        &self.widget_trees,
-                        &self.anim_runtime,
-                        &self.widget_lists,
+                        &self.catalog.definitions,
+                        &self.placements,
+                        &self.animation.motion,
+                        &self.animation.widgets,
                     )
                 })
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Popup(_output)) => self
+                .windows
                 .popups
                 .get(&id)
                 .map(|p| p.view(self))
                 .unwrap_or_else(|| Space::new().into()),
-            Some(PlotInfo::Notification(output)) => {
-                super::screens::notification::view(self, output)
-            }
+            Some(PlotInfo::Notification(output)) => super::screens::notification::view(
+                super::screens::notification::ViewContext {
+                    config: &self.config.notifications,
+                    state: &self.notification,
+                    motion: &self.animation.motion,
+                },
+                output,
+            ),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
         }
@@ -638,49 +507,41 @@ impl Plots {
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
         match message {
             Plant::Uproot(id) => {
-                self.input.cursors.remove(&id);
-                self.input.presses.remove(&id);
-                let mut closed_last_panel = false;
-                if let Some(info) = self.ids.get(&id).copied() {
-                    match info {
-                        PlotInfo::Top(_) => {
-                            self.ids.remove(&id);
-                            self.tops.remove(&id);
-                        }
-                        PlotInfo::Popup(_) => {
-                            self.ids.remove(&id);
-                            self.popups.remove(&id);
-                        }
-                        PlotInfo::Notification(output) => {
-                            self.ids.remove(&id);
-                            let _ = Notification::remove_for_output(self, output);
-                        }
-                        PlotInfo::Background(output) => {
-                            self.ids.remove(&id);
-                            self.backgrounds.remove(&output);
-                            self.background_ids.remove(&output);
-                        }
-                        PlotInfo::Setting => {
-                            Setting::remove(&mut self.settings, &mut self.ids, id);
-                            closed_last_panel = self.settings.is_empty();
-                        }
+                let info = self.windows.ids.get(&id).copied();
+                let mut commands = Vec::new();
+                if matches!(info, Some(PlotInfo::Top(_))) {
+                    let children: Vec<_> = self
+                        .windows
+                        .popups
+                        .iter()
+                        .filter_map(|(popup_id, popup)| (popup.bar_id == id).then_some(*popup_id))
+                        .collect();
+                    for child in children {
+                        commands.push(Popup::handle_dismiss(self, child));
                     }
-                } else {
-                    // Unknown id (e.g. duplicate close event): still drop tracking.
-                    Setting::remove(&mut self.settings, &mut self.ids, id);
                 }
+                if let Some(PlotInfo::Notification(output)) = info
+                    && self.windows.notifications.get(&output) == Some(&id)
+                {
+                    commands.push(Notification::remove_for_output(self, output));
+                }
+                self.forget_window(id);
+                let closed_last_panel =
+                    matches!(info, Some(PlotInfo::Setting)) && self.windows.settings.is_empty();
                 // Idempotent close: covers both the in-window close button
                 // and the compositor's X button (via close_events -> Uproot).
                 // Any window close also flushes staged config edits, so a
                 // drag-then-close without an idle gap still persists.
                 self.flush_config_save();
-                let close = iced_runtime::task::effect(Action::Window(WindowAction::Close(id)));
+                commands.push(iced_runtime::task::effect(Action::Window(
+                    WindowAction::Close(id),
+                )));
                 // Panel edits are done when the last panel closes: regen
                 // immediately instead of waiting out the countdown.
                 if closed_last_panel && self.theme_jobs.dirty {
-                    return Command::batch(vec![close, self.fire_regen_theme()]);
+                    commands.push(self.fire_regen_theme());
                 }
-                close
+                Command::batch(commands)
             }
             Plant::Tend => Command::none(),
             Plant::Sprout => {
@@ -697,21 +558,29 @@ impl Plots {
             Plant::Wayland(LandEvent::OutputAdded(output)) => {
                 let output_id = OutputId::from(&output);
                 // store geometry for panel.screen clipping
-                self.output_infos.insert(output_id, output.clone());
+                self.windows.output_infos.insert(output_id, output.clone());
                 let mut cmds = Vec::new();
+                // Warm passive notification surfaces before any arrival. An
+                // arrival then updates an existing renderer/layer instead of
+                // mapping a new surface over the focused fullscreen app.
+                if self.config.notifications.enabled {
+                    let config = self.config.notifications.clone();
+                    if let Some(command) = Notification::ensure_window(self, output_id, &config) {
+                        cmds.push(command);
+                    }
+                }
                 // sentinel Top cleanup (delegated to Top layer)
-                for sentinel_id in Top::cleanup_sentinels(&mut self.tops, &mut self.ids) {
-                    self.input.cursors.remove(&sentinel_id);
-                    self.input.presses.remove(&sentinel_id);
+                for sentinel_id in self.windows.sentinel_bars() {
+                    self.forget_window(sentinel_id);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(sentinel_id),
                     )));
                 }
                 // Background fullscreen per output for selection (delegated to Background layer)
                 if let Some(cmd) = Background::ensure_for_output(
-                    &mut self.backgrounds,
-                    &mut self.background_ids,
-                    &mut self.ids,
+                    &mut self.windows.backgrounds,
+                    &mut self.windows.background_ids,
+                    &mut self.windows.ids,
                     output_id,
                 ) {
                     cmds.push(cmd);
@@ -734,6 +603,7 @@ impl Plots {
                     // against the connector name (`DP-1`, …).
                     if !cfg.output.trim().is_empty() {
                         let here = self
+                            .windows
                             .output_infos
                             .get(&output_id)
                             .and_then(|info| info.name.clone())
@@ -742,10 +612,12 @@ impl Plots {
                             continue;
                         }
                     }
-                    let taken = self.ids.iter().any(|(wid, info)| match info {
-                        PlotInfo::Top(o) if *o == output_id => {
-                            self.tops.get(wid).is_some_and(|t| t.anchor() == anchor)
-                        }
+                    let taken = self.windows.ids.iter().any(|(wid, info)| match info {
+                        PlotInfo::Top(o) if *o == output_id => self
+                            .windows
+                            .tops
+                            .get(wid)
+                            .is_some_and(|t| t.anchor() == anchor),
                         _ => false,
                     });
                     if taken {
@@ -753,6 +625,7 @@ impl Plots {
                     }
                     let top = Top::with_config(index, anchor, cfg.into());
                     let (sw, sh) = self
+                        .windows
                         .output_infos
                         .get(&output_id)
                         .map(Background::output_geometry)
@@ -760,8 +633,8 @@ impl Plots {
                         .unwrap_or((1920.0, 1080.0));
                     let (w, h) = top.local.px_size(sw, sh, top.is_horizontal());
                     let (win_id, settings) = top.open(output_id.0, w, h);
-                    self.tops.insert(win_id, top);
-                    self.ids.insert(win_id, PlotInfo::Top(output_id));
+                    self.windows.tops.insert(win_id, top);
+                    self.windows.ids.insert(win_id, PlotInfo::Top(output_id));
                     Top::render_bar_widgets(self, win_id);
                     cmds.push(Command::done(Plant::NewLayerShell {
                         settings,
@@ -780,12 +653,13 @@ impl Plots {
                 // after the Added-time burst already fired against placeholder
                 // values and computed the wrong overlap rects — heal again.
                 let geom_changed = self
+                    .windows
                     .output_infos
                     .get(&output_id)
                     .map(Background::output_geometry)
                     .unwrap_or((0.0, 0.0, 0.0, 0.0))
                     != Background::output_geometry(&output);
-                self.output_infos.insert(output_id, output);
+                self.windows.output_infos.insert(output_id, output);
                 if geom_changed {
                     // `%` bar sizes resolve against this geometry: re-push
                     // every bar's px size so nothing goes stale, plus heals.
@@ -802,36 +676,17 @@ impl Plots {
             }
             Plant::Wayland(LandEvent::OutputRemoved(output)) => {
                 let output_id = OutputId::from(&output);
-                let mut cmds = Vec::new();
-                if let Some(id) = Background::remove_for_output(
-                    &mut self.backgrounds,
-                    &mut self.background_ids,
-                    &mut self.ids,
-                    output_id,
-                ) {
-                    self.input.cursors.remove(&id);
-                    cmds.push(iced_runtime::task::effect(Action::Window(
-                        WindowAction::Close(id),
-                    )));
+                let surfaces = self.windows.on_output(output_id);
+                // Retire notifications while their window binding still exists.
+                let mut cmds = vec![Notification::remove_for_output(self, output_id)];
+                for id in surfaces {
+                    if self.forget_window(id).is_some() {
+                        cmds.push(iced_runtime::task::effect(Action::Window(
+                            WindowAction::Close(id),
+                        )));
+                    }
                 }
-                // remove all tops for this output (delegated to Top layer)
-                for wid in Top::remove_for_output(&mut self.tops, &mut self.ids, output_id) {
-                    self.input.cursors.remove(&wid);
-                    self.input.presses.remove(&wid);
-                    cmds.push(iced_runtime::task::effect(Action::Window(
-                        WindowAction::Close(wid),
-                    )));
-                }
-                // popups live on the same output (delegated to Popup layer)
-                for wid in Popup::remove_for_output(&mut self.popups, &mut self.ids, output_id) {
-                    self.input.cursors.remove(&wid);
-                    cmds.push(iced_runtime::task::effect(Action::Window(
-                        WindowAction::Close(wid),
-                    )));
-                }
-                // notification stacks are transient: drop, don't migrate.
-                cmds.push(Notification::remove_for_output(self, output_id));
-                self.output_infos.remove(&output_id);
+                self.windows.output_infos.remove(&output_id);
                 // clear global selection if it was on removed output (will hide via intersect check)
                 if cmds.is_empty() {
                     Command::none()
@@ -839,16 +694,24 @@ impl Plots {
                     Command::batch(cmds)
                 }
             }
-            Plant::Wayland(LandEvent::NewShell(info)) => {
-                // The layer surface actually exists now — the Added-time heals
-                // may have fired before its configure. Heal only for our own
-                // Background windows.
-                if matches!(self.ids.get(&info.window), Some(PlotInfo::Background(_))) {
-                    Self::repaint_burst()
-                } else {
-                    Command::none()
+            Plant::Wayland(LandEvent::NewShell(info)) => match self.id_info(info.window) {
+                Some(PlotInfo::Background(_)) => Self::repaint_burst(),
+                Some(PlotInfo::Notification(output)) => {
+                    // Fresh native surface: force the mask reinstall and
+                    // assert the passive keyboard policy exactly once. Later
+                    // reconciles only push when the card rects actually move.
+                    self.notification.mask.clear();
+                    Command::batch(vec![
+                        Command::done(Plant::KeyboardInteractivityChange {
+                            id: info.window,
+                            keyboard_interactivity:
+                                iced_exwlshell::reexport::KeyboardInteractivity::None,
+                        }),
+                        Notification::push_input_region(self, output),
+                    ])
                 }
-            }
+                _ => Command::none(),
+            },
             Plant::Wayland(LandEvent::Closed(_)) => Command::none(),
             Plant::Wayland(LandEvent::WindowOutputChanged { .. }) => Command::none(),
             Plant::Wayland(LandEvent::Locked) => Command::none(),
@@ -872,11 +735,11 @@ impl Plots {
             }
             Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => {
                 // drive fade animation (speed-scaled InOutQuad) — clear when done
-                if let Some(start) = self.fade_start
+                if let Some(start) = self.desktop.fade_start
                     && start.elapsed() >= self.config.animation.speed.duration()
                 {
-                    self.fade_rect = None;
-                    self.fade_start = None;
+                    self.desktop.fade_rect = None;
+                    self.desktop.fade_start = None;
                 }
                 Command::none()
             }
@@ -917,9 +780,7 @@ impl Plots {
                 }
                 // Widget definitions hot-rescan on widgets-dir change:
                 // fresh defs repaint every bar on the next frame.
-                let dir_mtime = crate::config::widgets_dir_mtime();
-                if dir_mtime != self.widgets_dir_mtime {
-                    self.widgets_dir_mtime = dir_mtime;
+                if self.catalog.directory_changed() {
                     return Command::batch(vec![
                         Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(
                             Top::discover_widget_defs(),
@@ -929,26 +790,25 @@ impl Plots {
                 }
                 // Retired widgets.toml reappeared: warn once, never read.
                 if crate::config::widgets_path().exists() {
-                    if !self.widgets_toml_warned {
-                        self.widgets_toml_warned = true;
+                    if !self.catalog.retired_file_warned {
+                        self.catalog.retired_file_warned = true;
                         eprintln!(
                             "widgets: {} is retired (migrated to placements/Lua defaults) and ignored; remove it",
                             crate::config::widgets_path().display()
                         );
                     }
                 } else {
-                    self.widgets_toml_warned = false;
+                    self.catalog.retired_file_warned = false;
                 }
                 // Shared components hot-reload the same way: any
                 // `components/*.lua` change rebuilds every Lua state
                 // (same defs, fresh runtimes) and drops the cached
                 // notification renderer so it re-execs the library.
-                if let Some(mtime) = crate::config::poll_components(&self.components_mtime) {
-                    self.components_mtime = mtime;
-                    self.notify_lua = None;
+                if self.catalog.library_changed() {
+                    self.notification.lua = None;
                     return Command::batch(vec![
                         Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(
-                            self.widgets.clone(),
+                            self.catalog.definitions.clone(),
                         ))),
                         self.notify_parse_error(),
                     ]);
@@ -967,7 +827,7 @@ impl Plots {
                 let switched_to_dynamic =
                     cfg.theme.name == "dynamic" && self.config.theme.name != "dynamic";
                 self.config = cfg;
-                Self::sync_wallpapers(&self.config, &mut self.wallpapers);
+                self.desktop.sync_wallpapers(&self.config);
                 // Bars resolve [[bar]] entries once at spawn; re-resolve
                 // here so slot/align/geometry edits apply live (anchor
                 // changes still need a respawn). On-disk wins by contract.
@@ -979,7 +839,7 @@ impl Plots {
                     cmds.push(Top::apply_layout(self, bar_id));
                 }
                 Top::init_widget_lua(self);
-                for id in self.popups.keys().copied().collect::<Vec<_>>() {
+                for id in self.windows.popups.keys().copied().collect::<Vec<_>>() {
                     cmds.push(Popup::handle_dismiss(self, id));
                 }
                 if images_changed || switched_to_dynamic {
@@ -997,9 +857,9 @@ impl Plots {
                 // and rebuild Lua states (scripts may have changed too).
                 // Open menus reference dead states, so they close;
                 // bars re-resolve placements on the next redraw (Scope::All).
-                self.widgets = defs;
+                self.catalog.definitions = defs;
                 Top::init_widget_lua(self);
-                let stale: Vec<iced::window::Id> = self.popups.keys().copied().collect();
+                let stale: Vec<iced::window::Id> = self.windows.popups.keys().copied().collect();
                 if stale.is_empty() {
                     Command::none()
                 } else {
@@ -1054,10 +914,10 @@ impl Plots {
                 };
                 self.config.apply(patch);
                 if sync {
-                    Self::sync_wallpapers(&self.config, &mut self.wallpapers);
+                    self.desktop.sync_wallpapers(&self.config);
                 }
                 if let Some(index) = removed_index {
-                    for setting in self.settings.values_mut() {
+                    for setting in self.windows.settings.values_mut() {
                         setting.image_removed(index);
                     }
                 }
@@ -1219,7 +1079,7 @@ impl Plots {
             }
             Plant::Notify(NotifyEvent::Tick) => Notification::handle_tick(self),
             Plant::Notify(NotifyEvent::Scrolled(output, offset)) => {
-                self.notif_scroll.insert(output, offset);
+                self.notification.scroll.insert(output, offset);
                 Notification::push_input_region(self, output)
             }
             Plant::Notify(NotifyEvent::DBusUp) => {
@@ -1247,10 +1107,11 @@ impl Plots {
                 // (Per-move patches never dirty the theme — only the drop
                 // arms the 2s regen countdown.)
                 let dropped_image = self
+                    .windows
                     .settings
                     .get(&id)
                     .is_some_and(|s| s.map_view().drag.is_some_and(|d| d.image.is_some()));
-                if let Some(setting) = self.settings.get_mut(&id) {
+                if let Some(setting) = self.windows.settings.get_mut(&id) {
                     setting.set_map_view(view);
                 }
                 if dropped_image {
@@ -1260,9 +1121,13 @@ impl Plots {
             }
             Plant::TopPlot(TopEvent::Sow) => {
                 // delegate to Top layer (closest-edge detection and spawn)
-                let menu_pos = self.context_menu.as_ref().map(|cm| Point::new(cm.x, cm.y));
-                let menu_output = self.context_menu.as_ref().and_then(|cm| cm.output);
-                if let Some(cm) = &mut self.context_menu {
+                let menu_pos = self
+                    .desktop
+                    .context_menu
+                    .as_ref()
+                    .map(|cm| Point::new(cm.x, cm.y));
+                let menu_output = self.desktop.context_menu.as_ref().and_then(|cm| cm.output);
+                if let Some(cm) = &mut self.desktop.context_menu {
                     cm.open = false;
                 }
                 if let Some(cmd) = Top::handle_add(self, menu_pos, menu_output) {
@@ -1357,6 +1222,107 @@ pub fn redraw_scope(message: &Plant) -> Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compositor_bar_close_releases_children_caches_and_motion_without_deleting_saved_bar() {
+        use crate::ui::{
+            listview::{Axis, ListView},
+            node::WidgetNode,
+        };
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots {
+            windows: Default::default(),
+            shell_events: receiver,
+            input: Default::default(),
+            desktop: Default::default(),
+            config: Config::default(),
+            config_mtime: None,
+            catalog: super::super::catalog::WidgetCatalog::new(Vec::new()),
+            placements: Default::default(),
+            animation: Default::default(),
+            services: crate::services::state::ServiceState::new(),
+            config_jobs: Default::default(),
+            theme_mtime: None,
+            theme_jobs: Default::default(),
+            notification: Default::default(),
+        };
+        plots.config.bar.push(crate::config::TopConfig::default());
+        let bar = iced::window::Id::unique();
+        let popup = iced::window::Id::unique();
+        let other = iced::window::Id::unique();
+        plots.windows.ids.insert(bar, PlotInfo::Top(OutputId(1)));
+        plots
+            .windows
+            .ids
+            .insert(popup, PlotInfo::Popup(OutputId(1)));
+        plots.windows.ids.insert(other, PlotInfo::Top(OutputId(2)));
+        plots.windows.tops.insert(bar, Top::new());
+        plots.windows.tops.insert(other, Top::new());
+        plots.windows.popups.insert(
+            popup,
+            Popup {
+                win_id: popup,
+                bar_id: bar,
+                slot: 0,
+                placement: "clock".into(),
+                body: String::new(),
+                items: Vec::new(),
+                tree: None,
+                size: 13.0,
+                w: 100,
+                h: 100,
+            },
+        );
+        for id in [bar, popup, other] {
+            plots.input.cursors.insert(id, Point::new(10.0, 20.0));
+            plots.input.presses.insert(id, (0, None, Instant::now()));
+            plots
+                .placements
+                .outputs
+                .insert((id, "clock".into()), "tick".into());
+            plots
+                .placements
+                .trees
+                .insert((id, "clock".into()), WidgetNode::Spinner);
+        }
+        for scope in [format!("{bar:?}/clock"), format!("popup:{popup:?}/clock")] {
+            let mut list = ListView::new(32.0);
+            list.update(
+                &mut plots.animation.motion,
+                Duration::from_secs(1),
+                Axis::Vertical,
+                &[],
+                &[(scope.clone(), "item".into())],
+                &[],
+            );
+            plots.animation.widgets.insert(scope, list);
+        }
+        assert!(plots.animation.motion.motion_count() > 0);
+        let _ = plots.update(Plant::Uproot(bar));
+        assert!(!plots.windows.ids.contains_key(&bar));
+        assert!(!plots.windows.ids.contains_key(&popup));
+        assert!(plots.windows.popups.is_empty());
+        assert!(plots.animation.widgets.is_empty());
+        assert_eq!(plots.animation.motion.motion_count(), 0);
+        for id in [bar, popup] {
+            assert!(!plots.input.cursors.contains_key(&id));
+            assert!(!plots.input.presses.contains_key(&id));
+            assert!(
+                !plots
+                    .placements
+                    .outputs
+                    .keys()
+                    .any(|(owner, _)| *owner == id)
+            );
+            assert!(!plots.placements.trees.keys().any(|(owner, _)| *owner == id));
+        }
+        assert_eq!(plots.config.bar.len(), 1);
+        assert!(plots.windows.tops.contains_key(&other));
+        assert!(plots.input.cursors.contains_key(&other));
+        assert_eq!(plots.placements.outputs.len(), 1);
+        let _ = plots.update(Plant::Uproot(bar));
+        assert!(plots.windows.tops.contains_key(&other));
+    }
 
     #[test]
     fn pointer_feedback_redraws_only_its_window() {

@@ -7,8 +7,8 @@ impl<'a> ServiceCtx<'a> {
             sys: &plots.services.system,
             gpu,
             theme: &plots.config.theme,
-            outputs: &plots.output_infos,
-            notifications: &plots.notifications,
+            outputs: &plots.windows.output_infos,
+            notifications: &plots.notification.queue,
             toplevels: &plots.services.toplevels,
             workspaces: &plots.services.workspaces,
         }

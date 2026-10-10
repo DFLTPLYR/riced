@@ -10,6 +10,7 @@ pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
     }
     t.get(field)
 }
+
 pub(crate) fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
     match node_property(t, field).map_err(|e| e.to_string())? {
         Value::Nil | Value::Function(_) => Ok(None),
@@ -316,5 +317,55 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             color: opt_color(t, "color", "ui.separator()")?,
         }),
         other => Err(format!("unknown ui node type {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_node_reads_full_trees_and_rejects_junk() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let value: Value = lua.load(r#"return ui.row({ui.text('hi'),ui.button('go','run'),7,{type='icon',name='cpu'}})"#).eval().unwrap();
+        let text = |content: &str| WidgetNode::Text {
+            content: content.into(),
+            size: None,
+            width: None,
+            height: None,
+            color: None,
+        };
+        assert_eq!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Row {
+                children: vec![
+                    text("hi"),
+                    WidgetNode::Button {
+                        label: "go".into(),
+                        action: "run".into(),
+                        width: None,
+                        height: None,
+                        padding: None,
+                        color: None,
+                        background: None,
+                        radius: None
+                    },
+                    text("7"),
+                    WidgetNode::Icon {
+                        name: "cpu".into(),
+                        color: None
+                    }
+                ],
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                spacing: 4.0,
+            }
+        );
+        for bad in ["return {}", "return {type='nope'}"] {
+            let value: Value = lua.load(bad).eval().unwrap();
+            assert!(parse_node(&value).is_err(), "rejects {bad}");
+        }
+        assert!(lua.load("return ui.row('flat')").eval::<Value>().is_err());
     }
 }

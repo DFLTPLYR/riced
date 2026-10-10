@@ -1,5 +1,6 @@
 //! Wallpaper page snapshots; rendering has no access to unrelated shell domains.
-use super::{Setting, hint, image_file_name, image_spin_row, section, section_heading};
+use super::editors::image_spin_row;
+use super::{Setting, hint, image_file_name, section, section_heading};
 use crate::ui::widgets::display_map::{MapLayer, MapView, images_layer, outputs_layer};
 use crate::{
     config::{BackgroundImage, ConfigPatch},
@@ -24,8 +25,8 @@ impl<'a> From<&'a Plots> for WallpaperContext<'a> {
     fn from(plots: &'a Plots) -> Self {
         Self {
             images: &plots.config.background.image,
-            output_infos: &plots.output_infos,
-            handles: &plots.wallpapers,
+            output_infos: &plots.windows.output_infos,
+            handles: &plots.desktop.wallpapers,
         }
     }
 }

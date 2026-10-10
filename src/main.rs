@@ -75,6 +75,7 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
     .settings(Settings {
         layer_settings: LayerShellSettings {
             start_mode: StartMode::Background,
+            keyboard_interactivity: iced_exwlshell::reexport::KeyboardInteractivity::None,
             ..Default::default()
         },
         with_connection: Some(connection2.into()),

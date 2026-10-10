@@ -1,11 +1,13 @@
 use super::background::Background;
-use super::top::{
-    Top, TopLocal, WidgetNode, call_lua_value, coerce_text, lua_has_func, lua_value_kind,
-    parse_node, rich_text,
-};
-use crate::shell::state::{PlotInfo, Plots};
+use super::top::{Top, TopLocal};
+use crate::lua::value::{coerce_text, lua_value_kind};
+use crate::lua::widgets::{call_lua_value, lua_has_func};
 use crate::shell::{Plant, TopEvent, WidgetEvent};
+use crate::shell::{state::Plots, windows::PlotInfo};
 use crate::theme;
+use crate::ui::decode::parse_node;
+use crate::ui::icons::rich_text;
+use crate::ui::node::WidgetNode;
 use iced::window;
 use iced::{Element, Length, Point, Task as Command};
 use iced_exwlshell::actions::IcedNewPopupSettings;
@@ -15,6 +17,7 @@ use iced_exwlshell::reexport::{
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::OutputId;
+#[cfg(test)]
 use std::collections::HashMap;
 
 /// QML-`Menu`-style popup for widget slots, backed by a native
@@ -297,11 +300,13 @@ impl Popup {
         cursor: Option<(f32, f32)>,
         prefer: Option<&str>,
     ) -> Option<Command<Plant>> {
-        let top = plots.tops.get(&bar_id)?.clone();
+        let top = plots.windows.tops.get(&bar_id)?.clone();
         let placements: Vec<crate::config::WidgetPlacement> = top.local.widgets_at(pos).to_vec();
         let mut capable: Vec<String> = placements
             .iter()
-            .filter(|p| !p.id.is_empty() && lua_has_func(&plots.widget_lua, &p.id, "popup"))
+            .filter(|p| {
+                !p.id.is_empty() && lua_has_func(&plots.placements.instances, &p.id, "popup")
+            })
             .map(|p| p.id.clone())
             .collect();
         // Slow path: the file may have changed since the cached state
@@ -322,7 +327,9 @@ impl Popup {
             }
             capable = placements
                 .iter()
-                .filter(|p| !p.id.is_empty() && lua_has_func(&plots.widget_lua, &p.id, "popup"))
+                .filter(|p| {
+                    !p.id.is_empty() && lua_has_func(&plots.placements.instances, &p.id, "popup")
+                })
                 .map(|p| p.id.clone())
                 .collect();
         }
@@ -339,7 +346,7 @@ impl Popup {
             return None;
         }
         let label = resolved.label();
-        let body = match plots.widget_lua.get(&resolved.id) {
+        let body = match plots.placements.instances.get(&resolved.id) {
             Some(lua) => {
                 let ctx = crate::services::ServiceCtx::from_plots(plots, Self::gpu_usage_percent());
                 let output = Top::output_name(plots, bar_id);
@@ -349,7 +356,8 @@ impl Popup {
                         crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
                     })
                     .and_then(|()| {
-                        super::top::publish_props(lua, &resolved.props).map_err(|e| e.to_string())
+                        crate::lua::props::publish_props(lua, &resolved.props)
+                            .map_err(|e| e.to_string())
                     })
                     .and_then(|()| call_lua_value(lua, "popup"))
                     .and_then(Self::parse_popup_content)
@@ -367,7 +375,7 @@ impl Popup {
         if body.text.trim().is_empty() && body.items.is_empty() && body.tree.is_none() {
             return None;
         }
-        let (_, _, sw, sh) = Background::available_rect(output, &plots.output_infos)?;
+        let (_, _, sw, sh) = Background::available_rect(output, &plots.windows.output_infos)?;
         let horizontal = top.is_horizontal();
         let (bw, bh) = top.local.px_size(sw, sh, horizontal);
         let (pl, pt, pr, pb) = if top.local.floating {
@@ -429,7 +437,7 @@ impl Popup {
             Top::note_widget_error(plots, &label, error);
             return None;
         }
-        plots.popups.insert(
+        plots.windows.popups.insert(
             win_id,
             Popup {
                 win_id,
@@ -444,7 +452,7 @@ impl Popup {
                 h,
             },
         );
-        plots.ids.insert(win_id, PlotInfo::Popup(output));
+        plots.windows.ids.insert(win_id, PlotInfo::Popup(output));
         Some(Command::done(Plant::NewPopUp {
             settings,
             id: win_id,
@@ -471,8 +479,8 @@ impl Popup {
                 &format!("popup:{win_id:?}"),
                 self.size,
                 Some(&msg),
-                &plots.anim_runtime,
-                &plots.widget_lists,
+                &plots.animation.motion,
+                &plots.animation.widgets,
             ) {
                 content = content.push(node);
             }
@@ -501,21 +509,7 @@ impl Popup {
     /// Dismiss a popup: drop tracking + cursor state and close its window
     /// (idempotent, like every other layer close).
     pub(crate) fn handle_dismiss(plots: &mut Plots, id: window::Id) -> Command<Plant> {
-        let prefix = format!("popup:{id:?}/");
-        let keys: Vec<_> = plots
-            .widget_lists
-            .keys()
-            .filter(|key| key.starts_with(&prefix))
-            .cloned()
-            .collect();
-        for key in keys {
-            if let Some(mut list) = plots.widget_lists.remove(&key) {
-                list.clear_all(&mut plots.anim_runtime);
-            }
-        }
-        plots.input.cursors.remove(&id);
-        plots.popups.remove(&id);
-        plots.ids.remove(&id);
+        plots.forget_window(id);
         iced_runtime::task::effect(Action::Window(WindowAction::Close(id)))
     }
 
@@ -527,6 +521,7 @@ impl Popup {
     /// dismissed. Returns close commands for dismissals (possibly none).
     pub(crate) fn refresh_bodies(plots: &mut Plots) -> Command<Plant> {
         let open: Vec<(window::Id, String, window::Id)> = plots
+            .windows
             .popups
             .iter()
             .map(|(id, popup)| (*id, popup.placement.clone(), popup.bar_id))
@@ -552,7 +547,7 @@ impl Popup {
                     Top::note_widget_error(plots, &label, e);
                     continue;
                 }
-                Ok(()) => match plots.widget_lua.get(&resolved.id) {
+                Ok(()) => match plots.placements.instances.get(&resolved.id) {
                     Some(lua) => {
                         let output = Top::output_name(plots, bar);
                         let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
@@ -563,7 +558,7 @@ impl Popup {
                                     .map_err(|e| e.to_string())
                             })
                             .and_then(|()| {
-                                super::top::publish_props(lua, &resolved.props)
+                                crate::lua::props::publish_props(lua, &resolved.props)
                                     .map_err(|e| e.to_string())
                             })
                             .and_then(|()| call_lua_value(lua, "popup"))
@@ -584,18 +579,23 @@ impl Popup {
                     // Recompute the box: explicit width/height may have
                     // changed (e.g. 300 -> 200), and the window keeps its
                     // creation size unless told otherwise.
-                    let output = plots.ids.get(&pid).and_then(|info| match info {
-                        PlotInfo::Popup(o) => plots.output_infos.get(o).map(|_| *o),
+                    let output = plots.windows.ids.get(&pid).and_then(|info| match info {
+                        PlotInfo::Popup(o) => plots.windows.output_infos.get(o).map(|_| *o),
                         _ => None,
                     });
                     let (nw, nh) = match output {
-                        Some(o) => match Background::available_rect(o, &plots.output_infos) {
+                        Some(o) => match Background::available_rect(o, &plots.windows.output_infos)
+                        {
                             Some((_, _, sw, sh)) => Self::content_size(sw, sh, &content),
                             None => Self::content_size(1920.0, 1080.0, &content),
                         },
                         None => Self::content_size(1920.0, 1080.0, &content),
                     };
-                    let old = plots.popups.get(&pid).and_then(|popup| popup.tree.clone());
+                    let old = plots
+                        .windows
+                        .popups
+                        .get(&pid)
+                        .and_then(|popup| popup.tree.clone());
                     if let Some(tree) = &content.tree
                         && let Err(error) = super::top::sync_declared_lists(
                             plots,
@@ -607,7 +607,7 @@ impl Popup {
                         Top::note_widget_error(plots, &resolved.label(), error);
                         continue;
                     }
-                    if let Some(popup) = plots.popups.get_mut(&pid)
+                    if let Some(popup) = plots.windows.popups.get_mut(&pid)
                         && (popup.body != content.text
                             || popup.items != content.items
                             || popup.tree != content.tree
@@ -642,10 +642,10 @@ impl Popup {
         id: window::Id,
         action: String,
     ) -> Command<Plant> {
-        let Some(placement_id) = plots.popups.get(&id).map(|p| p.placement.clone()) else {
+        let Some(placement_id) = plots.windows.popups.get(&id).map(|p| p.placement.clone()) else {
             return Command::none();
         };
-        let bar = plots.popups.get(&id).map(|p| p.bar_id);
+        let bar = plots.windows.popups.get(&id).map(|p| p.bar_id);
         // Fresh handler for the click: an edited `on_action()` applies
         // immediately (in-memory toggle state resets on reload, same
         // as editing any widget script).
@@ -658,7 +658,7 @@ impl Popup {
             }
         }
         let outcome = resolved.as_ref().and_then(|resolved| {
-            plots.widget_lua.get(&resolved.id).map(|lua| {
+            plots.placements.instances.get(&resolved.id).map(|lua| {
                 let output = bar.map(|b| Top::output_name(plots, b)).unwrap_or_default();
                 let ctx = crate::services::ServiceCtx::from_plots(plots, Self::gpu_usage_percent());
                 crate::services::publish_all(&ctx, lua)
@@ -667,14 +667,15 @@ impl Popup {
                         crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
                     })
                     .and_then(|()| {
-                        super::top::publish_props(lua, &resolved.props).map_err(|e| e.to_string())
+                        crate::lua::props::publish_props(lua, &resolved.props)
+                            .map_err(|e| e.to_string())
                     })
-                    .and_then(|()| super::top::call_lua_named_action(lua, &action))
+                    .and_then(|()| crate::lua::widgets::call_lua_named_action(lua, &action))
             })
         });
         match outcome {
             Some(Ok(value)) => {
-                plots.widget_last_error.remove(&placement_id);
+                plots.placements.errors.remove(&placement_id);
                 let notif = super::notification::command_from_action(&value, plots);
                 let refresh = Self::refresh_bodies(plots);
                 // Tree-aware cell refresh (same as the cell-action
@@ -700,27 +701,6 @@ impl Popup {
         }
         Command::none()
     }
-
-    /// Remove all popups for `output_id` (mirrors `Top::remove_for_output`).
-    /// Returns the window ids that were removed.
-    pub(crate) fn remove_for_output(
-        popups: &mut HashMap<window::Id, Popup>,
-        ids: &mut HashMap<window::Id, PlotInfo>,
-        output_id: OutputId,
-    ) -> Vec<window::Id> {
-        let to_remove: Vec<window::Id> = ids
-            .iter()
-            .filter_map(|(wid, info)| match info {
-                PlotInfo::Popup(o) if *o == output_id => Some(*wid),
-                _ => None,
-            })
-            .collect();
-        for wid in &to_remove {
-            popups.remove(wid);
-            ids.remove(wid);
-        }
-        to_remove
-    }
 }
 
 #[cfg(test)]
@@ -732,13 +712,15 @@ mod tests {
     fn session_menu_delegates_have_visible_layout_bounds() {
         use crate::{shell::screens::top, ui::listview::ListView};
         use iced::advanced::{layout, renderer::Headless, widget::Tree};
-        let lua = top::new_widget_lua().unwrap();
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
         for (_, source) in crate::config::builtin_component_files() {
             lua.load(&source).exec().unwrap();
         }
-        top::load_widget_script(&lua, "system", crate::config::SEED_SYSTEM_LUA).unwrap();
+        crate::lua::widgets::load_widget_script(&lua, "system", crate::config::SEED_SYSTEM_LUA)
+            .unwrap();
         let content =
-            Popup::parse_popup_content(top::call_lua_value(&lua, "popup").unwrap()).unwrap();
+            Popup::parse_popup_content(crate::lua::widgets::call_lua_value(&lua, "popup").unwrap())
+                .unwrap();
         let tree = content.tree.unwrap();
         let runtime = aura_anim::core::runtime::MotionRuntime::new();
         let mut lists = HashMap::new();

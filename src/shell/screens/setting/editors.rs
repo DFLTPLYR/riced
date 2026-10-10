@@ -8,10 +8,75 @@ use crate::{
 };
 use iced::{
     Element, Length,
-    widget::{Checkbox, button, column, container, row, text, text_input},
+    widget::{Checkbox, button, column, container, row, slider, text, text_input},
     window,
 };
+use std::ops::RangeInclusive;
 use std::rc::Rc;
+
+pub(super) fn plant_slider_row(
+    label: String,
+    value: f64,
+    range: RangeInclusive<f64>,
+    step: f64,
+    msg: impl Fn(f64) -> Plant + 'static,
+    release: Option<Plant>,
+) -> Element<'static, Plant> {
+    let bounds = format!("{:.0} – {:.0}", range.start(), range.end());
+    let mut control = slider(range, value, msg).step(step).width(Length::Fill);
+    if let Some(release) = release {
+        control = control.on_release(release);
+    }
+    container(
+        column![
+            row![
+                text(label)
+                    .size(14)
+                    .color(theme::text())
+                    .width(Length::Fill),
+                hint(bounds)
+            ]
+            .spacing(12),
+            control
+        ]
+        .spacing(10),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .into()
+}
+
+pub(super) fn image_spin_row(
+    label: impl Into<String>,
+    value: f64,
+    range: RangeInclusive<f64>,
+    step: f64,
+    decimals: usize,
+    on_commit: impl Fn(f64) -> Plant + Clone + 'static,
+    on_reset: Plant,
+) -> Element<'static, Plant> {
+    container(
+        column![
+            text(label.into())
+                .size(14)
+                .color(theme::text())
+                .width(Length::Fill),
+            row![
+                spin_box(value, range, step, decimals, on_commit).width(Length::Fill),
+                button(text("Reset default").size(12).color(theme::button_text()))
+                    .on_press(on_reset)
+                    .padding(6)
+                    .style(theme::menu_button(theme::RADIUS))
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+        ]
+        .spacing(8),
+    )
+    .padding(10)
+    .width(Length::Fill)
+    .into()
+}
 
 pub(super) struct PropertyControl {
     pub label: String,

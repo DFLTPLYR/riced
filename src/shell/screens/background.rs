@@ -1,5 +1,5 @@
-use crate::shell::state::{PlotInfo, Plots};
 use crate::shell::{BackgroundEvent, ConfigEvent, Plant, TopEvent};
+use crate::shell::{state::Plots, windows::PlotInfo};
 use iced::mouse::Button;
 use iced::widget::image::Image;
 use iced::widget::{Space, container, stack};
@@ -12,8 +12,8 @@ use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::top::{NodeLength, WidgetNode};
 use crate::theme;
+use crate::ui::node::{NodeLength, WidgetNode};
 use crate::ui::widgets::panel::panel;
 use crate::ui::widgets::panel_window::background_window;
 
@@ -77,7 +77,7 @@ mod tests {
                     matches!(&children[0], WidgetNode::Button {label, action, padding: Some(7.0), radius: Some(3.0), ..} if label == "Add Top" && action == "add-top")
                 );
             }
-            let mut element = super::super::top::build_node(
+            let mut element = crate::ui::build::build_node(
                 &node,
                 12.0,
                 Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
@@ -190,7 +190,7 @@ mod tests {
                 seeded_menu(auto_sizing)
             };
             validate_menu_size(&menu).unwrap();
-            let content = super::super::top::build_node(
+            let content = crate::ui::build::build_node(
                 &menu,
                 12.0,
                 Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
@@ -375,6 +375,7 @@ impl Background {
             size: LayerSize::FILL,
             output_option: OutputOption::GlobalName(output),
             namespace: Some("Riced - Background".to_string()),
+            keyboard_interactivity: iced_exwlshell::reexport::KeyboardInteractivity::None,
             blur_option: BlurOption::None,
             ..Default::default()
         };
@@ -463,20 +464,6 @@ impl Background {
         Some(Command::done(Plant::NewLayerShell { settings, id }))
     }
 
-    /// Remove the Background for `output_id` (called on `LandEvent::OutputRemoved`).
-    /// Returns the closed window `Id` if one existed.
-    pub(crate) fn remove_for_output(
-        backgrounds: &mut HashMap<OutputId, Background>,
-        background_ids: &mut HashMap<OutputId, window::Id>,
-        ids: &mut HashMap<window::Id, PlotInfo>,
-        output_id: OutputId,
-    ) -> Option<window::Id> {
-        let id = background_ids.remove(&output_id)?;
-        backgrounds.remove(&output_id);
-        ids.remove(&id);
-        Some(id)
-    }
-
     // ------------------------------------------------------------------
     // Event handling — moved out of Plots::update so clicks live with the
     // Background they belong to (per `Plant::Graft(id, event)` window id).
@@ -489,7 +476,7 @@ impl Background {
     /// `repaint_seq` so the heal is a real state transition rather than a
     /// silent no-op; the redraw itself comes from `redraw_scope => Scope::All`.
     pub(crate) fn repaint(plots: &mut Plots) -> Command<Plant> {
-        plots.repaint_seq += 1;
+        plots.desktop.repaint_seq += 1;
         Command::none()
     }
 
@@ -575,19 +562,24 @@ impl Background {
         // mouse-output placement (notifications, popups). Moves over
         // bars/popups leave the last desktop position, which is the
         // right output in practice.
-        if matches!(plots.ids.get(&id), Some(PlotInfo::Background(_))) {
+        if matches!(plots.windows.ids.get(&id), Some(PlotInfo::Background(_))) {
             plots.input.global = Some(Self::to_global(
                 id,
                 position,
-                &plots.ids,
-                &plots.output_infos,
+                &plots.windows.ids,
+                &plots.windows.output_infos,
             ));
         }
-        if plots.selection_rect.selecting {
-            if let Some(sp) = plots.selection_rect.start_point {
-                let gp = Self::to_global(id, position, &plots.ids, &plots.output_infos);
+        if plots.desktop.selection_rect.selecting {
+            if let Some(sp) = plots.desktop.selection_rect.start_point {
+                let gp = Self::to_global(
+                    id,
+                    position,
+                    &plots.windows.ids,
+                    &plots.windows.output_infos,
+                );
                 // skip tiny moves <1px to reduce choppy updates
-                if plots.selection_rect.drag_update(sp, gp) {
+                if plots.desktop.selection_rect.drag_update(sp, gp) {
                     // fall through to BackgroundPlot::SelectionTick redraw
                 } else {
                     return Command::none();
@@ -600,7 +592,7 @@ impl Background {
     }
 
     fn menu_hit_test(plots: &Plots, gp: Point) -> bool {
-        let cm = match &plots.context_menu {
+        let cm = match &plots.desktop.context_menu {
             Some(cm) if cm.open => cm,
             _ => return false,
         };
@@ -608,13 +600,13 @@ impl Background {
         // (stored output first, else containing available rect)
         let menu_avail = cm
             .output
-            .and_then(|o| Self::available_rect(o, &plots.output_infos).map(|a| (o, a)))
+            .and_then(|o| Self::available_rect(o, &plots.windows.output_infos).map(|a| (o, a)))
             .or_else(|| {
-                plots.output_infos.keys().find_map(|o| {
-                    Self::available_rect(*o, &plots.output_infos).and_then(|a| {
+                plots.windows.output_infos.keys().find_map(|o| {
+                    Self::available_rect(*o, &plots.windows.output_infos).and_then(|a| {
                         // menu stored in global coords; check against *full* output
                         // geometry for containment, but clamp/render in available
-                        let info = plots.output_infos.get(o)?;
+                        let info = plots.windows.output_infos.get(o)?;
                         let (sx, sy, sw, sh) = Self::output_geometry(info);
                         if cm.x >= sx && cm.x < sx + sw && cm.y >= sy && cm.y < sy + sh {
                             Some((*o, a))
@@ -641,7 +633,7 @@ impl Background {
         output: OutputId,
         action: &str,
     ) -> Command<Plant> {
-        let Some(cm) = &mut plots.context_menu else {
+        let Some(cm) = &mut plots.desktop.context_menu else {
             return Command::none();
         };
         if !cm.open || cm.output != Some(output) {
@@ -662,12 +654,12 @@ impl Background {
             return Command::none();
         }
         let pos = Self::last_local(plots, id);
-        let gp = Self::to_global(id, pos, &plots.ids, &plots.output_infos);
+        let gp = Self::to_global(id, pos, &plots.windows.ids, &plots.windows.output_infos);
         let output = match plots.id_info(id) {
             Some(PlotInfo::Background(o)) => Some(o),
             _ => None,
         };
-        plots.context_menu = Some(ContextMenu {
+        plots.desktop.context_menu = Some(ContextMenu {
             x: gp.x,
             y: gp.y,
             open: true,
@@ -684,37 +676,20 @@ impl Background {
             return Command::none();
         }
         let pos = Self::last_local(plots, id);
-        let gp = Self::to_global(id, pos, &plots.ids, &plots.output_infos);
+        let gp = Self::to_global(id, pos, &plots.windows.ids, &plots.windows.output_infos);
 
         if Self::menu_hit_test(plots, gp) {
             // click was on context menu — suppress selection drag
             return Command::none();
         }
-        if let Some(cm) = &mut plots.context_menu
-            && cm.open
-        {
-            cm.open = false;
-        }
-
-        plots.fade_rect = None;
-        plots.fade_start = None;
-        plots.selection_rect.selecting = true;
+        plots.desktop.begin_selection(gp);
         SELECTING.store(true, std::sync::atomic::Ordering::Relaxed);
-        plots.selection_rect.start_point = Some(gp);
-        plots.selection_rect.x = gp.x;
-        plots.selection_rect.y = gp.y;
-        plots.selection_rect.width = 0.0;
-        plots.selection_rect.height = 0.0;
         println!("select start {gp:?} (local {pos:?})");
         Command::none()
     }
 
     pub(crate) fn handle_left_release(plots: &mut Plots) -> Command<Plant> {
-        if plots.selection_rect.selecting {
-            plots.fade_rect = Some(plots.selection_rect.clone());
-            plots.fade_start = Some(Instant::now());
-        }
-        plots.selection_rect.reset();
+        plots.desktop.end_selection(Instant::now());
         SELECTING.store(false, std::sync::atomic::Ordering::Relaxed);
         Command::none()
     }
@@ -765,9 +740,11 @@ impl Background {
         let (ax, ay, aw, ah) = avail;
         let fade_ms = plots.config.animation.speed.duration().as_millis() as f32;
         // active rect is either selecting rect or fading rect (speed-scaled InOutQuad)
-        let (active_rect, opacity) = if plots.selection_rect.selecting {
-            (Some(&plots.selection_rect), 1.0)
-        } else if let (Some(fr), Some(start)) = (&plots.fade_rect, &plots.fade_start) {
+        let (active_rect, opacity) = if plots.desktop.selection_rect.selecting {
+            (Some(&plots.desktop.selection_rect), 1.0)
+        } else if let (Some(fr), Some(start)) =
+            (&plots.desktop.fade_rect, &plots.desktop.fade_start)
+        {
             let elapsed = start.elapsed().as_millis() as f32;
             if elapsed >= fade_ms {
                 (None, 0.0)
@@ -803,16 +780,16 @@ impl Background {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         };
         if cw > 1.0 && ch > 1.0 && op > 0.01 {
-            let rendered = plots.composable_runtime.borrow_mut().render(
+            let rendered = plots.desktop.composable_runtime.borrow_mut().render(
                 &format!("selection/{output:?}"),
                 &plots.config.composable.selection_rect,
                 serde_json::json!({
                     "width": cw, "height": ch, "x": cx, "y": cy,
-                    "opacity": op, "selecting": plots.selection_rect.selecting,
+                    "opacity": op, "selecting": plots.desktop.selection_rect.selecting,
                     "output": { "x": ax, "y": ay, "width": aw, "height": ah },
                 }),
                 &plots.config.theme,
-                plots.components_mtime,
+                plots.catalog.library_revision,
             );
             if let Some(rendered) = rendered {
                 let opacity = rendered
@@ -821,7 +798,7 @@ impl Background {
                     .and_then(serde_json::Value::as_f64)
                     .unwrap_or(op as f64) as f32;
                 if let Ok(content) =
-                    super::top::build_node_opacity(&rendered.node, 13.0, None, opacity)
+                    crate::ui::build::build_node_opacity(&rendered.node, 13.0, None, opacity)
                 {
                     return panel()
                         .content(content)
@@ -877,14 +854,19 @@ impl Background {
         let mut host = context_menu_host(&plots.config.composable.context_menu_item);
         host["output"] =
             serde_json::json!({"x": avail.0, "y": avail.1, "width": avail.2, "height": avail.3});
-        if let Some(rendered) = plots.composable_runtime.borrow_mut().render_checked(
-            &format!("context-menu/{output:?}"),
-            &plots.config.composable.context_menu,
-            host,
-            &plots.config.theme,
-            plots.components_mtime,
-            |rendered| validate_menu_size(&rendered.node),
-        ) {
+        if let Some(rendered) = plots
+            .desktop
+            .composable_runtime
+            .borrow_mut()
+            .render_checked(
+                &format!("context-menu/{output:?}"),
+                &plots.config.composable.context_menu,
+                host,
+                &plots.config.theme,
+                plots.catalog.library_revision,
+                |rendered| validate_menu_size(&rendered.node),
+            )
+        {
             return rendered.node;
         }
         Self::native_context_menu_node(&plots.config.composable)
@@ -964,7 +946,7 @@ impl Background {
         avail: (f32, f32, f32, f32),
     ) -> Element<'_, Plant> {
         let (ax, ay, aw, ah) = avail;
-        let cm = match &plots.context_menu {
+        let cm = match &plots.desktop.context_menu {
             Some(cm) if cm.open => cm,
             _ => return Space::new().width(0).height(0).into(),
         };
@@ -979,7 +961,7 @@ impl Background {
         let message =
             |action| Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action));
         let content =
-            super::top::build_node(&node, 12.0, Some(&message)).expect("validated menu tree");
+            crate::ui::build::build_node(&node, 12.0, Some(&message)).expect("validated menu tree");
         crate::ui::widgets::anchored::anchored(
             content,
             Point::new(lx, ly),
@@ -989,7 +971,7 @@ impl Background {
     }
 
     pub(crate) fn view(plots: &Plots, id: window::Id, output: OutputId) -> Element<'_, Plant> {
-        let avail = Self::available_rect_or_fallback(output, &plots.output_infos);
+        let avail = Self::available_rect_or_fallback(output, &plots.windows.output_infos);
 
         // Bottom of the stack is wallpaper images (QML `Background`), then
         // the debug label, selection, and menu overlays on top.

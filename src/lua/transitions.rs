@@ -1,8 +1,28 @@
 //! Decode motion descriptions independently of bar/window ownership.
 use super::value::lua_value_kind;
 use crate::ui::listview::Transition;
-use mlua::{Table, Value};
+use mlua::{Lua, Table, Value};
 use std::time::Duration;
+
+pub(crate) fn parse_transitions(
+    lua: &Lua,
+    enter: &Transition,
+    exit: &Transition,
+    displaced: &Transition,
+) -> Result<(Transition, Transition, Transition, bool), String> {
+    let spec = match lua.named_registry_value::<Table>("riced.widget.app") {
+        Ok(app) => match app
+            .get::<Value>("transitions")
+            .map_err(|error| error.to_string())?
+        {
+            Value::Nil => Value::Nil,
+            Value::Function(_) => super::widgets::call_lua_value(lua, "transitions")?,
+            _ => return Err("app.transitions must be a function".into()),
+        },
+        Err(_) => Value::Nil,
+    };
+    parse_transition_value(spec, enter, exit, displaced)
+}
 
 pub(crate) fn parse_transition_value(
     spec: Value,
@@ -107,4 +127,57 @@ pub(crate) fn parse_transition_value(
         }
     }
     Ok((out_enter, out_exit, out_displaced, custom_enter))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lua::widgets::{load_widget_script, new_widget_lua};
+
+    #[test]
+    fn parse_transitions_reads_qml_subset_and_defaults() {
+        let enter = Transition::slide_fade(16.0);
+        let exit = Transition::slide_fade_out(-16.0);
+        let displaced = Transition {
+            from: crate::ui::anim::ItemMotion::settled(),
+            to: crate::ui::anim::ItemMotion::settled(),
+            duration: None,
+        };
+        let lua = new_widget_lua().unwrap();
+        let (e, x, d, _) = parse_transitions(&lua, &enter, &exit, &displaced).unwrap();
+        assert_eq!(e.from.x, 16.0);
+        assert_eq!(x.to.x, -16.0);
+        assert!(d.duration.is_none());
+        load_widget_script(&lua, "transitions", r#"local app={view=function() return ui.text('x') end}; function app:transitions() return {
+            add={x={from=200,to=0},opacity={from=0,to=1},duration=250}, remove={x={to=-200},duration=250}, displaced={duration=300}
+        } end; return app"#).unwrap();
+        let (e, x, d, custom) = parse_transitions(&lua, &enter, &exit, &displaced).unwrap();
+        assert!(custom);
+        assert_eq!((e.from.x, e.to.x, e.from.opacity), (200.0, 0.0, 0.0));
+        assert_eq!(x.to.x, -200.0);
+        assert_eq!(
+            (e.duration, x.duration, d.duration),
+            (
+                Some(Duration::from_millis(250)),
+                Some(Duration::from_millis(250)),
+                Some(Duration::from_millis(300))
+            )
+        );
+        load_widget_script(&lua, "transitions", "return {view=function() return '' end, transitions=function() return {add={x={from=50}}} end}").unwrap();
+        let (e, x, d, _) = parse_transitions(&lua, &enter, &exit, &displaced).unwrap();
+        assert_eq!(e.from.x, 50.0);
+        assert_eq!(e.to.x, 0.0);
+        assert_eq!(x.to.x, -16.0);
+        assert!(d.duration.is_none());
+        load_widget_script(&lua, "transitions", "return {view=function() return '' end, transitions=function() return {add={x='nope'}} end}").unwrap();
+        let error = parse_transitions(&lua, &enter, &exit, &displaced).unwrap_err();
+        assert!(error.contains("add"), "{error}");
+        load_widget_script(
+            &lua,
+            "transitions",
+            "return {view=function() return '' end, transitions=function() return nil end}",
+        )
+        .unwrap();
+        assert!(parse_transitions(&lua, &enter, &exit, &displaced).is_ok());
+    }
 }

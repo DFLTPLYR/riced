@@ -297,3 +297,184 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set("ui", ui)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::{
+        decode::parse_node,
+        listview::ListView,
+        node::{NodeLength, WidgetNode},
+    };
+
+    fn description(source: &str) -> WidgetNode {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let value: Value = lua.load(source).eval().unwrap();
+        parse_node(&value).unwrap()
+    }
+
+    fn text(content: &str) -> WidgetNode {
+        WidgetNode::Text {
+            content: content.into(),
+            size: None,
+            width: None,
+            height: None,
+            color: None,
+        }
+    }
+
+    #[test]
+    fn lua_setters_are_repeatable_and_components_are_directly_callable() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        lua.load(r#"iced.define('label', function(p) return iced.text(p.text) end)"#)
+            .exec()
+            .unwrap();
+        let value: Value = lua.load(r##"return iced.label({text='hello'}):width(10):width(30):color('#f00'):color('#0f0')"##).eval().unwrap();
+        assert!(
+            matches!(parse_node(&value).unwrap(), WidgetNode::Text { width: Some(NodeLength::Fixed(30.0)), color: Some(color), .. } if color.g == 1.0 && color.r == 0.0)
+        );
+        let value: Value = lua
+            .load("return iced.row({}, 4):spacing(8):spacing(12)")
+            .eval()
+            .unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Row { spacing: 12.0, .. }
+        ));
+        assert!(
+            lua.load("iced.define('text', function() return iced.text('x') end)")
+                .exec()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn iced_define_and_use_round_trip_with_chaining() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        lua.load(r#"iced.define('__t_stat', function(props) return iced.row({iced.icon(props.icon), iced.text(props.value)}) end)"#).exec().unwrap();
+        let value: Value = lua
+            .load(r#"return iced.use('__t_stat', {icon='cpu',value='42%'}):width('fill')"#)
+            .eval()
+            .unwrap();
+        match parse_node(&value).unwrap() {
+            WidgetNode::Row {
+                width: NodeLength::Fill,
+                children,
+                ..
+            } => assert_eq!(children.len(), 2),
+            other => panic!("unexpected {other:?}"),
+        }
+        let error = lua
+            .load("return iced.use('__t_missing', {})")
+            .eval::<Value>()
+            .unwrap_err();
+        assert!(error.to_string().contains("__t_missing"), "{error}");
+        lua.load("iced.define('__t_bad', function() return 42 end)")
+            .exec()
+            .unwrap();
+        let error = lua
+            .load("return iced.use('__t_bad', {})")
+            .eval::<Value>()
+            .unwrap_err();
+        assert!(error.to_string().contains("__t_bad"), "{error}");
+    }
+
+    #[test]
+    fn representative_builders_produce_expected_owned_descriptions() {
+        assert_eq!(
+            description("return ui.text('x'):size(14):size(16):width('auto')"),
+            WidgetNode::Text {
+                content: "x".into(),
+                size: Some(16.0),
+                width: Some(NodeLength::Shrink),
+                height: None,
+                color: None,
+            }
+        );
+        assert_eq!(
+            description("return ui.row({ui.icon('cpu'), ui.text('x')}):spacing(5)"),
+            WidgetNode::Row {
+                children: vec![
+                    WidgetNode::Icon {
+                        name: "cpu".into(),
+                        color: None
+                    },
+                    text("x")
+                ],
+                spacing: 5.0,
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+            }
+        );
+        assert_eq!(
+            description(
+                "return ui.container(ui.column({ui.button('go','go'):radius(3),ui.progress(0.4,100)})):padding(4)"
+            ),
+            WidgetNode::Container {
+                child: Box::new(WidgetNode::Column {
+                    children: vec![
+                        WidgetNode::Button {
+                            label: "go".into(),
+                            action: "go".into(),
+                            width: None,
+                            height: None,
+                            padding: None,
+                            color: None,
+                            background: None,
+                            radius: Some(3.0)
+                        },
+                        WidgetNode::Progress {
+                            value: 0.4,
+                            width: NodeLength::Fixed(100.0),
+                            height: None,
+                            color: None,
+                            background: None
+                        },
+                    ],
+                    spacing: 4.0,
+                    width: NodeLength::Shrink,
+                    height: NodeLength::Shrink,
+                }),
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                padding: 4.0,
+                background: None,
+                radius: 0.0,
+                border: None,
+                border_width: 0.0,
+            }
+        );
+        let defaults: ListView<String, WidgetNode> = ListView::default();
+        assert_eq!(
+            description(
+                "return ui.listview({{id=1}}):id('test'):key('id'):delegate(function(item) return ui.text(item.id) end)"
+            ),
+            WidgetNode::ListView {
+                id: "test".into(),
+                items: vec![("1".into(), text("1"))],
+                horizontal: false,
+                pitch: 32.0,
+                spacing: 4.0,
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                transitions: Box::new((
+                    defaults.enter_spec(),
+                    defaults.exit_spec(),
+                    defaults.displaced_spec()
+                )),
+            }
+        );
+        assert_eq!(
+            description(
+                "ui.define('custom', function(p) return ui.separator():height(p.h) end); return ui.custom({h=2})"
+            ),
+            WidgetNode::Separator {
+                height: 2.0,
+                color: None
+            }
+        );
+    }
+}

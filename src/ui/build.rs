@@ -327,3 +327,145 @@ pub(crate) fn build_node_opacity(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::decode::parse_node;
+    use mlua::{Lua, Value};
+
+    fn lua() -> Lua {
+        let lua = Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        lua
+    }
+
+    #[test]
+    fn build_node_builds_every_primitive_without_a_renderer() {
+        let text = |content: &str| WidgetNode::Text {
+            content: content.into(),
+            size: None,
+            width: None,
+            height: None,
+            color: None,
+        };
+        let button = WidgetNode::Button {
+            label: "go".into(),
+            action: "run".into(),
+            width: None,
+            height: None,
+            padding: None,
+            color: None,
+            background: None,
+            radius: None,
+        };
+        for node in [
+            text("hi"),
+            WidgetNode::Icon {
+                name: "cpu".into(),
+                color: None,
+            },
+            WidgetNode::Icon {
+                name: "typo".into(),
+                color: None,
+            },
+            WidgetNode::Row {
+                children: vec![text("a")],
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                spacing: 2.0,
+            },
+            WidgetNode::Column {
+                children: vec![],
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                spacing: 2.0,
+            },
+            button.clone(),
+            WidgetNode::Progress {
+                value: 1.5,
+                width: NodeLength::Fixed(120.0),
+                height: None,
+                color: None,
+                background: None,
+            },
+            WidgetNode::Separator {
+                height: 2.0,
+                color: None,
+            },
+        ] {
+            let _ = build_node(&node, 13.0, None).unwrap();
+        }
+        let _ = build_node(&button, 13.0, Some(&|_| Plant::Tend)).unwrap();
+    }
+
+    #[test]
+    fn ui_spinner_parses_and_builds() {
+        let lua = lua();
+        let value: Value = lua.load("return ui.spinner()").eval().unwrap();
+        let node = parse_node(&value).unwrap();
+        assert_eq!(node, WidgetNode::Spinner);
+        let _ = build_node(&node, 13.0, None).unwrap();
+        let value: Value = lua
+            .load("return ui.row({ui.spinner(),ui.text('x')})")
+            .eval()
+            .unwrap();
+        assert!(
+            matches!(parse_node(&value).unwrap(), WidgetNode::Row {children, ..} if children.len() == 2)
+        );
+    }
+
+    #[test]
+    fn color_setter_accepts_hex_and_rgba_tables() {
+        let lua = lua();
+        let red = iced::Color::from_rgb(1.0, 0.0, 0.0);
+        for (source, expected) in [
+            (r##"return iced.text('hi'):color('#ff0000')"##, red),
+            (r##"return iced.text('hi'):color('#f00')"##, red),
+            ("return iced.text('hi'):color({r=1,g=0,b=0})", red),
+            (
+                "return iced.text('hi'):color({1,0,0,0.5})",
+                iced::Color::from_rgba(1.0, 0.0, 0.0, 0.5),
+            ),
+        ] {
+            let value: Value = lua.load(source).eval().unwrap();
+            match parse_node(&value).unwrap() {
+                WidgetNode::Text {
+                    color: Some(color), ..
+                } => assert!(
+                    (color.r - expected.r).abs() < 0.01
+                        && (color.g - expected.g).abs() < 0.01
+                        && (color.b - expected.b).abs() < 0.01
+                        && (color.a - expected.a).abs() < 0.01,
+                    "{source} -> {color:?}"
+                ),
+                other => panic!("{source} -> {other:?}"),
+            }
+        }
+        let value: Value = lua.load("return iced.text('hi')").eval().unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Text { color: None, .. }
+        ));
+        let value: Value = lua
+            .load("return iced.text('hi'):color('nope')")
+            .eval()
+            .unwrap();
+        let error = parse_node(&value).unwrap_err();
+        assert!(error.contains("color"), "{error}");
+        let value: Value = lua
+            .load(r##"return iced.button('go','run'):color('#00ff00')"##)
+            .eval()
+            .unwrap();
+        let node = parse_node(&value).unwrap();
+        assert!(matches!(node, WidgetNode::Button { color: Some(_), .. }));
+        let _ = build_node(&node, 13.0, None).unwrap();
+        let value: Value = lua
+            .load(r##"return iced.icon('cpu'):color('#00ff00')"##)
+            .eval()
+            .unwrap();
+        let node = parse_node(&value).unwrap();
+        assert!(matches!(node, WidgetNode::Icon { color: Some(_), .. }));
+        let _ = build_node(&node, 13.0, None).unwrap();
+    }
+}

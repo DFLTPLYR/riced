@@ -1,24 +1,27 @@
 pub(crate) mod animation;
+mod edit;
+mod input;
+mod render;
+mod runtime;
 mod scheduling;
 use super::Popup;
 use super::background::Background;
-use super::listview::{Axis, Transition};
 use crate::config::WidgetDefinition;
-use crate::shell::state::{PlotInfo, Plots};
 use crate::shell::{Plant, TopEvent, WidgetEvent};
-use crate::theme;
-use crate::ui::widgets::panel_window::top_window;
+use crate::shell::{state::Plots, windows::PlotInfo};
 use iced::mouse::Button;
 use iced::widget::{Space, column, container, row, text};
 use iced::window;
-use iced::{Element, Fill, Point, Task as Command};
+use iced::{Element, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::{OutputId, OutputInfo};
-use mlua::{Function, Lua, Table, Value};
+#[cfg(test)]
+use mlua::Table;
+use mlua::{Lua, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -235,21 +238,14 @@ impl TopLocal {
 /// Fully-resolved render inputs for one placement: definition
 /// defaults overlaid with placement overrides, script path included.
 /// Built fresh per render so edits apply without restarts.
-pub(crate) struct ResolvedWidget {
-    pub id: String,
-    pub name: String,
-    pub path: std::path::PathBuf,
-    pub interval: f32,
-    pub size: f32,
-    pub props: HashMap<String, crate::config::PropValue>,
-}
-
-impl ResolvedWidget {
-    /// Human label for logs: definition name plus placement id.
-    pub(crate) fn label(&self) -> String {
-        format!("{} [{}]", self.name, self.id)
-    }
-}
+pub(crate) use crate::lua::widgets::ResolvedWidget;
+#[cfg(test)]
+pub(crate) use crate::lua::widgets::call_lua_named_action;
+#[cfg(test)]
+use crate::lua::widgets::call_lua_value;
+pub(crate) use crate::lua::widgets::{lua_has_func, new_widget_lua};
+#[cfg(test)]
+pub(crate) use crate::ui::dsl::inject_ui_base;
 
 impl From<&crate::config::TopConfig> for TopLocal {
     fn from(c: &crate::config::TopConfig) -> Self {
@@ -327,147 +323,6 @@ impl From<&crate::config::TopConfig> for TopLocal {
 /// guarantee as lucide-iced itself — no hand list, no checked-in
 /// table) plus short aliases (`mem`, `vol`, `up`...). Unknown names
 /// render as literal text so typos stay visible.
-#[cfg(test)]
-use crate::ui::icons::icon_bytes;
-pub(crate) use crate::ui::icons::rich_text;
-#[cfg(test)]
-use crate::ui::icons::{Segment, icon_segments};
-
-/// Empty cell for slots with no widget (unknown names land here too).
-fn empty_slot() -> Element<'static, Plant> {
-    Space::new().into()
-}
-
-/// Render one slot's widgets side by side along the bar axis
-/// (`none`/unknown names are skipped; no entries = empty cell).
-/// Every widget gets its own mouse area (renderer hit-testing), so
-/// clicks carry the exact widget — no slot-granularity guessing.
-/// Top-level rows/columns get enter/exit transitions on direct
-/// button children (see [`crate::ui::anim`]); anything else builds plain.
-#[allow(clippy::too_many_arguments)]
-fn render_slot_widgets(
-    bar_id: window::Id,
-    pos: usize,
-    placements: &[crate::config::WidgetPlacement],
-    defs: &[WidgetDefinition],
-    outputs: &HashMap<(window::Id, String), String>,
-    trees: &HashMap<(window::Id, String), WidgetNode>,
-    gap: f32,
-    horizontal: bool,
-    anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    lists: &std::collections::HashMap<
-        String,
-        super::listview::ListView<(String, String), WidgetNode>,
-    >,
-) -> Element<'static, Plant> {
-    use iced::widget::mouse_area;
-    let mut items = Vec::new();
-    for placement in placements {
-        if TopLocal::is_empty_widget(&placement.name) {
-            continue;
-        }
-        let name = placement.name.clone();
-        let id = placement.id.clone();
-        // Per-placement click target: press records (slot, placement),
-        // the matching release dispatches. Inner `ui.button`s capture
-        // their own presses, so they never double-fire the widget.
-        // Duplicate widget names in one slot stay unambiguous.
-        let area = |el: Element<'static, Plant>, id: &str| -> Element<'static, Plant> {
-            let id = id.to_string();
-            let press_id = id.clone();
-            mouse_area(el)
-                .on_press(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Pressed(
-                    bar_id, pos, press_id,
-                ))))
-                .on_release(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Released(
-                    bar_id, pos, id,
-                ))))
-                .into()
-        };
-        if let Some(node) = trees.get(&(bar_id, id.clone())) {
-            // Effective size: placement override else definition default.
-            let size = defs
-                .iter()
-                .find(|d| d.name == name)
-                .map(|d| placement.effective_size(&d.defaults))
-                .unwrap_or(crate::config::WidgetDefaults::default().size);
-            // Trees failing to build render nothing (logged at ingest).
-            // Buttons arm a per-placement MouseArea: the click carries
-            // the placement id, so on_action routes back to its own
-            // state. List owners scope to this bar and placement, so
-            // two bars — or two same-widget placements — never animate
-            // each other.
-            let scope = Top::list_scope(bar_id, &id);
-            let mid = id.clone();
-            let msg = move |action: String| {
-                Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(
-                    bar_id,
-                    mid.clone(),
-                    action,
-                )))
-            };
-            let built = match node {
-                WidgetNode::Row {
-                    children,
-                    spacing,
-                    width,
-                    height,
-                }
-                | WidgetNode::Column {
-                    children,
-                    spacing,
-                    width,
-                    height,
-                } => {
-                    let is_row = matches!(node, WidgetNode::Row { .. });
-                    build_anim_list(
-                        &scope,
-                        children,
-                        *spacing,
-                        width.clone(),
-                        height.clone(),
-                        is_row,
-                        size,
-                        &msg,
-                        anim_runtime,
-                        lists,
-                    )
-                }
-                _ => build_with_lists(node, &scope, size, Some(&msg), anim_runtime, lists),
-            };
-            if let Ok(item) = built {
-                items.push(area(item, &id));
-            }
-        } else if let Some((output, size)) = lua_cell_text(bar_id, placement, defs, outputs) {
-            items.push(area(rich_text(output, size, gap), &id));
-        }
-    }
-    if items.is_empty() {
-        return empty_slot();
-    }
-    if horizontal {
-        let mut row = row![]
-            .spacing(gap.max(0.0))
-            .align_y(iced::Alignment::Center)
-            .width(iced::Length::Shrink)
-            .height(iced::Length::Shrink);
-        for item in items {
-            row = row.push(item);
-        }
-        row.into()
-    } else {
-        let mut column = column![]
-            .spacing(gap.max(0.0))
-            .align_x(iced::Alignment::Center)
-            .width(iced::Length::Shrink)
-            .height(iced::Length::Shrink);
-        for item in items {
-            column = column.push(item);
-        }
-        column.into()
-    }
-}
-
 /// Build a top-level row/column with QML-style transitions: direct
 /// button children (keyed by action) shift by their live motion
 /// without disturbing layout; retained ghosts render inert at their
@@ -486,7 +341,7 @@ fn build_anim_list(
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
     lists: &std::collections::HashMap<
         String,
-        super::listview::ListView<(String, String), WidgetNode>,
+        crate::ui::listview::ListView<(String, String), WidgetNode>,
     >,
 ) -> Result<Element<'static, Plant>, String> {
     // This widget's own list (absent on first paint): settled motion.
@@ -514,7 +369,7 @@ fn build_anim_list(
                     })
                     .unwrap_or(1.0);
                 let el = build_node_opacity(child, size, Some(button_msg), opacity)?;
-                items.push(super::motion::shifted(el, x, y, true));
+                items.push(crate::ui::motion::shifted(el, x, y, true));
             }
             _ => items.push(el),
         }
@@ -541,7 +396,7 @@ fn build_anim_list(
             None => (0.0, 0.0),
         };
         let anchor = ghost.index as f32 * TopLocal::ROW_PITCH;
-        overlays.push(super::motion::ghost(
+        overlays.push(crate::ui::motion::ghost(
             el,
             x + if is_row { anchor } else { 0.0 },
             y + if is_row { 0.0 } else { anchor },
@@ -607,8 +462,8 @@ pub(crate) fn sync_declared_lists(
     new: &WidgetNode,
 ) -> Result<(), String> {
     animation::ListContext {
-        lists: &mut plots.widget_lists,
-        motion: &mut plots.anim_runtime,
+        lists: &mut plots.animation.widgets,
+        motion: &mut plots.animation.motion,
         duration: plots.config.animation.speed.duration(),
     }
     .synchronize(widget, old, new)
@@ -782,43 +637,6 @@ pub(crate) fn build_with_lists(
     }
 }
 
-/// Parse an optional Lua `transitions()` spec over per-slot defaults
-/// (QML `Transition` blocks, declarative):
-///
-/// ```lua
-/// function transitions()
-///     return {
-///         add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
-///         remove = { x = { to = -200 }, opacity = { to = 0 }, duration = 250 },
-///         displaced = { duration = 250 },
-///     }
-/// end
-/// ```
-///
-/// Missing `transitions`, a nil return, or missing slots/fields keep
-/// the defaults, so partial specs compose. Anything misshaped errors
-/// naming the slot (callers log once and keep defaults — never
-/// half-applied). Durations are milliseconds, clamped to 0–5000.
-/// `displaced` takes only `duration` (distance comes from the layout).
-pub(crate) fn parse_transitions(
-    lua: &Lua,
-    enter: &Transition,
-    exit: &Transition,
-    displaced: &Transition,
-) -> Result<(Transition, Transition, Transition, bool), String> {
-    let spec = match lua.named_registry_value::<Table>("riced.widget.app") {
-        Ok(app) => match app.get::<Value>("transitions").map_err(|e| e.to_string())? {
-            Value::Nil => Value::Nil,
-            Value::Function(_) => call_lua_value(lua, "transitions")?,
-            _ => return Err("app.transitions must be a function".into()),
-        },
-        Err(_) => Value::Nil,
-    };
-    parse_transition_value(spec, enter, exit, displaced)
-}
-
-use crate::lua::transitions::parse_transition_value;
-
 /// Last script output (text, size) by placement id (`None` = empty
 /// cell). Split out so the cache lookup stays testable without rendering.
 fn lua_cell_text(
@@ -848,6 +666,7 @@ use crate::ui::decode::node_property;
 /// Parse a `render()` table return into a node tree. Scalars coerce to
 /// text like before; malformed structure is an error (logged
 /// once-per-message by the caller, cell renders empty).
+#[cfg(test)]
 pub(crate) use crate::ui::decode::parse_node;
 
 /// Rough vertical extent of a node tree in px, for popup window sizing.
@@ -855,762 +674,31 @@ pub(crate) use crate::ui::decode::parse_node;
 /// this mirrors the built geometry closely enough to avoid clipping.
 pub(crate) use crate::ui::build::{build_node, build_node_opacity, estimate_height};
 
-/// Lua state for one widget: string/table/math/os/io with native
-/// shell (`os.execute`, `io.popen` live — owner-accepted risk, no
-/// allowlist). `os.exit`/`os.remove`/`os.rename` stay nil'd, as do
-/// `dofile`/`loadfile`/`require`. `print` stays for daemon logs.
-///
-/// Shared with the notification renderer (same sandbox, separate state).
-pub(crate) fn new_widget_lua() -> mlua::Result<Lua> {
-    let lua = empty_widget_lua()?;
-    inject_ui(&lua)?;
-    Ok(lua)
-}
-
+#[cfg(test)]
 fn empty_widget_lua() -> mlua::Result<Lua> {
     crate::lua::sandbox::new_lua(crate::lua::sandbox::Profile::Widget)
 }
 
-/// The `iced` constructors table (plus legacy `ui` alias), present in
-/// every widget state next to the service tables. Each call builds a
-/// plain description table — no iced objects cross into Lua;
-/// [`parse_node`] interprets them.
-///
-/// Every node type gets its own metatable with iced-spelled chainable
-/// setters, so Lua reads like iced builders: `ui.progress(0.5)`
-/// `:width(200):height(12)`, `ui.text("hi"):size(14)`, `ui.row({...})`
-/// `:spacing(8)`, `ui.button("go", "run"):width(120):padding(4)`.
-/// Each setter writes its field and returns the node. Calling a
-/// setter the node type doesn't own (e.g. `:width()` on text) is a
-/// Lua error naming the type — typos stay visible. Setter names never
-/// collide with parsed fields: setters live on the metatable while
-/// real data (`t.width`) reads raw first.
-///
-/// Shared with the notification renderer (same constructors, same
-/// sandbox, separate Lua state).
-pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
-    inject_ui_base(lua)?;
-    crate::lua::library::install(
-        lua,
-        crate::lua::sandbox::Profile::Widget,
-        crate::config::component_files(),
-    )
-}
-
-// Compatibility entry point; all production hosts use the shared binding module.
-pub(crate) use crate::ui::dsl::inject_ui_base;
-
-// Kept only as a migration oracle until the historical DSL tests are relocated.
-#[cfg(test)]
-fn reference_inject_ui_base(lua: &Lua) -> mlua::Result<()> {
-    /// One setter: store properties separately from methods so repeated
-    /// calls never shadow the method itself.
-    /// NOTE: the type gate below is near-dead — method lookup via
-    /// __index fails first for foreign setters (nil method = eval
-    /// error before the closure runs). Kept as defense in depth for
-    /// shared metatables (button+progress share `:width`).
-    fn setter(lua: &Lua, field: &str, types: &'static [&'static str]) -> mlua::Result<Function> {
-        let key = field.to_string();
-        lua.create_function(move |_, (node, v): (Table, Value)| {
-            let kind: String = node.get("type")?;
-            if !types.contains(&kind.as_str()) {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "ui {kind} has no :{key}() setter"
-                )));
-            }
-            let properties: Table = node.raw_get("_properties")?;
-            properties.set(key.clone(), v)?;
-            Ok(node)
-        })
-    }
-    /// Metatable for one node type: methods table as `__index`.
-    /// NOTE: pre-seeding fields as nil does NOT shadow __index (Lua
-    /// treats nil slots as absent), so setter names and field names
-    /// share one namespace by necessity. Parse therefore reads via a
-    /// helper that skips functions: real numbers pass, unset-or-method
-    /// reads as nil (unset). `opt_number` below implements this.
-    fn mt_for(lua: &Lua, methods: &[(&str, Function)]) -> mlua::Result<Table> {
-        let mt = lua.create_table()?;
-        let index = lua.create_table()?;
-        for (name, f) in methods {
-            index.set(*name, f.clone())?;
-        }
-        mt.set("__index", index)?;
-        Ok(mt)
-    }
-    fn node(
-        lua: &Lua,
-        node_type: &str,
-        mt: Table,
-        build: impl FnOnce(&mlua::Table) -> mlua::Result<()>,
-    ) -> mlua::Result<mlua::Table> {
-        let t = lua.create_table()?;
-        t.set("type", node_type)?;
-        build(&t)?;
-        let properties = lua.create_table()?;
-        for field in [
-            "size",
-            "width",
-            "height",
-            "spacing",
-            "padding",
-            "color",
-            "background",
-            "border",
-            "border_width",
-            "radius",
-            "id",
-            "key",
-            "delegate",
-            "axis",
-            "pitch",
-        ] {
-            properties.set(field, t.raw_get::<Value>(field)?)?;
-            t.raw_set(field, Value::Nil)?;
-        }
-        t.raw_set("_properties", properties)?;
-        t.set_metatable(Some(mt))?;
-        Ok(t)
-    }
-    // One metatable per setter shape (shared across types that allow
-    // the same setters). Width/height now span text/row/column/button/
-    // progress — every layout type chains iced-style.
-    let mt_text = mt_for(
-        lua,
-        &[
-            ("size", setter(lua, "size", &["text"])?),
-            (
-                "width",
-                setter(
-                    lua,
-                    "width",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            (
-                "height",
-                setter(
-                    lua,
-                    "height",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            (
-                "color",
-                setter(
-                    lua,
-                    "color",
-                    &["text", "icon", "button", "progress", "separator"],
-                )?,
-            ),
-        ],
-    )?;
-    let mt_icon = mt_for(
-        lua,
-        &[(
-            "color",
-            setter(
-                lua,
-                "color",
-                &["text", "icon", "button", "progress", "separator"],
-            )?,
-        )],
-    )?;
-    let mt_rowcol = mt_for(
-        lua,
-        &[
-            ("spacing", setter(lua, "spacing", &["row", "column"])?),
-            (
-                "width",
-                setter(
-                    lua,
-                    "width",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            (
-                "height",
-                setter(
-                    lua,
-                    "height",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-        ],
-    )?;
-    let mt_button = mt_for(
-        lua,
-        &[
-            (
-                "width",
-                setter(
-                    lua,
-                    "width",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            (
-                "height",
-                setter(
-                    lua,
-                    "height",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            ("padding", setter(lua, "padding", &["button"])?),
-            ("radius", setter(lua, "radius", &["button", "container"])?),
-            (
-                "background",
-                setter(lua, "background", &["container", "button", "progress"])?,
-            ),
-            (
-                "color",
-                setter(
-                    lua,
-                    "color",
-                    &["text", "icon", "button", "progress", "separator"],
-                )?,
-            ),
-        ],
-    )?;
-    let mt_progress = mt_for(
-        lua,
-        &[
-            (
-                "width",
-                setter(
-                    lua,
-                    "width",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            (
-                "height",
-                setter(
-                    lua,
-                    "height",
-                    &["text", "row", "column", "button", "progress"],
-                )?,
-            ),
-            (
-                "color",
-                setter(
-                    lua,
-                    "color",
-                    &["text", "icon", "button", "progress", "separator"],
-                )?,
-            ),
-            (
-                "background",
-                setter(lua, "background", &["container", "button", "progress"])?,
-            ),
-        ],
-    )?;
-    let mt_bare = mt_for(lua, &[])?;
-    let mt_separator = mt_for(
-        lua,
-        &[
-            ("height", setter(lua, "height", &["separator"])?),
-            (
-                "color",
-                setter(
-                    lua,
-                    "color",
-                    &["text", "icon", "button", "progress", "separator"],
-                )?,
-            ),
-        ],
-    )?;
-    lua.globals().set("_riced_ui_mt_text", mt_text.clone())?;
-    lua.globals()
-        .set("_riced_ui_mt_rowcol", mt_rowcol.clone())?;
-    lua.globals()
-        .set("_riced_ui_mt_button", mt_button.clone())?;
-    lua.globals()
-        .set("_riced_ui_mt_progress", mt_progress.clone())?;
-    lua.globals().set("_riced_ui_mt_bare", mt_bare.clone())?;
-    lua.globals()
-        .set("_riced_ui_mt_separator", mt_separator.clone())?;
-    lua.globals().set("_riced_ui_mt_icon", mt_icon.clone())?;
-    // Move clones into the constructor closures (mlua closures are
-    // 'static): each captures only its own metatable.
-    let (mt_text_c, mt_rowcol_c, mt_button_c, mt_progress_c, mt_icon_c) = (
-        mt_text.clone(),
-        mt_rowcol.clone(),
-        mt_button.clone(),
-        mt_progress.clone(),
-        mt_icon.clone(),
-    );
-    let ui = lua.create_table()?;
-    let mut list_methods = Vec::new();
-    for field in [
-        "id", "key", "delegate", "axis", "pitch", "spacing", "width", "height",
-    ] {
-        list_methods.push((field, setter(lua, field, &["listview"])?));
-    }
-    for (method, slot) in [
-        ("onEntered", "add"),
-        ("onExit", "remove"),
-        ("onDisplaced", "displaced"),
-    ] {
-        list_methods.push((
-            method,
-            lua.create_function(move |_, (node, spec): (Table, Table)| {
-                let transitions: Table = node.get("transitions")?;
-                transitions.set(slot, spec)?;
-                Ok(node)
-            })?,
-        ));
-    }
-    let list_mt = mt_for(lua, &list_methods)?;
-    ui.set(
-        "listview",
-        lua.create_function(move |lua, data: Table| {
-            node(lua, "listview", list_mt.clone(), |table| {
-                table.set("data", data)?;
-                table.set("transitions", lua.create_table()?)
-            })
-        })?,
-    )?;
-    for kind in ["container", "scrollable", "space", "image"] {
-        let mut methods = vec![
-            (
-                "width",
-                setter(lua, "width", &["container", "scrollable", "space", "image"])?,
-            ),
-            (
-                "height",
-                setter(
-                    lua,
-                    "height",
-                    &["container", "scrollable", "space", "image"],
-                )?,
-            ),
-        ];
-        if kind == "container" {
-            methods.extend([
-                ("padding", setter(lua, "padding", &["container"])?),
-                (
-                    "background",
-                    setter(lua, "background", &["container", "button", "progress"])?,
-                ),
-                ("radius", setter(lua, "radius", &["container"])?),
-                ("border", setter(lua, "border", &["container"])?),
-                ("border_width", setter(lua, "border_width", &["container"])?),
-            ]);
-        }
-        let mt = mt_for(lua, &methods)?;
-        ui.set(
-            kind,
-            lua.create_function(move |lua, value: Value| {
-                node(lua, kind, mt.clone(), |t| match kind {
-                    "container" | "scrollable" => t.set("child", value),
-                    "image" => t.set("path", value),
-                    _ => Ok(()),
-                })
-            })?,
-        )?;
-    }
-    ui.set(
-        "text",
-        lua.create_function(move |lua, text: Value| {
-            node(lua, "text", mt_text_c.clone(), |t| t.set("text", text))
-        })?,
-    )?;
-    ui.set(
-        "icon",
-        lua.create_function(move |lua, name: Value| {
-            node(lua, "icon", mt_icon_c.clone(), |t| t.set("name", name))
-        })?,
-    )?;
-    ui.set(
-        "row",
-        lua.create_function(move |lua, (children, spacing): (Table, Value)| {
-            node(lua, "row", mt_rowcol_c.clone(), |t| {
-                t.set("children", children)?;
-                t.set("spacing", spacing)
-            })
-        })?,
-    )?;
-    let mt_rowcol_c2 = mt_rowcol.clone();
-    ui.set(
-        "column",
-        lua.create_function(move |lua, (children, spacing): (Table, Value)| {
-            node(lua, "column", mt_rowcol_c2.clone(), |t| {
-                t.set("children", children)?;
-                t.set("spacing", spacing)
-            })
-        })?,
-    )?;
-    ui.set(
-        "button",
-        lua.create_function(move |lua, (label, action): (Value, Value)| {
-            node(lua, "button", mt_button_c.clone(), |t| {
-                t.set("label", label)?;
-                t.set("action", action)
-            })
-        })?,
-    )?;
-    ui.set(
-        "progress",
-        lua.create_function(move |lua, (value, width): (Value, Value)| {
-            node(lua, "progress", mt_progress_c.clone(), |t| {
-                t.set("value", value)?;
-                t.set("width", width)
-            })
-        })?,
-    )?;
-    let mt_bare_c2 = mt_bare.clone();
-    ui.set(
-        "spinner",
-        lua.create_function(move |lua, _: Value| {
-            node(lua, "spinner", mt_bare_c2.clone(), |_| Ok(()))
-        })?,
-    )?;
-    let mt_separator_c = mt_separator.clone();
-    ui.set(
-        "separator",
-        lua.create_function(move |lua, _: Value| {
-            node(lua, "separator", mt_separator_c.clone(), |_| Ok(()))
-        })?,
-    )?;
-    // Named component registry (per state): `iced.define(name, fn)`
-    // stores a builder, `iced.use(name, props)` calls it and returns
-    // the node table (metatable intact, so chaining still works).
-    // Non-table or typeless returns error naming the component.
-    lua.globals()
-        .set("_riced_components", lua.create_table()?)?;
-    ui.set(
-        "define",
-        lua.create_function(|lua, (name, func): (String, Function)| {
-            let namespace: Table = lua.globals().get("iced")?;
-            if namespace.raw_get::<Value>(name.as_str())? != Value::Nil {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "component {name:?} conflicts with an iced constructor"
-                )));
-            }
-            let registry: Table = lua.globals().get("_riced_components")?;
-            if registry.get::<Value>(name.clone())? != Value::Nil {
-                eprintln!("iced: component {name:?} redefined (last wins)");
-            }
-            registry.set(name, func)?;
-            Ok(())
-        })?,
-    )?;
-    ui.set(
-        "use",
-        lua.create_function(|lua, (name, props): (String, Value)| {
-            let registry: Table = lua.globals().get("_riced_components")?;
-            let func: Function = match registry.get::<Value>(name.clone())? {
-                Value::Function(f) => f,
-                _ => {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "unknown component {name:?} — iced.define it first"
-                    )));
-                }
-            };
-            let out: Value = func.call(props)?;
-            match &out {
-                Value::Table(t) => match t.get::<Value>("type")? {
-                    Value::String(_) => Ok(out),
-                    other => Err(mlua::Error::RuntimeError(format!(
-                        "component {name:?} must return a ui node table, got type {}",
-                        lua_value_kind(&other)
-                    ))),
-                },
-                _ => Err(mlua::Error::RuntimeError(format!(
-                    "component {name:?} must return a ui node table, got {}",
-                    lua_value_kind(&out)
-                ))),
-            }
-        })?,
-    )?;
-    let component_methods = lua.create_table()?;
-    component_methods.set(
-        "__index",
-        lua.create_function(|lua, (_table, name): (Table, String)| {
-            let registry: Table = lua.globals().get("_riced_components")?;
-            if registry.get::<Value>(name.as_str())? == Value::Nil {
-                return Ok(Value::Nil);
-            }
-            Ok(Value::Function(lua.create_function(
-                move |lua, props: Value| {
-                    let namespace: Table = lua.globals().get("iced")?;
-                    let use_component: Function = namespace.raw_get("use")?;
-                    use_component.call::<Value>((name.clone(), props))
-                },
-            )?))
-        })?,
-    )?;
-    ui.set_metatable(Some(component_methods))?;
-    // Canonical namespace: `iced` owns every constructor above (plus
-    // `define`/`use`). Bare `ui` stays as the same table so existing
-    // scripts keep working untouched.
-    lua.globals().set("iced", ui.clone())?;
-    lua.globals().set("ui", ui)?;
-    // Shared component library (`components/*.lua`, see
-    // `config::components_source`): runs in every state so widgets and
-    // the notification renderer share `iced.define` components. The
-    // registry above is fresh per injection, so re-injection redefines
-    // silently. A broken library logs once and leaves bare `iced` —
-    // widgets still render, components just stay undefined.
-    Ok(())
-}
-
 /// Load a module script. Only a returned app table with app:view is accepted.
 pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::Result<()> {
-    crate::lua::sandbox::reset_budget(lua)?;
-    let returned: Value = lua.load(source).set_name(format!("@{label}")).eval()?;
-    match returned {
-        Value::Table(app) => {
-            let _: Function = app.get("view").map_err(|_| {
-                mlua::Error::RuntimeError(format!(
-                    "{label}: returned app table needs a view method"
-                ))
-            })?;
-            for method in ["view", "popup", "on_action", "on_press", "transitions"] {
-                match app.get::<Value>(method)? {
-                    Value::Function(_) | Value::Nil => {}
-                    _ => {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "{label}: app.{method} must be a function"
-                        )));
-                    }
-                }
-            }
-            lua.set_named_registry_value("riced.widget.app", app)?;
-            Ok(())
-        }
-        _ => Err(mlua::Error::RuntimeError(format!(
-            "{label}: script must return an app table with a view method"
-        ))),
-    }
+    crate::lua::widgets::load_widget_script(lua, label, source)
 }
 
 /// Read `app.defaults` + `app.property_schema` from an already-loaded
 /// widget state (metadata only — never calls `view()`). Malformed
 /// pieces warn once and fall back so a typo can't brick a widget.
-pub(crate) fn load_widget_meta(
-    lua: &Lua,
-    label: &str,
-) -> (
-    crate::config::WidgetDefaults,
-    HashMap<String, crate::config::PropSchema>,
-) {
-    use crate::config::{PropSchema, WidgetDefaults};
-    let app: Table = match lua.named_registry_value("riced.widget.app") {
-        Ok(app) => app,
-        Err(e) => {
-            eprintln!("riced: widget {label:?}: cannot read app table: {e}");
-            return (WidgetDefaults::default(), HashMap::new());
-        }
-    };
-    let mut defaults = WidgetDefaults::default();
-    // Note: Lua `2` is an integer and `2.0` a float — accept both.
-    let as_number = |value: Value| match value {
-        Value::Number(n) => Some(n),
-        Value::Integer(n) => Some(n as f64),
-        _ => None,
-    };
-    if let Ok(Value::Table(table)) = app.get::<Value>("defaults") {
-        match table.get::<Value>("interval") {
-            Ok(Value::Nil) => {}
-            Ok(value) => match as_number(value) {
-                Some(interval) => defaults.interval = interval as f32,
-                None => eprintln!("riced: widget {label:?}: defaults.interval must be a number"),
-            },
-            Err(e) => eprintln!("riced: widget {label:?}: bad defaults.interval: {e}"),
-        }
-        match table.get::<Value>("size") {
-            Ok(Value::Nil) => {}
-            Ok(value) => match as_number(value) {
-                Some(size) => defaults.size = size as f32,
-                None => eprintln!("riced: widget {label:?}: defaults.size must be a number"),
-            },
-            Err(e) => eprintln!("riced: widget {label:?}: bad defaults.size: {e}"),
-        }
-        if let Ok(Value::Table(props)) = table.get::<Value>("props") {
-            for pair in props.pairs::<Value, Value>() {
-                match pair {
-                    Ok((Value::String(key), value)) => match prop_value_from_lua(&value) {
-                        Some(prop) => {
-                            defaults.props.insert(key.to_string_lossy(), prop);
-                        }
-                        None => eprintln!(
-                            "riced: widget {label:?}: defaults.props.{} must be boolean/number/string",
-                            key.to_string_lossy()
-                        ),
-                    },
-                    Ok((key, _)) => eprintln!(
-                        "riced: widget {label:?}: skipping non-string prop key ({})",
-                        lua_value_kind(&key)
-                    ),
-                    Err(e) => eprintln!("riced: widget {label:?}: bad defaults.props: {e}"),
-                }
-            }
-        } else if !matches!(table.get::<Value>("props"), Ok(Value::Nil)) {
-            eprintln!("riced: widget {label:?}: defaults.props must be a table");
-        }
-    } else if !matches!(app.get::<Value>("defaults"), Ok(Value::Nil)) {
-        eprintln!("riced: widget {label:?}: defaults must be a table");
-    }
-    let mut schema = HashMap::new();
-    if let Ok(Value::Table(table)) = app.get::<Value>("property_schema") {
-        for pair in table.pairs::<Value, Value>() {
-            let (key, spec) = match pair {
-                Ok((Value::String(key), Value::Table(spec))) => (key.to_string_lossy(), spec),
-                Ok((key, _)) => {
-                    let name = match &key {
-                        Value::String(s) => s.to_string_lossy(),
-                        _ => lua_value_kind(&key).to_string(),
-                    };
-                    eprintln!("riced: widget {label:?}: property_schema.{name} must be a table");
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("riced: widget {label:?}: bad property_schema: {e}");
-                    continue;
-                }
-            };
-            let get_str = |field: &str| match spec.get::<Value>(field) {
-                Ok(Value::String(s)) => Some(s.to_string_lossy()),
-                Ok(Value::Nil) => None,
-                Ok(other) => {
-                    eprintln!(
-                        "riced: widget {label:?}: property_schema.{key}.{field} must be a string, got {}",
-                        lua_value_kind(&other)
-                    );
-                    None
-                }
-                Err(_) => None,
-            };
-            let prop_type = match spec.get::<Value>("type") {
-                Ok(Value::String(t)) => {
-                    let t = t.to_string_lossy();
-                    if ["boolean", "number", "string"].contains(&t.as_str()) {
-                        Some(t)
-                    } else {
-                        eprintln!(
-                            "riced: widget {label:?}: property_schema.{key}.type must be boolean/number/string"
-                        );
-                        None
-                    }
-                }
-                Ok(Value::Nil) => None,
-                Ok(other) => {
-                    eprintln!(
-                        "riced: widget {label:?}: property_schema.{key}.type must be a string, got {}",
-                        lua_value_kind(&other)
-                    );
-                    None
-                }
-                Err(_) => None,
-            };
-            let number = |field: &str| match spec.get::<Value>(field) {
-                Ok(Value::Number(n)) => Some(n),
-                Ok(Value::Integer(n)) => Some(n as f64),
-                Ok(Value::Nil) => None,
-                Ok(other) => {
-                    eprintln!(
-                        "riced: widget {label:?}: property_schema.{key}.{field} must be a number, got {}",
-                        lua_value_kind(&other)
-                    );
-                    None
-                }
-                Err(_) => None,
-            };
-            let choices = match spec.get::<Value>("choices") {
-                Ok(Value::Table(list)) => {
-                    let mut out = Vec::new();
-                    for item in list.sequence_values::<Value>() {
-                        match item {
-                            Ok(Value::String(s)) => out.push(s.to_string_lossy()),
-                            Ok(other) => eprintln!(
-                                "riced: widget {label:?}: property_schema.{key}.choices must be strings, got {}",
-                                lua_value_kind(&other)
-                            ),
-                            Err(e) => eprintln!(
-                                "riced: widget {label:?}: bad property_schema.{key}.choices: {e}"
-                            ),
-                        }
-                    }
-                    out
-                }
-                Ok(Value::Nil) => Vec::new(),
-                Ok(other) => {
-                    eprintln!(
-                        "riced: widget {label:?}: property_schema.{key}.choices must be a list, got {}",
-                        lua_value_kind(&other)
-                    );
-                    Vec::new()
-                }
-                Err(_) => Vec::new(),
-            };
-            // Evaluate the closures before moving `key` (they borrow
-            // it for their log lines).
-            let label = get_str("label");
-            let description = get_str("description");
-            let min = number("min");
-            let max = number("max");
-            schema.insert(
-                key,
-                PropSchema {
-                    label,
-                    prop_type,
-                    description,
-                    min,
-                    max,
-                    choices,
-                },
-            );
-        }
-    } else if !matches!(app.get::<Value>("property_schema"), Ok(Value::Nil)) {
-        eprintln!("riced: widget {label:?}: property_schema must be a table");
-    }
-    (defaults, schema)
-}
-
-/// Lua scalar → [`PropValue`](crate::config::PropValue); tables and
-/// friends are rejected (props stay flat and introspectable).
-pub(crate) fn prop_value_from_lua(value: &Value) -> Option<crate::config::PropValue> {
-    use crate::config::PropValue;
-    match value {
-        Value::Boolean(b) => Some(PropValue::Bool(*b)),
-        Value::Integer(n) => Some(PropValue::Number(*n as f64)),
-        Value::Number(n) => Some(PropValue::Number(*n)),
-        Value::String(s) => Some(PropValue::Text(s.to_string_lossy())),
-        _ => None,
-    }
-}
+pub(crate) use crate::lua::metadata::load_widget_meta;
 
 /// Publish resolved custom properties as the app table's `props`
 /// field, so methods read per-placement values via `self.props`.
 /// Overwrites any author-assigned `props` each render on purpose:
 /// the field is engine-managed.
+#[cfg(test)]
 pub(crate) use crate::lua::props::publish_props;
-
-pub(crate) use crate::lua::value::lua_value_kind;
-
-/// Invoke a registered app method with self bound; return values are
-/// decoded immediately and never stored in the Rust IR.
-pub(crate) fn call_widget_method(
-    lua: &Lua,
-    method: &str,
-    args: mlua::MultiValue,
-) -> Result<Value, String> {
-    crate::lua::sandbox::reset_budget(lua).map_err(|error| error.to_string())?;
-    let app: Table = lua
-        .named_registry_value("riced.widget.app")
-        .map_err(|e| e.to_string())?;
-    crate::lua::entry::invoke(lua, app, method, args).map_err(|error| error.to_string())
-}
-
-pub(crate) fn call_lua_value(lua: &Lua, func: &str) -> Result<Value, String> {
-    call_widget_method(lua, func, mlua::MultiValue::new())
-}
 
 /// Coerce a Lua return value to cell text (numbers and booleans
 /// stringify, `nil` is empty). Anything else is an error naming `what`.
+#[cfg(test)]
 pub(crate) use crate::lua::value::coerce_text;
 
 /// Call a widget script function, tolerantly coerced to text.
@@ -1622,49 +710,16 @@ pub(crate) fn call_lua_text(lua: &Lua, func: &str) -> Result<String, String> {
     coerce_text(value, &format!("{func}()"))
 }
 
-/// Does a widget state define a callable global (`popup`, `on_press`)?
-/// Missing states and non-function globals read as absent, never an error.
-pub(crate) fn lua_has_func(states: &HashMap<String, mlua::Lua>, name: &str, func: &str) -> bool {
-    states.get(name).is_some_and(|lua| {
-        lua.named_registry_value::<Table>("riced.widget.app")
-            .and_then(|app| app.get::<Function>(func))
-            .is_ok()
-    })
-}
-
 /// Run a widget's `on_press()` click action. The return value is ignored;
 /// scripts signal through globals that the next `render()` reads.
+#[cfg(test)]
 fn call_lua_action(lua: &Lua) -> Result<(), String> {
     call_lua_value(lua, "on_press").map(|_| ())
 }
 
-/// Run a widget's `on_action(key)` (cell buttons and popup items share
-/// it). Missing `on_action` is a silent no-op so plain-text widgets
-/// coexist with button trees. Returns the raw Lua value: handlers map
-/// `{ dismiss = id }` / `{ invoke = { id, key } }` onto notification
-/// commands (see `notification::command_from_action`), anything else
-/// just refreshes the widget.
-pub(crate) fn call_lua_named_action(lua: &Lua, action: &str) -> Result<Value, String> {
-    let app: Table = lua
-        .named_registry_value("riced.widget.app")
-        .map_err(|e| e.to_string())?;
-    if matches!(
-        app.get::<Value>("on_action").map_err(|e| e.to_string())?,
-        Value::Nil
-    ) {
-        return Ok(Value::Nil);
-    }
-    let key = lua.create_string(action).map_err(|e| e.to_string())?;
-    call_widget_method(
-        lua,
-        "on_action",
-        mlua::MultiValue::from_vec(vec![Value::String(key)]),
-    )
-}
-
 impl Top {
     /// Hold threshold: press held >= this on release counts as hold.
-    const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+    const HOLD_THRESHOLD: Duration = input::HOLD_THRESHOLD;
 
     pub fn new() -> Self {
         Self {
@@ -1760,6 +815,7 @@ impl Top {
             output_option: OutputOption::GlobalName(output),
             margin: None,
             namespace: Some(format!("Riced - {} {}", self.anchor_label(), output)),
+            keyboard_interactivity: iced_exwlshell::reexport::KeyboardInteractivity::None,
             // Bars never blur (frost fights the `opacity` fade).
             blur_option: BlurOption::None,
             ..Default::default()
@@ -1780,6 +836,7 @@ impl Top {
             size: LayerSize::fill_width(50),
             output_option: OutputOption::Active,
             namespace: Some(format!("Riced - {} Active", self.anchor_label())),
+            keyboard_interactivity: iced_exwlshell::reexport::KeyboardInteractivity::None,
             margin: None,
             // Bars never blur: frosted glass fights the `opacity` alpha fade
             // (blur would frost the desktop behind a faded fill and the
@@ -1791,97 +848,27 @@ impl Top {
         (id, settings)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &self,
         id: window::Id,
         widgets: &[WidgetDefinition],
-        outputs: &HashMap<(window::Id, String), String>,
-        trees: &HashMap<(window::Id, String), WidgetNode>,
+        placements: &crate::lua::widgets::WidgetState,
         anim_runtime: &aura_anim::core::runtime::MotionRuntime,
         lists: &std::collections::HashMap<
             String,
-            super::listview::ListView<(String, String), WidgetNode>,
+            crate::ui::listview::ListView<(String, String), WidgetNode>,
         >,
     ) -> Element<'_, Plant> {
-        let n = self.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        let gap = self.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        let pad = self.local.slot_padding.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        let horizontal = self.is_horizontal();
-        let cell = |pos: usize| -> Element<'_, Plant> {
-            let body: Element<'_, Plant> = render_slot_widgets(
-                id,
-                pos,
-                self.local.widgets_at(pos),
-                widgets,
-                outputs,
-                trees,
-                gap,
-                horizontal,
-                anim_runtime,
+        render::view(
+            self,
+            id,
+            render::BarViewContext {
+                catalog: widgets,
+                placements,
+                motion: anim_runtime,
                 lists,
-            );
-            let (align_x, align_y) = self.local.align_at(pos).for_bar(horizontal);
-            container(body)
-                .width(Fill)
-                .height(Fill)
-                .align_x(align_x)
-                .align_y(align_y)
-                .padding(pad)
-                .into()
-        };
-        let content: Element<'_, Plant> = if self.is_horizontal() {
-            let mut r = row![].width(Fill).height(Fill).spacing(gap);
-            for pos in 0..n {
-                r = r.push(cell(pos));
-            }
-            r.into()
-        } else {
-            let mut c = column![].width(Fill).height(Fill).spacing(gap);
-            for pos in 0..n {
-                c = c.push(cell(pos));
-            }
-            c.into()
-        };
-        let radius = self.local.radius;
-        let opacity = TopLocal::snap_opacity(self.local.opacity);
-        let m = self.local.margins;
-        let padding = if self.local.floating {
-            iced::Padding {
-                top: m.top.max(0) as f32,
-                right: m.right.max(0) as f32,
-                bottom: m.bottom.max(0) as f32,
-                left: m.left.max(0) as f32,
-            }
-        } else {
-            iced::Padding::ZERO
-        };
-        top_window(id)
-            .padding(padding)
-            .content(
-                container(content)
-                    .width(Fill)
-                    .height(Fill)
-                    .center_x(Fill)
-                    .center_y(Fill)
-                    .style(move |theme: &iced::Theme| {
-                        let mut s = theme::bar(theme);
-                        if let Some(iced::Background::Color(c)) = s.background {
-                            s.background = Some(iced::Background::Color(iced::Color {
-                                a: c.a * opacity,
-                                ..c
-                            }));
-                        }
-                        s.border.radius = iced::border::Radius {
-                            top_left: radius.top_left,
-                            top_right: radius.top_right,
-                            bottom_right: radius.bottom_right,
-                            bottom_left: radius.bottom_left,
-                        };
-                        s
-                    }),
-            )
-            .into()
+            },
+        )
     }
 
     // ------------------------------------------------------------------
@@ -1908,18 +895,8 @@ impl Top {
         // their own). Record a gap target so the matching release runs
         // the slot fallback; unresolvable slots clear stale targets.
         // Non-left buttons never click: drop any target.
-        if button != Button::Left {
-            plots.input.presses.remove(&id);
-            return Command::none();
-        }
-        match Self::cursor_slot(plots, id) {
-            Some(pos) => {
-                plots.input.presses.insert(id, (pos, None, Instant::now()));
-            }
-            None => {
-                plots.input.presses.remove(&id);
-            }
-        }
+        let slot = Self::cursor_slot(plots, id);
+        input::record_gap_press(&mut plots.input, id, slot, button, Instant::now());
         Command::none()
     }
 
@@ -1945,36 +922,17 @@ impl Top {
     /// Shared by press recording (releases match against the recorded
     /// target instead of re-resolving).
     fn cursor_slot(plots: &Plots, bar_id: window::Id) -> Option<usize> {
-        let top = plots.tops.get(&bar_id)?.clone();
-        let output = match plots.ids.get(&bar_id).copied() {
+        let top = plots.windows.tops.get(&bar_id)?;
+        let output = match plots.windows.ids.get(&bar_id).copied() {
             Some(PlotInfo::Top(o)) => o,
             _ => return None,
         };
-        let (_, _, sw, sh) = Background::available_rect(output, &plots.output_infos)?;
-        let horizontal = top.is_horizontal();
-        let (bw, bh) = top.local.px_size(sw, sh, horizontal);
-        let (pl, pt, pr, pb) = if top.local.floating {
-            let m = top.local.margins;
-            (
-                m.left.max(0) as f32,
-                m.top.max(0) as f32,
-                m.right.max(0) as f32,
-                m.bottom.max(0) as f32,
-            )
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
-        let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        plots.input.cursors.get(&bar_id).copied().and_then(|p| {
-            Popup::slot_at_point(
-                (pl, pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
-                n,
-                gap,
-                horizontal,
-                p,
-            )
-        })
+        input::cursor_slot(
+            top,
+            output,
+            &plots.windows.output_infos,
+            plots.input.cursors.get(&bar_id).copied(),
+        )
     }
 
     /// Whether a release completes the recorded press as a click: same
@@ -1987,9 +945,7 @@ impl Top {
         button: Button,
         now: Instant,
     ) -> bool {
-        button == Button::Left
-            && matches!(target, Some((p, ref w, t))
-                if p == pos && w.as_deref() == widget && now.duration_since(t) < Self::HOLD_THRESHOLD)
+        input::release_matches_press(target, pos, widget, button, now)
     }
 
     /// Size/float/margin edits apply live to the layer window every tick, so
@@ -2001,13 +957,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.length_pct = value.clamp(1.0, 100.0);
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, _| {
+            local.length_pct = value.clamp(1.0, 100.0)
+        })
     }
 
     pub(crate) fn handle_set_thickness(
@@ -2015,28 +967,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        // Thickness is px, bound to 1..=thin output axis.
-        let max = plots
-            .ids
-            .get(&id)
-            .copied()
-            .and_then(|info| match info {
-                PlotInfo::Top(o) => plots.output_infos.get(&o),
-                _ => None,
-            })
-            .map(|info| {
-                let (_, _, sw, sh) = Background::output_geometry(info);
-                let horizontal = plots.tops.get(&id).is_none_or(|t| t.is_horizontal());
-                TopLocal::max_thickness(sw, sh, horizontal).max(1.0)
-            })
-            .unwrap_or(1080.0);
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.thickness_px = value.clamp(1.0, max);
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, max| {
+            local.thickness_px = value.clamp(1.0, max)
+        })
     }
 
     pub(crate) fn handle_set_slots(
@@ -2044,16 +977,11 @@ impl Top {
         id: window::Id,
         value: u32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.slots = value.clamp(1, TopLocal::MAX_SLOTS);
-            // Count change resizes the per-slot rows (extras drop, new
-            // cells start centered with no widget) — placement survives
-            // by position.
-            top.local.ensure_aligns();
-            top.local.ensure_widgets();
-        }
-        // Window size is unchanged (cells share the bar) — persist only.
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.slots = value.clamp(1, TopLocal::MAX_SLOTS);
+            local.ensure_aligns();
+            local.ensure_widgets();
+        })
     }
 
     /// Set one slot's child alignment (`TopEvent::Bar(BarEvent::SlotAlign)`): single
@@ -2064,15 +992,12 @@ impl Top {
         pos: usize,
         align: SlotAlign,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.ensure_aligns();
-            if pos < top.local.aligns.len() {
-                top.local.aligns[pos] = align;
+        Self::change_bar(plots, id, false, |local, _| {
+            local.ensure_aligns();
+            if let Some(stored) = local.aligns.get_mut(pos) {
+                *stored = align;
             }
-        }
-        // Window size is unchanged (alignment only moves the child
-        // inside its cell) — persist only.
-        Self::persist_bar(plots, id)
+        })
     }
 
     pub(crate) fn handle_widget_layout(
@@ -2081,23 +1006,9 @@ impl Top {
         expected: Vec<Vec<crate::config::WidgetPlacement>>,
         widgets: Vec<Vec<crate::config::WidgetPlacement>>,
     ) -> Command<Plant> {
-        // Empty ids come from pool drops (fresh placements); assign
-        // before validating so identity travels with the drag.
-        let mut widgets = widgets;
-        for slot in widgets.iter_mut() {
-            for placement in slot.iter_mut() {
-                if placement.id.is_empty() {
-                    placement.id = crate::config::fresh_placement_id();
-                }
-            }
-        }
-        let Some(top) = plots.tops.get_mut(&id) else {
-            return Command::none();
-        };
-        if !Self::valid_widget_layout(&top.local.widgets, &expected, &widgets, &plots.widgets) {
+        if !Self::edit_context(plots).widget_layout(id, &expected, widgets) {
             return Command::none();
         }
-        top.local.widgets = widgets;
         Self::render_bar_widgets(plots, id);
         Self::persist_bar(plots, id)
     }
@@ -2139,19 +1050,9 @@ impl Top {
         placement_id: &str,
         patch: crate::shell::PlacementProp,
     ) -> Command<Plant> {
-        let Some(top) = plots.tops.get_mut(&id) else {
+        if !Self::edit_context(plots).widget_prop(id, placement_id, &patch) {
             return Command::none();
-        };
-        let Some(placement) = top
-            .local
-            .widgets
-            .iter_mut()
-            .flatten()
-            .find(|p| p.id == placement_id)
-        else {
-            return Command::none();
-        };
-        Self::apply_prop_patch(placement, &patch);
+        }
         Self::render_bar_widgets(plots, id);
         Self::persist_bar(plots, id)
     }
@@ -2191,12 +1092,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.slot_padding = value.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        }
-        // Window size is unchanged (padding lives inside the cells) —
-        // persist only.
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.slot_padding = value.clamp(0.0, TopLocal::MAX_SLOT_GAP)
+        })
     }
 
     /// Set the slot gaps (`TopEvent::Bar(BarEvent::SlotSpacing)`): single commit per
@@ -2206,10 +1104,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.slot_spacing = value.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        }
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.slot_spacing = value.clamp(0.0, TopLocal::MAX_SLOT_GAP)
+        })
     }
 
     /// Minimum seconds between two `render()` calls of one Lua widget
@@ -2294,13 +1191,14 @@ impl Top {
                     "widgets: {} unparseable, leaving it in place: {e}",
                     path.display()
                 );
-                plots.widgets_toml_warned = true;
+                plots.catalog.retired_file_warned = true;
                 return;
             }
             Ok(defs) => defs,
         };
         let lua_defaults: std::collections::HashMap<String, WidgetDefaults> = plots
-            .widgets
+            .catalog
+            .definitions
             .iter()
             .map(|def| (def.name.clone(), def.defaults.clone()))
             .collect();
@@ -2341,7 +1239,7 @@ impl Top {
     /// it breaks differently).
     pub(crate) fn note_widget_error(plots: &mut Plots, name: &str, err: String) {
         crate::lua::error::report_keyed(
-            &mut plots.widget_last_error,
+            &mut plots.placements.errors,
             name,
             &format!("riced: widget {name:?}: "),
             err,
@@ -2350,7 +1248,12 @@ impl Top {
 
     /// Definition for a widget name (cloned for borrowck).
     fn def_for(plots: &Plots, widget: &str) -> Option<crate::config::WidgetDefinition> {
-        plots.widgets.iter().find(|d| d.name == widget).cloned()
+        plots
+            .catalog
+            .definitions
+            .iter()
+            .find(|d| d.name == widget)
+            .cloned()
     }
 
     /// Resolve one placement to render inputs: definition defaults
@@ -2381,30 +1284,14 @@ impl Top {
         plots: &mut Plots,
         resolved: &ResolvedWidget,
     ) -> Result<(), String> {
-        if plots.widget_lua.contains_key(&resolved.id) {
-            return Ok(());
-        }
-        let source = std::fs::read_to_string(&resolved.path)
-            .map_err(|e| format!("cannot read {}: {e}", resolved.path.display()))?;
-        let lua = new_widget_lua().map_err(|e| e.to_string())?;
-        load_widget_script(&lua, &resolved.name, &source)
-            .map_err(|e| format!("{}: {e}", resolved.path.display()))?;
-        plots.widget_lua.insert(resolved.id.clone(), lua);
-        Ok(())
-    }
-
-    /// Owner scope for one bar's placement instance: legacy button
-    /// lists and declared `ui.listview`s key runtimes (and motion keys)
-    /// under this, so two bars — or two same-widget placements — never
-    /// animate each other.
-    fn list_scope(bar: window::Id, placement_id: &str) -> String {
-        format!("{bar:?}/{placement_id}")
+        plots.placements.ensure_instance(resolved)
     }
 
     /// Bars whose slots contain a placement (by id): its per-bar render
     /// targets. Placements in no bar render nowhere.
     fn bars_with_placement(plots: &Plots, id: &str) -> Vec<window::Id> {
         plots
+            .windows
             .tops
             .iter()
             .filter(|(_, top)| {
@@ -2422,10 +1309,10 @@ impl Top {
     fn all_resolved(plots: &Plots) -> Vec<(window::Id, ResolvedWidget)> {
         let mut out = Vec::new();
         // Deterministic bar order keeps tick behavior stable.
-        let mut bars: Vec<window::Id> = plots.tops.keys().copied().collect();
+        let mut bars: Vec<window::Id> = plots.windows.tops.keys().copied().collect();
         bars.sort_by_key(|id| format!("{id:?}"));
         for bar in bars {
-            if let Some(top) = plots.tops.get(&bar) {
+            if let Some(top) = plots.windows.tops.get(&bar) {
                 for slot in &top.local.widgets {
                     for placement in slot {
                         if let Some(resolved) = Self::resolve_placement(plots, placement) {
@@ -2448,18 +1335,52 @@ impl Top {
         gpu: Option<f32>,
         bar: window::Id,
     ) -> Result<Value, String> {
-        Self::sync_script_state(plots, resolved);
-        Self::ensure_widget_lua(plots, resolved)?;
-        let lua = plots
-            .widget_lua
-            .get(&resolved.id)
-            .ok_or_else(|| "runtime missing".to_string())?;
-        let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
-        crate::services::publish_all(&ctx, lua).map_err(|e| e.to_string())?;
-        let output = Self::output_name(plots, bar);
-        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())?;
-        publish_props(lua, &resolved.props).map_err(|e| e.to_string())?;
-        call_lua_value(lua, "view")
+        Self::runtime_context(plots, gpu).render(resolved, bar)
+    }
+
+    fn runtime_context(plots: &mut Plots, gpu: Option<f32>) -> runtime::RuntimeContext<'_> {
+        let outputs = plots
+            .windows
+            .tops
+            .keys()
+            .map(|bar| (*bar, Self::output_name(plots, *bar)))
+            .collect();
+        let paths = plots
+            .windows
+            .tops
+            .values()
+            .flat_map(|top| top.local.widgets.iter().flatten())
+            .filter(|placement| !placement.id.is_empty())
+            .map(|placement| {
+                (
+                    placement.id.clone(),
+                    Self::widget_file_path(
+                        &placement.name,
+                        placement.file.as_deref().unwrap_or(""),
+                    ),
+                )
+            })
+            .collect();
+        runtime::RuntimeContext {
+            placements: &mut plots.placements,
+            catalog: &mut plots.catalog.definitions,
+            animation: animation::ListContext {
+                lists: &mut plots.animation.widgets,
+                motion: &mut plots.animation.motion,
+                duration: plots.config.animation.speed.duration(),
+            },
+            services: crate::services::ServiceCtx {
+                sys: &plots.services.system,
+                gpu,
+                theme: &plots.config.theme,
+                outputs: &plots.windows.output_infos,
+                notifications: &plots.notification.queue,
+                toplevels: &plots.services.toplevels,
+                workspaces: &plots.services.workspaces,
+            },
+            outputs,
+            paths,
+        }
     }
 
     /// Store one `render()` result: tables become [`WidgetNode`] trees,
@@ -2472,124 +1393,7 @@ impl Top {
         bar: window::Id,
         result: Result<Value, String>,
     ) {
-        let tree_key = (bar, resolved.id.clone());
-        let scope = Self::list_scope(bar, &resolved.id);
-        let label = resolved.label();
-        match result {
-            Ok(Value::Table(t)) => {
-                plots.widget_last_error.remove(&resolved.id);
-                plots.widget_outputs.remove(&tree_key);
-                match parse_node(&Value::Table(t)) {
-                    Ok(node) => {
-                        // Diff button lists for enter/exit/displaced
-                        // transitions before replacing the cached tree,
-                        // applying this widget's Lua `transitions()`
-                        // spec (or the shared defaults) to its own list.
-                        let old = plots.widget_trees.get(&tree_key).cloned();
-                        if let Err(error) = sync_declared_lists(plots, &scope, old.as_ref(), &node)
-                        {
-                            Self::note_widget_error(plots, &label, error);
-                            return;
-                        }
-                        let duration = plots.config.animation.speed.duration();
-                        let list = plots
-                            .widget_lists
-                            .entry(scope.clone())
-                            .or_insert_with(|| super::listview::ListView::new(TopLocal::ROW_PITCH));
-                        if let Some(lua) = plots.widget_lua.get(&resolved.id) {
-                            let defaults: super::listview::ListView<(String, String), WidgetNode> =
-                                super::listview::ListView::new(TopLocal::ROW_PITCH);
-                            let current = (
-                                defaults.enter_spec(),
-                                defaults.exit_spec(),
-                                defaults.displaced_spec(),
-                            );
-                            match parse_transitions(lua, &current.0, &current.1, &current.2) {
-                                Ok((enter, exit, displaced, custom)) => {
-                                    list.set_transitions(enter, exit, displaced, custom);
-                                }
-                                Err(e) => {
-                                    list.clear_all(&mut plots.anim_runtime);
-                                    Self::note_widget_error(plots, &label, e);
-                                    plots.widget_lists.remove(&scope);
-                                    plots.widget_trees.insert(tree_key.clone(), node);
-                                    return;
-                                }
-                            }
-                        }
-                        let old_is_list = matches!(
-                            old,
-                            Some(WidgetNode::Row { .. } | WidgetNode::Column { .. })
-                        );
-                        let new_is_list =
-                            matches!(node, WidgetNode::Row { .. } | WidgetNode::Column { .. });
-                        if !old_is_list || !new_is_list {
-                            // First paint or shape flip: settle instantly.
-                            if let Some(list) = plots.widget_lists.get_mut(&scope) {
-                                list.clear_scope(&mut plots.anim_runtime, move |(w, _)| {
-                                    *w == scope
-                                });
-                            }
-                        } else {
-                            let old_node = old.as_ref().expect("list checked");
-                            let old_kids = button_children(old_node);
-                            let new_kids = button_children(&node);
-                            let old_keys: Vec<(String, String)> = old_kids
-                                .iter()
-                                .map(|(k, _)| (scope.clone(), k.clone()))
-                                .collect();
-                            let new_keys: Vec<(String, String)> = new_kids
-                                .iter()
-                                .map(|(k, _)| (scope.clone(), k.clone()))
-                                .collect();
-                            let by_key: std::collections::HashMap<&str, &WidgetNode> =
-                                old_kids.iter().map(|(k, n)| (k.as_str(), n)).collect();
-                            let removed: Vec<(usize, (String, String), WidgetNode)> = old_keys
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, k)| !new_keys.contains(k))
-                                .filter_map(|(i, k)| {
-                                    by_key
-                                        .get(k.1.as_str())
-                                        .map(|n| (i, k.clone(), (*n).clone()))
-                                })
-                                .collect();
-                            let axis = if matches!(node, WidgetNode::Row { .. }) {
-                                Axis::Horizontal
-                            } else {
-                                Axis::Vertical
-                            };
-                            if let Some(list) = plots.widget_lists.get_mut(&scope) {
-                                list.update(
-                                    &mut plots.anim_runtime,
-                                    duration,
-                                    axis,
-                                    &old_keys,
-                                    &new_keys,
-                                    &removed,
-                                );
-                            }
-                        }
-                        plots.widget_trees.insert(tree_key, node);
-                    }
-                    Err(e) => {
-                        plots.widget_trees.remove(&tree_key);
-                        Self::note_widget_error(plots, &label, e);
-                    }
-                }
-            }
-            Ok(value) => {
-                plots.widget_last_error.remove(&resolved.id);
-                plots.widget_trees.remove(&tree_key);
-                match coerce_text(value, "render()") {
-                    Ok(text) => {
-                        plots.widget_outputs.insert(tree_key, text);
-                    }
-                    Err(e) => Self::note_widget_error(plots, &label, e),
-                }
-            }
-            Err(e) => Self::note_widget_error(plots, &label, e),
-        }
+        Self::runtime_context(plots, None).ingest(resolved, bar, result);
     }
 
     /// Drop a placement's runtime when its script file changed on
@@ -2603,54 +1407,7 @@ impl Top {
     /// placement rendering that file drops its state. Returns whether
     /// anything changed.
     pub(crate) fn sync_script_state(plots: &mut Plots, resolved: &ResolvedWidget) -> bool {
-        let Ok(mtime) = std::fs::metadata(&resolved.path).and_then(|m| m.modified()) else {
-            return false;
-        };
-        match plots.widget_script_mtime.get(&resolved.path) {
-            Some(known) if *known == mtime => false,
-            _ => {
-                // States whose resolved file is this path go first
-                // (collect ids: placements borrow plots immutably).
-                let mut dropped = Vec::new();
-                for top in plots.tops.values() {
-                    for slot in &top.local.widgets {
-                        for placement in slot {
-                            if Self::widget_file_path(
-                                &placement.name,
-                                placement.file.as_deref().unwrap_or(""),
-                            ) == resolved.path
-                                && !placement.id.is_empty()
-                            {
-                                dropped.push(placement.id.clone());
-                            }
-                        }
-                    }
-                }
-                for id in dropped {
-                    plots.widget_lua.remove(&id);
-                }
-                plots
-                    .widget_script_mtime
-                    .insert(resolved.path.clone(), mtime);
-                // Author metadata (defaults/schema) may have changed
-                // too — reload it for discovered defs backed by this file.
-                for def in plots
-                    .widgets
-                    .iter_mut()
-                    .filter(|def| def.file == resolved.path)
-                {
-                    if let Ok(source) = std::fs::read_to_string(&resolved.path)
-                        && let Ok(lua) = new_widget_lua()
-                        && load_widget_script(&lua, &def.name, &source).is_ok()
-                    {
-                        let (defaults, schema) = load_widget_meta(&lua, &def.name);
-                        def.defaults = defaults;
-                        def.schema = schema;
-                    }
-                }
-                true
-            }
-        }
+        Self::runtime_context(plots, None).sync_revision(resolved)
     }
 
     /// Re-resolve every live bar from its `[[bar]]` config entry
@@ -2659,13 +1416,14 @@ impl Top {
     /// state-sync (no rendering); callers follow with `apply_layout`
     /// + `init_widget_lua` since placement ids regenerate.
     pub(crate) fn resync_bars_from_config(plots: &mut Plots) -> Vec<window::Id> {
-        let bars: Vec<window::Id> = plots.tops.keys().copied().collect();
+        let bars: Vec<window::Id> = plots.windows.tops.keys().copied().collect();
         for bar_id in &bars {
             let entry = plots
+                .windows
                 .tops
                 .get(bar_id)
                 .and_then(|top| plots.config.bar.get(top.bar_index).cloned());
-            if let (Some(entry), Some(top)) = (entry, plots.tops.get_mut(bar_id)) {
+            if let (Some(entry), Some(top)) = (entry, plots.windows.tops.get_mut(bar_id)) {
                 top.local = TopLocal::from(&entry);
             }
         }
@@ -2678,24 +1436,16 @@ impl Top {
     /// Per-bar trees render when bars appear (`render_bar_widgets`)
     /// or on the next due tick; with no bars yet this only resets.
     pub(crate) fn init_widget_lua(plots: &mut Plots) {
-        plots.widget_lua.clear();
-        plots.widget_outputs.clear();
-        plots.widget_trees.clear();
-        plots.widget_last_run.clear();
-        plots.widget_last_error.clear();
-        plots.widget_script_mtime.clear();
+        plots.placements.reset();
         // Fresh Lua states mean fresh lists: drop every per-widget
         // list (their runtime slots free on the next sweep; the first
         // post-reload paint re-enters from scratch and settles).
-        for list in plots.widget_lists.values_mut() {
-            list.clear_all(&mut plots.anim_runtime);
-        }
-        plots.widget_lists.clear();
+        plots.animation.reset_widgets();
         plots.services.refresh_system();
         let gpu = Popup::gpu_usage_percent();
         let now = Instant::now();
         for (bar, resolved) in Self::all_resolved(plots) {
-            plots.widget_last_run.insert(resolved.id.clone(), now);
+            plots.placements.last_run.insert(resolved.id.clone(), now);
             let result = Self::render_lua_value(plots, &resolved, gpu, bar);
             Self::ingest_render_value(plots, &resolved, bar, result);
         }
@@ -2710,6 +1460,7 @@ impl Top {
         let gpu = Popup::gpu_usage_percent();
         let now = Instant::now();
         let placements: Vec<crate::config::WidgetPlacement> = plots
+            .windows
             .tops
             .get(&bar)
             .map(|top| {
@@ -2726,7 +1477,7 @@ impl Top {
             let Some(resolved) = Self::resolve_placement(plots, placement) else {
                 continue;
             };
-            plots.widget_last_run.insert(resolved.id.clone(), now);
+            plots.placements.last_run.insert(resolved.id.clone(), now);
             let result = Self::render_lua_value(plots, &resolved, gpu, bar);
             Self::ingest_render_value(plots, &resolved, bar, result);
         }
@@ -2736,11 +1487,15 @@ impl Top {
     /// definition (typos and deleted files render blank).
     /// Runs at startup and on every hot-reload, when configs change.
     fn warn_unknown_slot_widgets(plots: &Plots) {
-        for (bar_id, top) in &plots.tops {
+        for (bar_id, top) in &plots.windows.tops {
             for (pos, slot) in top.local.widgets.iter().enumerate() {
                 for placement in slot {
                     if !TopLocal::is_empty_widget(&placement.name)
-                        && !plots.widgets.iter().any(|d| d.name == placement.name)
+                        && !plots
+                            .catalog
+                            .definitions
+                            .iter()
+                            .any(|d| d.name == placement.name)
                     {
                         eprintln!(
                             "riced: bar {bar_id:?} slot {} references unknown widget {:?} (no widgets/{}.lua)",
@@ -2759,7 +1514,21 @@ impl Top {
     /// per-placement (placement override else definition default).
     fn run_due_widgets(plots: &mut Plots) -> bool {
         let jobs = Self::all_resolved(plots);
-        scheduling::run_due(plots, jobs)
+        let now = Instant::now();
+        plots.services.refresh_system();
+        let gpu = crate::services::gpu::gpu_usage_percent();
+        let open_popups = plots
+            .windows
+            .popups
+            .values()
+            .map(|popup| popup.placement.clone())
+            .collect();
+        scheduling::run_due(
+            &mut Self::runtime_context(plots, gpu),
+            jobs,
+            &open_popups,
+            now,
+        )
     }
 
     /// Re-render one widget on every bar showing it, and report whether
@@ -2772,11 +1541,13 @@ impl Top {
             .map(|bar| {
                 (
                     plots
-                        .widget_outputs
+                        .placements
+                        .outputs
                         .get(&(*bar, placement_id.to_string()))
                         .cloned(),
                     plots
-                        .widget_trees
+                        .placements
+                        .trees
                         .get(&(*bar, placement_id.to_string()))
                         .cloned(),
                 )
@@ -2794,11 +1565,13 @@ impl Top {
             .map(|bar| {
                 (
                     plots
-                        .widget_outputs
+                        .placements
+                        .outputs
                         .get(&(*bar, placement_id.to_string()))
                         .cloned(),
                     plots
-                        .widget_trees
+                        .placements
+                        .trees
                         .get(&(*bar, placement_id.to_string()))
                         .cloned(),
                 )
@@ -2815,6 +1588,7 @@ impl Top {
         placement_id: &str,
     ) -> Option<ResolvedWidget> {
         plots
+            .windows
             .tops
             .values()
             .flat_map(|top| top.local.widgets.iter().flatten())
@@ -2836,10 +1610,7 @@ impl Top {
     /// notification transition sets. Repaint comes from the `Scope::All`
     /// redraw scope, not here.
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
-        plots.anim_runtime.tick_at(Instant::now());
-        for list in plots.widget_lists.values_mut() {
-            list.sweep(&mut plots.anim_runtime);
-        }
+        plots.animation.advance(Instant::now());
         super::notification::sweep_noti_anims(plots)
     }
 
@@ -2858,21 +1629,19 @@ impl Top {
         let gpu = Popup::gpu_usage_percent();
         let resolved = Self::resolve_placement_id(plots, &placement_id);
         let outcome = resolved.as_ref().and_then(|resolved| {
-            plots.widget_lua.get(&resolved.id).map(|lua| {
-                let output = Self::output_name(plots, bar);
-                let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
-                crate::services::publish_all(&ctx, lua)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| {
-                        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
-                    })
-                    .and_then(|()| publish_props(lua, &resolved.props).map_err(|e| e.to_string()))
-                    .and_then(|()| call_lua_named_action(lua, &action))
-            })
+            let output = Self::output_name(plots, bar);
+            plots.placements.action(
+                resolved,
+                &crate::lua::widgets::EntryContext {
+                    services: crate::services::ServiceCtx::from_plots(plots, gpu),
+                    output: &output,
+                },
+                &action,
+            )
         });
         match outcome {
             Some(Ok(value)) => {
-                plots.widget_last_error.remove(&placement_id);
+                plots.placements.errors.remove(&placement_id);
                 let notif = super::notification::command_from_action(&value, plots);
                 if Self::refresh_widget(plots, &placement_id, gpu) {
                     return Command::batch(vec![
@@ -2899,11 +1668,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            // Single commit per press (preset buttons, not a drag stream).
-            top.local.opacity = TopLocal::snap_opacity(value);
-        }
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.opacity = TopLocal::snap_opacity(value)
+        })
     }
 
     pub(crate) fn handle_set_floating(
@@ -2911,13 +1678,7 @@ impl Top {
         id: window::Id,
         value: bool,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.floating = value;
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, _| local.floating = value)
     }
 
     pub(crate) fn handle_set_margin_top(
@@ -2925,13 +1686,7 @@ impl Top {
         id: window::Id,
         value: i32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.margins.top = value.max(0);
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, _| local.margins.top = value.max(0))
     }
 
     pub(crate) fn handle_set_margin_right(
@@ -2939,13 +1694,9 @@ impl Top {
         id: window::Id,
         value: i32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.margins.right = value.max(0);
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, _| {
+            local.margins.right = value.max(0)
+        })
     }
 
     pub(crate) fn handle_set_margin_bottom(
@@ -2953,13 +1704,9 @@ impl Top {
         id: window::Id,
         value: i32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.margins.bottom = value.max(0);
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, _| {
+            local.margins.bottom = value.max(0)
+        })
     }
 
     pub(crate) fn handle_set_margin_left(
@@ -2967,13 +1714,9 @@ impl Top {
         id: window::Id,
         value: i32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.margins.left = value.max(0);
-        }
-        Command::batch(vec![
-            Self::apply_layout(plots, id),
-            Self::persist_bar(plots, id),
-        ])
+        Self::change_bar(plots, id, true, |local, _| {
+            local.margins.left = value.max(0)
+        })
     }
 
     pub(crate) fn handle_set_radius_tl(
@@ -2981,10 +1724,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.radius.top_left = value.max(0.0);
-        }
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.radius.top_left = value.max(0.0)
+        })
     }
 
     pub(crate) fn handle_set_radius_tr(
@@ -2992,10 +1734,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.radius.top_right = value.max(0.0);
-        }
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.radius.top_right = value.max(0.0)
+        })
     }
 
     pub(crate) fn handle_set_radius_bl(
@@ -3003,10 +1744,9 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.radius.bottom_left = value.max(0.0);
-        }
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.radius.bottom_left = value.max(0.0)
+        })
     }
 
     pub(crate) fn handle_set_radius_br(
@@ -3014,20 +1754,20 @@ impl Top {
         id: window::Id,
         value: f32,
     ) -> Command<Plant> {
-        if let Some(top) = plots.tops.get_mut(&id) {
-            top.local.radius.bottom_right = value.max(0.0);
-        }
-        Self::persist_bar(plots, id)
+        Self::change_bar(plots, id, false, |local, _| {
+            local.radius.bottom_right = value.max(0.0)
+        })
     }
 
     /// Connector name for a bar's output (`""` when unknown/sentinel).
     pub(crate) fn output_name(plots: &Plots, bar_id: window::Id) -> String {
         plots
+            .windows
             .ids
             .get(&bar_id)
             .copied()
             .and_then(|info| match info {
-                PlotInfo::Top(o) => plots.output_infos.get(&o),
+                PlotInfo::Top(o) => plots.windows.output_infos.get(&o),
                 _ => None,
             })
             .and_then(|info| info.name.clone())
@@ -3041,83 +1781,52 @@ impl Top {
         plots: &Plots,
         widgets: &[Vec<crate::config::WidgetPlacement>],
     ) -> Vec<crate::config::SlotWidgets> {
-        widgets
-            .iter()
-            .map(|slot| {
-                let materialized: Vec<crate::config::WidgetPlacement> = slot
-                    .iter()
-                    .map(|placement| {
-                        match plots.widgets.iter().find(|def| def.name == placement.name) {
-                            Some(def) => placement.materialized(&def.defaults),
-                            None => placement.clone(),
-                        }
-                    })
-                    .collect();
-                crate::config::SlotWidgets::from_placements(&materialized)
-            })
-            .collect()
+        edit::serialize_slots(&plots.catalog.definitions, widgets)
     }
 
     /// Write the bar's current state back to its `[[bar]]` entry and
     /// arm a coalesced config save (same idle-write as `ConfigPatch`
     /// drags). Entries are matched by index; out-of-range indices push.
     pub(crate) fn persist_bar(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        let (index, anchor, local) = match plots.tops.get(&bar_id) {
-            Some(t) => (
-                t.bar_index,
-                t.anchor_label().to_lowercase(),
-                t.local.clone(),
-            ),
-            None => return Command::none(),
-        };
-        let output = Self::output_name(plots, bar_id);
-        let aligns: Vec<String> = local
-            .aligns
-            .iter()
-            .map(|a| a.as_str().to_string())
-            .collect();
-        let widgets: Vec<crate::config::SlotWidgets> = Self::serialize_slots(plots, &local.widgets);
-        let entry = crate::config::TopConfig {
-            anchor,
-            output,
-            length: local.length_pct,
-            thickness: local.thickness_px,
-            slots: local.slots.clamp(1, TopLocal::MAX_SLOTS),
-            aligns,
-            widgets,
-            slot_padding: local.slot_padding,
-            slot_spacing: local.slot_spacing,
-            opacity: TopLocal::snap_opacity(local.opacity),
-            floating: local.floating,
-            margin_top: local.margins.top,
-            margin_right: local.margins.right,
-            margin_bottom: local.margins.bottom,
-            margin_left: local.margins.left,
-            radius_top_left: local.radius.top_left,
-            radius_top_right: local.radius.top_right,
-            radius_bottom_left: local.radius.bottom_left,
-            radius_bottom_right: local.radius.bottom_right,
-        };
-        if index == usize::MAX || index >= plots.config.bar.len() {
-            plots.config.bar.push(entry);
-            if let Some(top) = plots.tops.get_mut(&bar_id) {
-                top.bar_index = plots.config.bar.len() - 1;
-            }
+        if Self::edit_context(plots).persist(bar_id) {
+            plots.arm_config_save()
         } else {
-            plots.config.bar[index] = entry;
+            Command::none()
         }
-        plots.arm_config_save()
+    }
+
+    fn edit_context(plots: &mut Plots) -> edit::EditContext<'_> {
+        edit::EditContext {
+            bars: &mut plots.windows.tops,
+            identities: &plots.windows.ids,
+            outputs: &plots.windows.output_infos,
+            catalog: &plots.catalog.definitions,
+            saved: &mut plots.config.bar,
+        }
+    }
+
+    fn change_bar(
+        plots: &mut Plots,
+        bar: window::Id,
+        relayout: bool,
+        change: impl FnOnce(&mut TopLocal, f32),
+    ) -> Command<Plant> {
+        let (layout, persist) = Self::edit_context(plots).change(bar, relayout, change);
+        if persist {
+            Command::batch([layout, plots.arm_config_save()])
+        } else {
+            layout
+        }
     }
 
     /// Remove a bar (`TopEvent::Remove`): drop tracking + cursor state,
     /// close its window, and delete its `[[bar]]` entry (persisted
     /// immediately) so it stays gone after restart.
     pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        plots.input.cursors.remove(&bar_id);
-        plots.input.presses.remove(&bar_id);
         let mut cmds = Vec::new();
         // A bar going away takes its popup with it.
         let popup_id = plots
+            .windows
             .popups
             .iter()
             .find(|(_, p)| p.bar_id == bar_id)
@@ -3125,12 +1834,11 @@ impl Top {
         if let Some(pid) = popup_id {
             cmds.push(super::Popup::handle_dismiss(plots, pid));
         }
-        if let Some(top) = plots.tops.remove(&bar_id) {
-            plots.ids.remove(&bar_id);
+        if let Some(top) = plots.windows.tops.remove(&bar_id) {
             if top.bar_index < plots.config.bar.len() {
                 plots.config.bar.remove(top.bar_index);
                 // Indices after the hole shift down by one.
-                for other in plots.tops.values_mut() {
+                for other in plots.windows.tops.values_mut() {
                     if other.bar_index > top.bar_index {
                         other.bar_index -= 1;
                     }
@@ -3140,9 +1848,8 @@ impl Top {
             // (same for persist_new below).
             plots.config_jobs.dirty = true;
             plots.flush_config_save();
-        } else {
-            plots.ids.remove(&bar_id);
         }
+        plots.forget_window(bar_id);
         cmds.push(iced_runtime::task::effect(Action::Window(
             WindowAction::Close(bar_id),
         )));
@@ -3153,55 +1860,14 @@ impl Top {
     /// Same window id throughout — no close/reopen flicker. Skips sentinel
     /// windows (fixed fallback until outputs arrive and replace them).
     pub(crate) fn apply_layout(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        // Clamp stale values: length 1–100%, thickness 1..=thin output axis.
-        if let Some(top) = plots.tops.get_mut(&bar_id) {
-            top.local.length_pct = top.local.length_pct.clamp(1.0, 100.0);
-        }
-        let (output, top) = match plots.ids.get(&bar_id).copied() {
-            Some(PlotInfo::Top(o)) => match plots.tops.get(&bar_id).cloned() {
-                Some(t) => (o, t),
-                None => return Command::none(),
-            },
-            _ => return Command::none(),
-        };
-        if output == OutputId(u32::MAX) {
-            return Command::none();
-        }
-        let (sw, sh) = Self::output_size(&plots.output_infos, output);
-        let mut top = top;
-        let max = TopLocal::max_thickness(sw, sh, top.is_horizontal()).max(1.0);
-        top.local.thickness_px = top.local.thickness_px.clamp(1.0, max);
-        if let Some(stored) = plots.tops.get_mut(&bar_id) {
-            stored.local.thickness_px = top.local.thickness_px;
-            stored.local.length_pct = top.local.length_pct;
-        }
-        let horizontal = top.is_horizontal();
-        let (w, h) = top.local.px_size(sw, sh, horizontal);
-        // Margins are widget padding (see `view`): the surface stays
-        // edge-pinned with its full exclusive zone. Always clear the
-        // compositor-side margins so no stale layer offset lingers.
-        let cmds = vec![
-            Command::done(Plant::LayoutChange {
-                id: bar_id,
-                anchor: top.anchor,
-                size: LayerSize::px(w, h),
-            }),
-            Command::done(Plant::ExclusiveZoneChange {
-                id: bar_id,
-                zone_size: Self::exclusive_px(&top, w, h),
-            }),
-            Command::done(Plant::MarginChange {
-                id: bar_id,
-                margin: (0, 0, 0, 0),
-            }),
-        ];
-        Command::batch(cmds)
+        Self::edit_context(plots).layout(bar_id)
     }
 
     /// Re-apply every bar on `output` (resolution/scale changed geometry:
     /// `%` sizes now resolve to different px). Called on `OutputUpdated`.
     pub(crate) fn reapply_for_output(plots: &mut Plots, output: OutputId) -> Command<Plant> {
         let bars: Vec<window::Id> = plots
+            .windows
             .ids
             .iter()
             .filter_map(|(wid, info)| match info {
@@ -3271,14 +1937,15 @@ impl Top {
     /// under the cursor and either toggle its widget popup or run its
     /// `on_press()` action. A slot holding both prefers the popup.
     pub(crate) fn handle_slot_click(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        let (output, top) = match plots.ids.get(&bar_id).copied() {
-            Some(PlotInfo::Top(o)) => match plots.tops.get(&bar_id).cloned() {
+        let (output, top) = match plots.windows.ids.get(&bar_id).copied() {
+            Some(PlotInfo::Top(o)) => match plots.windows.tops.get(&bar_id).cloned() {
                 Some(t) => (o, t),
                 None => return Command::none(),
             },
             _ => return Command::none(),
         };
-        let Some((_, _, sw, sh)) = Background::available_rect(output, &plots.output_infos) else {
+        let Some((_, _, sw, sh)) = Background::available_rect(output, &plots.windows.output_infos)
+        else {
             return Command::none();
         };
         let horizontal = top.is_horizontal();
@@ -3315,7 +1982,7 @@ impl Top {
                     top.local
                         .widgets_at(*pos)
                         .iter()
-                        .any(|p| lua_has_func(&plots.widget_lua, &p.id, "popup"))
+                        .any(|p| lua_has_func(&plots.placements.instances, &p.id, "popup"))
                 })
             });
         let Some(pos) = pos else {
@@ -3326,12 +1993,17 @@ impl Top {
         // their own toggles via `handle_widget_click`).
         let mut cmds = Vec::new();
         if let Some(pid) = plots
+            .windows
             .popups
             .iter()
             .find(|(_, p)| p.bar_id == bar_id)
             .map(|(id, _)| *id)
         {
-            let same = plots.popups.get(&pid).is_some_and(|p| p.slot == pos);
+            let same = plots
+                .windows
+                .popups
+                .get(&pid)
+                .is_some_and(|p| p.slot == pos);
             cmds.push(Popup::handle_dismiss(plots, pid));
             if same {
                 return Command::batch(cmds);
@@ -3362,7 +2034,7 @@ impl Top {
         pos: usize,
         placement_id: &str,
     ) -> Command<Plant> {
-        let output = match plots.ids.get(&bar_id).copied() {
+        let output = match plots.windows.ids.get(&bar_id).copied() {
             Some(PlotInfo::Top(o)) => o,
             _ => return Command::none(),
         };
@@ -3374,12 +2046,14 @@ impl Top {
             .map(|p| (p.x, p.y));
         let mut cmds = Vec::new();
         if let Some(pid) = plots
+            .windows
             .popups
             .iter()
             .find(|(_, p)| p.bar_id == bar_id)
             .map(|(id, _)| *id)
         {
             let same_placement = plots
+                .windows
                 .popups
                 .get(&pid)
                 .is_some_and(|p| p.placement == placement_id);
@@ -3388,16 +2062,17 @@ impl Top {
                 return Command::batch(cmds);
             }
         }
-        if lua_has_func(&plots.widget_lua, placement_id, "popup") {
+        if lua_has_func(&plots.placements.instances, placement_id, "popup") {
             if let Some(cmd) =
                 Popup::open_for(plots, bar_id, output, pos, cursor, Some(placement_id))
             {
                 cmds.push(cmd);
             }
-        } else if lua_has_func(&plots.widget_lua, placement_id, "on_press") {
+        } else if lua_has_func(&plots.placements.instances, placement_id, "on_press") {
             cmds.push(Self::run_on_press(plots, bar_id, placement_id));
         } else {
             let placements = plots
+                .windows
                 .tops
                 .get(&bar_id)
                 .map(|t| t.local.widgets_at(pos).to_vec())
@@ -3429,7 +2104,7 @@ impl Top {
     ) -> Command<Plant> {
         if placements
             .iter()
-            .any(|p| lua_has_func(&plots.widget_lua, &p.id, "popup"))
+            .any(|p| lua_has_func(&plots.placements.instances, &p.id, "popup"))
         {
             if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos, cursor, None) {
                 return cmd;
@@ -3440,7 +2115,7 @@ impl Top {
         // re-render that placement (a toggle flips its next output).
         if let Some(placement) = placements
             .iter()
-            .find(|p| lua_has_func(&plots.widget_lua, &p.id, "on_press"))
+            .find(|p| lua_has_func(&plots.placements.instances, &p.id, "on_press"))
         {
             return Self::run_on_press(plots, bar_id, &placement.id.clone());
         }
@@ -3454,17 +2129,14 @@ impl Top {
         let gpu = Popup::gpu_usage_percent();
         let resolved = Self::resolve_placement_id(plots, placement_id);
         let outcome = resolved.as_ref().and_then(|resolved| {
-            plots.widget_lua.get(&resolved.id).map(|lua| {
-                let output = Self::output_name(plots, bar);
-                let ctx = crate::services::ServiceCtx::from_plots(plots, gpu);
-                crate::services::publish_all(&ctx, lua)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| {
-                        crate::services::publish_bar(lua, &output).map_err(|e| e.to_string())
-                    })
-                    .and_then(|()| publish_props(lua, &resolved.props).map_err(|e| e.to_string()))
-                    .and_then(|()| call_lua_action(lua))
-            })
+            let output = Self::output_name(plots, bar);
+            plots.placements.press(
+                resolved,
+                &crate::lua::widgets::EntryContext {
+                    services: crate::services::ServiceCtx::from_plots(plots, gpu),
+                    output: &output,
+                },
+            )
         });
         match outcome {
             Some(Ok(())) => {
@@ -3493,48 +2165,6 @@ impl Top {
             return Self::handle_cursor_moved(plots, id, *position);
         }
         Command::none()
-    }
-
-    /// Cleanup sentinel tops (OutputId::MAX) created before outputs were known.
-    /// Returns the window ids that were removed (caller should close them and clean last_cursor).
-    pub(crate) fn cleanup_sentinels(
-        tops: &mut HashMap<window::Id, Top>,
-        ids: &mut HashMap<window::Id, PlotInfo>,
-    ) -> Vec<window::Id> {
-        let sentinel = OutputId(u32::MAX);
-        let sentinel_ids: Vec<window::Id> = ids
-            .iter()
-            .filter_map(|(wid, info)| match info {
-                PlotInfo::Top(o) if *o == sentinel => Some(*wid),
-                _ => None,
-            })
-            .collect();
-        for id in &sentinel_ids {
-            tops.remove(id);
-            ids.remove(id);
-        }
-        sentinel_ids
-    }
-
-    /// Remove all tops for `output_id` (supports multiple per output).
-    /// Returns the window ids that were removed.
-    pub(crate) fn remove_for_output(
-        tops: &mut HashMap<window::Id, Top>,
-        ids: &mut HashMap<window::Id, PlotInfo>,
-        output_id: OutputId,
-    ) -> Vec<window::Id> {
-        let to_remove: Vec<window::Id> = ids
-            .iter()
-            .filter_map(|(wid, info)| match info {
-                PlotInfo::Top(o) if *o == output_id => Some(*wid),
-                _ => None,
-            })
-            .collect();
-        for wid in &to_remove {
-            tops.remove(wid);
-            ids.remove(wid);
-        }
-        to_remove
     }
 
     /// Handle `TopPlot(TopEvent::Sow)` – detect output and closest edge (Left/Right/Top/Bottom) where the
@@ -3612,20 +2242,20 @@ impl Top {
 
         let (target_output, target_anchor): (Option<OutputId>, Anchor) = {
             if let Some(output) = menu_output {
-                if let Some(info) = plots.output_infos.get(&output) {
+                if let Some(info) = plots.windows.output_infos.get(&output) {
                     let anchor = menu_pos.map_or(Anchor::Top, |mp| closest_anchor(mp, info));
                     (Some(output), anchor)
                 } else {
                     (Some(output), Anchor::Top)
                 }
             } else if let Some(mp) = menu_pos {
-                let mut found = plots.output_infos.iter().find(|(_, info)| {
+                let mut found = plots.windows.output_infos.iter().find(|(_, info)| {
                     let (sx, sy, sw, sh) = Geo::output_geometry(info);
                     mp.x >= sx && mp.x < sx + sw && mp.y >= sy && mp.y < sy + sh
                 });
-                if found.is_none() && !plots.output_infos.is_empty() {
+                if found.is_none() && !plots.windows.output_infos.is_empty() {
                     let mut best: Option<(&OutputId, &OutputInfo, f32)> = None;
-                    for (oid, info) in &plots.output_infos {
+                    for (oid, info) in &plots.windows.output_infos {
                         let (sx, sy, sw, sh) = Geo::output_geometry(info);
                         let cx = sx + sw / 2.0;
                         let cy = sy + sh / 2.0;
@@ -3643,7 +2273,7 @@ impl Top {
                 } else {
                     (None, Anchor::Top)
                 }
-            } else if let Some(oid) = plots.output_infos.keys().next().copied() {
+            } else if let Some(oid) = plots.windows.output_infos.keys().next().copied() {
                 (Some(oid), Anchor::Top)
             } else {
                 (None, Anchor::Top)
@@ -3652,10 +2282,12 @@ impl Top {
 
         if let Some(output_id) = target_output {
             let anchor = target_anchor;
-            let duplicate = plots.ids.iter().any(|(wid, info)| match info {
-                PlotInfo::Top(o) if *o == output_id => {
-                    plots.tops.get(wid).is_some_and(|t| t.anchor() == anchor)
-                }
+            let duplicate = plots.windows.ids.iter().any(|(wid, info)| match info {
+                PlotInfo::Top(o) if *o == output_id => plots
+                    .windows
+                    .tops
+                    .get(wid)
+                    .is_some_and(|t| t.anchor() == anchor),
                 _ => false,
             });
             if duplicate {
@@ -3666,17 +2298,18 @@ impl Top {
                 return None;
             }
             let mut top = Top::with_anchor(anchor);
-            let (sw, sh) = Self::output_size(&plots.output_infos, output_id);
+            let (sw, sh) = Self::output_size(&plots.windows.output_infos, output_id);
             let (w, h) = top.local.px_size(sw, sh, top.is_horizontal());
             let (win_id, settings) = top.open(output_id.0, w, h);
             let output = plots
+                .windows
                 .output_infos
                 .get(&output_id)
                 .and_then(|info| info.name.clone())
                 .unwrap_or_default();
             persist_new(plots, &mut top, anchor, output);
-            plots.tops.insert(win_id, top);
-            plots.ids.insert(win_id, PlotInfo::Top(output_id));
+            plots.windows.tops.insert(win_id, top);
+            plots.windows.ids.insert(win_id, PlotInfo::Top(output_id));
             Self::render_bar_widgets(plots, win_id);
             println!(
                 "Added {} bar for output {output_id:?} window {win_id:?} (closest to {:?} @ {menu_pos:?} stored_output {menu_output:?}) — calling top.open() and spawning NewLayerShell",
@@ -3690,6 +2323,7 @@ impl Top {
         } else {
             let sentinel = OutputId(u32::MAX);
             let duplicate = plots
+                .windows
                 .ids
                 .iter()
                 .any(|(_, info)| matches!(info, PlotInfo::Top(o) if *o == sentinel));
@@ -3700,8 +2334,8 @@ impl Top {
             let mut top = Top::new();
             let (win_id, settings) = top.open_active();
             persist_new(plots, &mut top, Anchor::Top, String::new());
-            plots.tops.insert(win_id, top);
-            plots.ids.insert(win_id, PlotInfo::Top(sentinel));
+            plots.windows.tops.insert(win_id, top);
+            plots.windows.ids.insert(win_id, PlotInfo::Top(sentinel));
             Self::render_bar_widgets(plots, win_id);
             println!(
                 "Added sentinel Top window {win_id:?} (no output yet) — calling top.open_active()"
@@ -3717,29 +2351,6 @@ impl Top {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracted_dsl_preserves_description_shapes() {
-        let old = empty_widget_lua().unwrap();
-        let new = empty_widget_lua().unwrap();
-        reference_inject_ui_base(&old).unwrap();
-        inject_ui_base(&new).unwrap();
-        for source in [
-            "return ui.text('x'):size(14):size(16):width('auto')",
-            "return ui.row({ui.icon('cpu'), ui.text('x')}):spacing(5)",
-            "return ui.container(ui.column({ui.button('go','go'):radius(3),ui.progress(0.4,100)})):padding(4)",
-            "return ui.listview({{id=1}}):id('test'):key('id'):delegate(function(item) return ui.text(item.id) end)",
-            "ui.define('custom', function(p) return ui.separator():height(p.h) end); return ui.custom({h=2})",
-        ] {
-            let old: Value = old.load(source).eval().unwrap();
-            let new: Value = new.load(source).eval().unwrap();
-            assert_eq!(
-                parse_node(&old).unwrap(),
-                parse_node(&new).unwrap(),
-                "{source}"
-            );
-        }
-    }
 
     fn lua_widget_def(name: &str) -> crate::config::WidgetDefinition {
         crate::config::WidgetDefinition {
@@ -3765,105 +2376,6 @@ mod tests {
         for (_, source) in crate::config::builtin_component_files() {
             lua.load(source).exec().expect("seed component");
         }
-    }
-
-    #[test]
-    fn lua_sandbox_runs_app_view() {
-        let lua = new_widget_lua().expect("sandbox");
-        load_widget_script(&lua, "test", "return { view = function() return 'hi' end }")
-            .expect("load");
-        assert_eq!(call_lua_text(&lua, "view").unwrap(), "hi");
-    }
-
-    #[test]
-    fn lua_return_values_coerce_to_text() {
-        let lua = new_widget_lua().expect("sandbox");
-        load_widget_script(&lua, "test", "return { view = function() return 42 end }")
-            .expect("load");
-        assert_eq!(call_lua_text(&lua, "view").unwrap(), "42");
-        load_widget_script(&lua, "test", "return { view = function() return true end }")
-            .expect("load");
-        assert_eq!(call_lua_text(&lua, "view").unwrap(), "true");
-        load_widget_script(&lua, "test", "return { view = function() return nil end }")
-            .expect("load");
-        assert_eq!(call_lua_text(&lua, "view").unwrap(), "");
-        load_widget_script(&lua, "test", "return { view = function() return {} end }")
-            .expect("load");
-        assert!(call_lua_text(&lua, "view").is_err());
-    }
-
-    #[test]
-    fn lua_module_without_view_or_with_legacy_render_is_rejected() {
-        let lua = new_widget_lua().expect("sandbox");
-        assert!(load_widget_script(&lua, "test", "x = 1").is_err());
-        assert!(load_widget_script(&lua, "test", "function render() return 'old' end").is_err());
-        assert!(load_widget_script(&lua, "test", "return {}").is_err());
-    }
-
-    #[test]
-    fn module_methods_bind_self_without_exporting_globals() {
-        let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "module", "return {count=0, view=function(self) return ui.text(tostring(self.count)) end, on_press=function(self) self.count=self.count+1 end, on_action=function(self,key) return {dismiss=self.count, key=key} end}").unwrap();
-        for name in ["render", "view", "on_press", "on_action"] {
-            assert_eq!(lua.globals().get::<Value>(name).unwrap(), Value::Nil);
-        }
-        call_lua_action(&lua).unwrap();
-        assert_eq!(
-            parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap(),
-            WidgetNode::Text {
-                content: "1".into(),
-                size: None,
-                width: None,
-                height: None,
-                color: None,
-            }
-        );
-        let Value::Table(action) = call_lua_named_action(&lua, "dismiss").unwrap() else {
-            panic!("table");
-        };
-        assert_eq!(action.get::<u32>("dismiss").unwrap(), 1);
-        assert_eq!(action.get::<String>("key").unwrap(), "dismiss");
-        load_widget_script(&lua, "replacement", crate::config::SEED_HELLO_LUA).unwrap();
-        assert_eq!(call_lua_named_action(&lua, "dismiss").unwrap(), Value::Nil);
-    }
-
-    #[test]
-    fn lua_sandbox_blocks_escapes_but_keeps_time() {
-        // os.execute + io.popen are native shell (owner-accepted);
-        // os.exit/remove/rename + require stay blocked.
-        let lua = new_widget_lua().expect("sandbox");
-        let execute: Value = lua.load("return os.execute").eval().expect("eval");
-        assert!(matches!(execute, Value::Function(_)));
-        for key in ["exit", "remove", "rename"] {
-            let v: Value = lua.load(format!("return os.{key}")).eval().expect("eval");
-            assert!(matches!(v, Value::Nil), "{key} blocked");
-        }
-        let require: Value = lua.load("return require").eval().expect("eval");
-        assert!(matches!(require, Value::Nil));
-        let hour: String = lua.load("return os.date('%H')").eval().expect("eval");
-        assert_eq!(hour.len(), 2);
-    }
-
-    #[test]
-    fn os_execute_is_native_shell() {
-        // Native shell: exit codes, stdout capture, and `;` chaining
-        // all work (documents the accepted risk — no allowlist).
-        let lua = new_widget_lua().expect("sandbox");
-        let ok: bool = lua
-            .load(r#"return os.execute("true")"#)
-            .eval()
-            .expect("eval");
-        assert!(ok);
-        let out: String = lua
-            .load(r#"local h = io.popen("echo hi"); local s = h:read("*a"); h:close(); return s"#)
-            .eval()
-            .expect("eval");
-        assert_eq!(out.trim(), "hi");
-        let chained: String = lua
-            .load(r#"local h = io.popen("echo a; echo b"); local s = h:read("*a"); h:close(); return s"#)
-            .eval()
-            .expect("eval");
-        assert!(chained.contains('a') && chained.contains('b'));
     }
 
     #[test]
@@ -3985,45 +2497,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn icon_segments_split_placeholders() {
-        use Segment::{Icon, Text};
-        assert_eq!(icon_segments("12%"), vec![Text("12%")]);
-        assert_eq!(
-            icon_segments("{icon:cpu} 12%"),
-            vec![Icon("cpu"), Text(" 12%")]
-        );
-        assert_eq!(
-            icon_segments("{icon:cpu}{icon:mem}"),
-            vec![Icon("cpu"), Icon("mem")]
-        );
-        // Unterminated tails and empty names stay structured but render
-        // literal (lookup misses on "").
-        assert_eq!(icon_segments("{icon:cpu"), vec![Text("{icon:cpu")]);
-        assert_eq!(icon_segments("{icon:}"), vec![Icon("")]);
-        assert_eq!(icon_segments(""), Vec::new());
-    }
-
-    #[test]
-    fn icon_bytes_resolves_names_case_insensitively() {
-        assert!(icon_bytes("cpu").is_some());
-        assert!(icon_bytes("CPU").is_some());
-        assert!(icon_bytes("Heart").is_some());
-        assert!(icon_bytes("memory-stick").is_some());
-        assert!(icon_bytes("memory_stick").is_some());
-        assert!(icon_bytes("MemoryStick").is_some());
-        assert!(icon_bytes("mem").is_some());
-        assert!(icon_bytes("disk").is_some());
-        // Full set, not just the hand-match: generated fallback.
-        assert!(icon_bytes("bot").is_some());
-        assert!(icon_bytes("Bot").is_some());
-        assert!(icon_bytes("robot-vacuum").is_some());
-        assert!(icon_bytes("house").is_some());
-        assert!(icon_bytes("power").is_some());
-        assert!(icon_bytes("nope").is_none());
-        assert!(icon_bytes("").is_none());
-    }
-
     /// Publish every service table from throwaway fixtures (mirrors
     /// what `render_lua_value` does from live `Plots`, including the
     /// nil `bar.output` for output-agnostic seeds).
@@ -4126,6 +2599,7 @@ mod tests {
         let mut plots = Plots::new(rx);
         let bar = window::Id::unique();
         plots
+            .windows
             .tops
             .insert(bar, Top::with_config(0, Anchor::Top, TopLocal::default()));
         // Edited config: clock with an override plus a bare stats entry.
@@ -4146,7 +2620,7 @@ mod tests {
             ..Default::default()
         }];
         assert_eq!(Top::resync_bars_from_config(&mut plots), vec![bar]);
-        let top = plots.tops.get(&bar).expect("bar kept");
+        let top = plots.windows.tops.get(&bar).expect("bar kept");
         assert_eq!(top.local.widgets.len(), 2);
         let clock = &top.local.widgets[0][0];
         assert_eq!(clock.name, "clock");
@@ -4156,10 +2630,22 @@ mod tests {
         assert_eq!(stats.name, "stats");
         assert!(!stats.id.is_empty());
         // Unknown bar index keeps its layout instead of clearing.
-        plots.tops.get_mut(&bar).expect("bar kept").bar_index = 99;
+        plots
+            .windows
+            .tops
+            .get_mut(&bar)
+            .expect("bar kept")
+            .bar_index = 99;
         Top::resync_bars_from_config(&mut plots);
         assert_eq!(
-            plots.tops.get(&bar).expect("bar kept").local.widgets.len(),
+            plots
+                .windows
+                .tops
+                .get(&bar)
+                .expect("bar kept")
+                .local
+                .widgets
+                .len(),
             2
         );
     }
@@ -4503,105 +2989,6 @@ mod tests {
     }
 
     #[test]
-    fn widget_metadata_reads_defaults_and_schema() {
-        use crate::config::PropValue;
-        let lua = new_widget_lua().expect("sandbox");
-        load_widget_script(
-            &lua,
-            "meta",
-            r#"return {
-                view = function() return "x" end,
-                defaults = {
-                    interval = 5,
-                    size = 20,
-                    props = { format = "%H", n = 3, b = true, bad = {} },
-                },
-                property_schema = {
-                    format = { label = "Fmt", type = "string", description = "d", choices = { "%H", "%M" } },
-                    n = { type = "number", min = 1, max = 9 },
-                    bogus = "nope",
-                },
-            }"#,
-        )
-        .expect("load");
-        let (defaults, schema) = load_widget_meta(&lua, "meta");
-        // Integers coerce; tables are rejected from props.
-        assert_eq!(defaults.interval, 5.0);
-        assert_eq!(defaults.size, 20.0);
-        assert_eq!(defaults.props["format"], PropValue::Text("%H".to_string()));
-        assert_eq!(defaults.props["n"], PropValue::Number(3.0));
-        assert_eq!(defaults.props["b"], PropValue::Bool(true));
-        assert!(!defaults.props.contains_key("bad"));
-        assert_eq!(schema["format"].label.as_deref(), Some("Fmt"));
-        assert_eq!(schema["format"].choices, ["%H", "%M"]);
-        assert_eq!(schema["n"].min, Some(1.0));
-        assert_eq!(schema["n"].max, Some(9.0));
-        assert!(!schema.contains_key("bogus"));
-    }
-
-    #[test]
-    fn widget_metadata_missing_tables_fall_back() {
-        let lua = new_widget_lua().expect("sandbox");
-        load_widget_script(
-            &lua,
-            "plain",
-            r#"return { view = function() return "x" end }"#,
-        )
-        .expect("load");
-        let (defaults, schema) = load_widget_meta(&lua, "plain");
-        assert_eq!(defaults.interval, 1.0);
-        assert_eq!(defaults.size, 13.0);
-        assert!(defaults.props.is_empty());
-        assert!(schema.is_empty());
-    }
-
-    #[test]
-    fn publish_props_lands_table_on_app() {
-        use crate::config::PropValue;
-        let lua = new_widget_lua().expect("sandbox");
-        load_widget_script(
-            &lua,
-            "props",
-            r#"return { view = function() return "x" end }"#,
-        )
-        .expect("load");
-        let mut props = HashMap::new();
-        props.insert("format".to_string(), PropValue::Text("%Y".to_string()));
-        props.insert("n".to_string(), PropValue::Number(2.0));
-        props.insert("b".to_string(), PropValue::Bool(true));
-        publish_props(&lua, &props).expect("publish");
-        let app: mlua::Table = lua.named_registry_value("riced.widget.app").expect("app");
-        let published: mlua::Table = app.get("props").expect("props");
-        let format: String = published.get("format").expect("format");
-        let n: f64 = published.get("n").expect("n");
-        let b: bool = published.get("b").expect("b");
-        assert_eq!((format.as_str(), n, b), ("%Y", 2.0, true));
-    }
-
-    #[test]
-    fn resolved_props_flow_into_view() {
-        let lua = new_widget_lua().expect("sandbox");
-        load_widget_script(
-            &lua,
-            "fmt",
-            r#"return {
-                view = function(self) return self.props.format end,
-                defaults = { props = { format = "%H:%M" } },
-            }"#,
-        )
-        .expect("load");
-        // Override wins over the Lua default.
-        let mut props = HashMap::new();
-        props.insert(
-            "format".to_string(),
-            crate::config::PropValue::Text("%Y".to_string()),
-        );
-        publish_props(&lua, &props).expect("publish");
-        let value = call_lua_value(&lua, "view").expect("view");
-        assert_eq!(value, mlua::Value::String(lua.create_string("%Y").unwrap()));
-    }
-
-    #[test]
     fn apply_prop_patch_sets_and_clears() {
         use crate::config::{PropValue, WidgetPlacement};
         use crate::shell::PlacementProp;
@@ -4637,25 +3024,6 @@ mod tests {
             },
         );
         assert!(placement.props.is_empty());
-    }
-
-    #[test]
-    fn ui_spinner_parses_and_builds() {
-        let lua = new_widget_lua().expect("sandbox");
-        let value: mlua::Value = lua.load("return ui.spinner()").eval().expect("eval");
-        let node = parse_node(&value).expect("parse");
-        assert_eq!(node, WidgetNode::Spinner);
-        let _ = build_node(&node, 13.0, None).expect("builds");
-        // Nests like any node.
-        let value: mlua::Value = lua
-            .load("return ui.row({ ui.spinner(), ui.text(\"x\") })")
-            .eval()
-            .expect("eval");
-        let node = parse_node(&value).expect("parse");
-        assert!(matches!(
-            node,
-            WidgetNode::Row { children, .. } if children.len() == 2
-        ));
     }
 
     #[test]
@@ -5007,14 +3375,6 @@ mod tests {
     }
 
     #[test]
-    fn rich_text_builds_without_a_renderer() {
-        // Element construction is pure — smoke-test all three shapes.
-        let _ = rich_text("12%".to_string(), 13.0, 4.0);
-        let _ = rich_text("{icon:cpu} 12%".to_string(), 13.0, 4.0);
-        let _ = rich_text("{icon:nope}".to_string(), 13.0, 4.0);
-    }
-
-    #[test]
     fn ui_constructors_build_description_tables() {
         let lua = new_widget_lua().expect("sandbox");
         let node: Table = lua
@@ -5112,32 +3472,6 @@ mod tests {
     }
 
     #[test]
-    fn lua_setters_are_repeatable_and_components_are_directly_callable() {
-        let lua = empty_widget_lua().expect("lua");
-        inject_ui_base(&lua).expect("constructors");
-        lua.load(r#"iced.define('label', function(p) return iced.text(p.text) end)"#)
-            .exec()
-            .unwrap();
-        let value: Value = lua.load(r##"return iced.label({text='hello'}):width(10):width(30):color('#f00'):color('#0f0')"##).eval().unwrap();
-        assert!(matches!(parse_node(&value).unwrap(), WidgetNode::Text {
-            width: Some(NodeLength::Fixed(30.0)), color: Some(color), ..
-        } if color.g == 1.0 && color.r == 0.0));
-        let value: Value = lua
-            .load("return iced.row({}, 4):spacing(8):spacing(12)")
-            .eval()
-            .unwrap();
-        assert!(matches!(
-            parse_node(&value).unwrap(),
-            WidgetNode::Row { spacing: 12.0, .. }
-        ));
-        assert!(
-            lua.load("iced.define('text', function() return iced.text('x') end)")
-                .exec()
-                .is_err()
-        );
-    }
-
-    #[test]
     fn lua_listview_delegates_have_stable_keys_and_local_transitions() {
         let lua = empty_widget_lua().unwrap();
         inject_ui_base(&lua).unwrap();
@@ -5175,145 +3509,13 @@ mod tests {
         assert_eq!(transitions.2.duration, Some(Duration::from_millis(250)));
         let mut rt = aura_anim::core::runtime::MotionRuntime::new();
         let mut lists = WidgetLists::new();
-        let list = super::super::listview::ListView::new(108.0);
+        let list = crate::ui::listview::ListView::new(108.0);
         lists.insert("clock/center".into(), list);
         build_with_lists(&tree, "clock", 13.0, None, &rt, &lists).unwrap();
         for list in lists.values_mut() {
             list.clear_all(&mut rt);
         }
         assert_eq!(rt.motion_count(), 0);
-    }
-
-    #[test]
-    fn parse_node_reads_full_trees_and_rejects_junk() {
-        let lua = new_widget_lua().expect("sandbox");
-        let value: Value = lua
-            .load(
-                r#"return ui.row({ ui.text("hi"), ui.button("go", "run"), 7, { type = "icon", name = "cpu" } })"#,
-            )
-            .eval()
-            .expect("eval");
-        assert_eq!(
-            parse_node(&value).expect("parse"),
-            WidgetNode::Row {
-                children: vec![
-                    WidgetNode::Text {
-                        content: "hi".to_string(),
-                        size: None,
-                        width: None,
-                        height: None,
-                        color: None,
-                    },
-                    WidgetNode::Button {
-                        label: "go".to_string(),
-                        action: "run".to_string(),
-                        width: None,
-                        height: None,
-                        padding: None,
-                        color: None,
-                        background: None,
-                        radius: None,
-                    },
-                    WidgetNode::Text {
-                        content: "7".to_string(),
-                        size: None,
-                        width: None,
-                        height: None,
-                        color: None,
-                    },
-                    WidgetNode::Icon {
-                        name: "cpu".to_string(),
-                        color: None,
-                    },
-                ],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
-                spacing: 4.0,
-            }
-        );
-        for bad in ["return {}", "return { type = 'nope' }"] {
-            let value: Value = lua.load(bad).eval().expect("eval");
-            assert!(parse_node(&value).is_err(), "rejects {bad}");
-        }
-        // Wrong-typed constructor args fail at eval time instead
-        // (missing ones default: action "" is inert).
-        assert!(lua.load("return ui.row('flat')").eval::<Value>().is_err());
-    }
-
-    #[test]
-    fn build_node_builds_every_primitive_without_a_renderer() {
-        let size = 13.0;
-        let no_msg: Option<&dyn Fn(String) -> Plant> = None;
-        for node in [
-            WidgetNode::Text {
-                content: "hi".to_string(),
-                size: None,
-                width: None,
-                height: None,
-                color: None,
-            },
-            WidgetNode::Icon {
-                name: "cpu".to_string(),
-                color: None,
-            },
-            WidgetNode::Icon {
-                name: "typo".to_string(),
-                color: None,
-            },
-            WidgetNode::Row {
-                children: vec![WidgetNode::Text {
-                    content: "a".to_string(),
-                    size: None,
-                    width: None,
-                    height: None,
-                    color: None,
-                }],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
-                spacing: 2.0,
-            },
-            WidgetNode::Column {
-                children: vec![],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
-                spacing: 2.0,
-            },
-            WidgetNode::Button {
-                label: "go".to_string(),
-                action: "run".to_string(),
-                width: None,
-                height: None,
-                padding: None,
-                color: None,
-                background: None,
-                radius: None,
-            },
-            WidgetNode::Progress {
-                value: 1.5,
-                width: NodeLength::Fixed(120.0),
-                height: None,
-                color: None,
-                background: None,
-            },
-            WidgetNode::Separator {
-                height: 2.0,
-                color: None,
-            },
-        ] {
-            let _ = build_node(&node, size, no_msg).expect("builds");
-        }
-        // Buttons carry their action into the message when asked.
-        let node = WidgetNode::Button {
-            label: "go".to_string(),
-            action: "run".to_string(),
-            width: None,
-            height: None,
-            padding: None,
-            color: None,
-            background: None,
-            radius: None,
-        };
-        let _ = build_node(&node, size, Some(&|_| Plant::Tend)).expect("builds");
     }
 
     #[test]
@@ -5449,107 +3651,6 @@ mod tests {
     }
 
     #[test]
-    fn iced_define_and_use_round_trip_with_chaining() {
-        let lua = new_widget_lua().expect("sandbox");
-        lua.load(
-            r#"
-            iced.define("__t_stat", function(props)
-                return iced.row({ iced.icon(props.icon), iced.text(props.value) })
-            end)
-            "#,
-        )
-        .exec()
-        .expect("define");
-        // Chaining survives `use` (component returns a constructor value).
-        let value: Value = lua
-            .load(r#"return iced.use("__t_stat", { icon = "cpu", value = "42%" }):width("fill")"#)
-            .eval()
-            .expect("use");
-        match parse_node(&value).expect("parse") {
-            WidgetNode::Row {
-                width: NodeLength::Fill,
-                children,
-                ..
-            } => assert_eq!(children.len(), 2),
-            other => panic!("unexpected {other:?}"),
-        }
-        // Unknown names and non-node returns error naming the component.
-        let err = lua
-            .load(r#"return iced.use("__t_missing", {})"#)
-            .eval::<Value>()
-            .expect_err("missing");
-        assert!(err.to_string().contains("__t_missing"), "{err}");
-        lua.load(r#"iced.define("__t_bad", function() return 42 end)"#)
-            .exec()
-            .expect("define bad");
-        let err = lua
-            .load(r#"return iced.use("__t_bad", {})"#)
-            .eval::<Value>()
-            .expect_err("bad");
-        assert!(err.to_string().contains("__t_bad"), "{err}");
-    }
-
-    #[test]
-    fn color_setter_accepts_hex_and_rgba_tables() {
-        let lua = new_widget_lua().expect("sandbox");
-        let red = iced::Color::from_rgb(1.0, 0.0, 0.0);
-        for (src, expect) in [
-            (r##"return iced.text("hi"):color("#ff0000")"##, red),
-            (r##"return iced.text("hi"):color("#f00")"##, red),
-            (
-                r#"return iced.text("hi"):color({ r = 1, g = 0, b = 0 })"#,
-                red,
-            ),
-            (
-                r#"return iced.text("hi"):color({ 1, 0, 0, 0.5 })"#,
-                iced::Color::from_rgba(1.0, 0.0, 0.0, 0.5),
-            ),
-        ] {
-            let value: Value = lua.load(src).eval().expect("eval");
-            match parse_node(&value).expect("parse") {
-                WidgetNode::Text { color: Some(c), .. } => {
-                    assert!(
-                        (c.r - expect.r).abs() < 0.01
-                            && (c.g - expect.g).abs() < 0.01
-                            && (c.b - expect.b).abs() < 0.01
-                            && (c.a - expect.a).abs() < 0.01,
-                        "{src} -> {c:?}"
-                    );
-                }
-                other => panic!("{src} -> unexpected {other:?}"),
-            }
-        }
-        // Unset stays themed; garbage names the field at parse time
-        // (setters store, parse validates — same as sizes).
-        let value: Value = lua.load(r#"return iced.text("hi")"#).eval().expect("eval");
-        assert!(matches!(
-            parse_node(&value).expect("parse"),
-            WidgetNode::Text { color: None, .. }
-        ));
-        let value: Value = lua
-            .load(r#"return iced.text("hi"):color("nope")"#)
-            .eval()
-            .expect("setter stores");
-        let err = parse_node(&value).expect_err("bad hex");
-        assert!(err.contains("color"), "{err}");
-        // Buttons and icons take colors too; buttons keep the tinted style.
-        let value: Value = lua
-            .load(r##"return iced.button("go", "run"):color("#00ff00")"##)
-            .eval()
-            .expect("eval");
-        let node = parse_node(&value).expect("parse");
-        assert!(matches!(node, WidgetNode::Button { color: Some(_), .. }));
-        let _ = build_node(&node, 13.0, None).expect("builds tinted");
-        let value: Value = lua
-            .load(r##"return iced.icon("cpu"):color("#00ff00")"##)
-            .eval()
-            .expect("eval");
-        let node = parse_node(&value).expect("parse");
-        assert!(matches!(node, WidgetNode::Icon { color: Some(_), .. }));
-        let _ = build_node(&node, 13.0, None).expect("builds tinted");
-    }
-
-    #[test]
     fn seed_components_define_working_builders() {
         let lua = new_widget_lua().expect("sandbox");
         load_seed_components(&lua);
@@ -5610,72 +3711,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_transitions_reads_qml_subset_and_defaults() {
-        use super::super::listview::Transition;
-        let enter = Transition::slide_fade(16.0);
-        let exit = Transition::slide_fade_out(-16.0);
-        let displaced = Transition {
-            from: crate::ui::anim::ItemMotion::settled(),
-            to: crate::ui::anim::ItemMotion::settled(),
-            duration: None,
-        };
-        // No transitions() at all: defaults pass through untouched.
-        let lua = new_widget_lua().expect("sandbox");
-        let (e, x, d, _) = parse_transitions(&lua, &enter, &exit, &displaced).expect("parse");
-        assert_eq!(e.from.x, 16.0);
-        assert_eq!(x.to.x, -16.0);
-        assert!(d.duration.is_none());
-        // Full spec overrides from/to/duration per slot.
-        load_widget_script(&lua, "transitions",
-            r#"
-            local app = {view=function() return ui.text('x') end}
-            function app:transitions()
-                return {
-                    add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
-                    remove = { x = { to = -200 }, duration = 250 },
-                    displaced = { duration = 300 },
-                }
-            end
-            return app
-            "#,
-        )
-        .expect("load");
-        let (e, x, d, custom) = parse_transitions(&lua, &enter, &exit, &displaced).expect("parse");
-        assert!(custom, "a transitions() spec marks the list customized");
-        assert_eq!((e.from.x, e.to.x, e.from.opacity), (200.0, 0.0, 0.0));
-        assert_eq!(x.to.x, -200.0);
-        assert_eq!(
-            (e.duration, x.duration, d.duration),
-            (
-                Some(Duration::from_millis(250)),
-                Some(Duration::from_millis(250)),
-                Some(Duration::from_millis(300)),
-            )
-        );
-        // Partial spec keeps unspecified fields at defaults (exit y is
-        // untouched, add.to.x untouched here since only from given).
-        load_widget_script(&lua, "transitions", r#"return {view=function() return '' end, transitions=function() return {add={x={from=50}}} end}"#)
-            .expect("load");
-        let (e, x, d, _) = parse_transitions(&lua, &enter, &exit, &displaced).expect("parse");
-        assert_eq!(e.from.x, 50.0);
-        assert_eq!(e.to.x, 0.0); // default settle
-        assert_eq!(x.to.x, -16.0); // exit untouched
-        assert!(d.duration.is_none());
-        // Malformed specs error naming the slot; nil passes through.
-        load_widget_script(&lua, "transitions", r#"return {view=function() return '' end, transitions=function() return {add={x='nope'}} end}"#)
-            .expect("load");
-        let err = parse_transitions(&lua, &enter, &exit, &displaced).expect_err("bad");
-        assert!(err.contains("add"), "{err}");
-        load_widget_script(
-            &lua,
-            "transitions",
-            "return {view=function() return '' end, transitions=function() return nil end}",
-        )
-        .expect("load");
-        assert!(parse_transitions(&lua, &enter, &exit, &displaced).is_ok());
-    }
-
-    #[test]
     fn notify_center_seed_reads_queue_and_dismisses() {
         use crate::config::SEED_NOTIFY_CENTER_LUA;
         let lua = new_widget_lua().expect("sandbox");
@@ -5733,7 +3768,7 @@ mod tests {
 
     #[test]
     fn build_anim_list_merges_live_and_ghosts() {
-        use super::super::listview::{Axis, ListView};
+        use crate::ui::listview::{Axis, ListView};
         use aura_anim::core::runtime::MotionRuntime;
         // Live row of two buttons, the first mid-enter, plus one
         // exiting ghost at index 1.
