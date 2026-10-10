@@ -26,6 +26,11 @@ pub(crate) struct WindowState {
 }
 
 impl WindowState {
+    pub(crate) fn register_popup(&mut self, output: OutputId, popup: Popup) {
+        let id = popup.win_id;
+        self.ids.insert(id, PlotInfo::Popup(output));
+        self.popups.insert(id, popup);
+    }
     pub(crate) fn sentinel_bars(&self) -> Vec<window::Id> {
         self.ids
             .iter()

@@ -117,3 +117,50 @@ impl ListContext<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lua_listview_delegates_have_stable_keys_and_local_transitions() {
+        let lua = crate::lua::sandbox::new_lua(crate::lua::sandbox::Profile::Widget).unwrap();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let value: mlua::Value = lua.load(r#"return iced.scrollable(iced.listview({{id=1,title='one'},{id=2,title='two'}}):id('center'):key('id'):pitch(108):spacing(8)
+            :delegate(function(n) return iced.container(iced.text(n.title)):padding(10):radius(6) end)
+            :onEntered({x={from=200,to=0},opacity={from=0,to=1},duration=250})
+            :onExit({x={to=-200},opacity={to=0},duration=250}):onDisplaced({duration=250}))"#).eval().unwrap();
+        let tree = crate::ui::decode::parse_node(&value).unwrap();
+        let WidgetNode::Scrollable { child, .. } = &tree else {
+            panic!("scrollable");
+        };
+        let WidgetNode::ListView {
+            items,
+            transitions,
+            pitch,
+            ..
+        } = &**child
+        else {
+            panic!("listview");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+        assert_eq!(*pitch, 108.0);
+        assert_eq!(transitions.0.from.x, 200.0);
+        assert_eq!(transitions.1.to.x, -200.0);
+        assert_eq!(transitions.2.duration, Some(Duration::from_millis(250)));
+        let mut motion = aura_anim::core::runtime::MotionRuntime::new();
+        let mut lists = WidgetLists::new();
+        lists.insert("clock/center".into(), ListView::new(108.0));
+        super::super::build_with_lists(&tree, "clock", 13.0, None, &motion, &lists).unwrap();
+        for list in lists.values_mut() {
+            list.clear_all(&mut motion);
+        }
+        assert_eq!(motion.motion_count(), 0);
+    }
+}

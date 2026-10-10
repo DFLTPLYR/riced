@@ -7,6 +7,19 @@ use super::seed::{
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+pub(crate) fn widget_file_path(name: &str, file: &str) -> PathBuf {
+    let file = file.trim();
+    if file.is_empty() {
+        return widgets_dir().join(format!("{}.lua", name.trim()));
+    }
+    let path = PathBuf::from(file);
+    if path.is_absolute() {
+        path
+    } else {
+        widgets_dir().join(path)
+    }
+}
+
 /// Discovered widget files: `(name, path)` with name = file stem,
 /// sorted by name. Non-recursive (so `components/` never becomes
 /// widgets), `*.lua` only, dotfiles skipped.
@@ -189,6 +202,22 @@ fn components_source_in(dir: &std::path::Path) -> Option<String> {
 mod tests {
     use super::super::seed::seed_components_in;
     use super::*;
+
+    #[test]
+    fn widget_script_path_defaults_to_name_lua() {
+        assert_eq!(
+            widget_file_path("clock", ""),
+            widgets_dir().join("clock.lua")
+        );
+        assert_eq!(
+            widget_file_path("x", "sub/y.lua"),
+            widgets_dir().join("sub/y.lua")
+        );
+        assert_eq!(
+            widget_file_path("x", "/tmp/abs.lua"),
+            PathBuf::from("/tmp/abs.lua")
+        );
+    }
 
     #[test]
     fn discovery_skips_non_widgets() {

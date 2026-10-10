@@ -700,7 +700,7 @@ impl Plots {
                     // Fresh native surface: force the mask reinstall and
                     // assert the passive keyboard policy exactly once. Later
                     // reconciles only push when the card rects actually move.
-                    self.notification.mask.clear();
+                    self.notification.masks.remove(&output);
                     Command::batch(vec![
                         Command::done(Plant::KeyboardInteractivityChange {
                             id: info.window,
@@ -805,7 +805,7 @@ impl Plots {
                 // (same defs, fresh runtimes) and drops the cached
                 // notification renderer so it re-execs the library.
                 if self.catalog.library_changed() {
-                    self.notification.lua = None;
+                    self.notification.renderer.lua = None;
                     return Command::batch(vec![
                         Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(
                             self.catalog.definitions.clone(),

@@ -34,6 +34,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_service_exposes_cpu_memory_and_gpu() {
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let mut system = sysinfo::System::new();
+        system.refresh_cpu_usage();
+        system.refresh_memory();
+        crate::lua::test_support::publish_test_services(&lua, &system, Some(42.0));
+        assert!(lua.load("return system.cpu_usage").eval::<f32>().unwrap() >= 0.0);
+        assert!(system.total_memory() > 0);
+        assert_eq!(
+            lua.load("return system.cpu_count").eval::<u64>().unwrap() as usize,
+            system.cpus().len()
+        );
+        assert_eq!(
+            lua.load("return system.gpu_usage").eval::<f32>().unwrap(),
+            42.0
+        );
+        crate::lua::test_support::publish_test_services(&lua, &system, None);
+        assert!(matches!(
+            lua.load("return system.gpu_usage")
+                .eval::<mlua::Value>()
+                .unwrap(),
+            mlua::Value::Nil
+        ));
+    }
+
+    #[test]
     fn system_table_carries_cpu_mem_and_optional_gpu() {
         let lua = mlua::Lua::new();
         let sys = sysinfo::System::new();

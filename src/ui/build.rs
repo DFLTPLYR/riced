@@ -334,6 +334,101 @@ mod tests {
     use crate::ui::decode::parse_node;
     use mlua::{Lua, Value};
 
+    #[test]
+    fn style_setters_parse_build_and_gate_by_type() {
+        let lua = lua();
+        for (source, width, has_color) in [
+            (
+                r##"return ui.container(ui.text('x')):border('#ff0000')"##,
+                1.0,
+                true,
+            ),
+            (
+                r##"return ui.container(ui.text('x')):border('#ff0000'):border_width(3)"##,
+                3.0,
+                true,
+            ),
+            (
+                "return ui.container(ui.text('x')):border_width(3)",
+                3.0,
+                false,
+            ),
+        ] {
+            let value: Value = lua.load(source).eval().unwrap();
+            match parse_node(&value).unwrap() {
+                WidgetNode::Container {
+                    border,
+                    border_width,
+                    ..
+                } => {
+                    assert_eq!(border_width, width, "{source}");
+                    assert_eq!(border.is_some(), has_color, "{source}");
+                    if has_color {
+                        assert_eq!(border, Some(iced::Color::from_rgb(1.0, 0.0, 0.0)));
+                    }
+                }
+                other => panic!("container: {other:?}"),
+            }
+        }
+        let value: Value = lua
+            .load(r##"return ui.button('go','run'):background('#00ff00')"##)
+            .eval()
+            .unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Button {
+                background: Some(_),
+                ..
+            }
+        ));
+        let value: Value = lua
+            .load(r##"return ui.progress(0.5):color('#ff0000'):background('#0000ff')"##)
+            .eval()
+            .unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Progress {
+                color: Some(_),
+                background: Some(_),
+                ..
+            }
+        ));
+        let value: Value = lua
+            .load("return ui.separator():color({r=1,g=0,b=0})")
+            .eval()
+            .unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Separator { color: Some(_), .. }
+        ));
+        for source in [
+            r##"return ui.container(ui.text('x')):background('#112233'):border('#ff0000'):radius(8)"##,
+            r##"return ui.button('go','run'):background('#00ff00'):color('#000000')"##,
+            r##"return ui.progress(0.5):color('#ff0000'):background('#0000ff')"##,
+            r##"return ui.separator():color('#ff0000')"##,
+        ] {
+            let value: Value = lua.load(source).eval().unwrap();
+            let _ = build_node(&parse_node(&value).unwrap(), 13.0, None).unwrap();
+        }
+        for source in [
+            "return ui.button('go','run'):background(42)",
+            "return ui.separator():color(42)",
+        ] {
+            let value: Value = lua.load(source).eval().unwrap();
+            assert!(parse_node(&value).is_err());
+        }
+        assert!(
+            lua.load(r##"return ui.text('x'):background('#fff')"##)
+                .eval::<Value>()
+                .is_err()
+        );
+        assert!(
+            lua.load(r##"return ui.button('go','run'):border('#fff')"##)
+                .eval::<Value>()
+                .is_err()
+        );
+    }
+
     fn lua() -> Lua {
         let lua = Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();

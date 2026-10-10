@@ -325,6 +325,222 @@ mod tests {
     }
 
     #[test]
+    fn ui_with_chains_like_iced_builders() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let parse = |source: &str| parse_node(&lua.load(source).eval::<Value>().unwrap()).unwrap();
+        assert_eq!(
+            parse("return ui.progress(0.5):width(200)"),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: NodeLength::Fixed(200.0),
+                height: None,
+                color: None,
+                background: None
+            }
+        );
+        assert_eq!(
+            parse("return ui.text('hi'):size(14)"),
+            WidgetNode::Text {
+                content: "hi".into(),
+                size: Some(14.0),
+                width: None,
+                height: None,
+                color: None
+            }
+        );
+        assert_eq!(
+            parse("return ui.button('go','run'):width(120):padding(4)"),
+            WidgetNode::Button {
+                label: "go".into(),
+                action: "run".into(),
+                width: Some(NodeLength::Fixed(120.0)),
+                height: None,
+                padding: Some(4.0),
+                color: None,
+                background: None,
+                radius: None
+            }
+        );
+        assert_eq!(
+            parse("return ui.row({ui.text('x')}):spacing(8)"),
+            WidgetNode::Row {
+                children: vec![text("x")],
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                spacing: 8.0
+            }
+        );
+        assert!(
+            !lua.load(
+                "local ok=pcall(function() return ui.progress(0.5):padding(4) end); return ok"
+            )
+            .eval::<bool>()
+            .unwrap()
+        );
+        let value: Value = lua
+            .load("return ui.progress(0.5):width('wide')")
+            .eval()
+            .unwrap();
+        assert!(parse_node(&value).is_err());
+        assert_eq!(
+            parse("return ui.progress(0.5):width(200):height(12)"),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: NodeLength::Fixed(200.0),
+                height: Some(NodeLength::Fixed(12.0)),
+                color: None,
+                background: None
+            }
+        );
+        assert!(matches!(
+            parse("return ui.button('go','run'):height(36)"),
+            WidgetNode::Button {
+                height: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse("return ui.text('hi'):height(20)"),
+            WidgetNode::Text {
+                height: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ui_constructors_build_description_tables() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let node: Table = lua
+            .load("return ui.row({ui.icon('cpu'),ui.text('42%')},8)")
+            .eval()
+            .unwrap();
+        assert_eq!(node.get::<String>("type").unwrap(), "row");
+        assert_eq!(
+            crate::ui::decode::node_property(&node, "spacing").unwrap(),
+            Value::Number(8.0)
+        );
+        let children: Vec<Table> = node
+            .get::<Table>("children")
+            .unwrap()
+            .sequence_values()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(children.len(), 2);
+        let value: Value = lua
+            .load("return ui.column({ui.progress(0.5)})")
+            .eval()
+            .unwrap();
+        assert_eq!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Column {
+                children: vec![WidgetNode::Progress {
+                    value: 0.5,
+                    width: NodeLength::Fixed(120.0),
+                    height: None,
+                    color: None,
+                    background: None
+                }],
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                spacing: 4.0
+            }
+        );
+        let value: Value = lua.load("return ui.progress(0.5,200)").eval().unwrap();
+        assert_eq!(
+            parse_node(&value).unwrap(),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: NodeLength::Fixed(200.0),
+                height: None,
+                color: None,
+                background: None
+            }
+        );
+        let value: Value = lua.load("return ui.progress(0.5,'wide')").eval().unwrap();
+        assert!(parse_node(&value).is_err());
+    }
+
+    #[test]
+    fn separator_parses_defaults_and_chains() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        assert!(lua.load("return ui==iced").eval::<bool>().unwrap());
+        for (source, height) in [
+            ("return iced.separator()", 1.0),
+            ("return iced.separator():height(3)", 3.0),
+            ("return ui.separator()", 1.0),
+        ] {
+            let value: Value = lua.load(source).eval().unwrap();
+            assert_eq!(
+                parse_node(&value).unwrap(),
+                WidgetNode::Separator {
+                    height,
+                    color: None
+                },
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_length_strings_map_to_fill_and_shrink() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let parse = |source: &str| parse_node(&lua.load(source).eval::<Value>().unwrap()).unwrap();
+        assert_eq!(
+            parse("return ui.progress(0.5):width('fill')"),
+            WidgetNode::Progress {
+                value: 0.5,
+                width: NodeLength::Fill,
+                height: None,
+                color: None,
+                background: None
+            }
+        );
+        assert_eq!(
+            parse("return ui.row({ui.text('x')}):width('FILL'):height('shrink')"),
+            WidgetNode::Row {
+                children: vec![text("x")],
+                width: NodeLength::Fill,
+                height: NodeLength::Shrink,
+                spacing: 4.0
+            }
+        );
+        assert!(matches!(
+            parse("return ui.text('hi'):width('fill')"),
+            WidgetNode::Text {
+                width: Some(NodeLength::Fill),
+                ..
+            }
+        ));
+        let value: Value = lua
+            .load("return ui.progress(0.5):width('huge')")
+            .eval()
+            .unwrap();
+        assert!(parse_node(&value).is_err());
+        assert_eq!(
+            parse("return ui.row({ui.text('x')})"),
+            WidgetNode::Row {
+                children: vec![text("x")],
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+                spacing: 4.0
+            }
+        );
+        let fill = WidgetNode::Progress {
+            value: 0.5,
+            width: NodeLength::Fill,
+            height: Some(NodeLength::Fill),
+            color: None,
+            background: None,
+        };
+        let _ = crate::ui::build::build_node(&fill, 13.0, None).unwrap();
+    }
+
+    #[test]
     fn lua_setters_are_repeatable_and_components_are_directly_callable() {
         let lua = Lua::new();
         inject_ui_base(&lua).unwrap();

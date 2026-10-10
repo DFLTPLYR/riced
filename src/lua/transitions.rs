@@ -3,6 +3,7 @@ use super::value::lua_value_kind;
 use crate::ui::listview::Transition;
 use mlua::{Lua, Table, Value};
 use std::time::Duration;
+pub(crate) type TransitionSpec = (Transition, Transition, Transition, bool);
 
 pub(crate) fn parse_transitions(
     lua: &Lua,

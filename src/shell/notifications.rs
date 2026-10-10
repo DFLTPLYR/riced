@@ -3,10 +3,7 @@ use super::screens::Notification;
 use crate::ui::{listview::ListView, node::WidgetNode};
 use iced::widget::image::Handle;
 use iced_wayland_subscriber::OutputId;
-use std::{
-    collections::{HashMap, VecDeque},
-    time::SystemTime,
-};
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug)]
 pub(crate) struct NotificationState {
@@ -15,14 +12,12 @@ pub(crate) struct NotificationState {
     pub scroll: HashMap<OutputId, f32>,
     pub exit_images: HashMap<u32, Handle>,
     pub next_id: u32,
-    pub lua: Option<mlua::Lua>,
-    pub revision: Option<SystemTime>,
-    pub error: Option<String>,
+    pub renderer: crate::lua::notifications::NotificationRenderer,
     pub trees: HashMap<u32, WidgetNode>,
     pub list: ListView<(OutputId, u32), WidgetNode>,
     /// Last input-region rects pushed to the compositor. Fresh native
     /// surfaces (NewShell) reset this so the mask is always reinstalled.
-    pub mask: Vec<(i32, i32, i32, i32)>,
+    pub masks: HashMap<OutputId, Vec<(i32, i32, i32, i32)>>,
 }
 
 impl Default for NotificationState {
@@ -33,12 +28,10 @@ impl Default for NotificationState {
             scroll: HashMap::new(),
             exit_images: HashMap::new(),
             next_id: 1,
-            lua: None,
-            revision: None,
-            error: None,
+            renderer: Default::default(),
             trees: HashMap::new(),
             list: ListView::new(super::screens::notification::CARD_PITCH),
-            mask: Vec::new(),
+            masks: HashMap::new(),
         }
     }
 }
@@ -63,6 +56,7 @@ impl NotificationState {
             .collect();
         self.sizes.remove(&output);
         self.scroll.remove(&output);
+        self.masks.remove(&output);
         self.queue
             .retain(|notification| notification.output != Some(output));
         let live: std::collections::HashSet<_> = self

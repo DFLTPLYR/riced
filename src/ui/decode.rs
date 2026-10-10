@@ -325,6 +325,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn listview_delegate_accepts_mixed_nodes_and_components() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        lua.load(
+            "iced.define('wsbtn',function(p) return iced.button(p.label,p.action):width(120) end)",
+        )
+        .exec()
+        .unwrap();
+        let value: Value = lua.load("return ui.listview({{key='a',label='x'},{key='b',label='y'}}):id('s'):key('key'):delegate(function(item) if item.key=='a' then return ui.text(item.label) else return ui.wsbtn({label=item.label,action='go'}) end end)").eval().unwrap();
+        match parse_node(&value).unwrap() {
+            WidgetNode::ListView { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[0].1, WidgetNode::Text { .. }));
+                assert!(
+                    matches!(items[1].1, WidgetNode::Button {ref label, ref action, ..} if label == "y" && action == "go")
+                );
+            }
+            other => panic!("expected listview, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_node_reads_full_trees_and_rejects_junk() {
         let lua = mlua::Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();

@@ -182,6 +182,17 @@ impl WidgetState {
         })
     }
 
+    pub(crate) fn popup(
+        &self,
+        resolved: &ResolvedWidget,
+        context: &EntryContext<'_>,
+    ) -> Option<Result<Value, String>> {
+        self.instances.get(&resolved.id).map(|lua| {
+            Self::publish_entry(lua, resolved, context)?;
+            call_lua_value(lua, "popup")
+        })
+    }
+
     pub(crate) fn press(
         &self,
         resolved: &ResolvedWidget,
@@ -219,6 +230,50 @@ impl WidgetState {
 mod tests {
     use super::*;
     use mlua::Table;
+
+    #[test]
+    fn lua_popup_and_press_contract() {
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(
+            &lua,
+            "test",
+            "return {view=function() return 'x' end, popup=function() return 'menu' end}",
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::value::coerce_text(call_lua_value(&lua, "popup").unwrap(), "popup()")
+                .unwrap(),
+            "menu"
+        );
+        load_widget_script(&lua, "test", "return {flag=false, view=function(self) return self.flag and 1 or 0 end, on_press=function(self) self.flag=true end}").unwrap();
+        call_lua_value(&lua, "on_press").unwrap();
+        assert_eq!(
+            super::super::value::coerce_text(call_lua_value(&lua, "view").unwrap(), "view()")
+                .unwrap(),
+            "1"
+        );
+        let mut states = HashMap::new();
+        states.insert("w".into(), new_widget_lua().unwrap());
+        load_widget_script(&states["w"], "w", "return {view=function() return 'x' end}").unwrap();
+        assert!(!lua_has_func(&states, "w", "popup"));
+        assert!(!lua_has_func(&states, "w", "on_press"));
+        assert!(!lua_has_func(&states, "missing", "view"));
+        assert!(call_lua_value(&states["w"], "on_press").is_err());
+    }
+
+    #[test]
+    fn lua_on_action_receives_the_item_key() {
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(&lua, "test", "seen={}; return {view=function() return '' end, on_action=function(self,name) seen[#seen+1]=name end}").unwrap();
+        call_lua_named_action(&lua, "toggle").unwrap();
+        assert_eq!(
+            lua.load("return seen[1]").eval::<String>().unwrap(),
+            "toggle"
+        );
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(&lua, "plain", "return {view=function() return 'x' end}").unwrap();
+        call_lua_named_action(&lua, "ws:1").unwrap();
+    }
 
     #[test]
     fn lua_sandbox_runs_app_view() {

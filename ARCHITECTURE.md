@@ -25,6 +25,12 @@ src/
         input.rs       bar input identity, slot hit-testing and press matching
         edit.rs        live geometry/slot edits and sparse persistence snapshots
         animation.rs   list-animation synchronization context
+      notification/
+        queue.rs       enqueue/retire/action guards over queue and motion state
+        runtime.rs     renderer/cache/list adapter with service snapshots
+        surface.rs     output selection and passive native-surface creation
+      popup/
+        surface.rs     popup geometry, list synchronization and registration
       setting/         Settings host, explicit page snapshots and shared controls
         context_menu.rs source-backed chrome property page
         wallpaper.rs   wallpaper map and image-property composition
@@ -53,9 +59,12 @@ src/
     composable.rs      source-backed chrome instances and last-good reloads
     widgets.rs         placement VMs, entry publication and per-window render caches
     metadata.rs        widget author defaults and property-schema decoding
+    notifications.rs   notification app entries, metadata and owned action decoding
     transitions.rs     transition decoding
     value.rs           scalar coercion and diagnostics
     demo.rs            development host
+    seed_tests.rs      bundled widget contracts using canonical Lua/UI APIs
+    test_support.rs    explicit bundled-library and service fixtures (tests only)
   config/
     mod.rs             public configuration API
     schema.rs          persisted types and pure transformations
@@ -207,14 +216,31 @@ Completed in the continuation:
   background protection, child/cache cleanup and output isolation.
 - Primitive realization, spinner composition and tinted-node rendering
   tests moved to `ui/build.rs`, using shared constructors directly.
+- Notification arrivals, retirement, expiry and action guards use a
+  queue/motion context; render entries use a separate renderer/cache/list
+  context with read-only service inputs. `lua/notifications.rs` owns VM
+  revision tracking, payload publication, self-bound views and owned action
+  decoding. Library installation occurs once per notification VM.
+- Notification output selection and native creation use output/window/size
+  snapshots. Popup creation and refresh use window and list-animation
+  contexts; popup/action entries share `lua/widgets.rs::EntryContext` with
+  widget views and presses. Bar press dispatch borrows only window identity
+  and input state.
+- Notification input-mask fingerprints are per output, including native
+  surface invalidation and output teardown. A two-output regression guards
+  identical card layouts from suppressing each other's mask updates.
+- The remaining shared constructor/style/delegate tests moved into `ui/`,
+  script/seed contracts into `lua/`, system publication into `services/`,
+  and path resolution into `config/`. Popup-specific tests live with the
+  popup host and list-animation tests with the bar animation adapter.
+  `top/mod.rs` retains bar-specific tests and no test-only Lua/UI re-exports.
 
-Remaining work:
+Further consolidation:
 
-1. Continue narrowing cross-domain window creation, popup/input dispatch
-   and notification arrival/render/action handlers into explicit contexts.
-2. Relocate the remaining shared Lua/UI tests still living in the bar host
-   to their canonical modules, and drop the test-only re-exports left in
-   the bar host. Keep file-size targets advisory until these land.
+Shell coordinators still assemble contexts and batch cross-domain commands.
+Bar bootstrap/config persistence and desktop/menu event coordination can
+adopt the same context pattern. File-size targets remain advisory; ownership
+and dependency boundaries determine extraction scope.
 
 ## Verification
 

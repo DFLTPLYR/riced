@@ -11,6 +11,37 @@ use std::{
 
 pub(super) const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
 
+pub(super) struct InputContext<'a> {
+    pub windows: &'a crate::shell::windows::WindowState,
+    pub input: &'a mut InputState,
+}
+
+impl InputContext<'_> {
+    pub fn press(&mut self, bar: window::Id, button: Button, now: Instant) {
+        let Some(crate::shell::windows::PlotInfo::Top(output)) = self.windows.ids.get(&bar) else {
+            return;
+        };
+        let slot = self.windows.tops.get(&bar).and_then(|top| {
+            cursor_slot(
+                top,
+                *output,
+                &self.windows.output_infos,
+                self.input.cursors.get(&bar).copied(),
+            )
+        });
+        record_gap_press(self.input, bar, slot, button, now);
+    }
+
+    pub fn widget_press(&mut self, bar: window::Id, slot: usize, placement: String, now: Instant) {
+        if matches!(
+            self.windows.ids.get(&bar),
+            Some(crate::shell::windows::PlotInfo::Top(_))
+        ) {
+            self.input.presses.insert(bar, (slot, Some(placement), now));
+        }
+    }
+}
+
 pub(super) fn cursor_slot(
     top: &Top,
     output: OutputId,

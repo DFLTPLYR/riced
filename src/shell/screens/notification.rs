@@ -16,23 +16,21 @@
 //! equivalent via `OutputOption`), any other value pins by output name
 //! (`OutputInfo.name`, e.g. `"DP-1"`).
 
+mod queue;
+mod runtime;
+mod surface;
 use super::background::Background;
 use crate::config::NotificationConfig;
-use crate::lua::widgets::{inject_ui, new_widget_lua};
+use crate::shell::state::Plots;
 use crate::shell::{NotifyEvent, Plant};
-use crate::shell::{state::Plots, windows::PlotInfo};
 use crate::theme;
 use crate::ui::anim::{ENTER_OFFSET, ItemMotion};
 use crate::ui::build::build_node;
-use crate::ui::decode::parse_node;
-use crate::ui::listview::Axis;
 use crate::ui::node::{NodeLength, WidgetNode};
-use iced::window;
 use iced::{Element, Length, Task as Command, Vector};
-use iced_exwlshell::reexport::{
-    Anchor, BlurOption, KeyboardInteractivity, Layer, LayerSize, NewLayerShellSettings,
-    OutputOption, WlRegion,
-};
+use iced_exwlshell::reexport::{Anchor, LayerSize, WlRegion};
+#[cfg(test)]
+use iced_exwlshell::reexport::{KeyboardInteractivity, Layer};
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::OutputId;
@@ -179,28 +177,11 @@ pub(crate) fn enqueue(queue: &mut VecDeque<Notification>, item: Notification) {
 /// Resolve the target output: configured name first (`"mouse"`
 /// means cursor output), then cursor output, then first output.
 pub(crate) fn resolve_output(plots: &Plots, cfg: &NotificationConfig) -> Option<OutputId> {
-    if cfg.output != "mouse" {
-        let wanted = cfg.output.to_lowercase();
-        if let Some((id, _)) = plots.windows.output_infos.iter().find(|(_, info)| {
-            info.name
-                .as_deref()
-                .is_some_and(|n| n.to_lowercase() == wanted)
-        }) {
-            return Some(*id);
-        }
+    surface::OutputContext {
+        outputs: &plots.windows.output_infos,
+        cursor: plots.input.global,
     }
-    if let Some(cursor) = plots.input.global {
-        let geoms: Vec<_> = plots
-            .windows
-            .output_infos
-            .iter()
-            .map(|(id, info)| (*id, Background::output_geometry(info)))
-            .collect();
-        if let Some(hit) = output_at(&geoms, cursor) {
-            return Some(hit);
-        }
-    }
-    plots.windows.output_infos.keys().copied().next()
+    .resolve(cfg)
 }
 
 /// Corner anchor + outward margins for the configured position.
@@ -253,30 +234,12 @@ impl Notification {
         output: OutputId,
         cfg: &NotificationConfig,
     ) -> Option<Command<Plant>> {
-        if plots.windows.notifications.contains_key(&output) {
-            return None;
+        surface::SurfaceContext {
+            windows: &mut plots.windows,
+            sizes: &mut plots.notification.sizes,
+            config: cfg,
         }
-        let id = window::Id::unique();
-        let (anchor, margin) = placement(cfg);
-        let height = window_height_for_output(output_height(plots, output));
-        let settings = NewLayerShellSettings {
-            anchor,
-            layer: Layer::Overlay,
-            exclusive_zone: None,
-            size: LayerSize::px(cfg.width.max(200.0) as u32, height),
-            output_option: OutputOption::GlobalName(output.0),
-            margin: Some(margin),
-            namespace: Some(format!("Riced - Notifications {output:?}")),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            // A new output-height surface must not intercept the pointer
-            // before its card-only input mask can be installed.
-            events_transparent: true,
-            blur_option: BlurOption::None,
-        };
-        plots.windows.notifications.insert(output, id);
-        plots.windows.ids.insert(id, PlotInfo::Notification(output));
-        plots.notification.sizes.insert(output, height);
-        Some(Command::done(Plant::NewLayerShell { settings, id }))
+        .ensure(output)
     }
 }
 
@@ -286,38 +249,16 @@ impl Notification {
 /// Survivors below the removed index glide up one slot (`displaced`,
 /// owned by the list diff). Returns false when the id was already gone.
 fn retire_noti(plots: &mut Plots, id: u32) -> bool {
-    let order = visible_order(&plots.notification.queue);
-    let Some(pos) = order.iter().position(|(nid, _)| *nid == id) else {
-        plots.notification.trees.remove(&id);
-        return false;
-    };
-    let output = order[pos].1;
-    let old_keys = output_keys(&plots.notification.queue, output);
-    let per_output_pos = old_keys.iter().position(|(_, nid)| *nid == id);
-    let cached = plots.notification.trees.remove(&id);
-    let fallback = plots.notification.queue.iter().find(|n| n.id == id);
-    let node = cached.unwrap_or_else(|| default_tree(fallback));
-    if let Some(image) = fallback.and_then(|n| n.image.clone()) {
-        plots.notification.exit_images.insert(id, image);
+    queue_context(plots).retire(id)
+}
+
+fn queue_context(plots: &mut Plots) -> queue::QueueContext<'_> {
+    queue::QueueContext {
+        state: &mut plots.notification,
+        motion: &mut plots.animation.motion,
+        config: &plots.config.notifications,
+        duration: plots.config.animation.speed.duration(),
     }
-    plots.notification.queue.retain(|n| n.id != id);
-    let new_keys = output_keys(&plots.notification.queue, output);
-    let duration = plots.config.animation.speed.duration();
-    // Bottom corners slide in from the other side (mirrors the old
-    // `enter_from` direction).
-    plots
-        .notification
-        .list
-        .set_enter_from_x(enter_from(&plots.config.notifications).x);
-    plots.notification.list.update(
-        &mut plots.animation.motion,
-        duration,
-        Axis::Vertical,
-        &old_keys,
-        &new_keys,
-        &[(per_output_pos.unwrap_or(pos), (output, id), node)],
-    );
-    true
 }
 
 /// Newest-first keys for one output's stack: the list order shared by
@@ -581,135 +522,26 @@ pub(crate) fn view(context: ViewContext<'_>, output: OutputId) -> Element<'_, Pl
         })
         .into()
 }
-/// Script file for the Lua renderer, next to the widget scripts
-/// (`~/.config/riced/widgets/notifications.lua`). Never overwritten
-/// once seeded; missing file falls back to [`default_tree`].
-pub(crate) fn script_path() -> std::path::PathBuf {
-    crate::config::widgets_dir().join("notifications.lua")
-}
-
-/// Drop the renderer state when the script changed on disk (same
-/// live-edit story as widgets). Returns true on change.
-fn sync_notify_lua(plots: &mut Plots) -> bool {
-    let Ok(mtime) = std::fs::metadata(script_path()).and_then(|m| m.modified()) else {
-        return false;
-    };
-    if plots.notification.revision == Some(mtime) {
-        return false;
-    }
-    plots.notification.lua = None;
-    plots.notification.revision = Some(mtime);
-    true
-}
-
-fn note_error(plots: &mut Plots, err: String) {
-    crate::lua::error::report_once(
-        &mut plots.notification.error,
-        "riced: notifications.lua: ",
-        err,
-    );
-}
-
-fn ensure_notify_lua(plots: &mut Plots) -> Result<(), String> {
-    if plots.notification.lua.is_some() {
-        return Ok(());
-    }
-    let source = std::fs::read_to_string(script_path()).map_err(|e| format!("cannot read {e}"))?;
-    let lua = new_widget_lua().map_err(|e| e.to_string())?;
-    inject_ui(&lua).map_err(|e| e.to_string())?;
-    crate::lua::widgets::load_widget_script(&lua, "notifications.lua", &source)
-        .map_err(|e| e.to_string())?;
-    // Optional `transitions()` spec (same shape as widgets): parsed
-    // once per script load. Malformed specs log and keep defaults.
-    let mut defaults: crate::ui::listview::ListView<(OutputId, u32), WidgetNode> =
-        crate::ui::listview::ListView::new(CARD_PITCH);
-    defaults.set_enter_from_x(enter_from(&plots.config.notifications).x);
-    let current = (
-        defaults.enter_spec(),
-        defaults.exit_spec(),
-        defaults.displaced_spec(),
-    );
-    match crate::lua::transitions::parse_transitions(&lua, &current.0, &current.1, &current.2) {
-        Ok((enter, exit, displaced, custom)) => plots
-            .notification
-            .list
-            .set_transitions(enter, exit, displaced, custom),
-        Err(e) => note_error(plots, e),
-    }
-    plots.notification.lua = Some(lua);
-    Ok(())
-}
-
-/// `n.actions` for Lua: 1-based array of `{key, label}` tables.
-fn actions_table(lua: &mlua::Lua, actions: &[(String, String)]) -> Result<mlua::Table, String> {
-    let table = lua.create_table().map_err(|e| e.to_string())?;
-    for (i, (key, label)) in actions.iter().enumerate() {
-        let entry = lua.create_table().map_err(|e| e.to_string())?;
-        entry.set("key", key.clone()).map_err(|e| e.to_string())?;
-        entry
-            .set("label", label.clone())
-            .map_err(|e| e.to_string())?;
-        table.set(i + 1, entry).map_err(|e| e.to_string())?;
-    }
-    Ok(table)
-}
-
 /// Render one notification through `render(n)` and cache the tree.
 /// Missing/broken scripts fall back to [`default_tree`] (and clear
 /// any stale cached tree); errors log once per message.
 pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
-    if let Err(e) = ensure_notify_lua(plots) {
-        note_error(plots, e);
-        plots.notification.trees.remove(&n.id);
-        return;
+    runtime::RenderContext {
+        renderer: &mut plots.notification.renderer,
+        trees: &mut plots.notification.trees,
+        list: &mut plots.notification.list,
+        config: &plots.config.notifications,
+        services: crate::services::ServiceCtx {
+            sys: &plots.services.system,
+            gpu: None,
+            theme: &plots.config.theme,
+            outputs: &plots.windows.output_infos,
+            notifications: &plots.notification.queue,
+            toplevels: &plots.services.toplevels,
+            workspaces: &plots.services.workspaces,
+        },
     }
-    let result: Result<WidgetNode, String> = (|| {
-        let lua = plots.notification.lua.as_ref().ok_or("runtime missing")?;
-        // Fresh service tables every card render (arrival/edit
-        // granularity, like widget states; `gpu` is nil here — cards
-        // render off-tick, so no fresh GPU reading is available).
-        // Cards have no bar: `bar.output` stays nil, but the table
-        // itself is still published so the global contract holds.
-        let ctx = crate::services::ServiceCtx::from_plots(plots, None);
-        crate::services::publish_all(&ctx, lua).map_err(|e| e.to_string())?;
-        crate::services::publish_bar(lua, "").map_err(|e| e.to_string())?;
-        let table = lua.create_table().map_err(|e| e.to_string())?;
-        table.set("id", n.id).map_err(|e| e.to_string())?;
-        table.set("app", n.app.clone()).map_err(|e| e.to_string())?;
-        table
-            .set("title", n.title.clone())
-            .map_err(|e| e.to_string())?;
-        table
-            .set("body", n.body.clone())
-            .map_err(|e| e.to_string())?;
-        table
-            .set("icon", n.icon.clone())
-            .map_err(|e| e.to_string())?;
-        table.set("urgency", n.urgency).map_err(|e| e.to_string())?;
-        table
-            .set("has_image", n.image.is_some())
-            .map_err(|e| e.to_string())?;
-        table
-            .set("actions", actions_table(lua, &n.actions)?)
-            .map_err(|e| e.to_string())?;
-        let value = crate::lua::widgets::call_widget_method(
-            lua,
-            "view",
-            mlua::MultiValue::from_vec(vec![mlua::Value::Table(table)]),
-        )?;
-        parse_node(&value)
-    })();
-    // Borrow dance: result computed, plots free again.
-    match result {
-        Ok(node) => {
-            plots.notification.error = None;
-            plots.notification.trees.insert(n.id, node);
-        }
-        Err(e) => {
-            note_error(plots, e);
-            plots.notification.trees.remove(&n.id);
-        }
-    }
+    .render(n);
 }
 
 /// Map an `on_action` return value onto notification commands:
@@ -719,18 +551,12 @@ pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
 /// existing guards inside the handlers ignore it, so center widgets
 /// can't break the queue.
 pub(crate) fn command_from_action(value: &mlua::Value, plots: &mut Plots) -> Command<Plant> {
-    let mlua::Value::Table(t) = value else {
-        return Command::none();
-    };
-    if let Ok(id) = t.get::<u32>("dismiss") {
-        return Notification::handle_dismissed(plots, id);
+    use crate::lua::notifications::{NotificationAction, notification_action};
+    match notification_action(value) {
+        Some(NotificationAction::Dismiss(id)) => Notification::handle_dismissed(plots, id),
+        Some(NotificationAction::Invoke(id, key)) => Notification::handle_invoke(plots, id, key),
+        None => Command::none(),
     }
-    if let Ok(inner) = t.get::<mlua::Table>("invoke")
-        && let (Ok(id), Ok(key)) = (inner.get::<u32>("id"), inner.get::<String>("key"))
-    {
-        return Notification::handle_invoke(plots, id, key);
-    }
-    Command::none()
 }
 
 /// Render every cached notification (script edit while visible).
@@ -753,7 +579,7 @@ impl Notification {
     /// Ingest an arrival: resolve output, assign id when zero, enqueue
     /// (same id replaces in place), ensure the window. Disabled layer
     /// drops everything silently.
-    pub(crate) fn handle_arrived(plots: &mut Plots, mut n: Notification) -> Command<Plant> {
+    pub(crate) fn handle_arrived(plots: &mut Plots, n: Notification) -> Command<Plant> {
         if !plots.config.notifications.enabled {
             return Command::none();
         }
@@ -763,38 +589,9 @@ impl Notification {
         let Some(output) = output else {
             return Command::none();
         };
-        n.output = Some(output);
-        if n.id == 0 {
-            n.id = plots.notification.allocate_id();
-        }
-        let id = n.id;
-        let old_keys = output_keys(&plots.notification.queue, output);
-        enqueue(&mut plots.notification.queue, n);
-        if let Some(stored) = plots
-            .notification
-            .queue
-            .iter()
-            .find(|n| n.id == id)
-            .cloned()
-        {
-            render_noti(plots, &stored);
-        }
-        // Fresh card fades/slides in on the list (direction follows the
-        // anchored corner); survivors below it displace-glide down.
-        let duration = plots.config.animation.speed.duration();
-        plots
-            .notification
-            .list
-            .set_enter_from_x(enter_from(&plots.config.notifications).x);
-        let new_keys = output_keys(&plots.notification.queue, output);
-        plots.notification.list.update(
-            &mut plots.animation.motion,
-            duration,
-            Axis::Vertical,
-            &old_keys,
-            &new_keys,
-            &[],
-        );
+        let stored = queue_context(plots).arrive(n, output);
+        render_noti(plots, &stored.notification);
+        queue_context(plots).animate_arrival(&stored);
         Command::batch(vec![
             Self::reconcile(plots, output),
             refresh_queue_widgets(plots),
@@ -831,12 +628,7 @@ impl Notification {
     /// then dismiss like a click (reason 2). Unknown ids — or keys the
     /// notification doesn't offer (stale trees) — are ignored.
     pub(crate) fn handle_invoke(plots: &mut Plots, id: u32, key: String) -> Command<Plant> {
-        let known = plots
-            .notification
-            .queue
-            .iter()
-            .find(|n| n.id == id)
-            .is_some_and(|n| n.actions.iter().any(|(k, _)| *k == key));
+        let known = queue_context(plots).action_known(id, &key);
         if !known {
             return Command::none();
         }
@@ -853,19 +645,12 @@ impl Notification {
     /// timed-out notifications (reason 1 each), close emptied windows.
     /// Repaint comes from the `Scope::All` redraw scope.
     pub(crate) fn handle_tick(plots: &mut Plots) -> Command<Plant> {
-        if sync_notify_lua(plots) {
+        if plots.notification.renderer.sync_revision() {
             render_all_notis(plots);
         }
         let now = Instant::now();
         let mut cmds = Vec::new();
-        for id in plots
-            .notification
-            .queue
-            .iter()
-            .filter(|n| n.expired(now))
-            .map(|n| n.id)
-            .collect::<Vec<_>>()
-        {
+        for id in queue_context(plots).expired(now) {
             if retire_noti(plots, id) {
                 cmds.push(crate::notify::emit_closed(id, 1));
             }
@@ -1037,10 +822,10 @@ impl Notification {
             return Command::none();
         };
         let rects = Self::input_rects(plots, output);
-        if rects == plots.notification.mask {
+        if plots.notification.masks.get(&output) == Some(&rects) {
             return Command::none();
         }
-        plots.notification.mask = rects.clone();
+        plots.notification.masks.insert(output, rects.clone());
         Command::done(Plant::SetInputRegion {
             id,
             callback: iced_exwlshell::actions::ActionCallback::new(move |region: &WlRegion| {
@@ -1075,6 +860,7 @@ impl Notification {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lua::notifications::actions_table;
     use crate::lua::widgets::{inject_ui, new_widget_lua};
     use crate::ui::decode::parse_node;
     use crate::ui::node::WidgetNode;
@@ -1146,7 +932,6 @@ mod tests {
         let id = *id;
         // Mask commits only fire on rect transitions — never a remap or
         // close, and never a redundant commit for identical content.
-        let mut pushed = 0;
         for populated in [false, true, false, true, false] {
             plots.notification.queue.clear();
             if populated {
@@ -1157,14 +942,13 @@ mod tests {
             }
             for repeat in 0..2 {
                 let updates = messages(Notification::reconcile(&mut plots, output));
-                if repeat == 0 && (populated || pushed > 0) {
+                if repeat == 0 {
                     assert!(
                         matches!(updates.as_slice(), [
                         Action::Output(Plant::SetInputRegion {id: mask_target, ..}),
                     ] if *mask_target == id),
                         "rect transition must reinstall the mask"
                     );
-                    pushed += 1;
                 } else {
                     assert!(
                         updates.is_empty(),
@@ -1178,6 +962,47 @@ mod tests {
                 !populated
             );
         }
+    }
+
+    #[test]
+    fn identical_masks_on_two_outputs_are_installed_and_invalidated_independently() {
+        use iced::futures::StreamExt;
+        use iced_wayland_subscriber::shell::{ShellInfo, ShellType};
+        let messages = |task: Command<Plant>| {
+            iced_runtime::task::into_stream(task)
+                .map(|stream| iced::futures::executor::block_on(stream.collect::<Vec<_>>()))
+                .unwrap_or_default()
+        };
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(receiver);
+        let config = plots.config.notifications.clone();
+        for output in [OutputId(1), OutputId(2)] {
+            let _ = Notification::ensure_window(&mut plots, output, &config);
+            let mut notification = noti(output.0, 0, Some(5000), 1);
+            notification.output = Some(output);
+            plots.notification.queue.push_back(notification);
+        }
+        for output in [OutputId(1), OutputId(2)] {
+            let id = plots.windows.notifications[&output];
+            assert!(
+                matches!(messages(Notification::push_input_region(&mut plots, output)).as_slice(), [Action::Output(Plant::SetInputRegion {id: target, ..})] if *target == id)
+            );
+        }
+        assert_eq!(
+            plots.notification.masks[&OutputId(1)],
+            plots.notification.masks[&OutputId(2)]
+        );
+        let id = plots.windows.notifications[&OutputId(1)];
+        let _ = plots.update(Plant::Wayland(crate::shell::LandEvent::NewShell(
+            ShellInfo {
+                window: id,
+                shell: ShellType::LayerShell,
+            },
+        )));
+        assert!(messages(Notification::push_input_region(&mut plots, OutputId(2))).is_empty());
+        let _ = Notification::remove_for_output(&mut plots, OutputId(1));
+        assert!(!plots.notification.masks.contains_key(&OutputId(1)));
+        assert!(plots.notification.masks.contains_key(&OutputId(2)));
     }
 
     fn noti(id: u32, age_ms: u64, timeout_ms: Option<u64>, urgency: u8) -> Notification {
