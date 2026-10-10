@@ -11,6 +11,7 @@
 mod bar;
 mod notifications;
 mod registry;
+pub(crate) mod state;
 mod system;
 mod theme;
 mod toplevels;

@@ -1,4 +1,4 @@
-use crate::app::{BackgroundEvent, Plant, TopEvent};
+use crate::shell::{BackgroundEvent, Plant, TopEvent};
 use iced::mouse::Button;
 use iced::widget::{Space, container, mouse_area};
 use iced::window;

@@ -1,11 +1,13 @@
+pub(crate) mod animation;
+mod scheduling;
 use super::Popup;
 use super::background::Background;
 use super::listview::{Axis, Transition};
-use crate::app::app::{PlotInfo, Plots};
-use crate::app::{Plant, TopEvent, WidgetEvent};
-use crate::composables::panel_window::top_window;
 use crate::config::WidgetDefinition;
+use crate::shell::state::{PlotInfo, Plots};
+use crate::shell::{Plant, TopEvent, WidgetEvent};
 use crate::theme;
+use crate::ui::widgets::panel_window::top_window;
 use iced::mouse::Button;
 use iced::widget::{Space, column, container, row, text};
 use iced::window;
@@ -341,7 +343,7 @@ fn empty_slot() -> Element<'static, Plant> {
 /// Every widget gets its own mouse area (renderer hit-testing), so
 /// clicks carry the exact widget — no slot-granularity guessing.
 /// Top-level rows/columns get enter/exit transitions on direct
-/// button children (see [`super::anim`]); anything else builds plain.
+/// button children (see [`crate::ui::anim`]); anything else builds plain.
 #[allow(clippy::too_many_arguments)]
 fn render_slot_widgets(
     bar_id: window::Id,
@@ -488,7 +490,7 @@ fn build_anim_list(
     >,
 ) -> Result<Element<'static, Plant>, String> {
     // This widget's own list (absent on first paint): settled motion.
-    let at_rest = crate::app::layers::anim::ItemMotion::settled();
+    let at_rest = crate::ui::anim::ItemMotion::settled();
     let shift_of = |action: &str| -> (f32, f32) {
         match lists.get(widget) {
             Some(list) => {
@@ -596,33 +598,7 @@ fn button_children(node: &WidgetNode) -> Vec<(String, WidgetNode)> {
     }
 }
 
-type WidgetLists = HashMap<String, super::listview::ListView<(String, String), WidgetNode>>;
-
-fn declared_lists<'a>(
-    node: &'a WidgetNode,
-    out: &mut HashMap<String, &'a WidgetNode>,
-) -> Result<(), String> {
-    match node {
-        WidgetNode::ListView { id, items, .. } => {
-            if out.insert(id.clone(), node).is_some() {
-                return Err(format!("duplicate listview id {id:?}"));
-            }
-            for (_, child) in items {
-                declared_lists(child, out)?;
-            }
-        }
-        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
-            for child in children {
-                declared_lists(child, out)?;
-            }
-        }
-        WidgetNode::Container { child, .. } | WidgetNode::Scrollable { child, .. } => {
-            declared_lists(child, out)?
-        }
-        _ => {}
-    }
-    Ok(())
-}
+use animation::WidgetLists;
 
 pub(crate) fn sync_declared_lists(
     plots: &mut Plots,
@@ -630,74 +606,12 @@ pub(crate) fn sync_declared_lists(
     old: Option<&WidgetNode>,
     new: &WidgetNode,
 ) -> Result<(), String> {
-    let mut before = HashMap::new();
-    let mut after = HashMap::new();
-    if let Some(old) = old {
-        declared_lists(old, &mut before)?;
+    animation::ListContext {
+        lists: &mut plots.widget_lists,
+        motion: &mut plots.anim_runtime,
+        duration: plots.config.animation.speed.duration(),
     }
-    declared_lists(new, &mut after)?;
-    for id in before.keys().filter(|id| !after.contains_key(*id)) {
-        if let Some(mut list) = plots.widget_lists.remove(&format!("{widget}/{id}")) {
-            list.clear_all(&mut plots.anim_runtime);
-        }
-    }
-    for (id, node) in after {
-        let WidgetNode::ListView {
-            items,
-            horizontal,
-            pitch,
-            transitions,
-            ..
-        } = node
-        else {
-            continue;
-        };
-        let owner = format!("{widget}/{id}");
-        let list = plots
-            .widget_lists
-            .entry(owner.clone())
-            .or_insert_with(|| super::listview::ListView::new(*pitch));
-        list.set_pitch(*pitch);
-        list.set_transitions(
-            transitions.0.clone(),
-            transitions.1.clone(),
-            transitions.2.clone(),
-            true,
-        );
-        let Some(WidgetNode::ListView {
-            items: old_items, ..
-        }) = before.get(&id).copied()
-        else {
-            continue;
-        };
-        let old_keys: Vec<_> = old_items
-            .iter()
-            .map(|(key, _)| (owner.clone(), key.clone()))
-            .collect();
-        let keys: Vec<_> = items
-            .iter()
-            .map(|(key, _)| (owner.clone(), key.clone()))
-            .collect();
-        let removed: Vec<_> = old_items
-            .iter()
-            .enumerate()
-            .filter(|(_, (key, _))| !items.iter().any(|(k, _)| k == key))
-            .map(|(index, (key, child))| (index, (owner.clone(), key.clone()), child.clone()))
-            .collect();
-        list.update(
-            &mut plots.anim_runtime,
-            plots.config.animation.speed.duration(),
-            if *horizontal {
-                Axis::Horizontal
-            } else {
-                Axis::Vertical
-            },
-            &old_keys,
-            &keys,
-            &removed,
-        );
-    }
-    Ok(())
+    .synchronize(widget, old, new)
 }
 
 pub(crate) fn build_with_lists(
@@ -731,7 +645,7 @@ pub(crate) fn build_with_lists(
             };
             let render = |_: &(String, String),
                           child: WidgetNode,
-                          motion: crate::app::layers::anim::ItemMotion,
+                          motion: crate::ui::anim::ItemMotion,
                           live: bool| {
                 if motion.opacity < 1.0 || !live {
                     build_node_opacity(
@@ -975,49 +889,12 @@ fn empty_widget_lua() -> mlua::Result<Lua> {
 /// Shared with the notification renderer (same constructors, same
 /// sandbox, separate Lua state).
 pub(crate) fn inject_ui(lua: &Lua) -> mlua::Result<()> {
-    type Library = Vec<(std::path::PathBuf, String)>;
-    static LAST_GOOD: std::sync::LazyLock<std::sync::Mutex<Library>> =
-        std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
-    static LAST_REJECTED: std::sync::LazyLock<std::sync::Mutex<Option<Library>>> =
-        std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
     inject_ui_base(lua)?;
-    let candidate = crate::config::component_files();
-    let mut previous = LAST_GOOD.lock().expect("component cache");
-    let mut rejected = LAST_REJECTED.lock().expect("rejected component cache");
-    let selected = if candidate == *previous {
-        candidate
-    } else if rejected.as_ref() == Some(&candidate) {
-        previous.clone()
-    } else {
-        let trial = empty_widget_lua()?;
-        inject_ui_base(&trial)?;
-        let validation = candidate.iter().try_for_each(|(path, source)| {
-            trial
-                .load(source)
-                .set_name(format!("@{}", path.display()))
-                .exec()
-        });
-        match validation {
-            Ok(()) => {
-                *rejected = None;
-                *previous = candidate.clone();
-                candidate
-            }
-            Err(error) => {
-                *rejected = Some(candidate);
-                eprintln!("components: keeping last working library: {error}");
-                previous.clone()
-            }
-        }
-    };
-    drop(previous);
-    drop(rejected);
-    for (path, source) in selected {
-        lua.load(source)
-            .set_name(format!("@{}", path.display()))
-            .exec()?;
-    }
-    Ok(())
+    crate::lua::library::install(
+        lua,
+        crate::lua::sandbox::Profile::Widget,
+        crate::config::component_files(),
+    )
 }
 
 // Compatibility entry point; all production hosts use the shared binding module.
@@ -1482,6 +1359,7 @@ fn reference_inject_ui_base(lua: &Lua) -> mlua::Result<()> {
 
 /// Load a module script. Only a returned app table with app:view is accepted.
 pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::Result<()> {
+    crate::lua::sandbox::reset_budget(lua)?;
     let returned: Value = lua.load(source).set_name(format!("@{label}")).eval()?;
     match returned {
         Value::Table(app) => {
@@ -1718,14 +1596,13 @@ pub(crate) use crate::lua::value::lua_value_kind;
 pub(crate) fn call_widget_method(
     lua: &Lua,
     method: &str,
-    mut args: mlua::MultiValue,
+    args: mlua::MultiValue,
 ) -> Result<Value, String> {
+    crate::lua::sandbox::reset_budget(lua).map_err(|error| error.to_string())?;
     let app: Table = lua
         .named_registry_value("riced.widget.app")
         .map_err(|e| e.to_string())?;
-    let func: Function = app.get(method).map_err(|e| e.to_string())?;
-    args.push_front(Value::Table(app));
-    func.call(args).map_err(|e| e.to_string())
+    crate::lua::entry::invoke(lua, app, method, args).map_err(|error| error.to_string())
 }
 
 pub(crate) fn call_lua_value(lua: &Lua, func: &str) -> Result<Value, String> {
@@ -2015,7 +1892,7 @@ impl Top {
     // ------------------------------------------------------------------
 
     fn handle_cursor_moved(plots: &mut Plots, id: window::Id, position: Point) -> Command<Plant> {
-        plots.last_cursor.insert(id, position);
+        plots.input.cursors.insert(id, position);
         Command::none()
     }
 
@@ -2032,15 +1909,15 @@ impl Top {
         // the slot fallback; unresolvable slots clear stale targets.
         // Non-left buttons never click: drop any target.
         if button != Button::Left {
-            plots.press_targets.remove(&id);
+            plots.input.presses.remove(&id);
             return Command::none();
         }
         match Self::cursor_slot(plots, id) {
             Some(pos) => {
-                plots.press_targets.insert(id, (pos, None, Instant::now()));
+                plots.input.presses.insert(id, (pos, None, Instant::now()));
             }
             None => {
-                plots.press_targets.remove(&id);
+                plots.input.presses.remove(&id);
             }
         }
         Command::none()
@@ -2058,7 +1935,8 @@ impl Top {
             return Command::none();
         }
         plots
-            .press_targets
+            .input
+            .presses
             .insert(bar_id, (pos, Some(placement_id), Instant::now()));
         Command::none()
     }
@@ -2088,7 +1966,7 @@ impl Top {
         };
         let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        plots.last_cursor.get(&bar_id).copied().and_then(|p| {
+        plots.input.cursors.get(&bar_id).copied().and_then(|p| {
             Popup::slot_at_point(
                 (pl, pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
                 n,
@@ -2230,9 +2108,9 @@ impl Top {
     /// TOML, never from the editor.
     pub(crate) fn apply_prop_patch(
         placement: &mut crate::config::WidgetPlacement,
-        patch: &crate::app::PlacementProp,
+        patch: &crate::shell::PlacementProp,
     ) {
-        use crate::app::PlacementProp;
+        use crate::shell::PlacementProp;
         match patch {
             PlacementProp::Interval(value) => placement.interval = *value,
             PlacementProp::Size(value) => placement.size = *value,
@@ -2259,7 +2137,7 @@ impl Top {
         plots: &mut Plots,
         id: window::Id,
         placement_id: &str,
-        patch: crate::app::PlacementProp,
+        patch: crate::shell::PlacementProp,
     ) -> Command<Plant> {
         let Some(top) = plots.tops.get_mut(&id) else {
             return Command::none();
@@ -2462,15 +2340,12 @@ impl Top {
     /// flood the log every tick; fixing the file logs nothing new until
     /// it breaks differently).
     pub(crate) fn note_widget_error(plots: &mut Plots, name: &str, err: String) {
-        if plots
-            .widget_last_error
-            .get(name)
-            .is_some_and(|last| *last == err)
-        {
-            return;
-        }
-        eprintln!("riced: widget {name:?}: {err}");
-        plots.widget_last_error.insert(name.to_string(), err);
+        crate::lua::error::report_keyed(
+            &mut plots.widget_last_error,
+            name,
+            &format!("riced: widget {name:?}: "),
+            err,
+        );
     }
 
     /// Definition for a widget name (cloned for borrowck).
@@ -2816,8 +2691,7 @@ impl Top {
             list.clear_all(&mut plots.anim_runtime);
         }
         plots.widget_lists.clear();
-        plots.sysinfo.refresh_cpu_usage();
-        plots.sysinfo.refresh_memory();
+        plots.services.refresh_system();
         let gpu = Popup::gpu_usage_percent();
         let now = Instant::now();
         for (bar, resolved) in Self::all_resolved(plots) {
@@ -2832,8 +2706,7 @@ impl Top {
     /// or output hotplug): without this a new bar paints empty until
     /// each placement's interval elapses.
     pub(crate) fn render_bar_widgets(plots: &mut Plots, bar: window::Id) {
-        plots.sysinfo.refresh_cpu_usage();
-        plots.sysinfo.refresh_memory();
+        plots.services.refresh_system();
         let gpu = Popup::gpu_usage_percent();
         let now = Instant::now();
         let placements: Vec<crate::config::WidgetPlacement> = plots
@@ -2885,57 +2758,8 @@ impl Top {
     /// when any output moved (caller repaints). Intervals are
     /// per-placement (placement override else definition default).
     fn run_due_widgets(plots: &mut Plots) -> bool {
-        let now = Instant::now();
-        plots.sysinfo.refresh_cpu_usage();
-        plots.sysinfo.refresh_memory();
-        let gpu = Popup::gpu_usage_percent();
-        let due: Vec<(window::Id, ResolvedWidget)> = Self::all_resolved(plots)
-            .into_iter()
-            .filter(|(_, resolved)| {
-                plots
-                    .widget_last_run
-                    .get(&resolved.id)
-                    .is_none_or(|t| {
-                        now.duration_since(*t) >= Duration::from_secs_f32(resolved.interval)
-                    })
-                    // Open popups bypass the render interval (a script
-                    // edit must refresh the menu now, not on the next
-                    // tick); the sync below decides if one happened.
-                    || plots.popups.values().any(|p| p.placement == resolved.id)
-            })
-            .collect();
-        let mut changed = false;
-        for (bar, resolved) in &due {
-            // Sync here (not in the filter above) so a script edit both
-            // drops the stale runtime and forces this render: reloaded
-            // content may differ even if `view()` output is identical.
-            let edited = Self::sync_script_state(plots, resolved);
-            plots.widget_last_run.insert(resolved.id.clone(), now);
-            let result = Self::render_lua_value(plots, resolved, gpu, *bar);
-            let before = (
-                plots
-                    .widget_outputs
-                    .get(&(*bar, resolved.id.clone()))
-                    .cloned(),
-                plots
-                    .widget_trees
-                    .get(&(*bar, resolved.id.clone()))
-                    .cloned(),
-            );
-            Self::ingest_render_value(plots, resolved, *bar, result);
-            let after = (
-                plots
-                    .widget_outputs
-                    .get(&(*bar, resolved.id.clone()))
-                    .cloned(),
-                plots
-                    .widget_trees
-                    .get(&(*bar, resolved.id.clone()))
-                    .cloned(),
-            );
-            changed |= before != after || edited;
-        }
-        changed
+        let jobs = Self::all_resolved(plots);
+        scheduling::run_due(plots, jobs)
     }
 
     /// Re-render one widget on every bar showing it, and report whether
@@ -3289,8 +3113,8 @@ impl Top {
     /// close its window, and delete its `[[bar]]` entry (persisted
     /// immediately) so it stays gone after restart.
     pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        plots.last_cursor.remove(&bar_id);
-        plots.press_targets.remove(&bar_id);
+        plots.input.cursors.remove(&bar_id);
+        plots.input.presses.remove(&bar_id);
         let mut cmds = Vec::new();
         // A bar going away takes its popup with it.
         let popup_id = plots
@@ -3314,7 +3138,7 @@ impl Top {
             }
             // flush_config_save only writes when dirty — mark it first
             // (same for persist_new below).
-            plots.config_dirty = true;
+            plots.config_jobs.dirty = true;
             plots.flush_config_save();
         } else {
             plots.ids.remove(&bar_id);
@@ -3404,7 +3228,7 @@ impl Top {
         // areas that already dispatched their own click: only a
         // recorded *gap* target acts here (the slot fallback below).
         // Anything else is either a widget click (handled) or stale.
-        let target = plots.press_targets.remove(&id);
+        let target = plots.input.presses.remove(&id);
         // Silent: the global Graft release safety net in update can
         // clear the press first when release lands on another window,
         // and a same-window release fires both PanelWindow and Graft
@@ -3430,7 +3254,7 @@ impl Top {
         if !matches!(plots.id_info(bar_id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }
-        let target = plots.press_targets.remove(&bar_id);
+        let target = plots.input.presses.remove(&bar_id);
         if Self::release_matches_press(
             target,
             pos,
@@ -3474,7 +3298,7 @@ impl Top {
         };
         let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
         let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        let cursor = plots.last_cursor.get(&bar_id).copied();
+        let cursor = plots.input.cursors.get(&bar_id).copied();
         let pos = cursor
             .and_then(|p| {
                 Popup::slot_at_point(
@@ -3542,7 +3366,12 @@ impl Top {
             Some(PlotInfo::Top(o)) => o,
             _ => return Command::none(),
         };
-        let cursor = plots.last_cursor.get(&bar_id).copied().map(|p| (p.x, p.y));
+        let cursor = plots
+            .input
+            .cursors
+            .get(&bar_id)
+            .copied()
+            .map(|p| (p.x, p.y));
         let mut cmds = Vec::new();
         if let Some(pid) = plots
             .popups
@@ -3777,7 +3606,7 @@ impl Top {
                 radius_bottom_right: l.radius.bottom_right,
             });
             top.bar_index = plots.config.bar.len() - 1;
-            plots.config_dirty = true;
+            plots.config_jobs.dirty = true;
             plots.flush_config_save();
         }
 
@@ -4291,7 +4120,7 @@ mod tests {
 
     #[test]
     fn resync_bars_applies_edited_slot_widgets() {
-        use crate::app::Plots;
+        use crate::shell::Plots;
         use iced_wayland_subscriber::shell::channel;
         let (_tx, rx) = channel();
         let mut plots = Plots::new(rx);
@@ -4401,14 +4230,16 @@ mod tests {
         load_widget_script(&lua, "clinepass", SEED_CLINEPASS_LUA).expect("load");
         publish_test_services(&lua, &sys, None);
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let content =
+            crate::shell::screens::Popup::parse_popup_content(popup).expect("popup parses");
         assert!(content.tree.is_some());
         // System seed: power cell plus a card with a four-row session menu.
         let lua = new_widget_lua().expect("sandbox");
         load_seed_components(&lua);
         load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let content =
+            crate::shell::screens::Popup::parse_popup_content(popup).expect("popup parses");
         // Menu component now owns the rows (no popup `items` shorthand).
         assert!(content.items.is_empty());
         fn button_actions(node: &WidgetNode, out: &mut Vec<String>) {
@@ -4441,11 +4272,11 @@ mod tests {
         load_seed_components(&lua);
         load_widget_script(&lua, "system", SEED_SYSTEM_LUA).expect("load");
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("parse");
+        let content = crate::shell::screens::Popup::parse_popup_content(popup).expect("parse");
         let tree = content.tree.as_ref().expect("card tree");
         // The card embeds a four-row menu; the window must be tall enough
         // to show every row instead of clipping to a fixed row count.
-        let (_, height) = crate::app::layers::Popup::content_size(1920.0, 1080.0, &content);
+        let (_, height) = crate::shell::screens::Popup::content_size(1920.0, 1080.0, &content);
         let needed = estimate_height(tree, 13.0);
         assert!(
             height as f32 >= needed,
@@ -4536,7 +4367,8 @@ mod tests {
         // First popup (cold cache) is the spinner card, not the data:
         // card column is [head, separator, body].
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let content =
+            crate::shell::screens::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("spinner tree");
         assert!(matches!(
             tree,
@@ -4545,7 +4377,8 @@ mod tests {
         // render() fetches into _usage; second popup shows the rows.
         call_lua_value(&lua, "view").expect("view");
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup parses");
+        let content =
+            crate::shell::screens::Popup::parse_popup_content(popup).expect("popup parses");
         let tree = content.tree.expect("usage tree");
         let built = build_node(&tree, 13.0, None).expect("builds");
         let _ = built;
@@ -4770,8 +4603,8 @@ mod tests {
 
     #[test]
     fn apply_prop_patch_sets_and_clears() {
-        use crate::app::PlacementProp;
         use crate::config::{PropValue, WidgetPlacement};
+        use crate::shell::PlacementProp;
         let mut placement = WidgetPlacement {
             id: "w1".to_string(),
             name: "clock".to_string(),
@@ -5104,8 +4937,8 @@ mod tests {
 
     #[test]
     fn lua_popup_content_parses_string_and_table_forms() {
-        use crate::app::layers::Popup;
-        use crate::app::layers::top::WidgetNode;
+        use crate::shell::screens::Popup;
+        use crate::ui::node::WidgetNode;
         // Plain strings are just text with defaults.
         let lua = new_widget_lua().expect("sandbox");
         let value: Value = lua.load(r#"return "hi""#).eval().expect("eval");
@@ -5782,8 +5615,8 @@ mod tests {
         let enter = Transition::slide_fade(16.0);
         let exit = Transition::slide_fade_out(-16.0);
         let displaced = Transition {
-            from: crate::app::layers::anim::ItemMotion::settled(),
-            to: crate::app::layers::anim::ItemMotion::settled(),
+            from: crate::ui::anim::ItemMotion::settled(),
+            to: crate::ui::anim::ItemMotion::settled(),
             duration: None,
         };
         // No transitions() at all: defaults pass through untouched.
@@ -5855,7 +5688,7 @@ mod tests {
         let value = call_lua_value(&lua, "view").expect("view");
         let _ = build_node(&parse_node(&value).expect("parse"), 13.0, None).expect("build");
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let _ = crate::app::layers::Popup::parse_popup_content(popup).expect("popup");
+        let _ = crate::shell::screens::Popup::parse_popup_content(popup).expect("popup");
         // One queued item: count cell + a dismiss row.
         lua.load(
             r#"notifications = { { id = 42, app = "mako", title = "hi", body = "b", urgency = 1, has_image = false } }"#,
@@ -5868,7 +5701,7 @@ mod tests {
             WidgetNode::Row { .. }
         ));
         let popup = call_lua_value(&lua, "popup").expect("popup");
-        let content = crate::app::layers::Popup::parse_popup_content(popup).expect("popup");
+        let content = crate::shell::screens::Popup::parse_popup_content(popup).expect("popup");
         let mut actions = Vec::new();
         fn walk(node: &WidgetNode, out: &mut Vec<String>) {
             match node {

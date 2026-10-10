@@ -62,7 +62,7 @@ pub struct Plots {
     pub(crate) background_ids: HashMap<OutputId, iced::window::Id>,
     pub(crate) shell_events: ShellReceiver,
     // per-window cursor
-    pub(crate) last_cursor: HashMap<iced::window::Id, Point>,
+    pub(crate) input: super::input::InputState,
     // global selection rect (single, like Background.selectionRect)
     pub(crate) selection_rect: SelectionRect,
     pub(crate) composable_runtime: std::cell::RefCell<crate::lua::composable::ComposableRuntime>,
@@ -79,7 +79,6 @@ pub struct Plots {
     // widget; gap presses record None; releases act only on a matching
     // target, so bubbled outer releases never double-fire widget clicks.
     // `usize::MAX` slot marks a press whose slot couldn't be resolved.
-    pub(crate) press_targets: HashMap<iced::window::Id, (usize, Option<String>, Instant)>,
     // hot-reloaded config + last seen file mtime
     pub(crate) config: Config,
     pub(crate) config_mtime: Option<std::time::SystemTime>,
@@ -102,8 +101,7 @@ pub struct Plots {
     // bar (keyed `(bar, placement)`) so `bar.output` can differ per bar.
     pub(crate) widget_lua: HashMap<String, mlua::Lua>,
     pub(crate) widget_outputs: HashMap<(iced::window::Id, String), String>,
-    pub(crate) widget_trees:
-        HashMap<(iced::window::Id, String), crate::app::layers::top::WidgetNode>,
+    pub(crate) widget_trees: HashMap<(iced::window::Id, String), crate::ui::node::WidgetNode>,
     pub(crate) widget_last_run: HashMap<String, Instant>,
     pub(crate) widget_last_error: HashMap<String, String>,
     // Script file mtimes by resolved path (live-reload on edit).
@@ -114,32 +112,26 @@ pub struct Plots {
     // stack. Widget cell rows keyed (owner, key), notifications keyed
     // (output, id). Per-list runtimes let each list own its Lua
     // `transitions()` spec without bars animating each other.
-    pub(crate) anim_runtime: crate::app::layers::anim::AnimRuntime,
+    pub(crate) anim_runtime: crate::ui::anim::AnimRuntime,
     pub(crate) widget_lists: HashMap<
         String,
-        crate::app::layers::listview::ListView<
-            (String, String),
-            crate::app::layers::top::WidgetNode,
-        >,
+        crate::ui::listview::ListView<(String, String), crate::ui::node::WidgetNode>,
     >,
-    pub(crate) notif_list: crate::app::layers::listview::ListView<
+    pub(crate) notif_list: crate::ui::listview::ListView<
         (iced_wayland_subscriber::OutputId, u32),
-        crate::app::layers::top::WidgetNode,
+        crate::ui::node::WidgetNode,
     >,
     // Live system snapshot for the `system` Lua table (CPU + memory,
     // refreshed on every widget tick; usage needs the delta).
-    pub(crate) sysinfo: sysinfo::System,
+    pub(crate) services: crate::services::state::ServiceState,
     // Native toplevel listener backing `wayland.toplevels` (its own
     // thread blocks on the compositor socket; ticks just snapshot).
-    pub(crate) toplevel_cache: crate::services::ToplevelCache,
     // Native workspace listener backing `wayland.workspaces` (same
     // shape: own thread, tick snapshots).
-    pub(crate) workspace_cache: crate::services::WorkspaceCache,
     // Local-first staging: `Patch` mutates live memory every tick (smooth
     // previews, no disk I/O); the file write is coalesced via `SaveTimer`.
     // `dirty` marks unsaved staged edits, `seq` invalidates superseded timers.
-    pub(crate) config_dirty: bool,
-    pub(crate) config_save_seq: u64,
+    pub(crate) config_jobs: super::jobs::SaveState,
     // mtime of the active theme file (`theme::poll`); `None` tracks the
     // vendored fallback. A change re-emits the config so every view repaints.
     pub(crate) theme_mtime: Option<std::time::SystemTime>,
@@ -155,29 +147,25 @@ pub struct Plots {
     // Dynamic-theme regen: discrete touches (drops, add/remove/scale,
     // file edits) arm a 2s one-shot timer; panel close fires immediately.
     // `seq` invalidates superseded timers, `running` guards overlap.
-    pub(crate) theme_regen_dirty: bool,
-    pub(crate) theme_regen_running: bool,
-    pub(crate) theme_regen_seq: u64,
+    pub(crate) theme_jobs: super::jobs::ThemeJobState,
     // Notification layer (D-Bus server + internal events): queued
     // plain-data notifications, one layer window per showing output,
     // last-known global cursor for mouse-output placement.
-    pub(crate) notifications: std::collections::VecDeque<crate::app::layers::Notification>,
+    pub(crate) notifications: std::collections::VecDeque<crate::shell::screens::Notification>,
     pub(crate) notif_windows: HashMap<OutputId, iced::window::Id>,
     pub(crate) notif_sizes: HashMap<OutputId, u32>,
     pub(crate) notif_scroll: HashMap<OutputId, f32>,
     pub(crate) notif_exit_images: HashMap<u32, iced::widget::image::Handle>,
     pub(crate) notif_next_id: u32,
-    pub(crate) last_cursor_global: Option<Point>,
     // Notification Lua renderer (`notifications.lua`): separate state
     // from widgets, same sandbox + constructors. Trees cached per id
     // (rendered update-side, never per frame).
     pub(crate) notify_lua: Option<mlua::Lua>,
     pub(crate) notify_mtime: Option<std::time::SystemTime>,
     pub(crate) notify_last_error: Option<String>,
-    pub(crate) notif_trees: HashMap<u32, crate::app::layers::top::WidgetNode>,
+    pub(crate) notif_trees: HashMap<u32, crate::ui::node::WidgetNode>,
     // Last mirrored TOML parse failure (`source: message`); a repeat of
     // the same message notifies only once.
-    pub(crate) config_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -193,16 +181,13 @@ impl Plots {
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
         crate::theme::ensure_user_themes();
-        crate::colorgen::ensure_user_templates();
+        crate::theme_gen::ensure_user_templates();
         let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);
         crate::theme::sync(&config.theme);
         let mut wallpapers = HashMap::new();
         Self::sync_wallpapers(&config, &mut wallpapers);
         let widgets = Top::discover_widget_defs();
         let widgets_dir_mtime = crate::config::widgets_dir_mtime();
-        let mut sysinfo = sysinfo::System::new();
-        sysinfo.refresh_cpu_usage();
-        sysinfo.refresh_memory();
         let mut plots = Self {
             ids: HashMap::new(),
             tops: HashMap::new(),
@@ -211,54 +196,46 @@ impl Plots {
             backgrounds: HashMap::new(),
             background_ids: HashMap::new(),
             shell_events,
-            last_cursor: HashMap::new(),
+            input: Default::default(),
             output_infos: HashMap::new(),
             selection_rect: SelectionRect::default(),
             composable_runtime: Default::default(),
             fade_rect: None,
             fade_start: None,
             context_menu: None,
-            press_targets: HashMap::new(),
             config,
             config_mtime,
             widgets,
             widgets_dir_mtime,
             widgets_toml_warned: false,
             components_mtime: crate::config::components_mtime(),
-            config_dirty: false,
-            config_save_seq: 0,
+            config_jobs: Default::default(),
             theme_mtime,
             wallpapers,
             repaint_seq: 0,
-            theme_regen_dirty: false,
-            theme_regen_running: false,
-            theme_regen_seq: 0,
+            theme_jobs: Default::default(),
             notifications: std::collections::VecDeque::new(),
             notif_windows: HashMap::new(),
             notif_sizes: HashMap::new(),
             notif_scroll: HashMap::new(),
             notif_exit_images: HashMap::new(),
             notif_next_id: 1,
-            last_cursor_global: None,
             notify_lua: None,
             notify_mtime: None,
             notify_last_error: None,
             notif_trees: HashMap::new(),
-            config_last_error: None,
             widget_lua: HashMap::new(),
             widget_outputs: HashMap::new(),
             widget_trees: HashMap::new(),
             widget_last_run: HashMap::new(),
             widget_last_error: HashMap::new(),
             widget_script_mtime: HashMap::new(),
-            anim_runtime: crate::app::layers::anim::AnimRuntime::default(),
+            anim_runtime: crate::ui::anim::AnimRuntime::default(),
             widget_lists: HashMap::new(),
-            notif_list: crate::app::layers::listview::ListView::new(
-                crate::app::layers::notification::CARD_PITCH,
+            notif_list: crate::ui::listview::ListView::new(
+                crate::shell::screens::notification::CARD_PITCH,
             ),
-            sysinfo,
-            toplevel_cache: crate::services::ToplevelCache::spawn(),
-            workspace_cache: crate::services::WorkspaceCache::spawn(),
+            services: crate::services::state::ServiceState::new(),
         };
         // Render Lua widgets once so bars populate on the first frame
         // instead of waiting out the first tick. Retired widgets.toml
@@ -329,11 +306,11 @@ impl Plots {
         Command::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let text = match crate::colorgen::stored_theme_text(&name) {
+                    let text = match crate::theme_gen::stored_theme_text(&name) {
                         Ok(t) => t,
                         Err(e) => return vec![e],
                     };
-                    crate::colorgen::render_theme_templates(&dir, &text, darkmode)
+                    crate::theme_gen::render_theme_templates(&dir, &text, darkmode)
                 })
                 .await
                 .unwrap_or_else(|e| vec![format!("template task failed: {e}")])
@@ -355,9 +332,7 @@ impl Plots {
     /// drags): memory updates every tick, the file once idle. Panel close
     /// flushes synchronously via `flush_config_save`.
     pub(crate) fn arm_config_save(&mut self) -> Command<Plant> {
-        self.config_dirty = true;
-        self.config_save_seq += 1;
-        let save_seq = self.config_save_seq;
+        let save_seq = self.config_jobs.stage();
         Command::perform(tokio::time::sleep(Self::CONFIG_SAVE_DELAY), move |_| {
             Plant::Config(ConfigEvent::SaveTimer(save_seq))
         })
@@ -366,11 +341,10 @@ impl Plots {
     /// Persist staged config edits, if any. Idempotent no-op when clean.
     /// Called by the coalescing save timer and synchronously on panel close.
     pub(crate) fn flush_config_save(&mut self) {
-        if !self.config_dirty {
+        if !self.config_jobs.dirty {
             return;
         }
-        self.config_dirty = false;
-        self.config_save_seq += 1;
+        self.config_jobs.invalidate();
         // Update mtime so the poll tick doesn't echo our own write back.
         self.config_mtime = self.config.save().or(self.config_mtime);
     }
@@ -380,16 +354,16 @@ impl Plots {
     /// until drop or close. Supersedes pending timers via `seq`; no-ops
     /// while a run is in flight (completion re-arms if still dirty).
     pub(crate) fn arm_regen_theme(&mut self) -> Command<Plant> {
-        self.theme_regen_dirty = true;
-        if self.theme_regen_running {
+        self.theme_jobs.dirty = true;
+        if self.theme_jobs.running {
             return Command::none();
         }
-        if !crate::colorgen::wants_regen(&self.config.theme.name) {
-            self.theme_regen_dirty = false;
+        if !crate::theme_gen::wants_regen(&self.config.theme.name) {
+            self.theme_jobs.dirty = false;
             return Command::none();
         }
-        self.theme_regen_seq += 1;
-        let seq = self.theme_regen_seq;
+        self.theme_jobs.sequence += 1;
+        let seq = self.theme_jobs.sequence;
         Command::perform(tokio::time::sleep(Self::REGEN_DELAY), move |_| {
             Plant::Config(ConfigEvent::RegenTimer(seq))
         })
@@ -398,11 +372,11 @@ impl Plots {
     /// Fire a regen now (last Settings panel just closed — the user is
     /// done editing). Batch-safe: `none` unless dirty, idle, and wanted.
     pub(crate) fn fire_regen_theme(&mut self) -> Command<Plant> {
-        if !self.theme_regen_dirty || self.theme_regen_running {
+        if !self.theme_jobs.dirty || self.theme_jobs.running {
             return Command::none();
         }
-        if !crate::colorgen::wants_regen(&self.config.theme.name) {
-            self.theme_regen_dirty = false;
+        if !crate::theme_gen::wants_regen(&self.config.theme.name) {
+            self.theme_jobs.dirty = false;
             return Command::none();
         }
         self.spawn_regen()
@@ -427,29 +401,29 @@ impl Plots {
                 .background
                 .image
                 .iter()
-                .filter_map(crate::components::display_map::MapLayer::resolved)
+                .filter_map(crate::ui::widgets::display_map::MapLayer::resolved)
                 .collect();
         }
         let images = self.config.background.image.clone();
         let variant = self.config.theme.variant.clone();
         let darkmode = self.config.theme.darkmode;
-        let templates = crate::colorgen::effective_templates_dir(&self.config.theme);
+        let templates = crate::theme_gen::effective_templates_dir(&self.config.theme);
 
-        self.theme_regen_dirty = false;
-        self.theme_regen_running = true;
-        self.theme_regen_seq += 1;
+        self.theme_jobs.dirty = false;
+        self.theme_jobs.running = true;
+        self.theme_jobs.sequence += 1;
         Command::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let views = crate::colorgen::render_views(&rects, &images);
+                    let views = crate::theme_gen::render_views(&rects, &images);
                     let errors =
-                        match crate::colorgen::generate_from_views(&views, &variant, darkmode) {
+                        match crate::theme_gen::generate_from_views(&views, &variant, darkmode) {
                             Ok(g) => {
                                 let mut errors = Vec::new();
-                                if let Err(e) = crate::colorgen::write_dynamic_theme(&g.payload) {
+                                if let Err(e) = crate::theme_gen::write_dynamic_theme(&g.payload) {
                                     errors.push(format!("cannot write dynamic.json: {e}"));
                                 } else if let Some(dir) = templates {
-                                    errors.extend(crate::colorgen::process_templates(
+                                    errors.extend(crate::theme_gen::process_templates(
                                         &dir,
                                         &g.variables,
                                     ));
@@ -462,7 +436,7 @@ impl Plots {
                     // and are all dropped here; without a trim glibc
                     // arenas retain the high-water RSS forever on this
                     // pooled worker thread.
-                    crate::colorgen::trim_memory();
+                    crate::theme_gen::trim_memory();
                     errors
                 })
                 .await
@@ -648,10 +622,10 @@ impl Plots {
             return Command::none();
         };
         let key = format!("{source}: {msg}");
-        if self.config_last_error.as_deref() == Some(&key) {
+        if self.config_jobs.last_error.as_deref() == Some(&key) {
             return Command::none();
         }
-        self.config_last_error = Some(key);
+        self.config_jobs.last_error = Some(key);
         let n = Notification::internal(
             &self.config.notifications,
             &format!("{source} parse error"),
@@ -664,8 +638,8 @@ impl Plots {
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
         match message {
             Plant::Uproot(id) => {
-                self.last_cursor.remove(&id);
-                self.press_targets.remove(&id);
+                self.input.cursors.remove(&id);
+                self.input.presses.remove(&id);
                 let mut closed_last_panel = false;
                 if let Some(info) = self.ids.get(&id).copied() {
                     match info {
@@ -703,7 +677,7 @@ impl Plots {
                 let close = iced_runtime::task::effect(Action::Window(WindowAction::Close(id)));
                 // Panel edits are done when the last panel closes: regen
                 // immediately instead of waiting out the countdown.
-                if closed_last_panel && self.theme_regen_dirty {
+                if closed_last_panel && self.theme_jobs.dirty {
                     return Command::batch(vec![close, self.fire_regen_theme()]);
                 }
                 close
@@ -727,8 +701,8 @@ impl Plots {
                 let mut cmds = Vec::new();
                 // sentinel Top cleanup (delegated to Top layer)
                 for sentinel_id in Top::cleanup_sentinels(&mut self.tops, &mut self.ids) {
-                    self.last_cursor.remove(&sentinel_id);
-                    self.press_targets.remove(&sentinel_id);
+                    self.input.cursors.remove(&sentinel_id);
+                    self.input.presses.remove(&sentinel_id);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(sentinel_id),
                     )));
@@ -835,22 +809,22 @@ impl Plots {
                     &mut self.ids,
                     output_id,
                 ) {
-                    self.last_cursor.remove(&id);
+                    self.input.cursors.remove(&id);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(id),
                     )));
                 }
                 // remove all tops for this output (delegated to Top layer)
                 for wid in Top::remove_for_output(&mut self.tops, &mut self.ids, output_id) {
-                    self.last_cursor.remove(&wid);
-                    self.press_targets.remove(&wid);
+                    self.input.cursors.remove(&wid);
+                    self.input.presses.remove(&wid);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(wid),
                     )));
                 }
                 // popups live on the same output (delegated to Popup layer)
                 for wid in Popup::remove_for_output(&mut self.popups, &mut self.ids, output_id) {
-                    self.last_cursor.remove(&wid);
+                    self.input.cursors.remove(&wid);
                     cmds.push(iced_runtime::task::effect(Action::Window(
                         WindowAction::Close(wid),
                     )));
@@ -888,7 +862,7 @@ impl Plots {
                     ))
                 ) {
                     let _ = Background::handle_left_release(self);
-                    self.press_targets.remove(&id);
+                    self.input.presses.remove(&id);
                     return Command::none();
                 }
                 match self.id_info(id) {
@@ -985,11 +959,10 @@ impl Plots {
                 // The file changed under us (external edit, or a theme file
                 // hot-reload re-emit): the on-disk config wins and replaces
                 // any staged local edits. Pending save timers are cancelled.
-                if self.config_dirty {
+                if self.config_jobs.dirty {
                     println!("riced: config changed on disk — replacing staged local edits");
                 }
-                self.config_dirty = false;
-                self.config_save_seq += 1;
+                self.config_jobs.invalidate();
                 let images_changed = cfg.background.image != self.config.background.image;
                 let switched_to_dynamic =
                     cfg.theme.name == "dynamic" && self.config.theme.name != "dynamic";
@@ -1071,7 +1044,7 @@ impl Plots {
                     patch,
                     ConfigPatch::ThemeName(_) | ConfigPatch::ThemeDarkmode(_)
                 )
-                .then(|| crate::colorgen::effective_templates_dir(&self.config.theme))
+                .then(|| crate::theme_gen::effective_templates_dir(&self.config.theme))
                 .flatten();
                 // Removal shifts image indices: capture the index before
                 // `apply` moves `patch`, then remap every panel's pick.
@@ -1088,9 +1061,7 @@ impl Plots {
                         setting.image_removed(index);
                     }
                 }
-                self.config_dirty = true;
-                self.config_save_seq += 1;
-                let save_seq = self.config_save_seq;
+                let save_seq = self.config_jobs.stage();
                 let save =
                     Command::perform(tokio::time::sleep(Self::CONFIG_SAVE_DELAY), move |_| {
                         Plant::Config(ConfigEvent::SaveTimer(save_seq))
@@ -1106,7 +1077,7 @@ impl Plots {
             Plant::Config(ConfigEvent::SaveTimer(seq)) => {
                 // Stale timers (superseded by a later patch) or a clean
                 // state (flushed on panel close) never write twice.
-                if seq != self.config_save_seq || !self.config_dirty {
+                if !self.config_jobs.should_flush(seq) {
                     return Command::none();
                 }
                 self.flush_config_save();
@@ -1135,13 +1106,13 @@ impl Plots {
             Plant::Config(ConfigEvent::RegenTimer(seq)) => {
                 // Stale timers (superseded by a later arm, or already
                 // consumed by a fire) never run twice.
-                if seq != self.theme_regen_seq {
+                if seq != self.theme_jobs.sequence {
                     return Command::none();
                 }
                 self.fire_regen_theme()
             }
             Plant::Config(ConfigEvent::ThemeRegenerated(errors)) => {
-                self.theme_regen_running = false;
+                self.theme_jobs.running = false;
                 // The completion itself is the notification (success or
                 // failure); edits landing mid-flight chain a follow-up.
                 let regen_cmd = if errors.is_empty() {
@@ -1167,7 +1138,7 @@ impl Plots {
                 };
                 // Edits that landed mid-flight re-dirty the flag; chain one
                 // follow-up regen instead of dropping them.
-                if self.theme_regen_dirty {
+                if self.theme_jobs.dirty {
                     return Command::batch(vec![regen_cmd, self.arm_regen_theme()]);
                 }
                 regen_cmd

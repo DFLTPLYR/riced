@@ -1,7 +1,7 @@
 //! Runnable M0 plain-window demo. iced view is pure: Lua renders dirty IR
 //! in the host update/boot, then view realizes the cached owned tree.
 use super::{LuaRuntime, Message, WindowId};
-use crate::app::layers::top::build_node;
+use crate::ui::build::build_node;
 use iced::{
     Element, Length, Task,
     widget::{button, column, container, text},

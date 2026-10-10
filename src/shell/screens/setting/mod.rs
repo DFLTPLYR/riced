@@ -1,17 +1,21 @@
+mod context_menu;
+mod editors;
+mod pages;
+mod panel;
+mod wallpaper;
 use super::background::Background;
 use super::top::{SlotAlign, Top, TopLocal};
-use crate::app::ConfigEvent;
-use crate::app::app::{PlotInfo, Plots};
-use crate::app::layers::ContextMenu;
-use crate::app::{BarEvent, Corner, Edge, Plant, StyleEvent, TopEvent};
-use crate::components::display_map::{MapLayer, MapView, images_layer, outputs_layer};
-use crate::components::panel_preview::Preview;
-use crate::composables::spin_box::spin_box;
-use crate::config::{AnimationSpeed, BackgroundImage, ConfigPatch};
+use crate::config::BackgroundImage;
+use crate::shell::screens::ContextMenu;
+use crate::shell::state::{PlotInfo, Plots};
+use crate::shell::{BarEvent, Corner, Edge, Plant, StyleEvent, TopEvent};
 use crate::theme;
+use crate::ui::widgets::display_map::MapView;
+use crate::ui::widgets::panel_preview::Preview;
+use crate::ui::widgets::spin_box::spin_box;
+use editors::prop_row;
 use iced::widget::{
-    Checkbox, Space, button, column, container, row, rule, scrollable, slider, stack, text,
-    text_input,
+    Checkbox, Space, button, column, container, row, rule, scrollable, slider, text,
 };
 use iced::window;
 use iced::{Element, Length, Task as Command};
@@ -151,7 +155,7 @@ impl Setting {
             col = col.push(
                 button(text(page.title()).size(14).color(theme::text()))
                     .width(Length::Fill)
-                    .on_press(Plant::SettingPlot(crate::app::SettingEvent::Select(
+                    .on_press(Plant::SettingPlot(crate::shell::SettingEvent::Select(
                         id, page,
                     )))
                     .padding(12)
@@ -166,7 +170,7 @@ impl Setting {
     /// via `ConfigEvent::Patch`, so every layer updates on the next redraw.
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
-            SettingPage::Panel => self.panel_content(id, plots),
+            SettingPage::Panel => self.panel_content(id, panel::PanelContext::from(plots)),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
@@ -175,120 +179,13 @@ impl Setting {
     }
 
     fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        use crate::config::ComposableKind;
-        column![
-            section(
-                "Menu surface",
-                "Lua supplies sizing and appearance; Rust supplies the entries.",
-                Self::composable_editor(plots, ComposableKind::ContextMenu)
-            ),
-            section(
-                "Menu entries",
-                "Each entry is rendered by this Lua app with label/action host props.",
-                Self::composable_editor(plots, ComposableKind::ContextMenuItem)
-            ),
-        ]
-        .spacing(16)
-        .width(Length::Fill)
-        .into()
-    }
-
-    fn composable_editor(
-        plots: &Plots,
-        kind: crate::config::ComposableKind,
-    ) -> Element<'static, Plant> {
-        use crate::config::{ComposableKind, PropValue};
-        let config = plots.config.composable.get(kind);
-        let host = match kind {
-            ComposableKind::ContextMenu => {
-                super::background::context_menu_host(&plots.config.composable.context_menu_item)
-            }
-            _ => serde_json::json!({ "label": "Preview", "action": "preview" }),
-        };
-        let rendered = plots.composable_runtime.borrow_mut().render(
-            &format!("settings/{kind:?}"),
-            config,
-            host,
-            &plots.config.theme,
-            plots.components_mtime,
-        );
-        let mut props = config.props.clone();
-        if let Some(rendered) = rendered
-            && let Some(values) = rendered.props.as_object()
-        {
-            for (key, value) in values {
-                if ["label", "action", "_item_revision"].contains(&key.as_str()) {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_value::<PropValue>(value.clone()) {
-                    props.entry(key.clone()).or_insert(value);
-                }
-            }
-        }
-        let source = text_input("component.lua", &config.src)
-            .padding(6)
-            .style(prop_input_style)
-            .on_input(move |src| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::ComposableSource(kind, src)))
-            });
-        let mut col = column![prop_row(
-            "Source".into(),
-            Some("Relative to components/; absolute paths also work.".into()),
-            source.into(),
-            None
-        ),]
-        .spacing(10);
-        for (key, value) in props {
-            let reset = config.props.contains_key(&key).then(|| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::ComposableProp(
-                    kind,
-                    key.clone(),
-                    None,
-                )))
-            });
-            let key_for_control = key.clone();
-            let patch = move |value| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::ComposableProp(
-                    kind,
-                    key_for_control.clone(),
-                    Some(value),
-                )))
-            };
-            let control: Element<'static, Plant> = match value {
-                PropValue::Bool(value) => Checkbox::new(value)
-                    .on_toggle(move |v| patch(PropValue::Bool(v)))
-                    .into(),
-                PropValue::Number(value) => {
-                    let minimum = if key == "width" || key == "height" {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    spin_box(value, minimum..=1_000_000.0, 1.0, 2, move |v| {
-                        patch(PropValue::Number(v))
-                    })
-                    .into()
-                }
-                PropValue::Text(value) => text_input("", &value)
-                    .padding(6)
-                    .style(prop_input_style)
-                    .on_input(move |v| patch(PropValue::Text(v)))
-                    .into(),
-            };
-            let subtitle = if key == "height" && matches!(kind, ComposableKind::ContextMenu) {
-                "Fixed height when auto_sizing is off. Reset inherits the Lua default."
-            } else {
-                "Reset clears the override and inherits the Lua default."
-            };
-            col = col.push(prop_row(key, Some(subtitle.into()), control, reset));
-        }
-        col.width(Length::Fill).into()
+        context_menu::view(context_menu::Context::from(plots))
     }
 
     /// Panel page: picker row of bars on top, controls for the picked bar
     /// below (defaults to the first). Length % + thickness px, floating
     /// (+ margins when floating) and per-corner rounding.
-    fn panel_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+    fn panel_content(&self, id: window::Id, plots: panel::PanelContext<'_>) -> Element<'_, Plant> {
         let mut col = column![section_heading(
             "Choose a bar",
             "Each display can have its own bar configuration."
@@ -338,7 +235,7 @@ impl Setting {
                 .unwrap_or(connector);
             picker = picker.push(
                 button(text(label).size(13).color(theme::text()))
-                    .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectBar(
+                    .on_press(Plant::SettingPlot(crate::shell::SettingEvent::SelectBar(
                         id, *wid,
                     )))
                     .padding(8)
@@ -494,7 +391,7 @@ impl Setting {
                                 .size(12)
                                 .color(theme::text()),
                         )
-                        .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectSlot(
+                        .on_press(Plant::SettingPlot(crate::shell::SettingEvent::SelectSlot(
                             id, pos,
                         )))
                         .padding(6)
@@ -554,10 +451,10 @@ impl Setting {
                 }
                 col = col.push(Self::placement_editor(
                     wid,
-                    Top::output_name(plots, wid),
+                    plots.output_name(wid),
                     top,
                     self.selected_placement.as_deref(),
-                    plots,
+                    &plots,
                 ));
             }
 
@@ -722,70 +619,7 @@ impl Setting {
     /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
     /// and persists the choice to `config.toml`.
     fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        let current = &plots.config.theme;
-        let mut list = column![
-            section_heading(
-                "Color mode",
-                &format!(
-                    "Current palette: {} · {}",
-                    current.name,
-                    if current.darkmode { "Dark" } else { "Light" }
-                )
-            ),
-            row![
-                button(text("Dark").size(13).color(theme::text()))
-                    .width(Length::Fill)
-                    .on_press(Plant::Config(ConfigEvent::Patch(
-                        ConfigPatch::ThemeDarkmode(true)
-                    )))
-                    .padding(8)
-                    .style(theme::nav_button(current.darkmode)),
-                button(text("Light").size(13).color(theme::text()))
-                    .width(Length::Fill)
-                    .on_press(Plant::Config(ConfigEvent::Patch(
-                        ConfigPatch::ThemeDarkmode(false)
-                    )))
-                    .padding(8)
-                    .style(theme::nav_button(!current.darkmode)),
-            ]
-            .spacing(8),
-        ]
-        .spacing(16);
-        list = list.push(section_heading(
-            "Choose a palette",
-            "Swatches preview the primary, secondary, and tertiary colors.",
-        ));
-        for name in theme::available_themes() {
-            let selected = name == current.name;
-            let preview = theme::preview(&name, current.darkmode);
-            list = list.push(
-                button(
-                    row![
-                        text(name.clone()).size(13).color(preview.on_surface),
-                        text(if selected { "Selected" } else { "" })
-                            .size(11)
-                            .color(preview.on_surface),
-                        Space::new().width(Length::Fill),
-                        row![
-                            swatch(preview.primary, preview.outline),
-                            swatch(preview.secondary, preview.outline),
-                            swatch(preview.tertiary, preview.outline),
-                        ]
-                        .spacing(4),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center)
-                    .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .on_press(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
-                    name,
-                ))))
-                .padding(14)
-                .style(theme::preview_button(preview, selected)),
-            );
-        }
-        list.width(Length::Fill).into()
+        pages::theme_page(&plots.config.theme)
     }
 
     /// Animation speed picker: one global speed for every animated
@@ -793,291 +627,11 @@ impl Setting {
     /// change). Writes back via `ConfigEvent::Patch`, so the daemon
     /// re-times on the next redraw and persists the choice to `config.toml`.
     fn animation_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        let current = plots.config.animation.speed;
-        let mut speeds = column![].spacing(10);
-        for speed in AnimationSpeed::all() {
-            let selected = speed == current;
-            speeds = speeds.push(
-                button(
-                    column![
-                        row![
-                            text(speed.title())
-                                .size(14)
-                                .color(theme::text())
-                                .width(Length::Fill),
-                            text(format!(
-                                "{} ms{}",
-                                speed.duration().as_millis(),
-                                if selected { " · Selected" } else { "" }
-                            ))
-                            .size(12)
-                            .color(theme::text()),
-                        ]
-                        .spacing(8),
-                        hint(match speed {
-                            AnimationSpeed::Fast => "Quick and responsive",
-                            AnimationSpeed::Medium => "Balanced everyday transitions",
-                            AnimationSpeed::Slow => "Relaxed and more pronounced",
-                        }),
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .on_press(Plant::Config(ConfigEvent::Patch(
-                    ConfigPatch::AnimationSpeed(speed),
-                )))
-                .padding(14)
-                .style(theme::nav_button(selected)),
-            );
-        }
-        column![
-            section(
-                "Transition speed",
-                "Shorter durations feel snappier; longer durations make changes more gradual.",
-                speeds.width(Length::Fill).into()
-            ),
-            hint("Some Lua listviews define their own durations and override this global setting."),
-        ]
-        .spacing(8)
-        .width(Length::Fill)
-        .into()
+        pages::animation_page(plots.config.animation.speed)
     }
 
     fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        column![
-            section_heading("Display layout", "Drag images to position them. Use the map to see how they overlap your displays."),
-            row![
-                button(text("Add wallpaper…").size(13).color(theme::button_text()))
-                    .on_press(Plant::BackgroundPlot(
-                        crate::app::BackgroundEvent::PickWallpaper
-                    ))
-                    .padding(8)
-                    .style(theme::menu_button(theme::RADIUS)),
-                Space::new().width(Length::Fill),
-            ]
-            .spacing(8),
-            self.wallpaper_grid(id, plots),
-            section("Image properties", "Choose an image below to adjust its placement. Reset restores that property's default.", self.wallpaper_images(id, plots)),
-        ]
-        .spacing(16)
-        .into()
-    }
-
-    /// Image list below the map: picker row, remove, and per-property
-    /// spinboxes (x/y/z/width/height/scale) each with a reset button.
-    /// Commits go through `ConfigPatch` like every other panel edit, so
-    /// coalesced save + regen arming apply unchanged.
-    fn wallpaper_images(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        let images = &plots.config.background.image;
-        if images.is_empty() {
-            return column![
-                text("No images yet.").size(13).color(theme::text()),
-                text("Add wallpaper… to place the first one.").size(11),
-            ]
-            .spacing(4)
-            .into();
-        }
-        // Clamped pick (stale after external edits, like the bar picker).
-        let sel = match self.selected_image {
-            Some(s) if s < images.len() => s,
-            _ => 0,
-        };
-        let mut picker = row![].spacing(8);
-        for (i, img) in images.iter().enumerate() {
-            let name = image_file_name(img);
-            picker = picker.push(
-                button(
-                    text(format!("{} · {name}", i + 1))
-                        .size(12)
-                        .color(theme::text()),
-                )
-                .on_press(Plant::SettingPlot(crate::app::SettingEvent::SelectImage(
-                    id, i,
-                )))
-                .padding(8)
-                .style(theme::nav_button(i == sel)),
-            );
-        }
-        let img = &images[sel];
-        let name = image_file_name(img);
-        let (ix, iy, iz, iw, ih, iscale) = (img.x, img.y, img.z, img.width, img.height, img.scale);
-        // Actual file resolution for Width/Height reset (falls back to
-        // 0 = native flag when the file is unreadable).
-        let (fw, fh) = MapLayer::file_dimensions(img).unwrap_or((0.0, 0.0));
-        let (shown_width, shown_height) = MapLayer::size_with_file(img, (fw, fh));
-        // Match the renderer's effective scale, including wheel values up
-        // to 10x and larger valid values loaded from config.toml.
-        let shown_scale = iscale.max(0.01);
-        let mut col = column![
-            scrollable(picker).direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::default()
-            ))
-        ]
-        .spacing(16);
-        col = col.push(
-            row![
-                text(format!("Image {} · {name}", sel + 1))
-                    .size(13)
-                    .color(theme::text())
-                    .width(Length::Fill),
-                button(text("Remove image").size(12).color(theme::active().error))
-                    .on_press(Plant::Config(ConfigEvent::Patch(
-                        ConfigPatch::RemoveImage { index: sel }
-                    )))
-                    .padding(6)
-                    .style(theme::menu_button_tinted(
-                        theme::RADIUS,
-                        theme::active().error
-                    )),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        );
-        col = col.push(hint(format!("Source resolution: {fw:.0} × {fh:.0} px")));
-        col = col.push(section_heading(
-            "Position & stacking",
-            "X and Y are desktop coordinates. Higher Z values place the image in front.",
-        ));
-        col = col.push(image_spin_row(
-            "X (px)",
-            ix as f64,
-            -20000.0..=20000.0,
-            1.0,
-            1,
-            move |v| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
-                    index: sel,
-                    x: v as f32,
-                    y: iy,
-                }))
-            },
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
-                index: sel,
-                x: 0.0,
-                y: iy,
-            })),
-        ));
-        col = col.push(image_spin_row(
-            "Y (px)",
-            iy as f64,
-            -20000.0..=20000.0,
-            1.0,
-            1,
-            move |v| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
-                    index: sel,
-                    x: ix,
-                    y: v as f32,
-                }))
-            },
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
-                index: sel,
-                x: ix,
-                y: 0.0,
-            })),
-        ));
-        col = col.push(image_spin_row(
-            "Z (stack)",
-            iz as f64,
-            -100.0..=100.0,
-            1.0,
-            0,
-            move |v| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageZ {
-                    index: sel,
-                    z: v as i32,
-                }))
-            },
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageZ {
-                index: sel,
-                z: 0,
-            })),
-        ));
-        col = col.push(section_heading(
-            "Dimensions & scale",
-            "Width and height define the base size; scale multiplies both dimensions.",
-        ));
-        col = col.push(image_spin_row(
-            "Width (px)",
-            shown_width as f64,
-            0.0..=16000.0_f64.max(shown_width as f64),
-            1.0,
-            0,
-            move |v| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
-                    index: sel,
-                    width: v as f32,
-                    height: ih,
-                }))
-            },
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
-                index: sel,
-                width: fw,
-                height: ih,
-            })),
-        ));
-        col = col.push(image_spin_row(
-            "Height (px)",
-            shown_height as f64,
-            0.0..=16000.0_f64.max(shown_height as f64),
-            1.0,
-            0,
-            move |v| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
-                    index: sel,
-                    width: iw,
-                    height: v as f32,
-                }))
-            },
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
-                index: sel,
-                width: iw,
-                height: fh,
-            })),
-        ));
-        col = col.push(image_spin_row(
-            "Scale (×)",
-            shown_scale as f64,
-            0.01..=10.0_f64.max(shown_scale as f64),
-            0.1,
-            2,
-            move |v| {
-                Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageScale {
-                    index: sel,
-                    scale: v as f32,
-                }))
-            },
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageScale {
-                index: sel,
-                scale: 1.0,
-            })),
-        ));
-        col.spacing(8).width(Length::Fill).into()
-    }
-
-    fn wallpaper_grid(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        let mut outputs: Vec<(f32, f32, f32, f32)> = plots
-            .output_infos
-            .values()
-            .map(Background::output_geometry)
-            .collect();
-        outputs.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
-        let images = plots.config.background.image.clone();
-        let handles: Vec<Option<iced::widget::image::Handle>> = images
-            .iter()
-            .map(|img| plots.wallpaper_handle(img))
-            .collect();
-        let view = self.map_view;
-        container(stack![
-            images_layer(id, outputs.clone(), images.clone(), handles.clone(), view),
-            outputs_layer(id, outputs, images, handles, view),
-        ])
-        .style(theme::menu_box)
-        .height(Length::Fixed(360.0))
-        .clip(true)
-        .width(Length::Fill)
-        .into()
+        wallpaper::view(self, id, &wallpaper::WallpaperContext::from(plots))
     }
 
     /// Replace the map pan/zoom/drag view (`MapViewChanged`). Field stays
@@ -1172,7 +726,7 @@ impl Setting {
         output: String,
         top: &Top,
         selected: Option<&str>,
-        plots: &Plots,
+        plots: &panel::PanelContext<'_>,
     ) -> Element<'static, Plant> {
         let Some(sel_id) = selected else {
             return hint(
@@ -1190,7 +744,7 @@ impl Setting {
         };
         let pid = placement.id.clone();
         let pid_msg = pid.clone();
-        let commit = std::rc::Rc::new(move |patch: crate::app::PlacementProp| {
+        let commit = std::rc::Rc::new(move |patch: crate::shell::PlacementProp| {
             Plant::TopPlot(TopEvent::Bar(BarEvent::WidgetProp {
                 bar: wid,
                 placement: pid_msg.clone(),
@@ -1222,7 +776,7 @@ impl Setting {
             let reset = placement
                 .interval
                 .is_some()
-                .then(|| commit_interval(crate::app::PlacementProp::Interval(None)));
+                .then(|| commit_interval(crate::shell::PlacementProp::Interval(None)));
             let commit_value = commit.clone();
             col = col.push(prop_row(
                 "Refresh interval".to_string(),
@@ -1231,7 +785,7 @@ impl Setting {
                     .is_none()
                     .then(|| format!("Widget default: {:.2}s", def.defaults.interval)),
                 spin_box(effective as f64, 0.25..=3600.0, 0.25, 2, move |v| {
-                    commit_value(crate::app::PlacementProp::Interval(Some(v as f32)))
+                    commit_value(crate::shell::PlacementProp::Interval(Some(v as f32)))
                 })
                 .width(Length::Fill)
                 .into(),
@@ -1245,7 +799,7 @@ impl Setting {
             let reset = placement
                 .size
                 .is_some()
-                .then(|| commit_size(crate::app::PlacementProp::Size(None)));
+                .then(|| commit_size(crate::shell::PlacementProp::Size(None)));
             let commit_value = commit.clone();
             col = col.push(prop_row(
                 "Text size".to_string(),
@@ -1254,7 +808,7 @@ impl Setting {
                     .is_none()
                     .then(|| format!("Widget default: {:.1}px", def.defaults.size)),
                 spin_box(effective as f64, 1.0..=128.0, 0.5, 1, move |v| {
-                    commit_value(crate::app::PlacementProp::Size(Some(v as f32)))
+                    commit_value(crate::shell::PlacementProp::Size(Some(v as f32)))
                 })
                 .width(Length::Fill)
                 .into(),
@@ -1298,115 +852,7 @@ impl Setting {
         placement: &crate::config::WidgetPlacement,
         def: &crate::config::WidgetDefinition,
     ) -> Element<'static, Plant> {
-        use crate::config::PropValue;
-        let schema = def.schema.get(&key);
-        let default = def.defaults.props.get(&key);
-        let overridden = placement.props.get(&key);
-        let value = overridden.or(default);
-        let kind = schema
-            .and_then(|s| s.prop_type.as_deref())
-            .filter(|t| ["boolean", "number", "string"].contains(t))
-            .unwrap_or_else(|| {
-                default
-                    .map(PropValue::kind)
-                    .or_else(|| overridden.map(PropValue::kind))
-                    .unwrap_or("string")
-            });
-        let label = schema
-            .and_then(|s| s.label.clone())
-            .unwrap_or_else(|| key.clone());
-        // Reset clears the override so the key inherits again (absent
-        // keys fall back to widget defaults at render).
-        let reset = overridden
-            .is_some()
-            .then(|| patch_prop_msg(wid, pid.clone(), key.clone(), None));
-        let inherited = default.map(|dflt| format!("Widget default: {}", prop_display(dflt)));
-        let subtitle = schema.and_then(|s| s.description.clone()).or(inherited);
-        match kind {
-            "boolean" => {
-                let checked = matches!(value, Some(PropValue::Bool(true)));
-                let (wid_b, pid_b, key_b) = (wid, pid.clone(), key.clone());
-                let control = Checkbox::new(checked)
-                    .label(label.clone())
-                    .on_toggle(move |b| {
-                        patch_prop_msg(
-                            wid_b,
-                            pid_b.clone(),
-                            key_b.clone(),
-                            Some(PropValue::Bool(b)),
-                        )
-                    })
-                    .width(Length::Fill)
-                    .into();
-                prop_row(label, subtitle, control, reset)
-            }
-            "number" => {
-                let current = match value {
-                    Some(PropValue::Number(n)) => *n,
-                    _ => 0.0,
-                };
-                let min = schema.and_then(|s| s.min).unwrap_or(0.0);
-                let max = schema.and_then(|s| s.max).unwrap_or(1_000_000.0);
-                let (wid_n, pid_n, key_n) = (wid, pid.clone(), key.clone());
-                let control = spin_box(current, min..=max, 1.0, 2, move |v| {
-                    patch_prop_msg(
-                        wid_n,
-                        pid_n.clone(),
-                        key_n.clone(),
-                        Some(PropValue::Number(v)),
-                    )
-                })
-                .width(Length::Fill)
-                .into();
-                prop_row(label, subtitle, control, reset)
-            }
-            _ => {
-                let choices = schema.map(|s| s.choices.clone()).unwrap_or_default();
-                if choices.is_empty() {
-                    let current = match value {
-                        Some(PropValue::Text(s)) => s.clone(),
-                        _ => String::new(),
-                    };
-                    let (wid_t, pid_t, key_t) = (wid, pid.clone(), key.clone());
-                    let control = text_input("", &current)
-                        .size(12)
-                        .width(Length::Fill)
-                        .padding(6)
-                        .style(prop_input_style)
-                        .on_input(move |typed| {
-                            patch_prop_msg(
-                                wid_t,
-                                pid_t.clone(),
-                                key_t.clone(),
-                                Some(PropValue::Text(typed)),
-                            )
-                        })
-                        .into();
-                    prop_row(label, subtitle, control, reset)
-                } else {
-                    let current = match value {
-                        Some(PropValue::Text(s)) => s.clone(),
-                        _ => String::new(),
-                    };
-                    let mut presets = row![].spacing(8);
-                    for choice in choices {
-                        let selected = *choice == current;
-                        presets = presets.push(
-                            button(text(choice.clone()).size(12).color(theme::text()))
-                                .on_press(patch_prop_msg(
-                                    wid,
-                                    pid.clone(),
-                                    key.clone(),
-                                    Some(PropValue::Text(choice)),
-                                ))
-                                .padding(6)
-                                .style(theme::nav_button(selected)),
-                        );
-                    }
-                    prop_row(label, subtitle, presets.into(), reset)
-                }
-            }
-        }
+        editors::widget_property(wid, pid, key, placement, def)
     }
 
     /// Pick the wallpaper image the editor below the map edits
@@ -1509,15 +955,15 @@ impl Setting {
         plots.flush_config_save();
         let mut cmds = Vec::with_capacity(to_close.len());
         for id in to_close {
-            plots.last_cursor.remove(&id);
-            plots.press_targets.remove(&id);
+            plots.input.cursors.remove(&id);
+            plots.input.presses.remove(&id);
             cmds.push(iced_runtime::task::effect(Action::Window(
                 WindowAction::Close(id),
             )));
         }
         // Toggle-closed with pending wallpaper edits: the user is done —
         // regen now instead of waiting out the countdown.
-        if plots.theme_regen_dirty {
+        if plots.theme_jobs.dirty {
             cmds.push(plots.fire_regen_theme());
         }
         if cmds.is_empty() {
@@ -1561,70 +1007,6 @@ fn section<'a>(title: &str, description: &str, body: Element<'a, Plant>) -> Elem
         .width(Length::Fill)
         .style(theme::menu_box)
         .into()
-}
-
-/// Settings-surface text input: card background, hairline border, theme
-/// text (mirrors the spin_box input).
-use crate::ui::style::input_style as prop_input_style;
-
-/// Build a [`BarEvent::WidgetProp`] patch message for one placement
-/// property (shared by every editor control; keeps closures small).
-fn patch_prop_msg(
-    wid: window::Id,
-    pid: String,
-    key: String,
-    value: Option<crate::config::PropValue>,
-) -> Plant {
-    Plant::TopPlot(TopEvent::Bar(BarEvent::WidgetProp {
-        bar: wid,
-        placement: pid,
-        patch: crate::app::PlacementProp::Prop { key, value },
-    }))
-}
-
-/// Human-readable property value for inherited-value captions.
-fn prop_display(value: &crate::config::PropValue) -> String {
-    use crate::config::PropValue;
-    match value {
-        PropValue::Bool(b) => b.to_string(),
-        PropValue::Number(n) => {
-            if n.fract() == 0.0 {
-                format!("{n:.0}")
-            } else {
-                n.to_string()
-            }
-        }
-        PropValue::Text(s) => s.clone(),
-    }
-}
-
-/// One editor row: title, control, optional Reset (shown only for
-/// overrides), optional inherited-value caption.
-fn prop_row(
-    title: String,
-    inherited: Option<String>,
-    control: Element<'static, Plant>,
-    on_reset: Option<Plant>,
-) -> Element<'static, Plant> {
-    let mut header = row![
-        text(title)
-            .size(14)
-            .color(theme::text())
-            .width(Length::Fill)
-    ];
-    if let Some(reset) = on_reset {
-        header = header.push(
-            button(text("Reset").size(12).color(theme::button_text()))
-                .on_press(reset)
-                .padding(6)
-                .style(theme::menu_button(theme::RADIUS)),
-        );
-    }
-    let mut col = column![header.spacing(12), control].spacing(8);
-    if let Some(caption) = inherited {
-        col = col.push(hint(caption));
-    }
-    container(col).padding(12).width(Length::Fill).into()
 }
 
 /// Single palette swatch box for theme preview rows: fixed-size tile
@@ -1746,7 +1128,7 @@ mod tests {
         let mut setting = Setting::default();
         setting.set_map_view(MapView {
             selected: Some(2),
-            drag: Some(crate::components::display_map::MapDrag {
+            drag: Some(crate::ui::widgets::display_map::MapDrag {
                 image: Some(2),
                 ..Default::default()
             }),

@@ -26,7 +26,7 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::layers::Notification;
+    use crate::shell::screens::Notification;
 
     #[test]
     fn notification_list_is_newest_first_metadata_only() {

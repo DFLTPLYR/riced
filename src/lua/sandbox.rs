@@ -1,6 +1,24 @@
 //! Explicit VM profiles. Native widget shell access is intentionally preserved.
-use mlua::{Lua, LuaOptions, StdLib, Table, Value};
-#[derive(Clone, Copy)]
+use mlua::{AnyUserData, HookTriggers, Lua, LuaOptions, StdLib, Table, UserData, Value, VmState};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const INSTRUCTION_LIMIT: usize = 200_000;
+const HOOK_INTERVAL: usize = 1_000;
+struct ExecutionBudget(Arc<AtomicUsize>);
+impl UserData for ExecutionBudget {}
+
+pub(crate) fn reset_budget(lua: &Lua) -> mlua::Result<()> {
+    let budget: AnyUserData = lua.named_registry_value("riced.execution_budget")?;
+    budget
+        .borrow::<ExecutionBudget>()?
+        .0
+        .store(INSTRUCTION_LIMIT, Ordering::Relaxed);
+    Ok(())
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Profile {
     App,
     Widget,
@@ -11,6 +29,26 @@ pub(crate) fn new_lua(profile: Profile) -> mlua::Result<Lua> {
         Profile::Widget => StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::OS | StdLib::IO,
     };
     let lua = Lua::new_with(libs, LuaOptions::default())?;
+    lua.set_memory_limit(MEMORY_LIMIT)?;
+    let remaining = Arc::new(AtomicUsize::new(INSTRUCTION_LIMIT));
+    lua.set_named_registry_value("riced.execution_budget", ExecutionBudget(remaining.clone()))?;
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(HOOK_INTERVAL as u32),
+        move |_, _| {
+            if remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(HOOK_INTERVAL)
+                })
+                .is_err()
+            {
+                Err(mlua::Error::RuntimeError(
+                    "Lua instruction budget exceeded".into(),
+                ))
+            } else {
+                Ok(VmState::Continue)
+            }
+        },
+    )?;
     if matches!(profile, Profile::Widget) {
         let globals = lua.globals();
         for key in ["dofile", "loadfile", "require"] {
@@ -22,4 +60,40 @@ pub(crate) fn new_lua(profile: Profile) -> mlua::Result<Lua> {
         }
     }
     Ok(lua)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_budget_is_shared_and_recovers_for_both_profiles() {
+        for profile in [Profile::App, Profile::Widget] {
+            let lua = new_lua(profile).unwrap();
+            let error = lua.load("while true do end").exec().unwrap_err();
+            assert!(error.to_string().contains("instruction budget exceeded"));
+            reset_budget(&lua).unwrap();
+            assert_eq!(lua.load("return 42").eval::<i32>().unwrap(), 42);
+        }
+    }
+
+    #[test]
+    fn native_widget_shell_access_is_preserved_under_the_shared_budget() {
+        let lua = new_lua(Profile::Widget).unwrap();
+        assert!(
+            lua.load("return type(os.execute) == 'function' and type(io.popen) == 'function'")
+                .eval::<bool>()
+                .unwrap()
+        );
+        assert!(
+            lua.load("return os.exit == nil and os.remove == nil and require == nil")
+                .eval::<bool>()
+                .unwrap()
+        );
+        let error = lua
+            .load("return string.rep('x', 128 * 1024 * 1024)")
+            .eval::<String>()
+            .unwrap_err();
+        assert!(error.to_string().to_lowercase().contains("memory"));
+    }
 }

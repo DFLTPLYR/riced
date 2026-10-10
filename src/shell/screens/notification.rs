@@ -8,7 +8,7 @@
 //! Bodies render from `notifications.lua`, falling back to
 //! [`default_tree`] when the script is missing or broken.
 //!
-//! Cards animate on the shared [`crate::app::layers::listview::ListView`]
+//! Cards animate on the shared [`crate::ui::listview::ListView`]
 //! keyed `(output, id)`: arrivals fade/slide in from the anchored
 //! edge, dismissals linger as inert ghosts fading out. Placement
 //! honors `[notifications] output`: `"mouse"` resolves the output
@@ -19,11 +19,11 @@
 use super::background::Background;
 use super::listview::Axis;
 use super::top::{NodeLength, WidgetNode, build_node, inject_ui, new_widget_lua, parse_node};
-use crate::app::app::{PlotInfo, Plots};
-use crate::app::layers::anim::{ENTER_OFFSET, ItemMotion};
-use crate::app::{NotifyEvent, Plant};
 use crate::config::NotificationConfig;
+use crate::shell::state::{PlotInfo, Plots};
+use crate::shell::{NotifyEvent, Plant};
 use crate::theme;
+use crate::ui::anim::{ENTER_OFFSET, ItemMotion};
 use iced::window;
 use iced::{Element, Length, Task as Command, Vector};
 use iced_exwlshell::reexport::{
@@ -186,7 +186,7 @@ pub(crate) fn resolve_output(plots: &Plots, cfg: &NotificationConfig) -> Option<
             return Some(*id);
         }
     }
-    if let Some(cursor) = plots.last_cursor_global {
+    if let Some(cursor) = plots.input.global {
         let geoms: Vec<_> = plots
             .output_infos
             .iter()
@@ -570,10 +570,11 @@ fn sync_notify_lua(plots: &mut Plots) -> bool {
 }
 
 fn note_error(plots: &mut Plots, err: String) {
-    if plots.notify_last_error.as_deref() != Some(err.as_str()) {
-        eprintln!("riced: notifications.lua: {err}");
-        plots.notify_last_error = Some(err);
-    }
+    crate::lua::error::report_once(
+        &mut plots.notify_last_error,
+        "riced: notifications.lua: ",
+        err,
+    );
 }
 
 fn ensure_notify_lua(plots: &mut Plots) -> Result<(), String> {
@@ -1010,7 +1011,7 @@ impl Notification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::layers::top::{WidgetNode, inject_ui, new_widget_lua, parse_node};
+    use crate::shell::screens::top::{WidgetNode, inject_ui, new_widget_lua, parse_node};
 
     fn noti(id: u32, age_ms: u64, timeout_ms: Option<u64>, urgency: u8) -> Notification {
         Notification {
@@ -1092,7 +1093,7 @@ mod tests {
 
     #[test]
     fn input_rects_cover_each_card_and_nothing_else() {
-        use crate::app::Plots;
+        use crate::shell::Plots;
         use iced_wayland_subscriber::shell::channel;
         let (_tx, rx) = channel();
         let mut plots = Plots::new(rx);
@@ -1301,8 +1302,8 @@ mod tests {
 
     #[test]
     fn notification_lists_share_the_generic_component() {
-        use super::super::anim::ENTER_OFFSET;
         use super::super::listview::{Axis, ListView};
+        use crate::ui::anim::ENTER_OFFSET;
         use aura_anim::core::runtime::MotionRuntime;
         // Same ListView machine as widget rows, keyed (output, id).
         let mut rt = MotionRuntime::new();

@@ -1,6 +1,6 @@
-use crate::app::ConfigEvent;
-use crate::app::Plant;
 use crate::config::{BackgroundImage, ConfigPatch};
+use crate::shell::ConfigEvent;
+use crate::shell::Plant;
 use crate::theme;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Stroke};
 use iced::widget::image::Handle;
@@ -288,7 +288,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
             return None;
         }
         let select = |view: MapView| {
-            Plant::SettingPlot(crate::app::SettingEvent::MapViewChanged { id: self.id, view })
+            Plant::SettingPlot(crate::shell::SettingEvent::MapViewChanged { id: self.id, view })
         };
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {

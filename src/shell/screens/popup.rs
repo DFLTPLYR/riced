@@ -3,8 +3,8 @@ use super::top::{
     Top, TopLocal, WidgetNode, call_lua_value, coerce_text, lua_has_func, lua_value_kind,
     parse_node, rich_text,
 };
-use crate::app::app::{PlotInfo, Plots};
-use crate::app::{Plant, TopEvent, WidgetEvent};
+use crate::shell::state::{PlotInfo, Plots};
+use crate::shell::{Plant, TopEvent, WidgetEvent};
 use crate::theme;
 use iced::window;
 use iced::{Element, Length, Point, Task as Command};
@@ -452,7 +452,7 @@ impl Popup {
     }
 
     pub fn view(&self, plots: &Plots) -> Element<'static, Plant> {
-        use crate::app::TopEvent;
+        use crate::shell::TopEvent;
         use iced::widget::{button, column, container};
         let win_id = self.win_id;
         let mut content = column![].spacing(4);
@@ -513,7 +513,7 @@ impl Popup {
                 list.clear_all(&mut plots.anim_runtime);
             }
         }
-        plots.last_cursor.remove(&id);
+        plots.input.cursors.remove(&id);
         plots.popups.remove(&id);
         plots.ids.remove(&id);
         iced_runtime::task::effect(Action::Window(WindowAction::Close(id)))
@@ -534,8 +534,7 @@ impl Popup {
         if open.is_empty() {
             return Command::none();
         }
-        plots.sysinfo.refresh_cpu_usage();
-        plots.sysinfo.refresh_memory();
+        plots.services.refresh_system();
         let gpu = Self::gpu_usage_percent();
         let mut cmds = Vec::new();
         for (pid, placement_id, bar) in open {
@@ -727,11 +726,11 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::layers::top::NodeLength;
+    use crate::ui::node::NodeLength;
 
     #[test]
     fn session_menu_delegates_have_visible_layout_bounds() {
-        use crate::app::layers::{listview::ListView, top};
+        use crate::{shell::screens::top, ui::listview::ListView};
         use iced::advanced::{layout, renderer::Headless, widget::Tree};
         let lua = top::new_widget_lua().unwrap();
         for (_, source) in crate::config::builtin_component_files() {
@@ -939,11 +938,11 @@ mod tests {
                 width: NodeLength::Shrink,
                 height: NodeLength::Shrink,
                 transitions: Box::new((
-                    crate::app::layers::listview::Transition::slide_fade(16.0),
-                    crate::app::layers::listview::Transition::slide_fade_out(-16.0),
-                    crate::app::layers::listview::Transition {
-                        from: crate::app::layers::anim::ItemMotion::settled(),
-                        to: crate::app::layers::anim::ItemMotion::settled(),
+                    crate::ui::listview::Transition::slide_fade(16.0),
+                    crate::ui::listview::Transition::slide_fade_out(-16.0),
+                    crate::ui::listview::Transition {
+                        from: crate::ui::anim::ItemMotion::settled(),
+                        to: crate::ui::anim::ItemMotion::settled(),
                         duration: None,
                     },
                 )),

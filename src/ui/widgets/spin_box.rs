@@ -1,4 +1,4 @@
-use crate::app::Plant;
+use crate::shell::Plant;
 use crate::theme;
 use iced::widget::row::Row;
 use iced::widget::{button, row, text_input};

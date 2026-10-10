@@ -4,13 +4,13 @@ use crate::services::ServiceCtx;
 impl<'a> ServiceCtx<'a> {
     pub fn from_plots(plots: &'a Plots, gpu: Option<f32>) -> Self {
         Self {
-            sys: &plots.sysinfo,
+            sys: &plots.services.system,
             gpu,
             theme: &plots.config.theme,
             outputs: &plots.output_infos,
             notifications: &plots.notifications,
-            toplevels: &plots.toplevel_cache,
-            workspaces: &plots.workspace_cache,
+            toplevels: &plots.services.toplevels,
+            workspaces: &plots.services.workspaces,
         }
     }
 }

@@ -9,19 +9,8 @@ use super::{bridge, composable, sandbox};
 use super::props::component_props;
 use crate::ui::dsl::inject_ui_base;
 use crate::ui::{decode::parse_node, node::WidgetNode as Node};
-use mlua::{Function, HookTriggers, Lua, LuaSerdeExt, RegistryKey, Table, Value, VmState};
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
-
-const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-const INSTRUCTION_LIMIT: usize = 200_000;
-const HOOK_INTERVAL: usize = 1_000;
+use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u64);
@@ -37,11 +26,7 @@ pub enum Message {
     Tick,
 }
 
-#[derive(Debug, Clone)]
-pub struct LuaError {
-    pub entry: String,
-    pub message: String,
-}
+pub use super::error::LuaError;
 
 /// Effect/Subscription payloads are Rust-owned. M4 extends these into
 /// executor tasks; M0 only needs explicit dirty invalidation.
@@ -58,7 +43,6 @@ pub enum SubSpec {}
 pub struct LuaRuntime {
     lua: Lua,
     app: Option<RegistryKey>,
-    budget: Arc<AtomicUsize>,
     version: u64,
     views: HashMap<WindowId, (u64, Node)>,
     pub last_error: Option<Arc<LuaError>>,
@@ -73,33 +57,10 @@ impl LuaRuntime {
         components: Vec<(std::path::PathBuf, String)>,
     ) -> mlua::Result<Self> {
         let lua = sandbox::new_lua(sandbox::Profile::App)?;
-        lua.set_memory_limit(MEMORY_LIMIT)?;
-        let budget = Arc::new(AtomicUsize::new(INSTRUCTION_LIMIT));
-        let remaining = budget.clone();
-        lua.set_hook(
-            HookTriggers::new().every_nth_instruction(HOOK_INTERVAL as u32),
-            move |_, _| {
-                let before = remaining.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
-                    left.checked_sub(HOOK_INTERVAL)
-                });
-                if before.is_err() {
-                    Err(mlua::Error::RuntimeError(
-                        "Lua instruction budget exceeded".into(),
-                    ))
-                } else {
-                    Ok(VmState::Continue)
-                }
-            },
-        )?;
         inject_ui_base(&lua)?;
         // The application host shares the same bundled pure component
         // definitions as the shell's module widgets.
-        for (path, source) in components {
-            budget.store(INSTRUCTION_LIMIT, Ordering::Relaxed);
-            lua.load(&source)
-                .set_name(format!("@{}", path.display()))
-                .exec()?;
-        }
+        super::library::install(&lua, sandbox::Profile::App, components)?;
         let api = lua.create_table()?;
         lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
         api.set(
@@ -126,8 +87,12 @@ impl LuaRuntime {
                 };
                 let props = component_props(lua, &app, overrides, host)?;
                 app.set("props", props.clone())?;
-                let view: Function = app.get("view")?;
-                let node: Value = view.call((app.clone(), props))?;
+                let node = super::entry::invoke(
+                    lua,
+                    app.clone(),
+                    "view",
+                    mlua::MultiValue::from_vec(vec![Value::Table(props)]),
+                )?;
                 parse_node(&node).map_err(mlua::Error::RuntimeError)?;
                 let entry = lua.create_table()?;
                 entry.set("source", source)?;
@@ -148,7 +113,6 @@ impl LuaRuntime {
         Ok(Self {
             lua,
             app: None,
-            budget,
             version: 0,
             views: HashMap::new(),
             last_error: None,
@@ -156,7 +120,7 @@ impl LuaRuntime {
     }
 
     fn begin(&self) -> mlua::Result<()> {
-        self.budget.store(INSTRUCTION_LIMIT, Ordering::Relaxed);
+        sandbox::reset_budget(&self.lua)?;
         self.lua
             .set_named_registry_value("riced.effects", self.lua.create_table()?)
     }
@@ -168,12 +132,7 @@ impl LuaRuntime {
                 Ok(value)
             }
             Err(error) => {
-                let message = error.to_string();
-                tracing::error!(entry, error = %message, "Lua entry failed");
-                self.last_error = Some(Arc::new(LuaError {
-                    entry: entry.into(),
-                    message,
-                }));
+                super::error::record_entry(&mut self.last_error, entry, error.to_string());
                 Err(error)
             }
         }
@@ -230,9 +189,13 @@ impl LuaRuntime {
                     .as_ref()
                     .ok_or_else(|| mlua::Error::RuntimeError("No Lua app loaded".into()))?,
             )?;
-            let callback: Function = app.get(handler.as_str())?;
             // Serialization values exist only for this entry; they never enter IR.
-            callback.call::<()>((app, self.lua.to_value(payload)?))?;
+            super::entry::invoke(
+                &self.lua,
+                app,
+                handler,
+                mlua::MultiValue::from_vec(vec![self.lua.to_value(payload)?]),
+            )?;
             let pending: Table = self.lua.named_registry_value("riced.effects")?;
             let mut effects = Vec::new();
             for effect in pending.sequence_values::<String>() {
@@ -261,8 +224,12 @@ impl LuaRuntime {
                     .as_ref()
                     .ok_or_else(|| mlua::Error::RuntimeError("No Lua app loaded".into()))?,
             )?;
-            let view: Function = app.get("view")?;
-            let returned: Value = view.call((app, window.0))?;
+            let returned = super::entry::invoke(
+                &self.lua,
+                app,
+                "view",
+                mlua::MultiValue::from_vec(vec![window.0.into_lua(&self.lua)?]),
+            )?;
             parse_node(&returned).map_err(mlua::Error::RuntimeError)
         })();
         let node = self.finish("view", result)?;
@@ -302,8 +269,12 @@ impl LuaRuntime {
             }
             let resolved = serde_json::Value::Object(resolved);
             app.set("props", props.clone())?;
-            let view: Function = app.get("view")?;
-            let returned: Value = view.call((app, props))?;
+            let returned = super::entry::invoke(
+                &self.lua,
+                app,
+                "view",
+                mlua::MultiValue::from_vec(vec![Value::Table(props)]),
+            )?;
             let node = parse_node(&returned).map_err(mlua::Error::RuntimeError)?;
             Ok((node, resolved))
         })();
@@ -338,6 +309,32 @@ impl LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_components_cannot_reset_the_outer_entry_budget() {
+        let root = std::env::temp_dir().join(format!("riced-nested-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let child = root.join("child.lua");
+        std::fs::write(
+            &child,
+            "return {view=function(self,props) return ui.space() end}",
+        )
+        .unwrap();
+        let mut runtime = LuaRuntime::new().unwrap();
+        runtime.load(&format!("local app={{}}; function app:view(id) while true do riced.component({:?}, {{}}, {{}}) end end; return app", child.to_string_lossy())).unwrap();
+        assert!(
+            runtime
+                .view(WindowId(1))
+                .unwrap_err()
+                .to_string()
+                .contains("instruction budget exceeded")
+        );
+        runtime
+            .load("return {view=function(self,id) return ui.text('recovered') end}")
+            .unwrap();
+        assert!(runtime.view(WindowId(1)).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn dirty_views_cache_owned_ir_and_updates_receive_serialized_payloads() {
         let mut runtime = LuaRuntime::new().unwrap();

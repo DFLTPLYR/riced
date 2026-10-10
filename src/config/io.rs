@@ -1,5 +1,6 @@
 //! Config persistence and parse-error reporting; schema and migrations are separate.
-use super::{Config, config_path, has_legacy_composables, migrate_legacy_top};
+use super::migrate::{has_legacy_composables, migrate_legacy_top};
+use super::{Config, config_path};
 use std::{path::Path, time::SystemTime};
 static LAST_PARSE_ERROR: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 pub(super) fn read_mtime(path: &Path) -> Option<SystemTime> {

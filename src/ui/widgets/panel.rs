@@ -1,4 +1,4 @@
-use crate::app::Plant;
+use crate::shell::Plant;
 use iced::widget::{Space, container};
 use iced::{Element, Fill, Length, Padding};
 

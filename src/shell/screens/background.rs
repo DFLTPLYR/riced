@@ -1,5 +1,5 @@
-use crate::app::app::{PlotInfo, Plots};
-use crate::app::{BackgroundEvent, ConfigEvent, Plant, TopEvent};
+use crate::shell::state::{PlotInfo, Plots};
+use crate::shell::{BackgroundEvent, ConfigEvent, Plant, TopEvent};
 use iced::mouse::Button;
 use iced::widget::image::Image;
 use iced::widget::{Space, container, stack};
@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use super::top::{NodeLength, WidgetNode};
-use crate::composables::panel::panel;
-use crate::composables::panel_window::background_window;
 use crate::theme;
+use crate::ui::widgets::panel::panel;
+use crate::ui::widgets::panel_window::background_window;
 
 #[derive(Debug)]
 pub struct Background;
@@ -196,8 +196,8 @@ mod tests {
                 Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
             )
             .unwrap();
-            let bounds: crate::composables::anchored::Bounds = Default::default();
-            let mut element = crate::composables::anchored::anchored(
+            let bounds: crate::ui::widgets::anchored::Bounds = Default::default();
+            let mut element = crate::ui::widgets::anchored::anchored(
                 content,
                 Point::new(790.0, 590.0),
                 Point::new(300.0, 100.0),
@@ -301,7 +301,7 @@ pub struct ContextMenu {
     pub y: f32, // global
     pub open: bool,
     pub output: Option<OutputId>,
-    pub bounds: crate::composables::anchored::Bounds,
+    pub bounds: crate::ui::widgets::anchored::Bounds,
 }
 
 fn validate_menu_size(node: &WidgetNode) -> Result<(), String> {
@@ -553,7 +553,8 @@ impl Background {
             .copied()
             .unwrap_or_else(|| {
                 plots
-                    .last_cursor
+                    .input
+                    .cursors
                     .get(&id)
                     .copied()
                     .unwrap_or(Point::new(0.0, 0.0))
@@ -568,14 +569,14 @@ impl Background {
         id: window::Id,
         position: Point,
     ) -> Command<Plant> {
-        plots.last_cursor.insert(id, position);
+        plots.input.cursors.insert(id, position);
         // Background windows are fullscreen at the output origin, so
         // this translates exactly: the single global cursor used for
         // mouse-output placement (notifications, popups). Moves over
         // bars/popups leave the last desktop position, which is the
         // right output in practice.
         if matches!(plots.ids.get(&id), Some(PlotInfo::Background(_))) {
-            plots.last_cursor_global = Some(Self::to_global(
+            plots.input.global = Some(Self::to_global(
                 id,
                 position,
                 &plots.ids,
@@ -979,7 +980,7 @@ impl Background {
             |action| Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action));
         let content =
             super::top::build_node(&node, 12.0, Some(&message)).expect("validated menu tree");
-        crate::composables::anchored::anchored(
+        crate::ui::widgets::anchored::anchored(
             content,
             Point::new(lx, ly),
             Point::new(ax, ay),
@@ -1005,7 +1006,7 @@ impl Background {
     /// its overlap-local offset — always ≥ 0 inside this output — so no
     /// negative-padding tricks are needed and the surface clips the rest.
     fn wallpaper_views(plots: &Plots, avail: (f32, f32, f32, f32)) -> Vec<Element<'_, Plant>> {
-        use crate::components::display_map::MapLayer;
+        use crate::ui::widgets::display_map::MapLayer;
 
         let (ax, ay, _, _) = avail;
         let mut order: Vec<usize> = (0..plots.config.background.image.len()).collect();

@@ -142,13 +142,11 @@ impl ComposableRuntime {
 }
 
 fn report_error(state: &mut Instance, path: &std::path::Path, error: String) {
-    if state.error.as_ref() != Some(&error) {
-        eprintln!(
-            "composable {}: keeping last working view: {error}",
-            path.display()
-        );
-        state.error = Some(error);
-    }
+    super::error::report_once(
+        &mut state.error,
+        &format!("composable {}: keeping last working view: ", path.display()),
+        error,
+    );
 }
 
 #[cfg(test)]
@@ -206,7 +204,7 @@ mod tests {
         assert_eq!(retained.props["width"], 80);
         match retained.node {
             WidgetNode::Container {
-                width: crate::app::layers::top::NodeLength::Fixed(80.0),
+                width: crate::ui::node::NodeLength::Fixed(80.0),
                 child,
                 ..
             } => {
@@ -240,16 +238,16 @@ mod tests {
             .props
             .insert("auto_sizing".into(), PropValue::Bool(false));
         let item = SourceComposable::new(&item_path.to_string_lossy());
-        let host = || crate::app::layers::background::context_menu_host(&item);
+        let host = || crate::shell::screens::background::context_menu_host(&item);
         let validate = |rendered: &Rendered| match &rendered.node {
             WidgetNode::Container {
-                width: crate::app::layers::top::NodeLength::Fixed(w),
-                height: crate::app::layers::top::NodeLength::Fixed(h),
+                width: crate::ui::node::NodeLength::Fixed(w),
+                height: crate::ui::node::NodeLength::Fixed(h),
                 ..
             } if *w > 0.0 && *h > 0.0 => Ok(()),
             WidgetNode::Container {
-                width: crate::app::layers::top::NodeLength::Fixed(w),
-                height: crate::app::layers::top::NodeLength::Shrink,
+                width: crate::ui::node::NodeLength::Fixed(w),
+                height: crate::ui::node::NodeLength::Shrink,
                 ..
             } if *w > 0.0 => Ok(()),
             _ => Err("fixed or automatic geometry required".into()),
@@ -289,8 +287,8 @@ mod tests {
         assert!(matches!(
             retained.node,
             WidgetNode::Container {
-                width: crate::app::layers::top::NodeLength::Fixed(220.0),
-                height: crate::app::layers::top::NodeLength::Fixed(92.0),
+                width: crate::ui::node::NodeLength::Fixed(220.0),
+                height: crate::ui::node::NodeLength::Fixed(92.0),
                 ..
             }
         ));
@@ -324,7 +322,7 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        crate::app::layers::top::build_node_opacity(&node, 13.0, None, 0.4).unwrap();
+        crate::ui::build::build_node_opacity(&node, 13.0, None, 0.4).unwrap();
         theme.darkmode = !theme.darkmode;
         let (updated, _) = runtime.component_view(&json!({}), &host, &theme).unwrap();
         assert_ne!(node, updated);

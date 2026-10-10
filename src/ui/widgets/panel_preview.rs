@@ -1,5 +1,5 @@
 //! Settings-only arrangement preview: chips are labels, never executable widgets.
-use crate::app::{BarEvent, Plant, SettingEvent, TopEvent};
+use crate::shell::{BarEvent, Plant, SettingEvent, TopEvent};
 use crate::theme;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke};
 use iced::{Element, Length, Point, Rectangle, Renderer, Size, Theme, keyboard, mouse, window};

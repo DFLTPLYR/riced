@@ -16,7 +16,7 @@ pub struct ServiceCtx<'a> {
     pub theme: &'a crate::config::ThemeConfig,
     pub outputs:
         &'a HashMap<iced_wayland_subscriber::OutputId, iced_wayland_subscriber::OutputInfo>,
-    pub notifications: &'a VecDeque<crate::app::layers::notification::Notification>,
+    pub notifications: &'a VecDeque<crate::shell::screens::notification::Notification>,
     pub toplevels: &'a ToplevelCache,
     pub workspaces: &'a WorkspaceCache,
 }

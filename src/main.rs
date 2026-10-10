@@ -1,11 +1,7 @@
 use iced_exwlshell::daemon;
 use wayland_client::Connection;
 
-mod app;
 mod cli;
-mod colorgen;
-mod components;
-mod composables;
 mod config;
 mod lua;
 mod notify;

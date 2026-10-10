@@ -127,7 +127,7 @@ pub enum BarEvent {
     Slots(Id, u32),
     /// Child alignment of one slot (position, not label): applied live,
     /// persisted to the bar's `[[bar]] aligns` entry.
-    SlotAlign(Id, usize, crate::app::layers::top::SlotAlign),
+    SlotAlign(Id, usize, crate::shell::screens::top::SlotAlign),
     /// Atomic settings-preview drop (placements carry ids); reject if
     /// the layout changed mid-drag.
     WidgetLayout {
@@ -219,7 +219,7 @@ pub enum BackgroundEvent {
 #[derive(Debug, Clone)]
 pub enum NotifyEvent {
     /// A notification arrived (D-Bus, internal event, or test source).
-    Arrived(crate::app::layers::notification::Notification),
+    Arrived(crate::shell::screens::notification::Notification),
     /// Dismiss one notification now (click, timeout sweep, D-Bus close,
     /// or output removal). Unknown ids are ignored.
     Dismissed(u32),
@@ -241,7 +241,7 @@ pub enum NotifyEvent {
 
 #[derive(Debug, Clone)]
 pub enum SettingEvent {
-    Select(Id, crate::app::layers::SettingPage),
+    Select(Id, crate::shell::screens::SettingPage),
     /// Pick the bar edited by the Panel page (`id` = settings window).
     SelectBar(Id, Id),
     /// Pick the wallpaper image edited below the map (`id` = settings
@@ -256,7 +256,7 @@ pub enum SettingEvent {
     SelectPlacement(Id, Id, String),
     MapViewChanged {
         id: Id,
-        view: crate::components::display_map::MapView,
+        view: crate::ui::widgets::display_map::MapView,
     },
 }
 
