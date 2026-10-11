@@ -1,5 +1,6 @@
 //! Owned descriptions, iced realization, reusable layout, and animation.
 pub mod anim;
+pub(crate) mod assets;
 pub mod build;
 pub mod decode;
 pub mod dsl;

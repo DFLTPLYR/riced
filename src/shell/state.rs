@@ -1,6 +1,5 @@
 use iced::futures::Stream;
 use iced::widget::Space;
-use iced::widget::image::Handle;
 use iced::{Element, Event, Point, Task as Command};
 use iced_exwlshell::redraw::Scope;
 use iced_runtime::Action;
@@ -124,8 +123,7 @@ impl Plots {
         crate::theme_gen::ensure_user_templates();
         let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);
         crate::theme::sync(&config.theme);
-        let mut desktop = super::desktop::DesktopState::default();
-        desktop.sync_wallpapers(&config);
+        let desktop = super::desktop::DesktopState::default();
         let widgets = Top::discover_widget_defs();
         let mut plots = Self {
             windows: Default::default(),
@@ -150,12 +148,6 @@ impl Plots {
         Top::migrate_widgets_toml(&mut plots);
         Top::init_widget_lua(&mut plots);
         plots
-    }
-
-    /// Pre-warmed [`Handle`] for an image entry, or `None` when its file
-    /// failed to decode (caller skips the entry, same as before).
-    pub(crate) fn wallpaper_handle(&self, img: &crate::config::BackgroundImage) -> Option<Handle> {
-        self.desktop.wallpapers.get(&img.local_path()).cloned()
     }
 
     /// sys `change_theme` equivalent as an iced command: render the
@@ -211,10 +203,8 @@ impl Plots {
         self.config_mtime = self.config.save().or(self.config_mtime);
     }
 
-    /// Arm a regen `REGEN_DELAY` out (drop / add / remove / scale / file
-    /// edit paths). Per-move patches never call this — drags stay silent
-    /// until drop or close. Supersedes pending timers via `seq`; no-ops
-    /// while a run is in flight (completion re-arms if still dirty).
+    /// Schedule a follow-up for an explicit Apply accepted during generation.
+    /// Supersedes pending timers via `seq`; no-ops while a run is in flight.
     pub(crate) fn arm_regen_theme(&mut self) -> Command<Plant> {
         self.theme_jobs.dirty = true;
         if self.theme_jobs.running {
@@ -231,8 +221,8 @@ impl Plots {
         })
     }
 
-    /// Fire a regen now (last Settings panel just closed — the user is
-    /// done editing). Batch-safe: `none` unless dirty, idle, and wanted.
+    /// Consume a generation request from a successful explicit Apply.
+    /// Batch-safe: `none` unless dirty, idle, and wanted.
     pub(crate) fn fire_regen_theme(&mut self) -> Command<Plant> {
         if !self.theme_jobs.dirty || self.theme_jobs.running {
             return Command::none();
@@ -268,6 +258,29 @@ impl Plots {
                 .collect();
         }
         let images = self.config.background.image.clone();
+        let mut applied: Vec<_> = self
+            .desktop
+            .wallpaper
+            .applied
+            .values()
+            .filter_map(|tile| match &tile.handle {
+                iced::widget::image::Handle::Rgba {
+                    width,
+                    height,
+                    pixels,
+                    ..
+                } => Some((
+                    tile.spec.key.clone(),
+                    crate::theme_gen::views::PixelView {
+                        width: *width,
+                        height: *height,
+                        pixels: pixels.clone(),
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+        applied.sort_by(|a, b| a.0.cmp(&b.0));
         let variant = self.config.theme.variant.clone();
         let darkmode = self.config.theme.darkmode;
         let templates = crate::theme_gen::effective_templates_dir(&self.config.theme);
@@ -278,23 +291,28 @@ impl Plots {
         Command::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let views = crate::theme_gen::render_views(&rects, &images);
-                    let errors =
-                        match crate::theme_gen::generate_from_views(&views, &variant, darkmode) {
-                            Ok(g) => {
-                                let mut errors = Vec::new();
-                                if let Err(e) = crate::theme_gen::write_dynamic_theme(&g.payload) {
-                                    errors.push(format!("cannot write dynamic.json: {e}"));
-                                } else if let Some(dir) = templates {
-                                    errors.extend(crate::theme_gen::process_templates(
-                                        &dir,
-                                        &g.variables,
-                                    ));
-                                }
-                                errors
+                    let generated = if applied.is_empty() {
+                        let views = crate::theme_gen::render_views(&rects, &images);
+                        crate::theme_gen::generate_from_views(&views, &variant, darkmode)
+                    } else {
+                        let views: Vec<_> = applied.into_iter().map(|(_, pixels)| pixels).collect();
+                        crate::theme_gen::generate_from_pixels(&views, &variant, darkmode)
+                    };
+                    let errors = match generated {
+                        Ok(g) => {
+                            let mut errors = Vec::new();
+                            if let Err(e) = crate::theme_gen::write_dynamic_theme(&g.payload) {
+                                errors.push(format!("cannot write dynamic.json: {e}"));
+                            } else if let Some(dir) = templates {
+                                errors.extend(crate::theme_gen::process_templates(
+                                    &dir,
+                                    &g.variables,
+                                ));
                             }
-                            Err(e) => vec![e],
-                        };
+                            errors
+                        }
+                        Err(e) => vec![e],
+                    };
                     // Views + quantization buffers peak in the tens of MB
                     // and are all dropped here; without a trim glibc
                     // arenas retain the high-water RSS forever on this
@@ -504,45 +522,62 @@ impl Plots {
         Notification::handle_arrived(self, n)
     }
 
+    fn close_surface(
+        &mut self,
+        id: iced::window::Id,
+        request_native_close: bool,
+    ) -> Command<Plant> {
+        let info = self.windows.ids.get(&id).copied();
+        let mut commands = Vec::new();
+        if matches!(info, Some(PlotInfo::Top(_))) {
+            let children: Vec<_> = self
+                .windows
+                .popups
+                .iter()
+                .filter_map(|(popup_id, popup)| (popup.bar_id == id).then_some(*popup_id))
+                .collect();
+            for child in children {
+                if request_native_close {
+                    commands.push(Popup::handle_dismiss(self, child));
+                } else {
+                    self.forget_window(child);
+                }
+            }
+        }
+        if let Some(PlotInfo::Notification(output)) = info
+            && self.windows.notifications.get(&output) == Some(&id)
+        {
+            self.notification
+                .forget_output(output, &mut self.animation.motion);
+        }
+        self.forget_window(id);
+        let closed_last_panel =
+            matches!(info, Some(PlotInfo::Setting)) && self.windows.settings.is_empty();
+        self.flush_config_save();
+        // Closing an already-removed native surface causes this backend to
+        // queue an action for an ID which will never be registered again.
+        if request_native_close && info.is_some() {
+            commands.push(iced_runtime::task::effect(Action::Window(
+                WindowAction::Close(id),
+            )));
+        }
+        if closed_last_panel && self.theme_jobs.dirty {
+            commands.push(self.fire_regen_theme());
+        }
+        Command::batch(commands)
+    }
+
+    fn refresh_theme(&mut self) -> Command<Plant> {
+        crate::theme::sync(&self.config.theme);
+        self.theme_mtime = crate::theme::poll(&self.config.theme, &None).unwrap_or(None);
+        Top::refresh_theme(self);
+        super::screens::notification::render_all_notis(self);
+        Command::batch([Popup::refresh_bodies(self), self.reclaim_image_memory()])
+    }
+
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
         match message {
-            Plant::Uproot(id) => {
-                let info = self.windows.ids.get(&id).copied();
-                let mut commands = Vec::new();
-                if matches!(info, Some(PlotInfo::Top(_))) {
-                    let children: Vec<_> = self
-                        .windows
-                        .popups
-                        .iter()
-                        .filter_map(|(popup_id, popup)| (popup.bar_id == id).then_some(*popup_id))
-                        .collect();
-                    for child in children {
-                        commands.push(Popup::handle_dismiss(self, child));
-                    }
-                }
-                if let Some(PlotInfo::Notification(output)) = info
-                    && self.windows.notifications.get(&output) == Some(&id)
-                {
-                    commands.push(Notification::remove_for_output(self, output));
-                }
-                self.forget_window(id);
-                let closed_last_panel =
-                    matches!(info, Some(PlotInfo::Setting)) && self.windows.settings.is_empty();
-                // Idempotent close: covers both the in-window close button
-                // and the compositor's X button (via close_events -> Uproot).
-                // Any window close also flushes staged config edits, so a
-                // drag-then-close without an idle gap still persists.
-                self.flush_config_save();
-                commands.push(iced_runtime::task::effect(Action::Window(
-                    WindowAction::Close(id),
-                )));
-                // Panel edits are done when the last panel closes: regen
-                // immediately instead of waiting out the countdown.
-                if closed_last_panel && self.theme_jobs.dirty {
-                    commands.push(self.fire_regen_theme());
-                }
-                Command::batch(commands)
-            }
+            Plant::Uproot(id) => self.close_surface(id, true),
             Plant::Tend => Command::none(),
             Plant::Sprout => {
                 // Toggle: spawn when none open, else close the current panel.
@@ -560,6 +595,7 @@ impl Plots {
                 // store geometry for panel.screen clipping
                 self.windows.output_infos.insert(output_id, output.clone());
                 let mut cmds = Vec::new();
+                cmds.push(self.refresh_wallpapers());
                 // Warm passive notification surfaces before any arrival. An
                 // arrival then updates an existing renderer/layer instead of
                 // mapping a new surface over the focused fullscreen app.
@@ -660,18 +696,20 @@ impl Plots {
                     .unwrap_or((0.0, 0.0, 0.0, 0.0))
                     != Background::output_geometry(&output);
                 self.windows.output_infos.insert(output_id, output);
+                let wallpaper = self.refresh_wallpapers();
                 if geom_changed {
                     // `%` bar sizes resolve against this geometry: re-push
                     // every bar's px size so nothing goes stale, plus heals.
                     // Notification windows span the output height, so they
                     // re-push too.
                     Command::batch(vec![
+                        wallpaper,
                         Self::repaint_burst(),
                         Top::reapply_for_output(self, output_id),
                         Notification::reapply_for_output(self, output_id),
                     ])
                 } else {
-                    Command::none()
+                    wallpaper
                 }
             }
             Plant::Wayland(LandEvent::OutputRemoved(output)) => {
@@ -687,6 +725,8 @@ impl Plots {
                     }
                 }
                 self.windows.output_infos.remove(&output_id);
+                self.desktop.wallpaper.applied.remove(&output_id);
+                cmds.push(self.refresh_wallpapers());
                 // clear global selection if it was on removed output (will hide via intersect check)
                 if cmds.is_empty() {
                     Command::none()
@@ -712,7 +752,13 @@ impl Plots {
                 }
                 _ => Command::none(),
             },
-            Plant::Wayland(LandEvent::Closed(_)) => Command::none(),
+            Plant::Wayland(LandEvent::Closed(id)) => {
+                // Backend confirmation: its renderer and UI cache are already
+                // gone. Also forget app state if the close subscription was
+                // missed, then reclaim only after those references are dropped.
+                let cleanup = self.close_surface(id, false);
+                Command::batch([cleanup, self.reclaim_image_memory()])
+            }
             Plant::Wayland(LandEvent::WindowOutputChanged { .. }) => Command::none(),
             Plant::Wayland(LandEvent::Locked) => Command::none(),
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
@@ -769,14 +815,11 @@ impl Plots {
                         self.notify_parse_error(),
                     ]);
                 }
-                // Theme files hot-reload on the same tick: re-emit the live
-                // config so every view repaints with the new palette. The
-                // actual re-parse happens in `theme::sync` on next view.
+                // Palette updates are not config-file edits and must not
+                // invalidate pending saves or rebuild every app VM.
                 if let Some(mtime) = crate::theme::poll(&self.config.theme, &self.theme_mtime) {
                     self.theme_mtime = mtime;
-                    return Command::done(Plant::Config(ConfigEvent::ConfigReloaded(
-                        self.config.clone(),
-                    )));
+                    return Command::done(Plant::Config(ConfigEvent::ThemeReloaded));
                 }
                 // Widget definitions hot-rescan on widgets-dir change:
                 // fresh defs repaint every bar on the next frame.
@@ -816,35 +859,67 @@ impl Plots {
                 self.notify_parse_error()
             }
             Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
-                // The file changed under us (external edit, or a theme file
-                // hot-reload re-emit): the on-disk config wins and replaces
+                let bars_changed = match (
+                    serde_json::to_value(&cfg.bar),
+                    serde_json::to_value(&self.config.bar),
+                ) {
+                    (Ok(next), Ok(current)) => next != current,
+                    _ => true,
+                };
+                // The config file changed under us: the on-disk config wins and replaces
                 // any staged local edits. Pending save timers are cancelled.
                 if self.config_jobs.dirty {
                     println!("riced: config changed on disk — replacing staged local edits");
                 }
                 self.config_jobs.invalidate();
                 let images_changed = cfg.background.image != self.config.background.image;
-                let switched_to_dynamic =
-                    cfg.theme.name == "dynamic" && self.config.theme.name != "dynamic";
                 self.config = cfg;
-                self.desktop.sync_wallpapers(&self.config);
                 // Bars resolve [[bar]] entries once at spawn; re-resolve
                 // here so slot/align/geometry edits apply live (anchor
                 // changes still need a respawn). On-disk wins by contract.
-                // Placement ids regenerate, so Lua states rebuild below
-                // (like WidgetsReloaded) and open popups dismiss.
-                let bars = Top::resync_bars_from_config(self);
+                // Only changed bar recipes regenerate placement IDs and VMs;
+                // palette-only changes retain existing app state and popups.
+                let bars = if bars_changed {
+                    Top::resync_bars_from_config(self)
+                } else {
+                    Vec::new()
+                };
                 let mut cmds = Vec::new();
+                cmds.push(self.refresh_wallpapers());
+                if images_changed {
+                    let mut previews = Vec::new();
+                    for (id, setting) in &mut self.windows.settings {
+                        if let Some(draft) = &mut setting.wallpaper_draft {
+                            if draft.dirty() {
+                                draft.error = Some(
+                                    "Wallpaper configuration changed. Discard to reload.".into(),
+                                );
+                            } else {
+                                let assets = draft.assets_revision + 1;
+                                let running = draft.preview_running;
+                                *draft = crate::wallpaper::draft::Draft::new(
+                                    &self.config.background.image,
+                                );
+                                draft.assets_revision = assets;
+                                draft.preview_running = running;
+                                previews.push(*id);
+                            }
+                        }
+                    }
+                    for id in previews {
+                        cmds.push(self.load_wallpaper_preview(id));
+                    }
+                }
                 for bar_id in bars {
                     cmds.push(Top::apply_layout(self, bar_id));
                 }
-                Top::init_widget_lua(self);
-                for id in self.windows.popups.keys().copied().collect::<Vec<_>>() {
-                    cmds.push(Popup::handle_dismiss(self, id));
-                }
-                if images_changed || switched_to_dynamic {
-                    cmds.push(self.arm_regen_theme());
-                    return Command::batch(cmds);
+                if bars_changed {
+                    Top::init_widget_lua(self);
+                    for id in self.windows.popups.keys().copied().collect::<Vec<_>>() {
+                        cmds.push(Popup::handle_dismiss(self, id));
+                    }
+                } else {
+                    cmds.push(self.refresh_theme());
                 }
                 if cmds.is_empty() {
                     Command::none()
@@ -872,6 +947,10 @@ impl Plots {
                 }
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
+                let palette_changed = matches!(
+                    patch,
+                    ConfigPatch::ThemeName(_) | ConfigPatch::ThemeDarkmode(_)
+                );
                 // Local-first single source of truth: mutate the live
                 // (in-memory) config and redraw All so every subscribed view
                 // previews the value next frame. The disk write is staged,
@@ -890,6 +969,7 @@ impl Plots {
                 let wallpaper_touched = matches!(
                     patch,
                     ConfigPatch::AddImage(_)
+                        | ConfigPatch::MoveImage { .. }
                         | ConfigPatch::RemoveImage { .. }
                         | ConfigPatch::SetImageScale { .. }
                         | ConfigPatch::SetImageSize { .. }
@@ -913,9 +993,6 @@ impl Plots {
                     _ => None,
                 };
                 self.config.apply(patch);
-                if sync {
-                    self.desktop.sync_wallpapers(&self.config);
-                }
                 if let Some(index) = removed_index {
                     for setting in self.windows.settings.values_mut() {
                         setting.image_removed(index);
@@ -926,13 +1003,17 @@ impl Plots {
                     Command::perform(tokio::time::sleep(Self::CONFIG_SAVE_DELAY), move |_| {
                         Plant::Config(ConfigEvent::SaveTimer(save_seq))
                     });
+                let mut commands = vec![save];
+                if palette_changed {
+                    commands.push(self.refresh_theme());
+                }
                 if let Some(dir) = retemplate_dir {
-                    return Command::batch(vec![save, Self::retemplate_command(dir, &self.config)]);
+                    commands.push(Self::retemplate_command(dir, &self.config));
                 }
-                if wallpaper_touched {
-                    return Command::batch(vec![save, self.arm_regen_theme()]);
+                if wallpaper_touched || sync {
+                    commands.push(self.refresh_wallpapers());
                 }
-                save
+                Command::batch(commands)
             }
             Plant::Config(ConfigEvent::SaveTimer(seq)) => {
                 // Stale timers (superseded by a later patch) or a clean
@@ -953,7 +1034,7 @@ impl Plots {
                     eprintln!("riced: template: {err}");
                 }
                 if errors.is_empty() {
-                    return Command::none();
+                    return self.reclaim_image_memory();
                 }
                 let n = Notification::internal(
                     &self.config.notifications,
@@ -973,8 +1054,12 @@ impl Plots {
             }
             Plant::Config(ConfigEvent::ThemeRegenerated(errors)) => {
                 self.theme_jobs.running = false;
+                let mut commands = vec![self.reclaim_image_memory()];
+                if errors.is_empty() && self.config.theme.name == "dynamic" {
+                    commands.push(self.refresh_theme());
+                }
                 // The completion itself is the notification (success or
-                // failure); edits landing mid-flight chain a follow-up.
+                // failure); explicit Applies landing mid-flight chain a follow-up.
                 let regen_cmd = if errors.is_empty() {
                     println!("riced: dynamic theme regenerated");
                     let n = Notification::internal(
@@ -996,13 +1081,15 @@ impl Plots {
                     );
                     Notification::handle_arrived(self, n)
                 };
-                // Edits that landed mid-flight re-dirty the flag; chain one
+                // Applies that landed mid-flight re-dirty the flag; chain one
                 // follow-up regen instead of dropping them.
                 if self.theme_jobs.dirty {
-                    return Command::batch(vec![regen_cmd, self.arm_regen_theme()]);
+                    commands.push(self.arm_regen_theme());
                 }
-                regen_cmd
+                commands.push(regen_cmd);
+                Command::batch(commands)
             }
+            Plant::Config(ConfigEvent::ThemeReloaded) => self.refresh_theme(),
             Plant::TopPlot(TopEvent::Pressed(id, button)) => Top::handle_press(self, id, button),
             Plant::TopPlot(TopEvent::Released(id, button)) => Top::handle_release(self, id, button),
             Plant::TopPlot(TopEvent::Widget(event)) => match event {
@@ -1102,21 +1189,87 @@ impl Plots {
                 Setting::handle_select_placement(self, id, bar, placement)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
-                // Mouse drop ends the drag: the incoming view has drag None,
-                // so an image drag in the stored view means wallpapers moved.
-                // (Per-move patches never dirty the theme — only the drop
-                // arms the 2s regen countdown.)
-                let dropped_image = self
-                    .windows
-                    .settings
-                    .get(&id)
-                    .is_some_and(|s| s.map_view().drag.is_some_and(|d| d.image.is_some()));
                 if let Some(setting) = self.windows.settings.get_mut(&id) {
                     setting.set_map_view(view);
                 }
-                if dropped_image {
-                    return self.arm_regen_theme();
+                Command::none()
+            }
+            Plant::SettingPlot(SettingEvent::WallpaperPatch(id, patch)) => {
+                if let Some(setting) = self.windows.settings.get_mut(&id) {
+                    if let ConfigPatch::RemoveImage { index } = &patch {
+                        setting.image_removed(*index);
+                    }
+                    if let Some(draft) = &mut setting.wallpaper_draft {
+                        draft.patch(patch);
+                    }
                 }
+                self.load_wallpaper_preview(id)
+            }
+            Plant::SettingPlot(SettingEvent::PickWallpaper(id)) => Command::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter(
+                            "Images",
+                            &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"],
+                        )
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().to_string_lossy().into_owned())
+                },
+                move |path| Plant::SettingPlot(SettingEvent::WallpaperPicked(id, path)),
+            ),
+            Plant::SettingPlot(SettingEvent::WallpaperPicked(id, path)) => {
+                if let Some(path) = path
+                    && let Some(draft) = self
+                        .windows
+                        .settings
+                        .get_mut(&id)
+                        .and_then(|setting| setting.wallpaper_draft.as_mut())
+                {
+                    let z = draft.images.iter().map(|image| image.z).max().unwrap_or(-1) + 1;
+                    draft.patch(ConfigPatch::AddImage(crate::config::BackgroundImage {
+                        path,
+                        z,
+                        ..Default::default()
+                    }));
+                }
+                self.load_wallpaper_preview(id)
+            }
+            Plant::SettingPlot(SettingEvent::WallpaperPreviewReady {
+                id,
+                revision,
+                result,
+            }) => {
+                if let Some(draft) = self
+                    .windows
+                    .settings
+                    .get_mut(&id)
+                    .and_then(|setting| setting.wallpaper_draft.as_mut())
+                {
+                    if draft.preview_running == Some(revision) {
+                        draft.preview_running = None;
+                    }
+                    if draft.assets_revision == revision {
+                        draft.loading = false;
+                        match result {
+                            Ok(sources) => {
+                                draft.sources = sources;
+                                draft.error = None;
+                            }
+                            Err(error) => draft.error = Some(error),
+                        }
+                    }
+                }
+                Command::batch([self.load_wallpaper_preview(id), self.reclaim_image_memory()])
+            }
+            Plant::SettingPlot(SettingEvent::ApplyWallpaper(id)) => self.apply_wallpaper(id),
+            Plant::SettingPlot(SettingEvent::DiscardWallpaper(id)) => self.discard_wallpaper(id),
+            Plant::Config(ConfigEvent::WallpaperBaked { generation, result }) => {
+                self.wallpaper_baked(generation, result)
+            }
+            Plant::Config(ConfigEvent::ReclaimImageMemory) => {
+                crate::ui::assets::release_unused();
+                crate::theme_gen::trim_memory();
                 Command::none()
             }
             Plant::TopPlot(TopEvent::Sow) => {
@@ -1196,6 +1349,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Config(ConfigEvent::RegenTimer(_))
         | Plant::Config(ConfigEvent::SaveTimer(_))
         | Plant::Config(ConfigEvent::SaveNow)
+        | Plant::Config(ConfigEvent::ReclaimImageMemory)
         | Plant::IpcPoll => Scope::None,
         Plant::Config(ConfigEvent::ConfigReloaded(_))
         | Plant::Config(ConfigEvent::Patch(_))
@@ -1203,6 +1357,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // Fresh dynamic.json on disk: repaint so the new palette applies
         // (theme::sync picks the new mtime up during the redraw).
         Plant::Config(ConfigEvent::ThemeRegenerated(_)) => Scope::All,
+        Plant::Config(ConfigEvent::ThemeReloaded) => Scope::All,
         // Settings page/bar select / map pan-zoom only affects its own window.
         Plant::SettingPlot(
             SettingEvent::Select(id, _)
@@ -1210,7 +1365,13 @@ pub fn redraw_scope(message: &Plant) -> Scope {
             | SettingEvent::SelectImage(id, _)
             | SettingEvent::SelectSlot(id, _)
             | SettingEvent::SelectPlacement(id, _, _)
-            | SettingEvent::MapViewChanged { id, .. },
+            | SettingEvent::MapViewChanged { id, .. }
+            | SettingEvent::WallpaperPatch(id, _)
+            | SettingEvent::PickWallpaper(id)
+            | SettingEvent::WallpaperPicked(id, _)
+            | SettingEvent::WallpaperPreviewReady {id, ..}
+            | SettingEvent::ApplyWallpaper(id)
+            | SettingEvent::DiscardWallpaper(id),
         ) => Scope::Window(*id),
         Plant::Graft(_, Event::Mouse(_)) => Scope::None,
         Plant::Graft(_, _) => Scope::None,
@@ -1222,6 +1383,226 @@ pub fn redraw_scope(message: &Plant) -> Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wallpaper_test_plots() -> Plots {
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        Plots {
+            windows: Default::default(),
+            shell_events: receiver,
+            input: Default::default(),
+            desktop: Default::default(),
+            config: Config::default(),
+            config_mtime: None,
+            catalog: super::super::catalog::WidgetCatalog::new(Vec::new()),
+            placements: Default::default(),
+            animation: Default::default(),
+            services: crate::services::state::ServiceState::new(),
+            config_jobs: Default::default(),
+            theme_mtime: None,
+            theme_jobs: Default::default(),
+            notification: Default::default(),
+        }
+    }
+
+    #[test]
+    fn selecting_dynamic_or_changing_variant_does_not_queue_generation_without_apply() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut plots = wallpaper_test_plots();
+        let mut restored = plots.config.clone();
+        restored.theme.name = "dynamic".into();
+        let _ = plots.update(Plant::Config(ConfigEvent::ConfigReloaded(restored)));
+        assert!(!plots.theme_jobs.dirty);
+        assert!(!plots.theme_jobs.running);
+        assert_eq!(plots.theme_jobs.sequence, 0);
+        let _ = plots.update(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
+            "gruvbox".into(),
+        ))));
+        let _ = plots.update(Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(
+            "dynamic".into(),
+        ))));
+        let _ = plots.update(Plant::Config(ConfigEvent::Patch(
+            ConfigPatch::ThemeVariant("tonal-spot".into()),
+        )));
+        assert!(!plots.theme_jobs.dirty);
+        assert!(!plots.theme_jobs.running);
+        assert_eq!(plots.theme_jobs.sequence, 0);
+        plots.config_jobs.invalidate(); // No fixture edits may reach the user's config file.
+        let _ = plots.update(Plant::Sprout);
+        let _ = plots.update(Plant::Sprout);
+        assert!(!plots.theme_jobs.running);
+        assert_eq!(plots.theme_jobs.sequence, 0);
+    }
+
+    fn theme_test_plots() -> (Plots, iced::window::Id) {
+        let mut plots = wallpaper_test_plots();
+        let bar = iced::window::Id::unique();
+        let placement = crate::config::WidgetPlacement {
+            id: "keep-self".into(),
+            name: "theme-memory-test".into(),
+            file: Some("/not-a-real-theme-memory-test.lua".into()),
+            ..Default::default()
+        };
+        let mut top = Top::new();
+        top.bar_index = 0;
+        top.local.widgets = vec![vec![placement.clone()]];
+        plots.windows.tops.insert(bar, top);
+        plots.config.bar = vec![crate::config::TopConfig {
+            widgets: vec![crate::config::SlotWidgets::Many(vec![
+                crate::config::SlotEntry::Full(placement),
+            ])],
+            ..Default::default()
+        }];
+        plots
+            .catalog
+            .definitions
+            .push(crate::config::WidgetDefinition {
+                name: "theme-memory-test".into(),
+                file: "/not-a-real-theme-memory-test.lua".into(),
+                defaults: Default::default(),
+                schema: Default::default(),
+            });
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        crate::lua::widgets::load_widget_script(&lua,"theme-test","return {count=41,view=function(self) self.count=self.count+1; return ui.text(theme.primary) end}").unwrap();
+        plots.placements.instances.insert("keep-self".into(), lua);
+        (plots, bar)
+    }
+
+    #[test]
+    fn palette_reload_preserves_pending_save_and_widget_self_state() {
+        let (mut plots, bar) = theme_test_plots();
+        let save_sequence = plots.config_jobs.stage();
+        let message = Plant::Config(ConfigEvent::ThemeReloaded);
+        assert_eq!(redraw_scope(&message), Scope::All);
+        let _ = plots.update(message);
+        assert!(plots.config_jobs.should_flush(save_sequence));
+        assert_eq!(plots.windows.tops[&bar].local.widgets[0][0].id, "keep-self");
+        let app: mlua::Table = plots.placements.instances["keep-self"]
+            .named_registry_value("riced.widget.app")
+            .unwrap();
+        assert_eq!(app.get::<u32>("count").unwrap(), 42);
+        let _ = plots.update(Plant::Config(ConfigEvent::ThemeReloaded));
+        assert_eq!(app.get::<u32>("count").unwrap(), 43);
+    }
+
+    #[test]
+    fn theme_only_disk_config_reload_ignores_runtime_ids_and_keeps_widget_instances() {
+        let (mut plots, bar) = theme_test_plots();
+        let mut next = plots.config.clone();
+        next.theme.darkmode = !next.theme.darkmode;
+        if let crate::config::SlotWidgets::Many(entries) = &mut next.bar[0].widgets[0]
+            && let crate::config::SlotEntry::Full(placement) = &mut entries[0]
+        {
+            placement.id.clear();
+        }
+        let _ = plots.update(Plant::Config(ConfigEvent::ConfigReloaded(next)));
+        assert_eq!(plots.windows.tops[&bar].local.widgets[0][0].id, "keep-self");
+        let app: mlua::Table = plots.placements.instances["keep-self"]
+            .named_registry_value("riced.widget.app")
+            .unwrap();
+        assert_eq!(app.get::<u32>("count").unwrap(), 42);
+    }
+
+    #[test]
+    fn confirmed_native_close_releases_editor_sources_even_without_uproot() {
+        let mut plots = wallpaper_test_plots();
+        let id = iced::window::Id::unique();
+        let pixels = bytes::Bytes::from(vec![127; 512 * 256 * 4]);
+        let source = std::sync::Arc::new(crate::wallpaper::raster::Source {
+            width: 512,
+            height: 256,
+            handle: iced::widget::image::Handle::from_rgba(512, 256, pixels.clone()),
+            pixels,
+        });
+        let weak = std::sync::Arc::downgrade(&source);
+        let mut draft = crate::wallpaper::draft::Draft::new(&[]);
+        draft.loading = false;
+        draft
+            .sources
+            .insert(std::path::PathBuf::from("memory-only.png"), source);
+        let mut setting = Setting::default();
+        setting.wallpaper_draft = Some(draft);
+        plots.windows.settings.insert(id, setting);
+        plots.windows.ids.insert(id, PlotInfo::Setting);
+        assert!(weak.upgrade().is_some());
+        let _ = plots.update(Plant::Wayland(LandEvent::Closed(id)));
+        assert!(weak.upgrade().is_none());
+        assert!(!plots.windows.settings.contains_key(&id));
+        let _ = plots.update(Plant::Wayland(LandEvent::Closed(id)));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn wallpaper_edits_are_preview_only_and_closing_editor_does_not_apply_them() {
+        let mut plots = wallpaper_test_plots();
+        plots.config.background.image = vec![crate::config::BackgroundImage {
+            path: "original.png".into(),
+            ..Default::default()
+        }];
+        let id = iced::window::Id::unique();
+        let mut setting = Setting::default();
+        let mut draft = crate::wallpaper::draft::Draft::new(&plots.config.background.image);
+        draft.loading = false;
+        setting.wallpaper_draft = Some(draft);
+        plots.windows.settings.insert(id, setting);
+        plots.windows.ids.insert(id, PlotInfo::Setting);
+        let message = Plant::SettingPlot(SettingEvent::WallpaperPatch(
+            id,
+            ConfigPatch::MoveImage {
+                index: 0,
+                x: 100.0,
+                y: -50.0,
+            },
+        ));
+        assert_eq!(redraw_scope(&message), Scope::Window(id));
+        let _ = plots.update(message);
+        assert_eq!(plots.config.background.image[0].x, 0.0);
+        assert_eq!(
+            plots.windows.settings[&id]
+                .wallpaper_draft
+                .as_ref()
+                .unwrap()
+                .images[0]
+                .x,
+            100.0
+        );
+        assert!(!plots.config_jobs.dirty);
+        assert!(!plots.theme_jobs.dirty);
+        assert!(plots.desktop.wallpaper.pending.is_none());
+        let _ = plots.update(Plant::Uproot(id));
+        assert_eq!(plots.config.background.image[0].x, 0.0);
+        assert!(plots.windows.settings.is_empty());
+    }
+
+    #[test]
+    fn stale_wallpaper_result_never_publishes_and_latest_request_is_serialized() {
+        let mut plots = wallpaper_test_plots();
+        let request = crate::wallpaper::Request {
+            generation: 9,
+            editor: None,
+            images: vec![],
+            base: vec![],
+            outputs: vec![],
+            sources: Default::default(),
+        };
+        plots.desktop.wallpaper.pending = Some(request);
+        plots.desktop.wallpaper.running = Some(8);
+        let _ = plots.wallpaper_baked(
+            8,
+            Ok(crate::wallpaper::Batch {
+                tiles: Default::default(),
+            }),
+        );
+        assert!(plots.desktop.wallpaper.applied.is_empty());
+        assert_eq!(plots.desktop.wallpaper.running, Some(9));
+        assert_eq!(
+            plots.desktop.wallpaper.pending.as_ref().unwrap().generation,
+            9
+        );
+    }
 
     #[test]
     fn compositor_bar_close_releases_children_caches_and_motion_without_deleting_saved_bar() {

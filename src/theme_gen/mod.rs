@@ -28,6 +28,7 @@ pub mod templates;
 pub mod variant;
 pub mod views;
 
+pub(crate) use scheme::generate_from_pixels;
 pub(crate) use scheme::trim_memory;
 pub use scheme::{
     generate_from_views, render_theme_templates, stored_theme_text, wants_regen,

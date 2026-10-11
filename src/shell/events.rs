@@ -31,6 +31,8 @@ pub enum LandEvent {
 pub enum ConfigEvent {
     ConfigTick,
     ConfigReloaded(crate::config::Config),
+    /// Palette file refresh: keep staged config, placements, and VM self state.
+    ThemeReloaded,
     /// Runtime edit from a Settings-panel control. Applied to the single
     /// live config, persisted, and broadcast via full redraw.
     Patch(crate::config::ConfigPatch),
@@ -51,6 +53,11 @@ pub enum ConfigEvent {
     /// (empty errors) or the failure reasons. Always repaints so new
     /// colors apply on the next frame.
     ThemeRegenerated(Vec<String>),
+    WallpaperBaked {
+        generation: u64,
+        result: Result<crate::wallpaper::Batch, String>,
+    },
+    ReclaimImageMemory,
     /// Widgets dir changed on disk: fresh discovered definitions.
     /// Stored live and repainted (bars re-resolve placements).
     WidgetsReloaded(Vec<crate::config::WidgetDefinition>),
@@ -241,6 +248,16 @@ pub enum NotifyEvent {
 
 #[derive(Debug, Clone)]
 pub enum SettingEvent {
+    WallpaperPatch(Id, crate::config::ConfigPatch),
+    PickWallpaper(Id),
+    WallpaperPicked(Id, Option<String>),
+    WallpaperPreviewReady {
+        id: Id,
+        revision: u64,
+        result: Result<crate::wallpaper::raster::Sources, String>,
+    },
+    ApplyWallpaper(Id),
+    DiscardWallpaper(Id),
     Select(Id, crate::shell::screens::SettingPage),
     /// Pick the bar edited by the Panel page (`id` = settings window).
     SelectBar(Id, Id),

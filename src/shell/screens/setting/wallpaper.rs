@@ -4,7 +4,7 @@ use super::{Setting, hint, image_file_name, section, section_heading};
 use crate::ui::widgets::display_map::{MapLayer, MapView, images_layer, outputs_layer};
 use crate::{
     config::{BackgroundImage, ConfigPatch},
-    shell::{BackgroundEvent, ConfigEvent, Plant, SettingEvent, state::Plots},
+    shell::{Plant, SettingEvent, state::Plots},
     theme,
 };
 use iced::{
@@ -13,43 +13,51 @@ use iced::{
     window,
 };
 use iced_wayland_subscriber::{OutputId, OutputInfo};
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 pub(super) struct WallpaperContext<'a> {
     pub images: &'a Vec<BackgroundImage>,
     pub output_infos: &'a HashMap<OutputId, OutputInfo>,
-    pub handles: &'a HashMap<PathBuf, Handle>,
-}
-
-impl<'a> From<&'a Plots> for WallpaperContext<'a> {
-    fn from(plots: &'a Plots) -> Self {
-        Self {
-            images: &plots.config.background.image,
-            output_infos: &plots.windows.output_infos,
-            handles: &plots.desktop.wallpapers,
-        }
-    }
+    pub sources: &'a crate::wallpaper::raster::Sources,
 }
 
 impl WallpaperContext<'_> {
     pub fn wallpaper_handle(&self, image: &BackgroundImage) -> Option<Handle> {
-        self.handles.get(&image.local_path()).cloned()
+        self.sources
+            .get(&image.local_path())
+            .map(|source| source.handle.clone())
     }
 }
 
-pub(super) fn view<'a>(
-    setting: &'a Setting,
-    id: window::Id,
-    context: &WallpaperContext<'_>,
-) -> Element<'a, Plant> {
-    column![
-        section_heading("Display layout", "Drag images to position them. Use the map to see how they overlap your displays."),
+pub(super) fn view<'a>(setting: &'a Setting, id: window::Id, plots: &Plots) -> Element<'a, Plant> {
+    let Some(draft) = &setting.wallpaper_draft else {
+        return hint("Open the Wallpaper page to load the editor.");
+    };
+    let context = WallpaperContext {
+        images: &draft.images,
+        output_infos: &plots.windows.output_infos,
+        sources: &draft.sources,
+    };
+    let mut content = column![
+        section_heading("Display layout", "Arrange the original images in the preview. Apply saves lossless, native-resolution wallpapers for each display."),
         row![button(text("Add wallpaper…").size(13).color(theme::button_text()))
-            .on_press(Plant::BackgroundPlot(BackgroundEvent::PickWallpaper)).padding(8).style(theme::menu_button(theme::RADIUS)),
-            Space::new().width(Length::Fill)].spacing(8),
-        grid(id, context, setting.map_view),
-        section("Image properties", "Choose an image below to adjust its placement. Reset restores that property's default.", image_controls(id, context, setting.selected_image)),
-    ].spacing(16).into()
+            .on_press(Plant::SettingPlot(SettingEvent::PickWallpaper(id))).padding(8).style(theme::menu_button(theme::RADIUS)),
+            Space::new().width(Length::Fill),
+            hint(if draft.dirty() {"Unapplied changes"} else {"Applied layout"}),
+            button(text("Discard").size(13)).on_press(Plant::SettingPlot(SettingEvent::DiscardWallpaper(id))).padding(8).style(theme::menu_button(theme::RADIUS)),
+            button(text(if draft.applying {"Applying…"} else {"Apply"}).size(13))
+                .on_press_maybe((!draft.loading && !draft.applying).then_some(Plant::SettingPlot(SettingEvent::ApplyWallpaper(id))))
+                .padding(8).style(theme::menu_button(theme::RADIUS))].spacing(8).align_y(iced::Alignment::Center),
+        grid(id, &context, setting.map_view),
+        section("Image properties", "These controls change only the draft. Reset restores that property's default.", image_controls(id, &context, setting.selected_image)),
+    ].spacing(16);
+    if draft.loading {
+        content = content.push(hint("Loading full-resolution originals…"));
+    }
+    if let Some(error) = &draft.error {
+        content = content.push(text(error.clone()).size(12).color(theme::active().error));
+    }
+    content.into()
 }
 
 fn grid(id: window::Id, context: &WallpaperContext<'_>, view: MapView) -> Element<'static, Plant> {
@@ -64,9 +72,19 @@ fn grid(id: window::Id, context: &WallpaperContext<'_>, view: MapView) -> Elemen
         .iter()
         .map(|image| context.wallpaper_handle(image))
         .collect();
+    let sizes: Vec<_> = images
+        .iter()
+        .map(|image| {
+            context
+                .sources
+                .get(&image.local_path())
+                .map(|source| (source.width as f32, source.height as f32))
+        })
+        .collect();
     container(stack![
-        images_layer(id, outputs.clone(), images.clone(), handles.clone(), view),
-        outputs_layer(id, outputs, images, handles, view)
+        images_layer(id, outputs.clone(), images.clone(), handles.clone(), view)
+            .with_file_sizes(sizes.clone()),
+        outputs_layer(id, outputs, images, handles, view).with_file_sizes(sizes)
     ])
     .style(theme::menu_box)
     .height(Length::Fixed(360.0))
@@ -113,7 +131,11 @@ fn image_controls(
         image.height,
         image.scale,
     );
-    let (fw, fh) = MapLayer::file_dimensions(image).unwrap_or((0.0, 0.0));
+    let (fw, fh) = context
+        .sources
+        .get(&image.local_path())
+        .map(|source| (source.width as f32, source.height as f32))
+        .unwrap_or((0.0, 0.0));
     let (shown_width, shown_height) = MapLayer::size_with_file(image, (fw, fh));
     let shown_scale = scale.max(0.01);
     let mut col = column![
@@ -129,9 +151,7 @@ fn image_controls(
                 .color(theme::text())
                 .width(Length::Fill),
             button(text("Remove image").size(12).color(theme::active().error))
-                .on_press(Plant::Config(ConfigEvent::Patch(
-                    ConfigPatch::RemoveImage { index: sel }
-                )))
+                .on_press(change(id, ConfigPatch::RemoveImage { index: sel }))
                 .padding(6)
                 .style(theme::menu_button_tinted(
                     theme::RADIUS,
@@ -143,122 +163,117 @@ fn image_controls(
     );
     col = col.push(hint(format!("Source resolution: {fw:.0} × {fh:.0} px")));
     col = col.push(section_heading(
-        "Position & stacking",
-        "X and Y are desktop coordinates. Higher Z values place the image in front.",
+        "Placement",
+        "X/Y use desktop coordinates. Higher Z paints in front; scale multiplies width and height.",
     ));
-    col = col.push(image_spin_row(
-        "X (px)",
-        ix as f64,
-        -20000.0..=20000.0,
-        1.0,
-        1,
-        move |value| {
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
-                index: sel,
-                x: value as f32,
-                y: iy,
-            }))
-        },
-        Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
+    let make = move |property, value: f32| match property {
+        Property::X => ConfigPatch::MoveImage {
             index: sel,
-            x: 0.0,
+            x: value,
             y: iy,
-        })),
-    ));
-    col = col.push(image_spin_row(
-        "Y (px)",
-        iy as f64,
-        -20000.0..=20000.0,
-        1.0,
-        1,
-        move |value| {
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
-                index: sel,
-                x: ix,
-                y: value as f32,
-            }))
         },
-        Plant::Config(ConfigEvent::Patch(ConfigPatch::MoveImage {
+        Property::Y => ConfigPatch::MoveImage {
             index: sel,
             x: ix,
-            y: 0.0,
-        })),
-    ));
-    col = col.push(image_spin_row(
-        "Z (stack)",
-        iz as f64,
-        -100.0..=100.0,
-        1.0,
-        0,
-        move |value| {
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageZ {
-                index: sel,
-                z: value as i32,
-            }))
+            y: value,
         },
-        Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageZ {
+        Property::Z => ConfigPatch::SetImageZ {
             index: sel,
-            z: 0,
-        })),
-    ));
-    col = col.push(section_heading(
-        "Dimensions & scale",
-        "Width and height define the base size; scale multiplies both dimensions.",
-    ));
-    col = col.push(image_spin_row(
-        "Width (px)",
-        shown_width as f64,
-        0.0..=16000.0_f64.max(shown_width as f64),
-        1.0,
-        0,
-        move |value| {
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
-                index: sel,
-                width: value as f32,
-                height: ih,
-            }))
+            z: value as i32,
         },
-        Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
+        Property::Width => ConfigPatch::SetImageSize {
             index: sel,
-            width: fw,
+            width: value,
             height: ih,
-        })),
-    ));
-    col = col.push(image_spin_row(
-        "Height (px)",
-        shown_height as f64,
-        0.0..=16000.0_f64.max(shown_height as f64),
-        1.0,
-        0,
-        move |value| {
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
-                index: sel,
-                width: iw,
-                height: value as f32,
-            }))
         },
-        Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageSize {
+        Property::Height => ConfigPatch::SetImageSize {
             index: sel,
             width: iw,
-            height: fh,
-        })),
-    ));
-    col = col.push(image_spin_row(
-        "Scale (×)",
-        shown_scale as f64,
-        0.01..=10.0_f64.max(shown_scale as f64),
-        0.1,
-        2,
-        move |value| {
-            Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageScale {
-                index: sel,
-                scale: value as f32,
-            }))
+            height: value,
         },
-        Plant::Config(ConfigEvent::Patch(ConfigPatch::SetImageScale {
+        Property::Scale => ConfigPatch::SetImageScale {
             index: sel,
-            scale: 1.0,
-        })),
-    ));
+            scale: value,
+        },
+    };
+    for (label, value, bounds, step, decimals, reset, property) in [
+        (
+            "X (px)",
+            ix as f64,
+            -20000.0..=20000.0,
+            1.0,
+            1,
+            0.0,
+            Property::X,
+        ),
+        (
+            "Y (px)",
+            iy as f64,
+            -20000.0..=20000.0,
+            1.0,
+            1,
+            0.0,
+            Property::Y,
+        ),
+        (
+            "Z (stack)",
+            iz as f64,
+            -100.0..=100.0,
+            1.0,
+            0,
+            0.0,
+            Property::Z,
+        ),
+        (
+            "Width (px)",
+            shown_width as f64,
+            0.0..=16000.0_f64.max(shown_width as f64),
+            1.0,
+            0,
+            fw,
+            Property::Width,
+        ),
+        (
+            "Height (px)",
+            shown_height as f64,
+            0.0..=16000.0_f64.max(shown_height as f64),
+            1.0,
+            0,
+            fh,
+            Property::Height,
+        ),
+        (
+            "Scale (×)",
+            shown_scale as f64,
+            0.01..=10.0_f64.max(shown_scale as f64),
+            0.1,
+            2,
+            1.0,
+            Property::Scale,
+        ),
+    ] {
+        col = col.push(image_spin_row(
+            label,
+            value,
+            bounds,
+            step,
+            decimals,
+            move |value| change(id, make(property, value as f32)),
+            change(id, make(property, reset)),
+        ));
+    }
     col.spacing(8).width(Length::Fill).into()
+}
+
+#[derive(Clone, Copy)]
+enum Property {
+    X,
+    Y,
+    Z,
+    Width,
+    Height,
+    Scale,
+}
+fn change(id: window::Id, patch: ConfigPatch) -> Plant {
+    Plant::SettingPlot(SettingEvent::WallpaperPatch(id, patch))
 }

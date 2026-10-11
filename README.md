@@ -450,9 +450,9 @@ Dark/Light toggle, persisted via `ConfigPatch::ThemeName/Darkmode`.
 
 ## Dynamic theme (colorgen)
 
-`src/colorgen.rs` ports `sys/src/colorgen.rs` (`ColorGen.generate`):
+`src/theme_gen/` ports `sys/src/colorgen.rs` (`ColorGen.generate`):
 `riced generate-theme [--variant V] [--set] [--templates DIR]` rasterizes
-the wallpaper set with the same math as `Background::wallpaper_views`
+the wallpaper set with the shared wallpaper rasterizer
 (per-output crops, ascending `z`, stitched side-by-side), extracts the seed
 color, and writes the M3 scheme as `dynamic.json` — same
 `{light, dark}` keys and terminal mapping as sys, so files are drop-in
@@ -471,13 +471,56 @@ theme in Settings (or `riced apply-templates [--templates DIR] [--name X]`)
 passes the stored theme object through the same find-and-replace off the
 update thread, reporting per-template errors without freezing the shell.
 
-`dynamic.json` also regenerates itself without polling: dropping a dragged
-wallpaper, adding/removing/scaling one, or hand-editing
-`[background.image]` arms a one-shot 2s countdown (per-move patches stay
-silent, so drags never clog the events), and closing the last Settings
-panel fires immediately. Generation runs on a blocking worker from the
-live output rects and repaints all outputs when done; runs only while
-the selected theme is `dynamic`.
+Wallpaper edits in Settings are preview-only. Press **Apply** to bake and
+publish the new desktop; dynamic-theme generation then runs once from the
+applied output composites. Closing Settings does not apply a wallpaper draft.
+External changes to `[[background.image]]` rebuild the applied tiles. Theme
+generation remains off the update thread and runs only when the selected
+theme is `dynamic`.
+
+The daemon regenerates `dynamic.json` only after a successful explicit
+Wallpaper **Apply**. Startup/cache restoration, monitor changes, theme
+selection, and variant edits do not generate a new palette. Selecting
+`dynamic` loads the saved palette; variant changes take effect on the next
+Apply. `riced generate-theme` remains an explicit CLI generation command.
+
+Theme-file updates refresh the palette in existing widget VMs rather than
+reloading the entire config or discarding staged edits. Color extraction
+samples the already-resident applied pixels through a virtual monitor strip
+into a bounded 128×128 image, without constructing/encoding/re-decoding a
+full-resolution combined wallpaper. This affects palette sampling only;
+displayed wallpapers and editor originals stay full resolution.
+
+## Wallpaper editing and quality
+
+The Wallpaper page owns a draft with full-resolution source buffers. Drag,
+Ctrl+wheel scale, image properties, add, and remove operations update only
+that preview. **Discard** restores the current applied layout; **Apply** runs
+a background bake and atomically saves the editable recipe after success.
+
+Each connected output receives one lossless PNG, sampled from the originals
+at its native pixel resolution, with scaling, rotation-aware dimensions,
+Z-order, and alpha compositing. The small Settings preview is never used as
+the source for those pixels. Original files are not rewritten, and original
+paths and placements remain in `config.toml` for later editing.
+
+Derived tiles and their manifest live under `$XDG_CACHE_HOME/riced/wallpapers`
+(normally `~/.cache/riced/wallpapers`). Startup reuses matching applied tiles;
+output layout/resolution changes regenerate them from the editable recipe.
+Failed or superseded jobs leave the previous desktop in place. Unreferenced
+generated cache generations are removed after publication, while referenced
+source files are preserved.
+
+Closing the editor releases its application-owned source buffers. Desktop
+surfaces retain only their applied tiles. Lua UI image nodes also reuse
+revisioned, full-resolution decoded handles; caching does not introduce
+thumbnails or lossy image compression.
+
+Native window-close confirmation also reclaims unreferenced decoded-image
+cache entries and requests allocator trimming after UI/renderer teardown.
+Applying identical output pixels keeps the existing image handles, avoiding
+another texture upload. Applied tiles remain resident, and graphics-driver
+allocation pools may retain their capacity even after editor buffers are freed.
 
 ## Development
 

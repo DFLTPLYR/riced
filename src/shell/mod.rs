@@ -9,6 +9,7 @@ mod jobs;
 mod notifications;
 pub mod screens;
 pub mod state;
+mod wallpaper;
 mod windows;
 pub use events::*;
 pub use state::{Plots, redraw_scope};

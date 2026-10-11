@@ -1,5 +1,4 @@
 use crate::config::{BackgroundImage, ConfigPatch};
-use crate::shell::ConfigEvent;
 use crate::shell::Plant;
 use crate::theme;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Stroke};
@@ -35,6 +34,8 @@ pub struct MapLayer {
     handles: Vec<Option<Handle>>,
     view: MapView,
     id: window::Id,
+    file_sizes: Option<Vec<Option<(f32, f32)>>>,
+    resolved: Option<Vec<Option<GlobalRect>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,7 @@ const GRID_BASE: f32 = 10.0;
 const GRID_MIN_PX: f32 = 8.0;
 const ZOOM_MIN: f32 = 0.05;
 const ZOOM_MAX: f32 = 5.0;
+type GlobalRect = (f32, f32, f32, f32);
 
 impl MapLayer {
     pub fn images(
@@ -88,6 +90,8 @@ impl MapLayer {
             handles,
             view,
             id,
+            file_sizes: None,
+            resolved: None,
         }
     }
 
@@ -105,6 +109,53 @@ impl MapLayer {
             handles,
             view,
             id,
+            file_sizes: None,
+            resolved: None,
+        }
+    }
+
+    pub(crate) fn with_file_sizes(mut self, sizes: Vec<Option<(f32, f32)>>) -> Self {
+        self.file_sizes = Some(sizes);
+        self.resolved = Some(
+            (0..self.images.len())
+                .map(|index| self.resolve_at(index))
+                .collect(),
+        );
+        self
+    }
+
+    fn native_size_at(&self, index: usize) -> Option<(f32, f32)> {
+        let image = self.images.get(index)?;
+        if image.width > 0.0 && image.height > 0.0 {
+            return Some((image.width, image.height));
+        }
+        match &self.file_sizes {
+            Some(sizes) => Some(Self::size_with_file(
+                image,
+                sizes.get(index).copied().flatten()?,
+            )),
+            None => Self::native_size(image),
+        }
+    }
+
+    fn resolve_at(&self, index: usize) -> Option<(f32, f32, f32, f32)> {
+        let image = self.images.get(index)?;
+        let (width, height) = self.native_size_at(index)?;
+        if image.local_path().as_os_str().is_empty() {
+            return None;
+        }
+        Some((
+            image.x,
+            image.y,
+            width * image.scale.max(0.01),
+            height * image.scale.max(0.01),
+        ))
+    }
+
+    fn resolved_at(&self, index: usize) -> Option<(f32, f32, f32, f32)> {
+        match &self.resolved {
+            Some(rects) => rects.get(index).copied().flatten(),
+            None => self.resolve_at(index),
         }
     }
 
@@ -238,6 +289,7 @@ impl MapLayer {
     /// native pixels, so the Background layer renders exactly the visible
     /// part. `None` when the image misses the output entirely.
     /// Pure math over the already-resolved rect — unit-tested below.
+    #[cfg(test)]
     pub(crate) fn crop_for(
         img_rect: (f32, f32, f32, f32),
         native: (f32, f32),
@@ -267,7 +319,7 @@ impl MapLayer {
         let mut order: Vec<usize> = (0..self.images.len()).collect();
         order.sort_by_key(|&i| self.images[i].z);
         order.into_iter().rev().find_map(|i| {
-            let (x, y, w, h) = Self::resolved(&self.images[i])?;
+            let (x, y, w, h) = self.resolved_at(i)?;
             (g.0 >= x && g.0 < x + w && g.1 >= y && g.1 < y + h).then_some(i)
         })
     }
@@ -343,9 +395,12 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                     let x = (pos.x - view.off_x) / zoom - drag.grab_dx;
                     let y = (pos.y - view.off_y) / zoom - drag.grab_dy;
                     return Some(
-                        Action::publish(Plant::Config(ConfigEvent::Patch(
-                            ConfigPatch::MoveImage { index: i, x, y },
-                        )))
+                        Action::publish(Plant::SettingPlot(
+                            crate::shell::SettingEvent::WallpaperPatch(
+                                self.id,
+                                ConfigPatch::MoveImage { index: i, x, y },
+                            ),
+                        ))
                         .and_capture(),
                     );
                 }
@@ -371,8 +426,8 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                             view.selected = Some(i);
                             return Some(Action::publish(select(view)).and_capture());
                         }
-                        let (ix, iy, iw, ih) = Self::resolved(&self.images[i])?;
-                        let (nw, nh) = Self::native_size(&self.images[i])?;
+                        let (ix, iy, iw, ih) = self.resolved_at(i)?;
+                        let (nw, nh) = self.native_size_at(i)?;
                         let lines = match *delta {
                             mouse::ScrollDelta::Lines { y, .. } => y * 24.0,
                             mouse::ScrollDelta::Pixels { y, .. } => y,
@@ -387,14 +442,17 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                         let nx = gx - fx * nw * new_s;
                         let ny = gy - fy * nh * new_s;
                         return Some(
-                            Action::publish(Plant::Config(ConfigEvent::Patch(
-                                ConfigPatch::ScaleImage {
-                                    index: i,
-                                    x: nx,
-                                    y: ny,
-                                    scale: new_s,
-                                },
-                            )))
+                            Action::publish(Plant::SettingPlot(
+                                crate::shell::SettingEvent::WallpaperPatch(
+                                    self.id,
+                                    ConfigPatch::ScaleImage {
+                                        index: i,
+                                        x: nx,
+                                        y: ny,
+                                        scale: new_s,
+                                    },
+                                ),
+                            ))
                             .and_capture(),
                         );
                     }
@@ -468,8 +526,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 let mut order: Vec<usize> = (0..self.images.len()).collect();
                 order.sort_by_key(|&i| self.images[i].z);
                 for i in order {
-                    let img = &self.images[i];
-                    let Some((x, y, w, h)) = Self::resolved(img) else {
+                    let Some((x, y, w, h)) = self.resolved_at(i) else {
                         continue;
                     };
                     let Some(handle) = self.handles.get(i).and_then(|h| h.clone()) else {
@@ -503,17 +560,13 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                     let top_left = local(*x, *y);
                     let size = Size::new((*w * zoom).max(2.0), (*h * zoom).max(2.0));
                     frame.fill_rectangle(top_left, size, theme::output_wash());
-                    for img in &self.images {
-                        if let Some((ix, iy, iw, ih)) = Self::resolved(img) {
-                            for output in &self.outputs {
-                                if let Some((ox, oy, ow, oh)) =
-                                    Self::overlap((ix, iy, iw, ih), *output)
-                                {
-                                    let otl = local(ox, oy);
-                                    let osize = Size::new(ow * zoom, oh * zoom);
-                                    frame.fill_rectangle(otl, osize, theme::overlap_wash());
-                                }
-                            }
+                    for index in 0..self.images.len() {
+                        if let Some(rect) = self.resolved_at(index)
+                            && let Some((ox, oy, ow, oh)) = Self::overlap(rect, (*x, *y, *w, *h))
+                        {
+                            let otl = local(ox, oy);
+                            let osize = Size::new(ow * zoom, oh * zoom);
+                            frame.fill_rectangle(otl, osize, theme::overlap_wash());
                         }
                     }
                     frame.stroke_rectangle(
@@ -573,6 +626,45 @@ impl From<MapLayer> for Element<'_, Plant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_dimensions_drive_drag_without_file_io_and_publish_only_draft_edits() {
+        use iced::widget::canvas::Program as _;
+        let id = window::Id::unique();
+        let view = MapView {
+            zoom: Some(1.0),
+            drag: Some(MapDrag {
+                image: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let map = MapLayer::outputs(
+            id,
+            vec![],
+            vec![BackgroundImage {
+                path: "/not-a-real-wallpaper.png".into(),
+                ..Default::default()
+            }],
+            vec![None],
+            view,
+        )
+        .with_file_sizes(vec![Some((7.0, 3.0))]);
+        assert_eq!(map.hit((1.0, 1.0)), Some(0));
+        let action = map
+            .update(
+                &mut (),
+                &Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(2.0, 1.0),
+                }),
+                Rectangle::new(Point::ORIGIN, Size::new(20.0, 20.0)),
+                mouse::Cursor::Available(Point::new(2.0, 1.0)),
+            )
+            .unwrap();
+        assert!(
+            matches!(action.into_inner().0,Some(Plant::SettingPlot(crate::shell::SettingEvent::WallpaperPatch(target,ConfigPatch::MoveImage {index: 0,x: 2.0,y: 1.0}))) if target == id)
+        );
+    }
 
     fn outputs() -> Vec<(f32, f32, f32, f32)> {
         vec![(0.0, 0.0, 1920.0, 1080.0), (1920.0, -100.0, 1280.0, 1024.0)]

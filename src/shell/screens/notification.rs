@@ -560,7 +560,7 @@ pub(crate) fn command_from_action(value: &mlua::Value, plots: &mut Plots) -> Com
 }
 
 /// Render every cached notification (script edit while visible).
-fn render_all_notis(plots: &mut Plots) {
+pub(crate) fn render_all_notis(plots: &mut Plots) {
     let ids: Vec<u32> = plots.notification.queue.iter().map(|n| n.id).collect();
     for id in ids {
         if let Some(n) = plots

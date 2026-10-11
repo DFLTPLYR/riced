@@ -11,6 +11,7 @@ mod shell;
 mod theme;
 mod theme_gen;
 mod ui;
+mod wallpaper;
 
 use cli::commands::{run_apply_templates, run_generate_theme};
 use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};

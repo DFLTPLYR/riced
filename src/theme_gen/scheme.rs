@@ -1,13 +1,7 @@
 //! Scheme construction, reshell JSON output, and stored-theme reads.
 use super::templates::process_templates;
 use super::variant::parse_variant;
-use super::views::combine_views;
-use material_colors::{
-    color::Argb,
-    image::{FilterType, ImageReader},
-    scheme::Scheme,
-    theme::ThemeBuilder,
-};
+use material_colors::{color::Argb, image::ImageReader, scheme::Scheme, theme::ThemeBuilder};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,19 +46,31 @@ pub fn generate_from_views(
     variant: &str,
     darkmode: bool,
 ) -> Result<Generated, String> {
-    let image_path =
-        combine_views(views).ok_or_else(|| "no wallpaper views to combine".to_string())?;
+    let sample = super::views::sample_views(views)
+        .ok_or_else(|| "no wallpaper views to combine".to_string())?;
+    generate_from_sample(sample, variant, darkmode)
+}
 
-    let bytes = std::fs::read(&image_path)
-        .map_err(|e| format!("failed to read image: {e}"))
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&image_path);
-        })?;
+pub(crate) fn generate_from_pixels(
+    views: &[super::views::PixelView],
+    variant: &str,
+    darkmode: bool,
+) -> Result<Generated, String> {
+    let sample = super::views::sample_pixels(views)
+        .ok_or_else(|| "no wallpaper views to combine".to_string())?;
+    generate_from_sample(sample, variant, darkmode)
+}
 
-    let mut data =
-        ImageReader::read(bytes).map_err(|e| format!("failed to decode image: {e:?}"))?;
-    data.resize(128, 128, FilterType::Lanczos3);
-
+fn generate_from_sample(
+    sample: image::RgbImage,
+    variant: &str,
+    darkmode: bool,
+) -> Result<Generated, String> {
+    let rgba = image::RgbaImage::from_fn(sample.width(), sample.height(), |x, y| {
+        let pixel = sample.get_pixel(x, y);
+        image::Rgba([pixel[0], pixel[1], pixel[2], 255])
+    });
+    let data = material_colors::image::Image::new(rgba);
     let theme = ThemeBuilder::with_source(ImageReader::extract_color(&data))
         .variant(parse_variant(variant))
         .build();
@@ -74,10 +80,13 @@ pub fn generate_from_views(
     } else {
         &theme.schemes.light
     };
-    let image = image_path.display().to_string();
+    // Preserve the historical image label without encoding and re-decoding a
+    // full wallpaper strip; that temporary file was already removed before use.
+    let image = std::env::temp_dir()
+        .join("riced_combined_wallpaper.png")
+        .display()
+        .to_string();
     let variables = build_color_map(scheme, darkmode, &image);
-
-    let _ = std::fs::remove_file(&image_path);
 
     Ok(Generated {
         payload: serde_json::json!({

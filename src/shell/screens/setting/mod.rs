@@ -22,6 +22,7 @@ use std::collections::HashMap;
 /// Mirrors `Top` / `Background`: spawn + view live here, `Plots` just delegates.
 #[derive(Debug, Default)]
 pub struct Setting {
+    pub(crate) wallpaper_draft: Option<crate::wallpaper::draft::Draft>,
     page: SettingPage,
     /// Pan/zoom/drag view for the Background map. Single source of truth for
     /// both stacked canvas programs (canvas `State` can't be shared across
@@ -117,7 +118,11 @@ impl Setting {
                     column![
                         page_heading(self.page.title(), self.page.description()),
                         self.content(id, plots),
-                        hint("Changes apply live and are saved automatically."),
+                        hint(if self.page == SettingPage::Wallpaper {
+                            "Wallpaper edits stay in this preview until you press Apply."
+                        } else {
+                            "Changes apply live and are saved automatically."
+                        }),
                     ]
                     .spacing(20)
                     .width(Length::Fill),
@@ -158,9 +163,8 @@ impl Setting {
         col.spacing(10).width(Length::Fill).into()
     }
 
-    /// Right content pane (70%): live controls for the selected page. Each
-    /// slider reads the single `plots.config` source of truth and writes back
-    /// via `ConfigEvent::Patch`, so every layer updates on the next redraw.
+    /// Most pages edit live config; Wallpaper owns an isolated draft and
+    /// publishes a desktop snapshot only after Apply completes.
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
             SettingPage::Panel => self.panel_content(id, panel::PanelContext::from(plots)),
@@ -199,7 +203,7 @@ impl Setting {
     }
 
     fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        wallpaper::view(self, id, &wallpaper::WallpaperContext::from(plots))
+        wallpaper::view(self, id, plots)
     }
 
     /// Replace the map pan/zoom/drag view (`MapViewChanged`). Field stays
@@ -209,12 +213,6 @@ impl Setting {
             self.selected_image = Some(index);
         }
         self.map_view = view;
-    }
-
-    /// Current map view (for drop detection: an image drag ending means
-    /// wallpapers moved, even though per-move patches never dirty the theme).
-    pub(crate) fn map_view(&self) -> MapView {
-        self.map_view
     }
 
     /// Switch the selected page on `SettingEvent::Select`. Opening the
@@ -229,7 +227,14 @@ impl Setting {
             setting.page = page;
         }
         if page == SettingPage::Wallpaper {
-            return Plots::repaint_after(80);
+            if let Some(setting) = plots.windows.settings.get_mut(&id)
+                && setting.wallpaper_draft.is_none()
+            {
+                setting.wallpaper_draft = Some(crate::wallpaper::draft::Draft::new(
+                    &plots.config.background.image,
+                ));
+            }
+            return plots.load_wallpaper_preview(id);
         }
         Command::none()
     }

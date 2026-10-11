@@ -25,6 +25,27 @@ pub(super) fn parse(content: &str) -> Config {
     }
 }
 impl Config {
+    pub(crate) fn save_atomic_to(&self, path: &Path) -> Result<Option<SystemTime>, String> {
+        let text = toml::to_string_pretty(self).map_err(|error| error.to_string())?;
+        let temporary = path.with_extension(format!("toml.{}.pending", std::process::id()));
+        let result = (|| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            std::fs::write(&temporary, text).map_err(|error| error.to_string())?;
+            if let Ok(metadata) = std::fs::metadata(path) {
+                std::fs::set_permissions(&temporary, metadata.permissions())
+                    .map_err(|error| error.to_string())?;
+            }
+            std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+            Ok(read_mtime(path))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+        result
+    }
+
     pub fn load_from(path: &Path) -> (Self, Option<SystemTime>) {
         match std::fs::read_to_string(path) {
             Ok(content) => {

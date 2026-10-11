@@ -975,7 +975,7 @@ impl Background {
 
         // Bottom of the stack is wallpaper images (QML `Background`), then
         // the debug label, selection, and menu overlays on top.
-        let mut layers = Self::wallpaper_views(plots, avail);
+        let mut layers = Self::wallpaper_views(plots, output);
         layers.push(Self::selection_overlay(plots, output, avail));
         layers.push(Self::context_menu_overlay(plots, output, avail));
 
@@ -983,59 +983,18 @@ impl Background {
         background_window(id).content(stack(layers)).into()
     }
 
-    /// Wallpaper images cropped to their overlap with THIS output's available
-    /// rect, ascending `z` (later paints on top). Each crop is positioned at
-    /// its overlap-local offset — always ≥ 0 inside this output — so no
-    /// negative-padding tricks are needed and the surface clips the rest.
-    fn wallpaper_views(plots: &Plots, avail: (f32, f32, f32, f32)) -> Vec<Element<'_, Plant>> {
-        use crate::ui::widgets::display_map::MapLayer;
-
-        let (ax, ay, _, _) = avail;
-        let mut order: Vec<usize> = (0..plots.config.background.image.len()).collect();
-        order.sort_by_key(|&i| plots.config.background.image[i].z);
-        let mut views = Vec::new();
-        for i in order {
-            let img = &plots.config.background.image[i];
-            // Pre-warmed Handle: file-backed handles decode on a worker whose
-            // completion redraw the shell drops, leaving first paint blank.
-            let handle = match plots.wallpaper_handle(img) {
-                Some(handle) => handle,
-                None => continue,
-            };
-            let (ix, iy, iw, ih) = match MapLayer::resolved(img) {
-                Some(rect) => rect,
-                None => continue,
-            };
-            let native = match MapLayer::native_size(img) {
-                Some(size) => size,
-                None => continue,
-            };
-            let (ox, oy, ow, oh) = match MapLayer::overlap((ix, iy, iw, ih), avail) {
-                Some(overlap) => overlap,
-                None => continue,
-            };
-            let crop = match MapLayer::crop_for((ix, iy, iw, ih), native, (ox, oy, ow, oh)) {
-                Some(crop) => crop,
-                None => continue,
-            };
-            views.push(
-                container(
-                    Image::new(handle)
-                        .crop(crop)
-                        .width(Length::Fixed(ow))
-                        .height(Length::Fixed(oh)),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding(iced::Padding {
-                    top: oy - ay,
-                    left: ox - ax,
-                    right: 0.0,
-                    bottom: 0.0,
-                })
-                .into(),
-            );
+    /// One original-quality, baked image per output; source images live only
+    /// in the editor or the bake worker, not in every desktop surface.
+    fn wallpaper_views(plots: &Plots, output: OutputId) -> Vec<Element<'_, Plant>> {
+        match plots.desktop.wallpaper.applied.get(&output) {
+            Some(tile) => vec![
+                Image::new(tile.handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(iced::ContentFit::Fill)
+                    .into(),
+            ],
+            None => Vec::new(),
         }
-        views
     }
 }

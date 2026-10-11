@@ -1336,6 +1336,18 @@ impl Top {
         Self::warn_unknown_slot_widgets(plots);
     }
 
+    /// Re-render palette-dependent descriptions without replacing app VMs or IDs.
+    pub(crate) fn refresh_theme(plots: &mut Plots) {
+        plots.services.refresh_system();
+        let gpu = crate::services::gpu::gpu_usage_percent();
+        let now = Instant::now();
+        for (bar, resolved) in Self::all_resolved(plots) {
+            plots.placements.last_run.insert(resolved.id.clone(), now);
+            let result = Self::render_lua_value(plots, &resolved, gpu, bar);
+            Self::ingest_render_value(plots, &resolved, bar, result);
+        }
+    }
+
     /// Render every placement slotted on a bar (bar creation at startup
     /// or output hotplug): without this a new bar paints empty until
     /// each placement's interval elapses.

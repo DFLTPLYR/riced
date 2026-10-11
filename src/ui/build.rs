@@ -146,8 +146,8 @@ pub(crate) fn build_node_opacity(
             height,
         } => {
             let path = path.strip_prefix("file://").unwrap_or(path);
-            match crate::config::decode_handle(std::path::Path::new(path)) {
-                Some((_, _, handle)) => Ok(iced::widget::image::Image::new(handle)
+            match super::assets::image(std::path::Path::new(path)) {
+                Some(handle) => Ok(iced::widget::image::Image::new(handle)
                     .width(width.clone().iced())
                     .height(height.clone().iced())
                     .opacity(opacity)

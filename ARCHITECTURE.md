@@ -12,6 +12,7 @@ src/
     context.rs         host-to-service snapshot adapter
     input.rs           owned window cursors, global cursor and press identity
     desktop.rs         selection/fade lifecycle, context menu, chrome runtimes, wallpapers
+    wallpaper.rs       serialized bake jobs, draft/apply validation and publication
     catalog.rs         discovered widget definitions and library change stamps
     animation.rs       shared motion clock and widget-list lifetime
     notifications.rs   notification queue, renderer and per-output presentation state
@@ -38,6 +39,7 @@ src/
         placement.rs   placement properties and catalog-based editor
         editors.rs     schema-driven scalar/choice controls and reset rows
   ui/
+    assets.rs          bounded, revisioned full-resolution image-handle cache
     node.rs            owned description IR
     decode.rs          Lua description decoding
     dsl.rs             shared constructor/setter bindings
@@ -94,6 +96,10 @@ src/
   services/            system and native Wayland snapshots
     state.rs           owned sampler and native listener caches
   shared/geometry.rs   output geometry independent of UI/window ownership
+  wallpaper/
+    mod.rs             output snapshots, derived tile cache and transactional commit
+    raster.rs          original-pixel sampling and premultiplied linear compositing
+    draft.rs           isolated editable recipe and preview-buffer ownership
 ```
 
 The former `app`, `components`, `composables`, and `colorgen` import facades
@@ -139,6 +145,33 @@ configuration paths and Lua `src` values do not change when Rust modules
 move. Existing Lua libraries are user-owned. Initialization markers remain
 outside the widget/component directories; deleted files stay deleted.
 Legacy config conversion and backups retain their existing semantics.
+
+Wallpaper Settings use an editor-owned draft. Preview events redraw only the
+Settings window; Apply snapshots source buffers and output geometry, bakes
+lossless native-resolution tiles on a serialized worker, and publishes only
+the latest valid result. Recipe persistence is atomic and cache-manifest
+publication is rolled back on persistence failure. Originals remain editable
+and untouched. Desktop surfaces use one applied tile per output; original
+decoded buffers are held by the editor/bake job rather than the desktop.
+Dynamic-theme generation uses applied output composites. Generic UI image
+handles are cached independently without changing their pixel dimensions.
+Wallpaper publication carries an explicit origin: editor Apply can request
+dynamic-theme generation, while startup restoration and output rebuilds only
+publish tiles. Palette selection and variant changes do not schedule generation;
+an unchanged explicit Apply still requests it, so pending variant choices apply.
+Palette-file refresh has its own event, preserving pending saves, placement
+IDs, VM self state and open popups. Real config reloads only rebuild bar
+instances when persisted bar recipes differ (runtime IDs are ignored).
+Dynamic-theme sampling borrows resident applied RGBA buffers and resizes a
+virtual stitched image directly to 128×128, eliminating full-resolution
+stitch/PNG/decode copies. Completion schedules reclamation after host-side
+result processing as well as trimming worker temporaries.
+Native `Closed` events perform idempotent app detachment without requesting
+another close for the dead native ID. Image reclamation is deferred until
+result-message and renderer/UI owners can drop; cache entries still referenced
+by active elements remain intact. Wallpaper publication compares actual RGBA
+pixels and reuses previous handles for identical tiles, keeping texture IDs
+stable across repeated Apply operations.
 
 ## Migration status and remaining work
 
