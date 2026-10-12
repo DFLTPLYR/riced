@@ -1,11 +1,13 @@
 //! An editor-owned draft never mutates applied desktop configuration.
 use super::raster::Sources;
-use crate::config::{BackgroundImage, ConfigPatch};
+use crate::config::{BackgroundConfig, BackgroundImage, ConfigPatch};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Draft {
-    pub images: Vec<BackgroundImage>,
-    pub base: Vec<BackgroundImage>,
+    pub recipe: BackgroundConfig,
+    pub base: BackgroundConfig,
+    pub selected_output: Option<String>,
+    pub preview_outputs: Vec<super::OutputSpec>,
     pub sources: Sources,
     pub revision: u64,
     pub assets_revision: u64,
@@ -16,10 +18,12 @@ pub(crate) struct Draft {
 }
 
 impl Draft {
-    pub fn new(images: &[BackgroundImage]) -> Self {
+    pub fn new(recipe: &BackgroundConfig) -> Self {
         Self {
-            images: images.to_vec(),
-            base: images.to_vec(),
+            recipe: recipe.clone(),
+            base: recipe.clone(),
+            selected_output: None,
+            preview_outputs: Vec::new(),
             sources: Sources::new(),
             revision: 0,
             assets_revision: 0,
@@ -30,22 +34,42 @@ impl Draft {
         }
     }
     pub fn dirty(&self) -> bool {
-        self.images != self.base
+        self.recipe != self.base
     }
 
     pub fn patch(&mut self, patch: ConfigPatch) {
         match patch {
+            ConfigPatch::WallpaperMode(mode) => {
+                self.recipe.mode = mode;
+                self.assets_revision += 1;
+                self.loading = true;
+            }
+            ConfigPatch::MonitorWallpaper(wallpaper) => {
+                if let Some(existing) = self
+                    .recipe
+                    .monitor
+                    .iter_mut()
+                    .find(|m| m.output == wallpaper.output)
+                {
+                    *existing = wallpaper;
+                } else {
+                    self.recipe.monitor.push(wallpaper);
+                }
+                self.assets_revision += 1;
+                self.loading = true;
+            }
             ConfigPatch::AddImage(image) => {
-                self.images.push(image);
+                self.recipe.image.push(image);
                 self.assets_revision += 1;
                 self.loading = true;
             }
             ConfigPatch::RemoveImage { index } => {
-                if index < self.images.len() {
-                    self.images.remove(index);
+                if index < self.recipe.image.len() {
+                    self.recipe.image.remove(index);
                 }
                 let paths: std::collections::HashSet<_> = self
-                    .images
+                    .recipe
+                    .image
                     .iter()
                     .map(BackgroundImage::local_path)
                     .collect();
@@ -54,13 +78,13 @@ impl Draft {
                 self.loading = true;
             }
             ConfigPatch::MoveImage { index, x, y } => {
-                if let Some(image) = self.images.get_mut(index) {
+                if let Some(image) = self.recipe.image.get_mut(index) {
                     image.x = x;
                     image.y = y;
                 }
             }
             ConfigPatch::SetImageScale { index, scale } => {
-                if let Some(image) = self.images.get_mut(index) {
+                if let Some(image) = self.recipe.image.get_mut(index) {
                     image.scale = scale.max(0.01);
                 }
             }
@@ -69,20 +93,20 @@ impl Draft {
                 width,
                 height,
             } => {
-                if let Some(image) = self.images.get_mut(index) {
+                if let Some(image) = self.recipe.image.get_mut(index) {
                     image.width = width.max(0.0);
                     image.height = height.max(0.0);
                 }
             }
             ConfigPatch::ScaleImage { index, x, y, scale } => {
-                if let Some(image) = self.images.get_mut(index) {
+                if let Some(image) = self.recipe.image.get_mut(index) {
                     image.x = x;
                     image.y = y;
                     image.scale = scale.max(0.01);
                 }
             }
             ConfigPatch::SetImageZ { index, z } => {
-                if let Some(image) = self.images.get_mut(index) {
+                if let Some(image) = self.recipe.image.get_mut(index) {
                     image.z = z;
                 }
             }

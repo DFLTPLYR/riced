@@ -1,7 +1,7 @@
 //! Quality-preserving wallpaper snapshots and lossless, derived per-output tiles.
 pub(crate) mod draft;
 pub(crate) mod raster;
-use crate::config::BackgroundImage;
+use crate::config::{BackgroundConfig, BackgroundImage, WallpaperMode};
 use iced::{widget::image::Handle, window};
 use iced_wayland_subscriber::{OutputId, OutputInfo};
 use raster::Sources;
@@ -54,11 +54,39 @@ pub(crate) fn outputs(infos: &HashMap<OutputId, OutputInfo>) -> Vec<(OutputId, O
     specs
 }
 
+pub(crate) fn source_images(
+    recipe: &BackgroundConfig,
+    outputs: &[OutputSpec],
+) -> Vec<BackgroundImage> {
+    match recipe.mode {
+        WallpaperMode::FreeForm => recipe.image.clone(),
+        WallpaperMode::PerMonitor => recipe
+            .monitor
+            .iter()
+            .filter(|m| !m.path.is_empty() && outputs.iter().any(|spec| spec.key == m.output))
+            .map(|m| BackgroundImage {
+                path: m.path.clone(),
+                ..Default::default()
+            })
+            .collect(),
+    }
+}
+
+/// Headless theme generation uses the last applied monitor geometry.
+pub(crate) fn cached_outputs() -> Vec<OutputSpec> {
+    std::fs::read(cache_dir().join("applied.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+        .filter(|manifest| manifest.version == 2)
+        .map(|manifest| manifest.tiles.into_iter().map(|tile| tile.spec).collect())
+        .unwrap_or_default()
+}
+
 /// Commit the derived manifest and editable recipe, restoring the previous
 /// manifest if configuration persistence fails. Originals are never rewritten.
 pub(crate) fn commit(
     config: &crate::config::Config,
-    images: &[BackgroundImage],
+    images: &BackgroundConfig,
     batch: &Batch,
     dir: &Path,
     config_path: &Path,
@@ -66,7 +94,7 @@ pub(crate) fn commit(
     let previous = std::fs::read(dir.join("applied.json")).ok();
     save_manifest(dir, images, batch)?;
     let mut next = config.clone();
-    next.background.image = images.to_vec();
+    next.background = images.clone();
     match next.save_atomic_to(config_path) {
         Ok(mtime) => Ok((next, mtime)),
         Err(error) => {
@@ -136,8 +164,8 @@ pub struct Batch {
 pub(crate) struct Request {
     pub generation: u64,
     pub editor: Option<(window::Id, u64)>,
-    pub images: Vec<BackgroundImage>,
-    pub base: Vec<BackgroundImage>,
+    pub images: BackgroundConfig,
+    pub base: BackgroundConfig,
     pub outputs: Vec<(OutputId, OutputSpec)>,
     pub sources: Sources,
 }
@@ -148,7 +176,7 @@ pub(crate) struct State {
     pub generation: u64,
     pub pending: Option<Request>,
     pub running: Option<u64>,
-    pub layout: Vec<BackgroundImage>,
+    pub layout: BackgroundConfig,
     pub targets: Vec<(OutputId, OutputSpec)>,
 }
 
@@ -214,18 +242,18 @@ struct SavedTile {
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: u32,
-    images: Vec<BackgroundImage>,
+    images: BackgroundConfig,
     tiles: Vec<SavedTile>,
 }
 
 fn load_cached(
     dir: &Path,
-    images: &[BackgroundImage],
+    images: &BackgroundConfig,
     outputs: &[(OutputId, OutputSpec)],
 ) -> Option<Batch> {
     let manifest: Manifest =
         serde_json::from_slice(&std::fs::read(dir.join("applied.json")).ok()?).ok()?;
-    if manifest.version != 1 || manifest.images != images {
+    if manifest.version != 2 || manifest.images != *images {
         return None;
     }
     let mut tiles = HashMap::new();
@@ -255,7 +283,7 @@ pub(crate) fn bake(request: &Request, dir: &Path) -> Result<Batch, String> {
     if request.outputs.is_empty() {
         return Err("No outputs are available to apply wallpaper".into());
     }
-    if request.images.is_empty() {
+    if request.images.mode == WallpaperMode::FreeForm && request.images.image.is_empty() {
         return Ok(Batch {
             tiles: HashMap::new(),
         });
@@ -265,9 +293,16 @@ pub(crate) fn bake(request: &Request, dir: &Path) -> Result<Batch, String> {
     {
         return Ok(batch);
     }
-    let sources = raster::load_sources(&request.images, request.sources.clone())?;
+    // Disconnected assignments are retained without requiring their sources.
+    let specs: Vec<_> = request
+        .outputs
+        .iter()
+        .map(|(_, spec)| spec.clone())
+        .collect();
+    let active = source_images(&request.images, &specs);
+    let sources = raster::load_sources(&active, request.sources.clone())?;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    1_u32.hash(&mut hash);
+    2_u32.hash(&mut hash);
     serde_json::to_vec(&request.images)
         .map_err(|error| error.to_string())?
         .hash(&mut hash);
@@ -288,7 +323,7 @@ pub(crate) fn bake(request: &Request, dir: &Path) -> Result<Batch, String> {
     std::fs::create_dir_all(&generation_dir).map_err(|error| error.to_string())?;
     let mut tiles = HashMap::new();
     for (index, (id, spec)) in request.outputs.iter().enumerate() {
-        let canvas = raster::compose(spec.rect, spec.pixels, &request.images, &sources)?;
+        let canvas = raster::compose_output(spec, &request.images, &sources)?;
         let path = generation_dir.join(format!("output-{index}.png"));
         let temporary = generation_dir.join(format!("output-{index}.tmp.png"));
         canvas.save(&temporary).map_err(|error| error.to_string())?;
@@ -312,13 +347,13 @@ pub(crate) fn bake(request: &Request, dir: &Path) -> Result<Batch, String> {
 
 pub(crate) fn save_manifest(
     dir: &Path,
-    images: &[BackgroundImage],
+    images: &BackgroundConfig,
     batch: &Batch,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let manifest = Manifest {
-        version: 1,
-        images: images.to_vec(),
+        version: 2,
+        images: images.clone(),
         tiles: batch
             .tiles
             .values()

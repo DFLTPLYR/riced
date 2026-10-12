@@ -872,7 +872,7 @@ impl Plots {
                     println!("riced: config changed on disk — replacing staged local edits");
                 }
                 self.config_jobs.invalidate();
-                let images_changed = cfg.background.image != self.config.background.image;
+                let images_changed = cfg.background != self.config.background;
                 self.config = cfg;
                 // Bars resolve [[bar]] entries once at spawn; re-resolve
                 // here so slot/align/geometry edits apply live (anchor
@@ -897,9 +897,8 @@ impl Plots {
                             } else {
                                 let assets = draft.assets_revision + 1;
                                 let running = draft.preview_running;
-                                *draft = crate::wallpaper::draft::Draft::new(
-                                    &self.config.background.image,
-                                );
+                                *draft =
+                                    crate::wallpaper::draft::Draft::new(&self.config.background);
                                 draft.assets_revision = assets;
                                 draft.preview_running = running;
                                 previews.push(*id);
@@ -1208,6 +1207,59 @@ impl Plots {
                 }
                 self.load_wallpaper_preview(id)
             }
+            Plant::SettingPlot(SettingEvent::SelectMonitor(id, output)) => {
+                if let Some(draft) = self
+                    .windows
+                    .settings
+                    .get_mut(&id)
+                    .and_then(|s| s.wallpaper_draft.as_mut())
+                {
+                    draft.selected_output = Some(output);
+                }
+                Command::none()
+            }
+            Plant::SettingPlot(SettingEvent::PickMonitorWallpaper(id, output)) => Command::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter(
+                            "Images",
+                            &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"],
+                        )
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().to_string_lossy().into_owned())
+                },
+                move |path| {
+                    Plant::SettingPlot(SettingEvent::MonitorWallpaperPicked(
+                        id,
+                        output.clone(),
+                        path,
+                    ))
+                },
+            ),
+            Plant::SettingPlot(SettingEvent::MonitorWallpaperPicked(id, output, path)) => {
+                if let Some(path) = path
+                    && let Some(draft) = self
+                        .windows
+                        .settings
+                        .get_mut(&id)
+                        .and_then(|s| s.wallpaper_draft.as_mut())
+                {
+                    let mut wallpaper = draft
+                        .recipe
+                        .monitor
+                        .iter()
+                        .find(|m| m.output == output)
+                        .cloned()
+                        .unwrap_or(crate::config::MonitorWallpaper {
+                            output,
+                            ..Default::default()
+                        });
+                    wallpaper.path = path;
+                    draft.patch(ConfigPatch::MonitorWallpaper(wallpaper));
+                }
+                self.load_wallpaper_preview(id)
+            }
             Plant::SettingPlot(SettingEvent::PickWallpaper(id)) => Command::perform(
                 async {
                     rfd::AsyncFileDialog::new()
@@ -1229,7 +1281,14 @@ impl Plots {
                         .get_mut(&id)
                         .and_then(|setting| setting.wallpaper_draft.as_mut())
                 {
-                    let z = draft.images.iter().map(|image| image.z).max().unwrap_or(-1) + 1;
+                    let z = draft
+                        .recipe
+                        .image
+                        .iter()
+                        .map(|image| image.z)
+                        .max()
+                        .unwrap_or(-1)
+                        + 1;
                     draft.patch(ConfigPatch::AddImage(crate::config::BackgroundImage {
                         path,
                         z,
@@ -1367,6 +1426,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
             SettingEvent::Select(id, _)
             | SettingEvent::SelectBar(id, _)
             | SettingEvent::SelectImage(id, _)
+            | SettingEvent::SelectMonitor(id, _)
+            | SettingEvent::PickMonitorWallpaper(id, _)
+            | SettingEvent::MonitorWallpaperPicked(id, _, _)
             | SettingEvent::SelectSlot(id, _)
             | SettingEvent::SelectPlacement(id, _, _)
             | SettingEvent::MapViewChanged { id, .. }
@@ -1716,7 +1778,7 @@ mod tests {
             pixels,
         });
         let weak = std::sync::Arc::downgrade(&source);
-        let mut draft = crate::wallpaper::draft::Draft::new(&[]);
+        let mut draft = crate::wallpaper::draft::Draft::new(&Default::default());
         draft.loading = false;
         draft
             .sources
@@ -1742,7 +1804,7 @@ mod tests {
         }];
         let id = iced::window::Id::unique();
         let mut setting = Setting::default();
-        let mut draft = crate::wallpaper::draft::Draft::new(&plots.config.background.image);
+        let mut draft = crate::wallpaper::draft::Draft::new(&plots.config.background);
         draft.loading = false;
         setting.wallpaper_draft = Some(draft);
         plots.windows.settings.insert(id, setting);
@@ -1763,7 +1825,8 @@ mod tests {
                 .wallpaper_draft
                 .as_ref()
                 .unwrap()
-                .images[0]
+                .recipe
+                .image[0]
                 .x,
             100.0
         );
@@ -1781,8 +1844,8 @@ mod tests {
         let request = crate::wallpaper::Request {
             generation: 9,
             editor: None,
-            images: vec![],
-            base: vec![],
+            images: Default::default(),
+            base: Default::default(),
             outputs: vec![],
             sources: Default::default(),
         };

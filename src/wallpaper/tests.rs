@@ -96,8 +96,11 @@ fn request(images: Vec<BackgroundImage>) -> Request {
     Request {
         generation: 1,
         editor: Some((window::Id::unique(), 0)),
-        base: Vec::new(),
-        images,
+        base: BackgroundConfig::default(),
+        images: BackgroundConfig {
+            image: images,
+            ..Default::default()
+        },
         outputs: vec![(
             OutputId(1),
             OutputSpec {
@@ -244,7 +247,7 @@ fn failed_persistence_restores_manifest_and_does_not_replace_configuration() {
     let batch = bake(&request, &cache).unwrap();
     save_manifest(
         &cache,
-        &[],
+        &BackgroundConfig::default(),
         &Batch {
             tiles: HashMap::new(),
         },
@@ -267,9 +270,9 @@ fn failed_persistence_restores_manifest_and_does_not_replace_configuration() {
     assert_eq!(std::fs::read(cache.join("applied.json")).unwrap(), previous);
     let path = dir.join("config.toml");
     let (saved, _) = commit(&config, &request.images, &batch, &cache, &path).unwrap();
-    assert_eq!(saved.background.image, request.images);
+    assert_eq!(saved.background, request.images);
     assert_eq!(
-        crate::config::Config::load_from(&path).0.background.image,
+        crate::config::Config::load_from(&path).0.background,
         request.images
     );
     assert_eq!(saved.theme.name, config.theme.name);
@@ -284,15 +287,18 @@ fn draft_editing_retains_applied_recipe_until_apply_and_prunes_only_unreferenced
         "image.png",
         RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])),
     );
-    let mut draft = draft::Draft::new(std::slice::from_ref(&image));
+    let mut draft = draft::Draft::new(&BackgroundConfig {
+        image: vec![image.clone()],
+        ..Default::default()
+    });
     draft.patch(crate::config::ConfigPatch::MoveImage {
         index: 0,
         x: 99.0,
         y: -3.0,
     });
     assert!(draft.dirty());
-    assert_eq!(draft.base[0], image);
-    assert_eq!(draft.images[0].x, 99.0);
+    assert_eq!(draft.base.image[0], image);
+    assert_eq!(draft.recipe.image[0].x, 99.0);
     let cache = dir.join("cache");
     let batch = bake(&request(vec![image.clone()]), &cache).unwrap();
     let stale = cache.join("0123456789abcdef");

@@ -112,7 +112,7 @@ pub(crate) fn sample_pixels(views: &[PixelView]) -> Option<image::RgbImage> {
 /// `ColorGen.generate(paths)`.
 pub fn wallpaper_paths(config: &Config) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for img in &config.background.image {
+    for img in &config.background.active_images() {
         let path = img.local_path();
         if path.as_os_str().is_empty() || out.contains(&path) || !path.is_file() {
             continue;
@@ -120,6 +120,21 @@ pub fn wallpaper_paths(config: &Config) -> Vec<PathBuf> {
         out.push(path);
     }
     out
+}
+
+pub(crate) fn render_outputs(
+    specs: &[crate::wallpaper::OutputSpec],
+    recipe: &crate::config::BackgroundConfig,
+) -> Result<Vec<image::RgbImage>, String> {
+    let images = crate::wallpaper::source_images(recipe, specs);
+    let sources = crate::wallpaper::raster::load_sources(&images, Default::default())?;
+    specs
+        .iter()
+        .map(|spec| {
+            crate::wallpaper::raster::compose_output(spec, recipe, &sources)
+                .map(|pixels| crate::wallpaper::raster::over_black(&pixels))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

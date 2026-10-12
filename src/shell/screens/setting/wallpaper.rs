@@ -3,7 +3,7 @@ use super::editors::image_spin_row;
 use super::{Setting, hint, image_file_name, section, section_heading};
 use crate::ui::widgets::display_map::{MapLayer, MapView, images_layer, outputs_layer};
 use crate::{
-    config::{BackgroundImage, ConfigPatch},
+    config::{BackgroundImage, ConfigPatch, MonitorWallpaper, WallpaperFit, WallpaperMode},
     shell::{Plant, SettingEvent, state::Plots},
     theme,
 };
@@ -34,23 +34,47 @@ pub(super) fn view<'a>(setting: &'a Setting, id: window::Id, plots: &Plots) -> E
         return hint("Open the Wallpaper page to load the editor.");
     };
     let context = WallpaperContext {
-        images: &draft.images,
+        images: &draft.recipe.image,
         output_infos: &plots.windows.output_infos,
         sources: &draft.sources,
     };
-    let mut content = column![
+    let per_monitor = draft.recipe.mode == WallpaperMode::PerMonitor;
+    let mut modes = row![].spacing(8);
+    for (mode, label) in [
+        (WallpaperMode::FreeForm, "Free Form"),
+        (WallpaperMode::PerMonitor, "Per Monitor"),
+    ] {
+        modes = modes.push(
+            button(text(label).size(13))
+                .on_press(change(id, ConfigPatch::WallpaperMode(mode)))
+                .padding(8)
+                .style(theme::nav_button(draft.recipe.mode == mode)),
+        );
+    }
+    let mut content = column![modes,
         section_heading("Display layout", "Arrange the original images in the preview. Apply saves lossless, native-resolution wallpapers for each display."),
         row![button(text("Add wallpaper…").size(13).color(theme::button_text()))
-            .on_press(Plant::SettingPlot(SettingEvent::PickWallpaper(id))).padding(8).style(theme::menu_button(theme::RADIUS)),
+            .on_press_maybe((!per_monitor).then_some(Plant::SettingPlot(SettingEvent::PickWallpaper(id)))).padding(8).style(theme::menu_button(theme::RADIUS)),
             Space::new().width(Length::Fill),
             hint(if draft.dirty() {"Unapplied changes"} else {"Applied layout"}),
             button(text("Discard").size(13)).on_press(Plant::SettingPlot(SettingEvent::DiscardWallpaper(id))).padding(8).style(theme::menu_button(theme::RADIUS)),
             button(text(if draft.applying {"Applying…"} else {"Apply"}).size(13))
                 .on_press_maybe((!draft.loading && !draft.applying).then_some(Plant::SettingPlot(SettingEvent::ApplyWallpaper(id))))
                 .padding(8).style(theme::menu_button(theme::RADIUS))].spacing(8).align_y(iced::Alignment::Center),
-        grid(id, &context, setting.map_view),
-        section("Image properties", "These controls change only the draft. Reset restores that property's default.", image_controls(id, &context, setting.selected_image)),
     ].spacing(16);
+    if per_monitor {
+        content = content
+            .push(monitor_grid(id, &context, draft, setting.map_view))
+            .push(monitor_controls(id, &context, draft));
+    } else {
+        content = content
+            .push(grid(id, &context, setting.map_view))
+            .push(section(
+                "Image properties",
+                "These controls change only the draft. Reset restores that property's default.",
+                image_controls(id, &context, setting.selected_image),
+            ));
+    }
     if draft.loading {
         content = content.push(hint("Loading full-resolution originals…"));
     }
@@ -58,6 +82,146 @@ pub(super) fn view<'a>(setting: &'a Setting, id: window::Id, plots: &Plots) -> E
         content = content.push(text(error.clone()).size(12).color(theme::active().error));
     }
     content.into()
+}
+
+fn monitor_grid(
+    id: window::Id,
+    context: &WallpaperContext<'_>,
+    draft: &crate::wallpaper::draft::Draft,
+    view: MapView,
+) -> Element<'static, Plant> {
+    let outputs = crate::wallpaper::outputs(context.output_infos);
+    let selected = selected_monitor(draft, &outputs);
+    let names: Vec<_> = outputs.iter().map(|(_, spec)| spec.key.clone()).collect();
+    let rects: Vec<_> = outputs.iter().map(|(_, spec)| spec.rect).collect();
+    let mut images = Vec::new();
+    let mut handles = Vec::new();
+    for (_, spec) in &outputs {
+        let wallpaper = draft.recipe.monitor.iter().find(|m| m.output == spec.key);
+        let source = wallpaper.and_then(|m| {
+            context.sources.get(
+                &BackgroundImage {
+                    path: m.path.clone(),
+                    ..Default::default()
+                }
+                .local_path(),
+            )
+        });
+        match (wallpaper, source) {
+            (Some(wallpaper), Some(source)) => {
+                images.push(crate::wallpaper::raster::monitor_image(
+                    spec, wallpaper, source,
+                ));
+                handles.push(Some(source.handle.clone()));
+            }
+            _ => {
+                images.push(BackgroundImage::default());
+                handles.push(None);
+            }
+        }
+    }
+    let images_canvas = MapLayer::images(id, rects.clone(), images.clone(), handles.clone(), view)
+        .with_monitors(names.clone(), selected.clone());
+    let outputs_canvas =
+        MapLayer::outputs(id, rects, images, handles, view).with_monitors(names, selected);
+    container(stack![
+        iced::widget::canvas(images_canvas)
+            .width(Length::Fill)
+            .height(Length::Fill),
+        iced::widget::canvas(outputs_canvas)
+            .width(Length::Fill)
+            .height(Length::Fill)
+    ])
+    .style(theme::menu_box)
+    .height(360)
+    .width(Length::Fill)
+    .clip(true)
+    .into()
+}
+
+fn selected_monitor(
+    draft: &crate::wallpaper::draft::Draft,
+    outputs: &[(OutputId, crate::wallpaper::OutputSpec)],
+) -> Option<String> {
+    draft
+        .selected_output
+        .as_ref()
+        .filter(|name| outputs.iter().any(|(_, spec)| &spec.key == *name))
+        .cloned()
+        .or_else(|| outputs.first().map(|(_, spec)| spec.key.clone()))
+}
+
+fn monitor_controls(
+    id: window::Id,
+    context: &WallpaperContext<'_>,
+    draft: &crate::wallpaper::draft::Draft,
+) -> Element<'static, Plant> {
+    let outputs = crate::wallpaper::outputs(context.output_infos);
+    let Some(selected) = selected_monitor(draft, &outputs) else {
+        return hint("No displays connected.");
+    };
+    let mut picker = row![].spacing(8);
+    for (_, spec) in &outputs {
+        picker = picker.push(
+            button(text(spec.key.clone()).size(13))
+                .padding(8)
+                .style(theme::nav_button(spec.key == selected))
+                .on_press(Plant::SettingPlot(SettingEvent::SelectMonitor(
+                    id,
+                    spec.key.clone(),
+                ))),
+        );
+    }
+    let spec = &outputs
+        .iter()
+        .find(|(_, spec)| spec.key == selected)
+        .unwrap()
+        .1;
+    let wallpaper = draft
+        .recipe
+        .monitor
+        .iter()
+        .find(|m| m.output == selected)
+        .cloned()
+        .unwrap_or(MonitorWallpaper {
+            output: selected.clone(),
+            ..Default::default()
+        });
+    let mut fits = row![].spacing(8);
+    for (fit, label) in [
+        (WallpaperFit::Fit, "Fit"),
+        (WallpaperFit::Expand, "Expand"),
+        (WallpaperFit::Stretch, "Stretch"),
+        (WallpaperFit::Center, "Center"),
+    ] {
+        let mut next = wallpaper.clone();
+        next.fit = fit;
+        fits = fits.push(
+            button(text(label).size(12))
+                .padding(8)
+                .style(theme::nav_button(wallpaper.fit == fit))
+                .on_press(change(id, ConfigPatch::MonitorWallpaper(next))),
+        );
+    }
+    let mut cleared = wallpaper.clone();
+    cleared.path.clear();
+    let disconnected = draft
+        .recipe
+        .monitor
+        .iter()
+        .filter(|m| !outputs.iter().any(|(_, spec)| spec.key == m.output))
+        .count();
+    column![
+        scrollable(picker).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default())),
+        text(format!("{selected} · {} × {} px", spec.pixels.0, spec.pixels.1)).size(13),
+        hint(if wallpaper.path.is_empty() { "No wallpaper assigned (black background)".into() } else { wallpaper.path.clone() }),
+        row![button(text("Choose wallpaper…").size(13)).padding(8).style(theme::menu_button(theme::RADIUS))
+            .on_press(Plant::SettingPlot(SettingEvent::PickMonitorWallpaper(id, selected))),
+            button(text("Clear wallpaper").size(13)).padding(8).style(theme::menu_button(theme::RADIUS)).on_press(change(id, ConfigPatch::MonitorWallpaper(cleared)))].spacing(8),
+        text("Content fit").size(13), fits,
+        hint("Fit: whole image · Expand: fill and crop · Stretch: fill without preserving aspect ratio · Center: native pixels. All placements are centered."),
+        hint(format!("{disconnected} disconnected display assignment(s) retained.")),
+    ].spacing(12).into()
 }
 
 fn grid(id: window::Id, context: &WallpaperContext<'_>, view: MapView) -> Element<'static, Plant> {

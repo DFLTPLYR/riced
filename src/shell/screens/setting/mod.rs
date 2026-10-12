@@ -231,7 +231,7 @@ impl Setting {
                 && setting.wallpaper_draft.is_none()
             {
                 setting.wallpaper_draft = Some(crate::wallpaper::draft::Draft::new(
-                    &plots.config.background.image,
+                    &plots.config.background,
                 ));
             }
             return plots.load_wallpaper_preview(id);

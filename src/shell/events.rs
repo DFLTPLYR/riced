@@ -250,6 +250,9 @@ pub enum NotifyEvent {
 
 #[derive(Debug, Clone)]
 pub enum SettingEvent {
+    SelectMonitor(Id, String),
+    PickMonitorWallpaper(Id, String),
+    MonitorWallpaperPicked(Id, String, Option<String>),
     WallpaperPatch(Id, crate::config::ConfigPatch),
     PickWallpaper(Id),
     WallpaperPicked(Id, Option<String>),

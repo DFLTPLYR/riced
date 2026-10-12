@@ -39,6 +39,64 @@ impl Source {
 
 pub(crate) type Sources = HashMap<PathBuf, Arc<Source>>;
 
+/// Resolve per-monitor placement in oriented native pixels, then convert to
+/// desktop coordinates. Center therefore stays 1:1 even on scaled displays.
+pub(crate) fn monitor_image(
+    spec: &super::OutputSpec,
+    wallpaper: &crate::config::MonitorWallpaper,
+    source: &Source,
+) -> BackgroundImage {
+    use crate::config::WallpaperFit;
+    let (sw, sh) = (source.width as f32, source.height as f32);
+    let (pw, ph) = (spec.pixels.0 as f32, spec.pixels.1 as f32);
+    let factor = match wallpaper.fit {
+        WallpaperFit::Fit => (pw / sw).min(ph / sh),
+        WallpaperFit::Expand => (pw / sw).max(ph / sh),
+        WallpaperFit::Center | WallpaperFit::Stretch => 1.0,
+    };
+    let (w, h) = if wallpaper.fit == WallpaperFit::Stretch {
+        (pw, ph)
+    } else {
+        (sw * factor, sh * factor)
+    };
+    BackgroundImage {
+        path: wallpaper.path.clone(),
+        x: spec.rect.0 + (pw - w) * 0.5 * spec.rect.2 / pw,
+        y: spec.rect.1 + (ph - h) * 0.5 * spec.rect.3 / ph,
+        width: w * spec.rect.2 / pw,
+        height: h * spec.rect.3 / ph,
+        ..Default::default()
+    }
+}
+
+pub(crate) fn compose_output(
+    spec: &super::OutputSpec,
+    recipe: &crate::config::BackgroundConfig,
+    sources: &Sources,
+) -> Result<image::RgbaImage, String> {
+    if recipe.mode == crate::config::WallpaperMode::FreeForm {
+        return compose(spec.rect, spec.pixels, &recipe.image, sources);
+    }
+    let images = match recipe
+        .monitor
+        .iter()
+        .find(|m| m.output == spec.key && !m.path.is_empty())
+    {
+        Some(wallpaper) => {
+            let image = BackgroundImage {
+                path: wallpaper.path.clone(),
+                ..Default::default()
+            };
+            let source = sources
+                .get(&image.local_path())
+                .ok_or_else(|| format!("{}: source was not loaded", wallpaper.path))?;
+            vec![monitor_image(spec, wallpaper, source)]
+        }
+        None => Vec::new(),
+    };
+    compose(spec.rect, spec.pixels, &images, sources)
+}
+
 pub(crate) fn load_sources(
     images: &[BackgroundImage],
     mut sources: Sources,

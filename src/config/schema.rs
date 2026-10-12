@@ -512,11 +512,57 @@ pub enum SlotWidgets {
 /// ```
 /// Global coords like the selection rect; `width`/`height` of `0` mean native
 /// image size at load; `z` orders overlapping images on the map.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackgroundConfig {
+    pub mode: WallpaperMode,
+    pub monitor: Vec<MonitorWallpaper>,
     #[serde(default)]
     pub image: Vec<BackgroundImage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WallpaperMode {
+    #[default]
+    FreeForm,
+    PerMonitor,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WallpaperFit {
+    Fit,
+    #[default]
+    Expand,
+    Stretch,
+    Center,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MonitorWallpaper {
+    pub output: String,
+    pub path: String,
+    pub fit: WallpaperFit,
+}
+
+impl BackgroundConfig {
+    /// Source recipes for the active mode, deduplicated by the source loader.
+    pub fn active_images(&self) -> Vec<BackgroundImage> {
+        match self.mode {
+            WallpaperMode::FreeForm => self.image.clone(),
+            WallpaperMode::PerMonitor => self
+                .monitor
+                .iter()
+                .filter(|m| !m.path.is_empty())
+                .map(|m| BackgroundImage {
+                    path: m.path.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -559,6 +605,8 @@ impl Default for BackgroundImage {
 /// subscription registry needed; iced views are pure functions of state.
 #[derive(Debug, Clone)]
 pub enum ConfigPatch {
+    WallpaperMode(WallpaperMode),
+    MonitorWallpaper(MonitorWallpaper),
     ComposableSource(ComposableKind, String),
     ComposableProp(ComposableKind, String, Option<PropValue>),
     ThemeName(String),
@@ -1287,6 +1335,19 @@ impl Config {
         let c = &mut self.composable;
         let images = &mut self.background.image;
         match patch {
+            ConfigPatch::WallpaperMode(mode) => self.background.mode = mode,
+            ConfigPatch::MonitorWallpaper(wallpaper) => {
+                if let Some(existing) = self
+                    .background
+                    .monitor
+                    .iter_mut()
+                    .find(|m| m.output == wallpaper.output)
+                {
+                    *existing = wallpaper;
+                } else {
+                    self.background.monitor.push(wallpaper);
+                }
+            }
             ConfigPatch::ComposableSource(kind, src) => c.get_mut(kind).src = src,
             ConfigPatch::ComposableProp(kind, key, value) => {
                 let props = &mut c.get_mut(kind).props;

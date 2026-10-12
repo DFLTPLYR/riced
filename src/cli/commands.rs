@@ -53,7 +53,7 @@ pub(crate) fn run_generate_theme(
     }
     let paths = colorgen::wallpaper_paths(&config);
     if paths.is_empty() {
-        eprintln!("riced: no wallpaper images configured (see [background.image])");
+        eprintln!("riced: no wallpaper images configured for the active background mode");
         std::process::exit(1);
     }
     let rects: Vec<(f32, f32, f32, f32)> = config
@@ -62,16 +62,33 @@ pub(crate) fn run_generate_theme(
         .iter()
         .filter_map(crate::ui::widgets::display_map::MapLayer::resolved)
         .collect();
-    if rects.is_empty() {
+    let views = if config.background.mode == crate::config::WallpaperMode::PerMonitor {
+        let specs = crate::wallpaper::cached_outputs();
+        if specs.is_empty() {
+            eprintln!(
+                "riced: apply wallpaper once to record monitor geometry before generating a per-monitor theme"
+            );
+            std::process::exit(1);
+        }
+        match colorgen::views::render_outputs(&specs, &config.background) {
+            Ok(views) => views,
+            Err(error) => {
+                eprintln!("riced: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        colorgen::render_views(&rects, &config.background.image)
+    };
+    if views.is_empty() {
         eprintln!("riced: no wallpaper views to combine");
         std::process::exit(1);
     }
     println!(
         "riced: generating {variant} theme from {} wallpaper(s) ({} view(s))",
         paths.len(),
-        rects.len()
+        views.len()
     );
-    let views = colorgen::render_views(&rects, &config.background.image);
     let generated = match colorgen::generate_from_views(&views, &variant, config.theme.darkmode) {
         Ok(g) => g,
         Err(e) => {

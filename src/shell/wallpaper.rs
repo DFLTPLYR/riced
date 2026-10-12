@@ -14,6 +14,10 @@ impl Plots {
     }
 
     pub(crate) fn load_wallpaper_preview(&mut self, id: window::Id) -> Task<Plant> {
+        let outputs: Vec<_> = wallpaper::outputs(&self.windows.output_infos)
+            .into_iter()
+            .map(|(_, spec)| spec)
+            .collect();
         let Some(draft) = self
             .windows
             .settings
@@ -22,10 +26,15 @@ impl Plots {
         else {
             return Task::none();
         };
+        if draft.preview_outputs != outputs {
+            draft.preview_outputs = outputs.clone();
+            draft.assets_revision += 1;
+            draft.loading = true;
+        }
         if !draft.loading || draft.preview_running.is_some() {
             return Task::none();
         }
-        let images = draft.images.clone();
+        let images = wallpaper::source_images(&draft.recipe, &outputs);
         let sources = draft.sources.clone();
         let revision = draft.assets_revision;
         draft.preview_running = Some(revision);
@@ -67,7 +76,7 @@ impl Plots {
                 .wallpaper_draft
                 .as_ref()
                 .map_or(0, |draft| draft.assets_revision + 1);
-            let mut draft = Draft::new(&self.config.background.image);
+            let mut draft = Draft::new(&self.config.background);
             draft.assets_revision = revision;
             draft.preview_running = running;
             setting.wallpaper_draft = Some(draft);
@@ -87,7 +96,7 @@ impl Plots {
         if draft.loading || draft.applying {
             return Task::none();
         }
-        if draft.base != self.config.background.image {
+        if draft.base != self.config.background {
             draft.error = Some(
                 "Wallpaper configuration changed. Discard to reload the current layout.".into(),
             );
@@ -104,8 +113,8 @@ impl Plots {
         self.desktop.wallpaper.pending = Some(Request {
             generation: self.desktop.wallpaper.generation,
             editor: Some((id, draft.revision)),
-            images: draft.images.clone(),
-            base: self.config.background.image.clone(),
+            images: draft.recipe.clone(),
+            base: self.config.background.clone(),
             outputs,
             sources: draft.sources.clone(),
         });
@@ -114,23 +123,26 @@ impl Plots {
 
     pub(crate) fn refresh_wallpapers(&mut self) -> Task<Plant> {
         let outputs = wallpaper::outputs(&self.windows.output_infos);
+        let editors: Vec<_> = self.windows.settings.keys().copied().collect();
+        let mut previews: Vec<_> = editors
+            .into_iter()
+            .map(|id| self.load_wallpaper_preview(id))
+            .collect();
         if outputs.is_empty() {
-            return Task::none();
+            return Task::batch(previews);
         }
         if let Some(request) = &self.desktop.wallpaper.pending {
-            if request.outputs == outputs && request.base == self.config.background.image {
-                return Task::none();
+            if request.outputs == outputs && request.base == self.config.background {
+                return Task::batch(previews);
             }
         } else if self.desktop.wallpaper.targets == outputs
-            && self.desktop.wallpaper.layout == self.config.background.image
+            && self.desktop.wallpaper.layout == self.config.background
         {
-            return Task::none();
+            return Task::batch(previews);
         }
         let previous = self.desktop.wallpaper.pending.take();
         let (editor, images, sources) = match previous {
-            Some(request)
-                if request.editor.is_some() && request.base == self.config.background.image =>
-            {
+            Some(request) if request.editor.is_some() && request.base == self.config.background => {
                 (request.editor, request.images, request.sources)
             }
             other => {
@@ -144,7 +156,7 @@ impl Plots {
                     draft.applying = false;
                     draft.error = Some("Wallpaper configuration changed during Apply.".into());
                 }
-                (None, self.config.background.image.clone(), Sources::new())
+                (None, self.config.background.clone(), Sources::new())
             }
         };
         self.desktop.wallpaper.generation += 1;
@@ -152,11 +164,12 @@ impl Plots {
             generation: self.desktop.wallpaper.generation,
             editor,
             images,
-            base: self.config.background.image.clone(),
+            base: self.config.background.clone(),
             outputs,
             sources,
         });
-        self.launch_wallpaper_job()
+        previews.push(self.launch_wallpaper_job());
+        Task::batch(previews)
     }
 
     fn launch_wallpaper_job(&mut self) -> Task<Plant> {
@@ -207,7 +220,7 @@ impl Plots {
             .pending
             .take()
             .expect("matching wallpaper request");
-        if request.base != self.config.background.image
+        if request.base != self.config.background
             || request.outputs != wallpaper::outputs(&self.windows.output_infos)
         {
             if let Some((id, _)) = request.editor
@@ -253,7 +266,18 @@ impl Plots {
                 let publication = self.desktop.wallpaper.publish_request(&request, batch);
                 wallpaper::prune(
                     &wallpaper::cache_dir(),
-                    &request.images,
+                    &request
+                        .images
+                        .image
+                        .iter()
+                        .cloned()
+                        .chain(request.images.monitor.iter().map(|m| {
+                            crate::config::BackgroundImage {
+                                path: m.path.clone(),
+                                ..Default::default()
+                            }
+                        }))
+                        .collect::<Vec<_>>(),
                     &self.desktop.wallpaper.applied,
                 );
                 if let Some((id, _)) = request.editor {
@@ -270,7 +294,7 @@ impl Plots {
                                 );
                             } else {
                                 draft.base = request.images.clone();
-                                draft.images = request.images.clone();
+                                draft.recipe = request.images.clone();
                                 draft.assets_revision += 1;
                                 draft.loading = true;
                             }

@@ -36,6 +36,7 @@ pub struct MapLayer {
     id: window::Id,
     file_sizes: Option<Vec<Option<(f32, f32)>>>,
     resolved: Option<Vec<Option<GlobalRect>>>,
+    monitors: Option<(Vec<String>, Option<String>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +93,7 @@ impl MapLayer {
             id,
             file_sizes: None,
             resolved: None,
+            monitors: None,
         }
     }
 
@@ -111,6 +113,7 @@ impl MapLayer {
             id,
             file_sizes: None,
             resolved: None,
+            monitors: None,
         }
     }
 
@@ -121,6 +124,12 @@ impl MapLayer {
                 .map(|index| self.resolve_at(index))
                 .collect(),
         );
+        self
+    }
+
+    /// Images correspond one-to-one with outputs and are clipped to them.
+    pub(crate) fn with_monitors(mut self, names: Vec<String>, selected: Option<String>) -> Self {
+        self.monitors = Some((names, selected));
         self
     }
 
@@ -348,7 +357,26 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 let mut view = self.pinned(bounds.size(), self.view);
                 let zoom = view.zoom.unwrap_or(1.0);
                 let g = ((pos.x - view.off_x) / zoom, (pos.y - view.off_y) / zoom);
-                let hit = self.hit(g);
+                if let Some((names, _)) = &self.monitors {
+                    if let Some(index) = self.outputs.iter().position(|&(x, y, w, h)| {
+                        g.0 >= x && g.0 < x + w && g.1 >= y && g.1 < y + h
+                    }) {
+                        return Some(
+                            Action::publish(Plant::SettingPlot(
+                                crate::shell::SettingEvent::SelectMonitor(
+                                    self.id,
+                                    names[index].clone(),
+                                ),
+                            ))
+                            .and_capture(),
+                        );
+                    }
+                }
+                let hit = if self.monitors.is_some() {
+                    None
+                } else {
+                    self.hit(g)
+                };
                 // Click/drag selects the image; empty space deselects.
                 view.selected = hit;
                 view.drag = Some(if let Some(i) = hit {
@@ -419,7 +447,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 // zooming: the hovered image wins, otherwise the selected
                 // one. First tick over a new image just selects it so the
                 // highlight lands before anything grows.
-                if view.ctrl {
+                if view.ctrl && self.monitors.is_none() {
                     let g = ((pos.x - view.off_x) / zoom, (pos.y - view.off_y) / zoom);
                     if let Some(i) = self.hit(g).or(view.selected) {
                         if view.selected != Some(i) {
@@ -523,6 +551,15 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 }
 
                 // Wallpaper pixels, ascending `z`, each with a thin border.
+                if self.monitors.is_some() {
+                    for &(x, y, w, h) in &self.outputs {
+                        frame.fill_rectangle(
+                            local(x, y),
+                            Size::new(w * zoom, h * zoom),
+                            iced::Color::BLACK,
+                        );
+                    }
+                }
                 let mut order: Vec<usize> = (0..self.images.len()).collect();
                 order.sort_by_key(|&i| self.images[i].z);
                 for i in order {
@@ -534,6 +571,23 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                     };
                     let top_left = local(x, y);
                     let size = Size::new(w * zoom, h * zoom);
+                    if self.monitors.is_some() {
+                        let (ox, oy, ow, oh) = self.outputs[i];
+                        let origin = local(ox, oy);
+                        frame.with_clip(
+                            Rectangle::new(origin, Size::new(ow * zoom, oh * zoom)),
+                            |frame| {
+                                frame.draw_image(
+                                    Rectangle::new(
+                                        Point::new(top_left.x - origin.x, top_left.y - origin.y),
+                                        size,
+                                    ),
+                                    &handle,
+                                );
+                            },
+                        );
+                        continue;
+                    }
                     frame.draw_image(Rectangle::new(top_left, size), &handle);
                     frame.stroke_rectangle(
                         top_left,
@@ -556,11 +610,17 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 }
             }
             LayerKind::Outputs => {
-                for (x, y, w, h) in &self.outputs {
+                for (output_index, (x, y, w, h)) in self.outputs.iter().enumerate() {
                     let top_left = local(*x, *y);
                     let size = Size::new((*w * zoom).max(2.0), (*h * zoom).max(2.0));
-                    frame.fill_rectangle(top_left, size, theme::output_wash());
-                    for index in 0..self.images.len() {
+                    if self.monitors.is_none() {
+                        frame.fill_rectangle(top_left, size, theme::output_wash());
+                    }
+                    for index in 0..if self.monitors.is_some() {
+                        0
+                    } else {
+                        self.images.len()
+                    } {
                         if let Some(rect) = self.resolved_at(index)
                             && let Some((ox, oy, ow, oh)) = Self::overlap(rect, (*x, *y, *w, *h))
                         {
@@ -573,11 +633,23 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                         top_left,
                         size,
                         Stroke::default()
-                            .with_width(1.5)
+                            .with_width(
+                                if self.monitors.as_ref().is_some_and(|(names, selected)| {
+                                    selected.as_ref() == names.get(output_index)
+                                }) {
+                                    3.0
+                                } else {
+                                    1.5
+                                },
+                            )
                             .with_color(theme::output_border()),
                     );
                     frame.fill_text(canvas::Text {
-                        content: format!("{}x{}", *w as i32, *h as i32),
+                        content: self
+                            .monitors
+                            .as_ref()
+                            .map(|(names, _)| names[output_index].clone())
+                            .unwrap_or_else(|| format!("{}x{}", *w as i32, *h as i32)),
                         position: Point::new(top_left.x + 6.0, top_left.y + 4.0),
                         color: theme::map_label(),
                         size: 12.0.into(),
