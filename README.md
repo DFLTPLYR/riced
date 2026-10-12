@@ -176,6 +176,21 @@ frames. `pitch` is the estimated item size plus spacing along the list axis;
 without reserving layout slots. The app's `app:transitions()` method is
 supported for automatic button lists.
 
+Omitting width or height on containers, rows, columns, scrollables, and lists
+uses iced's native content-derived sizing on that axis. Containers wrap their
+content and inherit its fill hints; scrollables no longer fill both axes by
+default. Explicit pixel sizes, `"fill"`, and `"shrink"` override the default
+independently (`"auto"` remains an alias for `"shrink"`). For example,
+`ui.container(ui.column({ui.text("Hello"), ui.text("World")})):padding(12)`
+needs no dimensions to fit its content.
+
+For `app:popup()`, omitting the returned table's `height` fits the native popup
+window to the renderer-measured content, including padding, wrapped text, and
+menu rows. The height updates when content changes and is bounded by the output.
+An inner `:height("fill")` fills that fitted window; it does not force a window
+height. Return `height = 400` alongside `width` and `ui` to request a fixed popup
+height. Popup width retains its default of 280 unless explicitly supplied.
+
 Other composition primitives are `ui.container(child)` (width, height,
 padding, background, radius), `ui.scrollable(child)`, `ui.space()`, and
 `ui.image(path)` (width and height). Card props may supply `padding`, `radius`,

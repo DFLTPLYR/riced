@@ -306,7 +306,7 @@ pub struct ContextMenu {
 
 fn validate_menu_size(node: &WidgetNode) -> Result<(), String> {
     let valid = |length: &NodeLength| {
-        matches!(length, NodeLength::Shrink)
+        matches!(length, NodeLength::Native | NodeLength::Shrink)
             || matches!(length, NodeLength::Fixed(value) if value.is_finite() && *value > 0.0)
     };
     if let WidgetNode::Container { width, height, .. } = node

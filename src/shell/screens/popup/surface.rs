@@ -13,7 +13,6 @@ use iced_exwlshell::{
     actions::IcedNewPopupSettings,
     reexport::{Anchor, PixelSize, PopupAnchor, PopupConstraintAdjustment, PopupGravity},
 };
-use iced_runtime::{Action, window::Action as WindowAction};
 use iced_wayland_subscriber::OutputId;
 
 pub(super) struct SurfaceContext<'a> {
@@ -118,6 +117,10 @@ impl SurfaceContext<'_> {
                 size: resolved.size.max(1.0),
                 w,
                 h,
+                auto_height: body.height.is_none(),
+                max_height: sh.max(1.0),
+                sizing_revision: 0,
+                positioner: settings,
             },
         );
         Ok(Some(Task::done(Plant::NewPopUp { settings, id })))
@@ -136,10 +139,14 @@ impl SurfaceContext<'_> {
             .and_then(|output| Background::available_rect(output, &self.windows.output_infos))
             .map(|(_, _, width, height)| (width, height))
             .unwrap_or((1920.0, 1080.0));
-        let (w, h) = Popup::content_size(sw, sh, &content);
+        let (w, mut h) = Popup::content_size(sw, sh, &content);
         let Some(popup) = self.windows.popups.get_mut(&id) else {
             return Ok(None);
         };
+        let auto_height = content.height.is_none();
+        if auto_height && popup.auto_height {
+            h = popup.h.min(sh.max(1.0) as u32);
+        }
         if let Some(tree) = &content.tree {
             self.animation
                 .synchronize(&format!("popup:{id:?}"), popup.tree.as_ref(), tree)?;
@@ -149,6 +156,8 @@ impl SurfaceContext<'_> {
             && popup.tree == content.tree
             && popup.w == w
             && popup.h == h
+            && popup.auto_height == auto_height
+            && popup.max_height == sh.max(1.0)
         {
             return Ok(None);
         }
@@ -157,8 +166,9 @@ impl SurfaceContext<'_> {
         popup.tree = content.tree;
         popup.w = w;
         popup.h = h;
-        Ok(Some(iced_runtime::task::effect(Action::Window(
-            WindowAction::Resize(id, iced::Size::new(w as f32, h as f32)),
-        ))))
+        popup.auto_height = auto_height;
+        popup.max_height = sh.max(1.0);
+        popup.sizing_revision += 1;
+        Ok(Some(popup.reposition()))
     }
 }

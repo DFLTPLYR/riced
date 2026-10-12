@@ -123,6 +123,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nested_animated_lists_preserve_native_sizing_and_explicit_overrides() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        use iced::{Element, Length, Size};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = crate::lua::sandbox::new_lua(crate::lua::sandbox::Profile::Widget).unwrap();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        for suffix in ["", ":width(80)", ":width('shrink')", ":height(60)"] {
+            let source = format!(
+                "return ui.container(ui.scrollable(ui.column({{ui.listview({{{{id=1}}}}):id('sizing'):key('id'):delegate(function() return ui.space():width('fill'):height(20) end){suffix}}}))):padding(7)"
+            );
+            let value: mlua::Value = lua.load(source).eval().unwrap();
+            let node = crate::ui::decode::parse_node(&value).unwrap();
+            let mut motion = AnimRuntime::default();
+            let mut lists = WidgetLists::new();
+            ListContext {
+                lists: &mut lists,
+                motion: &mut motion,
+                duration: Duration::ZERO,
+            }
+            .synchronize("widget", None, &node)
+            .unwrap();
+            let mut built =
+                super::super::build_with_lists(&node, "widget", 13.0, None, &motion, &lists)
+                    .unwrap();
+            let mut list =
+                iced::widget::column![iced::widget::Space::new().width(Length::Fill).height(20)]
+                    .spacing(4);
+            list = match suffix {
+                ":width(80)" => list.width(80),
+                ":width('shrink')" => list.width(Length::Shrink),
+                ":height(60)" => list.height(60),
+                _ => list,
+            };
+            let mut native: Element<'static, crate::shell::Plant> = iced::widget::container(
+                iced::widget::scrollable(iced::widget::column![list].spacing(4)),
+            )
+            .padding(7)
+            .into();
+            assert_eq!(
+                built.as_widget().size_hint(),
+                native.as_widget().size_hint(),
+                "{suffix}"
+            );
+            let limits = layout::Limits::new(Size::ZERO, Size::new(300.0, 200.0));
+            let mut built_tree = Tree::new(&built);
+            let mut native_tree = Tree::new(&native);
+            let actual = built
+                .as_widget_mut()
+                .layout(&mut built_tree, &renderer, &limits);
+            let expected = native
+                .as_widget_mut()
+                .layout(&mut native_tree, &renderer, &limits);
+            assert_eq!(actual.bounds(), expected.bounds(), "{suffix}");
+        }
+    }
+
+    #[test]
     fn lua_listview_delegates_have_stable_keys_and_local_transitions() {
         let lua = crate::lua::sandbox::new_lua(crate::lua::sandbox::Profile::Widget).unwrap();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();

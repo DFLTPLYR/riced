@@ -366,8 +366,8 @@ mod tests {
             parse("return ui.row({ui.text('x')}):spacing(8)"),
             WidgetNode::Row {
                 children: vec![text("x")],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
                 spacing: 8.0
             }
         );
@@ -443,8 +443,8 @@ mod tests {
                     color: None,
                     background: None
                 }],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
                 spacing: 4.0
             }
         );
@@ -525,8 +525,8 @@ mod tests {
             parse("return ui.row({ui.text('x')})"),
             WidgetNode::Row {
                 children: vec![text("x")],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
                 spacing: 4.0
             }
         );
@@ -621,8 +621,8 @@ mod tests {
                     text("x")
                 ],
                 spacing: 5.0,
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
             }
         );
         assert_eq!(
@@ -651,11 +651,11 @@ mod tests {
                         },
                     ],
                     spacing: 4.0,
-                    width: NodeLength::Shrink,
-                    height: NodeLength::Shrink,
+                    width: NodeLength::Native,
+                    height: NodeLength::Native,
                 }),
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
                 padding: 4.0,
                 background: None,
                 radius: 0.0,
@@ -674,8 +674,8 @@ mod tests {
                 horizontal: false,
                 pitch: 32.0,
                 spacing: 4.0,
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
                 transitions: Box::new((
                     defaults.enter_spec(),
                     defaults.exit_spec(),

@@ -1103,6 +1103,9 @@ impl Plots {
                 WidgetEvent::Anim => Top::handle_anim_frame(self),
                 WidgetEvent::Changed => Popup::refresh_bodies(self),
                 WidgetEvent::PopupSelect(id, action) => Popup::handle_select(self, id, action),
+                WidgetEvent::PopupMeasured(id, revision, height) => {
+                    Popup::handle_measured(self, id, revision, height)
+                }
                 WidgetEvent::CellAction(bar, placement, action) => {
                     Top::handle_cell_action(self, bar, placement, action)
                 }
@@ -1325,6 +1328,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // (animation frames while a motion runs, releases opening a
         // popup, actions refreshing tiles, changed outputs).
         Plant::TopPlot(TopEvent::Widget(WidgetEvent::Pressed(..))) => Scope::None,
+        Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupMeasured(id, _, _))) => Scope::Window(*id),
         Plant::TopPlot(TopEvent::Widget(_))
         | Plant::TopPlot(TopEvent::Bar(_))
         | Plant::TopPlot(TopEvent::Style(_))
@@ -1402,6 +1406,200 @@ mod tests {
             theme_jobs: Default::default(),
             notification: Default::default(),
         }
+    }
+
+    #[test]
+    fn session_popup_auto_height_measures_fill_content_and_rejects_stale_results() {
+        use crate::ui::node::{NodeLength, WidgetNode};
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        crate::lua::test_support::load_seed_components(&lua);
+        let value = lua.load(r#"return {width=220, ui=ui.card({title='Session',icon='power',body=ui.menu({id='session-actions',items={
+            {label='Suspend',action='suspend'}, {label='Hibernate',action='hibernate'},
+            {label='Reboot',action='reboot'}, {label='Power off',action='poweroff'}
+        }})}):height('fill')}"#).eval().unwrap();
+        let content = Popup::parse_popup_content(value).unwrap();
+        let mut plots = wallpaper_test_plots();
+        let id = iced::window::Id::unique();
+        plots.windows.popups.insert(
+            id,
+            Popup {
+                win_id: id,
+                bar_id: iced::window::Id::unique(),
+                slot: 0,
+                placement: "session".into(),
+                body: content.text,
+                items: content.items,
+                tree: content.tree,
+                size: 13.0,
+                w: 220,
+                h: 64,
+                auto_height: true,
+                max_height: 1080.0,
+                sizing_revision: 7,
+                positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                    iced::window::Id::unique(),
+                    iced_exwlshell::reexport::PixelSize::try_px(220, 64).unwrap(),
+                    (0, 0),
+                ),
+            },
+        );
+        let measure = |plots: &Plots| {
+            let popup = &plots.windows.popups[&id];
+            let mut element = popup.view(plots);
+            let mut tree = Tree::new(&element);
+            let size = iced::Size::new(popup.w as f32, popup.h as f32);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+                iced::advanced::Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &iced::Rectangle::with_size(size),
+            );
+            messages
+        };
+        let messages = measure(&plots);
+        assert_eq!(messages.len(), 1);
+        let Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupMeasured(_, revision, height))) =
+            &messages[0]
+        else {
+            panic!("measurement expected");
+        };
+        assert_eq!(*revision, 7);
+        let session_height = *height;
+        assert!(
+            session_height > 150 && session_height < 300,
+            "four rows should fit: {session_height}"
+        );
+        assert_eq!(redraw_scope(&messages[0]), Scope::Window(id));
+        use iced::futures::StreamExt;
+        let command = plots.update(messages[0].clone());
+        let actions = iced::futures::executor::block_on(
+            iced_runtime::task::into_stream(command)
+                .unwrap()
+                .collect::<Vec<_>>(),
+        );
+        let [
+            Action::Output(Plant::PopUpReposition {
+                id: target,
+                settings,
+            }),
+        ] = actions.as_slice()
+        else {
+            panic!("popup sizing must use the backend's positioner action");
+        };
+        assert_eq!(*target, id);
+        assert_eq!(
+            settings.size,
+            iced_exwlshell::reexport::PixelSize::try_px(220, session_height).unwrap()
+        );
+        assert_eq!(plots.windows.popups[&id].h, session_height);
+        assert!(
+            measure(&plots).is_empty(),
+            "no resize feedback loop after accepting measurement"
+        );
+
+        // The measuring layer is invisible/inert; real menu buttons retain
+        // their layout and action routing inside the resized surface.
+        let mut element = plots.windows.popups[&id].view(&plots);
+        let mut tree = Tree::new(&element);
+        let size = iced::Size::new(220.0, session_height as f32);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, size),
+        );
+        let root = iced::advanced::Layout::new(&node);
+        let card = root.children().next().unwrap().children().next().unwrap();
+        let menu = card.children().nth(2).unwrap();
+        let mut clicked = Vec::new();
+        for row in menu.children() {
+            assert!(
+                row.bounds().y + row.bounds().height <= size.height,
+                "clipped menu row"
+            );
+            let cursor = iced::mouse::Cursor::Available(row.bounds().center());
+            for event in [
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &Event::Mouse(event),
+                    root,
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut clicked),
+                    &iced::Rectangle::with_size(size),
+                );
+            }
+        }
+        let keys: Vec<_> = clicked
+            .iter()
+            .filter_map(|message| match message {
+                Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(target, key)))
+                    if *target == id =>
+                {
+                    Some(key.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, ["suspend", "hibernate", "reboot", "poweroff"]);
+
+        // Fixed descendants remain authoritative; measurement may grow beyond
+        // the old native surface and then shrink when content disappears.
+        for (content_height, expected) in [(600.0, 624), (30.0, 54)] {
+            let popup = plots.windows.popups.get_mut(&id).unwrap();
+            popup.tree = Some(WidgetNode::Space {
+                width: NodeLength::Fill,
+                height: NodeLength::Fixed(content_height),
+            });
+            popup.sizing_revision += 1;
+            let messages = measure(&plots);
+            assert_eq!(messages.len(), 1);
+            let _ = plots.update(messages[0].clone());
+            assert_eq!(plots.windows.popups[&id].h, expected);
+            assert!(measure(&plots).is_empty());
+        }
+        let revision = plots.windows.popups[&id].sizing_revision;
+        let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
+            WidgetEvent::PopupMeasured(id, revision - 1, 900),
+        )));
+        assert_eq!(plots.windows.popups[&id].h, 54);
+        let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
+            WidgetEvent::PopupMeasured(id, revision, 9000),
+        )));
+        assert_eq!(plots.windows.popups[&id].h, 1080);
+        plots.windows.popups.get_mut(&id).unwrap().auto_height = false;
+        assert!(measure(&plots).is_empty());
+        let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
+            WidgetEvent::PopupMeasured(id, revision, 54),
+        )));
+        assert_eq!(
+            plots.windows.popups[&id].h, 1080,
+            "explicit height ignores auto measurements"
+        );
+        plots.windows.popups.remove(&id);
+        let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
+            WidgetEvent::PopupMeasured(id, revision, 54),
+        )));
     }
 
     #[test]
@@ -1652,6 +1850,14 @@ mod tests {
                 size: 13.0,
                 w: 100,
                 h: 100,
+                auto_height: false,
+                max_height: 1080.0,
+                sizing_revision: 0,
+                positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                    iced::window::Id::unique(),
+                    iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
+                    (0, 0),
+                ),
             },
         );
         for id in [bar, popup, other] {

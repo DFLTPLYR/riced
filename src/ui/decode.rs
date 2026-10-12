@@ -158,8 +158,8 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 spacing: opt_number(t, "spacing", "iced.listview()")?
                     .unwrap_or(4.0)
                     .max(0.0),
-                width: opt_length(t, "width", "iced.listview()")?.unwrap_or(NodeLength::Shrink),
-                height: opt_length(t, "height", "iced.listview()")?.unwrap_or(NodeLength::Shrink),
+                width: opt_length(t, "width", "iced.listview()")?.unwrap_or(NodeLength::Native),
+                height: opt_length(t, "height", "iced.listview()")?.unwrap_or(NodeLength::Native),
                 transitions: Box::new((enter, exit, displaced)),
             })
         }
@@ -173,8 +173,8 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 child: Box::new(parse_node(
                     &t.get::<Value>("child").map_err(|e| e.to_string())?,
                 )?),
-                width: opt_length(t, "width", "iced.container()")?.unwrap_or(NodeLength::Shrink),
-                height: opt_length(t, "height", "iced.container()")?.unwrap_or(NodeLength::Shrink),
+                width: opt_length(t, "width", "iced.container()")?.unwrap_or(NodeLength::Native),
+                height: opt_length(t, "height", "iced.container()")?.unwrap_or(NodeLength::Native),
                 padding: opt_number(t, "padding", "iced.container()")?.unwrap_or(0.0),
                 radius: opt_number(t, "radius", "iced.container()")?.unwrap_or(0.0),
                 background,
@@ -186,8 +186,8 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             child: Box::new(parse_node(
                 &t.get::<Value>("child").map_err(|e| e.to_string())?,
             )?),
-            width: opt_length(t, "width", "iced.scrollable()")?.unwrap_or(NodeLength::Fill),
-            height: opt_length(t, "height", "iced.scrollable()")?.unwrap_or(NodeLength::Fill),
+            width: opt_length(t, "width", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
+            height: opt_length(t, "height", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
         }),
         "space" => Ok(WidgetNode::Space {
             width: opt_length(t, "width", "iced.space()")?.unwrap_or(NodeLength::Shrink),
@@ -255,8 +255,8 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             } else {
                 "ui.column()"
             };
-            let width = opt_length(t, "width", what)?.unwrap_or(NodeLength::Shrink);
-            let height = opt_length(t, "height", what)?.unwrap_or(NodeLength::Shrink);
+            let width = opt_length(t, "width", what)?.unwrap_or(NodeLength::Native);
+            let height = opt_length(t, "height", what)?.unwrap_or(NodeLength::Native);
             if kind == "row" {
                 Ok(WidgetNode::Row {
                     children,
@@ -379,8 +379,8 @@ mod tests {
                         color: None
                     }
                 ],
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
+                width: NodeLength::Native,
+                height: NodeLength::Native,
                 spacing: 4.0,
             }
         );

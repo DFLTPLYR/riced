@@ -503,12 +503,14 @@ pub(crate) fn build_with_lists(
             // Match iced's push/extend semantics before installing the keyed
             // delegates, otherwise a shrink list of fill buttons gets width 0.
             let (list_width, list_height) = elements.iter().fold(
-                (width.clone().iced(), height.clone().iced()),
+                (iced::Length::Shrink, iced::Length::Shrink),
                 |(w, h), child| {
                     let hints = child.as_widget().size_hint();
                     (w.enclose(hints.width), h.enclose(hints.height))
                 },
             );
+            let list_width = width.resolve(list_width);
+            let list_height = height.resolve(list_height);
             if *horizontal {
                 Ok(iced::widget::Row::with_children(elements)
                     .spacing(*spacing)
@@ -545,11 +547,11 @@ pub(crate) fn build_with_lists(
                 .iter()
                 .map(|c| build_with_lists(c, widget, size, message, runtime, lists))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(iced::widget::Row::new()
-                .spacing(*spacing)
-                .width(width.clone().iced())
-                .height(height.clone().iced())
-                .extend(elements)
+            let content = iced::widget::Row::new().spacing(*spacing).extend(elements);
+            let hints = iced::advanced::Widget::size(&content);
+            Ok(content
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
                 .into())
         }
         WidgetNode::Column {
@@ -562,11 +564,13 @@ pub(crate) fn build_with_lists(
                 .iter()
                 .map(|c| build_with_lists(c, widget, size, message, runtime, lists))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(iced::widget::Column::new()
+            let content = iced::widget::Column::new()
                 .spacing(*spacing)
-                .width(width.clone().iced())
-                .height(height.clone().iced())
-                .extend(elements)
+                .extend(elements);
+            let hints = iced::advanced::Widget::size(&content);
+            Ok(content
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
                 .into())
         }
         WidgetNode::Container {
@@ -583,33 +587,39 @@ pub(crate) fn build_with_lists(
             let radius = *radius;
             let border = *border;
             let border_width = *border_width;
-            Ok(container(build_with_lists(
+            let content = container(build_with_lists(
                 child, widget, size, message, runtime, lists,
-            )?)
-            .width(width.clone().iced())
-            .height(height.clone().iced())
-            .padding(padding.max(0.0))
-            .style(move |_| iced::widget::container::Style {
-                background,
-                border: iced::Border {
-                    color: border.unwrap_or_default(),
-                    width: border_width,
-                    radius: radius.into(),
-                },
-                ..Default::default()
-            })
-            .into())
+            )?);
+            let hints = iced::advanced::Widget::size(&content);
+            Ok(content
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .padding(padding.max(0.0))
+                .style(move |_| iced::widget::container::Style {
+                    background,
+                    border: iced::Border {
+                        color: border.unwrap_or_default(),
+                        width: border_width,
+                        radius: radius.into(),
+                    },
+                    ..Default::default()
+                })
+                .into())
         }
         WidgetNode::Scrollable {
             child,
             width,
             height,
-        } => Ok(iced::widget::scrollable(build_with_lists(
-            child, widget, size, message, runtime, lists,
-        )?)
-        .width(width.clone().iced())
-        .height(height.clone().iced())
-        .into()),
+        } => {
+            let content = iced::widget::scrollable(build_with_lists(
+                child, widget, size, message, runtime, lists,
+            )?);
+            let hints = iced::advanced::Widget::size(&content);
+            Ok(content
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
+        }
         _ => build_node(node, size, message),
     }
 }

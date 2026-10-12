@@ -1,3 +1,4 @@
+mod sizing;
 mod surface;
 use super::top::{Top, TopLocal};
 use crate::lua::value::{coerce_text, lua_value_kind};
@@ -46,6 +47,10 @@ pub struct Popup {
     /// Box size in px.
     pub w: u32,
     pub h: u32,
+    pub auto_height: bool,
+    pub max_height: f32,
+    pub sizing_revision: u64,
+    pub positioner: iced_exwlshell::actions::IcedNewPopupSettings,
 }
 
 /// One clickable popup row: label plus the `on_action()` key sent on click.
@@ -71,9 +76,8 @@ impl Popup {
     /// Menu box width in px (height derives from the body line count).
     pub(crate) const WIDTH: f32 = 280.0;
 
-    /// Box size for popup content: explicit dimensions win (clamped
-    /// into the output), otherwise width 280 and height estimated from
-    /// the text lines, item rows, and the composed tree's real shape.
+    /// Provisional surface size until the first renderer layout. Explicit
+    /// dimensions win; an omitted height is subsequently measured by the view.
     pub(crate) fn content_size(sw: f32, sh: f32, content: &PopupContent) -> (u32, u32) {
         let text_h = content.text.lines().count() as f32 * 24.0;
         let items_h = content.items.len() as f32 * 24.0;
@@ -392,14 +396,47 @@ impl Popup {
     }
 
     pub fn view(&self, plots: &Plots) -> Element<'static, Plant> {
+        use iced::widget::container;
+        let content = container(self.body_view(plots, false))
+            .width(Length::Fixed(self.w as f32))
+            .height(Length::Fixed(self.h as f32))
+            .padding(12)
+            .clip(true)
+            .style(theme::menu_box)
+            .into();
+        if !self.auto_height {
+            return content;
+        }
+        let intrinsic = container(self.body_view(plots, true))
+            .width(Length::Fixed(self.w as f32))
+            .padding(12)
+            .into();
+        Element::new(sizing::MeasuredPopup {
+            content,
+            intrinsic,
+            id: self.win_id,
+            revision: self.sizing_revision,
+            height: self.h,
+            max_height: self.max_height,
+        })
+    }
+
+    fn body_view(&self, plots: &Plots, intrinsic: bool) -> Element<'static, Plant> {
         use crate::shell::TopEvent;
-        use iced::widget::{button, column, container};
+        use iced::widget::{button, column};
         let win_id = self.win_id;
         let mut content = column![].spacing(4);
         if !self.body.trim().is_empty() {
             content = content.push(rich_text(self.body.clone(), self.size, 4.0));
         }
         if let Some(tree) = &self.tree {
+            let measured;
+            let tree = if intrinsic {
+                measured = sizing::intrinsic_height(tree);
+                &measured
+            } else {
+                tree
+            };
             // Trees failing to build were rejected at parse/refresh.
             // Buttons route like item rows: the click carries this
             // popup, so `on_action` receives the key.
@@ -429,13 +466,39 @@ impl Popup {
                     .style(theme::menu_button(theme::RADIUS)),
             );
         }
-        container(content)
-            .width(Length::Fixed(self.w as f32))
-            .height(Length::Fixed(self.h as f32))
-            .padding(12)
-            .clip(true)
-            .style(theme::menu_box)
-            .into()
+        content.into()
+    }
+
+    pub(crate) fn handle_measured(
+        plots: &mut Plots,
+        id: window::Id,
+        revision: u64,
+        height: u32,
+    ) -> Command<Plant> {
+        let Some(popup) = plots.windows.popups.get_mut(&id) else {
+            return Command::none();
+        };
+        if !popup.auto_height || revision != popup.sizing_revision {
+            return Command::none();
+        }
+        let height = height.max(1).min(popup.max_height.max(1.0) as u32);
+        if height == popup.h {
+            return Command::none();
+        }
+        popup.h = height;
+        popup.reposition()
+    }
+
+    /// xdg_popup resizing uses its positioner, not iced's generic window API.
+    fn reposition(&mut self) -> Command<Plant> {
+        let Some(size) = iced_exwlshell::reexport::PixelSize::try_px(self.w, self.h) else {
+            return Command::none();
+        };
+        self.positioner.size = size;
+        Command::done(Plant::PopUpReposition {
+            settings: self.positioner,
+            id: self.win_id,
+        })
     }
 
     /// Dismiss a popup: drop tracking + cursor state and close its window
@@ -617,6 +680,62 @@ mod tests {
         assert!(
             matches!(content.tree, Some(WidgetNode::Button {action, ..}) if action == "reboot")
         );
+    }
+
+    #[test]
+    fn popup_refresh_preserves_measured_height_and_tracks_explicit_height_changes() {
+        let id = window::Id::unique();
+        let mut windows = crate::shell::windows::WindowState::default();
+        windows.popups.insert(
+            id,
+            Popup {
+                win_id: id,
+                bar_id: window::Id::unique(),
+                slot: 0,
+                placement: "session".into(),
+                body: "before".into(),
+                items: vec![],
+                tree: None,
+                size: 13.0,
+                w: 220,
+                h: 137,
+                auto_height: true,
+                max_height: 1080.0,
+                sizing_revision: 0,
+                positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                    window::Id::unique(),
+                    iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),
+                    (0, 0),
+                ),
+            },
+        );
+        let mut lists = super::super::top::animation::WidgetLists::new();
+        let mut motion = crate::ui::anim::AnimRuntime::default();
+        let mut context = surface::SurfaceContext {
+            windows: &mut windows,
+            animation: super::super::top::animation::ListContext {
+                lists: &mut lists,
+                motion: &mut motion,
+                duration: std::time::Duration::ZERO,
+            },
+        };
+        let content = PopupContent {
+            text: "after".into(),
+            width: Some(220.0),
+            ..Default::default()
+        };
+        assert!(context.refresh(id, content.clone()).unwrap().is_some());
+        assert_eq!(context.windows.popups[&id].h, 137);
+        assert_eq!(context.windows.popups[&id].sizing_revision, 1);
+        assert!(context.refresh(id, content.clone()).unwrap().is_none());
+        let content = PopupContent {
+            height: Some(210.0),
+            ..content
+        };
+        assert!(context.refresh(id, content.clone()).unwrap().is_some());
+        assert_eq!(context.windows.popups[&id].h, 210);
+        assert!(!context.windows.popups[&id].auto_height);
+        assert!(context.refresh(id, content).unwrap().is_none());
     }
 
     #[test]

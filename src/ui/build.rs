@@ -109,33 +109,36 @@ pub(crate) fn build_node_opacity(
             let radius = *radius;
             let border = border.map(|c| c.scale_alpha(opacity));
             let border_width = *border_width;
-            Ok(
-                container(build_node_opacity(child, size, button_msg, opacity)?)
-                    .width(width.clone().iced())
-                    .height(height.clone().iced())
-                    .padding(padding.max(0.0))
-                    .style(move |_| iced::widget::container::Style {
-                        background,
-                        border: iced::Border {
-                            color: border.unwrap_or_default(),
-                            width: border_width,
-                            radius: radius.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .into(),
-            )
+            let content = container(build_node_opacity(child, size, button_msg, opacity)?);
+            let hints = iced::advanced::Widget::size(&content);
+            Ok(content
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .padding(padding.max(0.0))
+                .style(move |_| iced::widget::container::Style {
+                    background,
+                    border: iced::Border {
+                        color: border.unwrap_or_default(),
+                        width: border_width,
+                        radius: radius.into(),
+                    },
+                    ..Default::default()
+                })
+                .into())
         }
         WidgetNode::Scrollable {
             child,
             width,
             height,
-        } => Ok(
-            iced::widget::scrollable(build_node_opacity(child, size, button_msg, opacity)?)
-                .width(width.clone().iced())
-                .height(height.clone().iced())
-                .into(),
-        ),
+        } => {
+            let content =
+                iced::widget::scrollable(build_node_opacity(child, size, button_msg, opacity)?);
+            let hints = iced::advanced::Widget::size(&content);
+            Ok(content
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
+        }
         WidgetNode::Space { width, height } => Ok(Space::new()
             .width(width.clone().iced())
             .height(height.clone().iced())
@@ -204,13 +207,15 @@ pub(crate) fn build_node_opacity(
         } => {
             let mut row = row![]
                 .spacing(spacing.max(0.0))
-                .align_y(iced::Alignment::Center)
-                .width(width.clone().iced())
-                .height(height.clone().iced());
+                .align_y(iced::Alignment::Center);
             for child in children {
                 row = row.push(build_node_opacity(child, size, button_msg, opacity)?);
             }
-            Ok(row.into())
+            let hints = iced::advanced::Widget::size(&row);
+            Ok(row
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
         }
         WidgetNode::Column {
             children,
@@ -220,13 +225,15 @@ pub(crate) fn build_node_opacity(
         } => {
             let mut column = column![]
                 .spacing(spacing.max(0.0))
-                .align_x(iced::Alignment::Center)
-                .width(width.clone().iced())
-                .height(height.clone().iced());
+                .align_x(iced::Alignment::Center);
             for child in children {
                 column = column.push(build_node_opacity(child, size, button_msg, opacity)?);
             }
-            Ok(column.into())
+            let hints = iced::advanced::Widget::size(&column);
+            Ok(column
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
         }
         WidgetNode::Button {
             label,
@@ -333,6 +340,89 @@ mod tests {
     use super::*;
     use crate::ui::decode::parse_node;
     use mlua::{Lua, Value};
+
+    #[test]
+    fn omitted_dimensions_and_axis_overrides_match_native_iced_layout() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        use iced::{Length, Size};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let fixed = || Space::new().width(40).height(20);
+        let fill = || Space::new().width(Length::Fill).height(20);
+        let cases: Vec<(&str, Element<'static, Plant>)> = vec![
+            (
+                "ui.container(ui.space():width(40):height(20)):padding(7)",
+                container(fixed()).padding(7).into(),
+            ),
+            (
+                "ui.container(ui.space():width('fill'):height(20)):padding(7)",
+                container(fill()).padding(7).into(),
+            ),
+            (
+                "ui.container(ui.space():width(40):height(20)):width('fill')",
+                container(fixed()).width(Length::Fill).into(),
+            ),
+            (
+                "ui.container(ui.space():width('fill'):height(20)):height(60)",
+                container(fill()).height(60).into(),
+            ),
+            (
+                "ui.container(ui.space():width('fill'):height(20)):width('shrink')",
+                container(fill()).width(Length::Shrink).into(),
+            ),
+            (
+                "ui.scrollable(ui.space():width(40):height(20))",
+                iced::widget::scrollable(fixed()).into(),
+            ),
+            (
+                "ui.scrollable(ui.space():width('fill'):height(20))",
+                iced::widget::scrollable(fill()).into(),
+            ),
+            (
+                "ui.row({ui.space():width('fill'):height(20)}):width('shrink')",
+                row![fill()].width(Length::Shrink).into(),
+            ),
+            (
+                "ui.column({ui.space():width('fill'):height(20)}):width(80)",
+                iced::widget::column![fill()].width(80).into(),
+            ),
+            (
+                "ui.container(ui.column({ui.text('Hello'),ui.text('World')}):spacing(8)):padding(12)",
+                container(
+                    iced::widget::column![text("Hello").size(13), text("World").size(13)]
+                        .spacing(8)
+                        .align_x(iced::Alignment::Center),
+                )
+                .padding(12)
+                .into(),
+            ),
+        ];
+        let lua = lua();
+        for (source, mut native) in cases {
+            let value: Value = lua.load(format!("return {source}")).eval().unwrap();
+            let node = parse_node(&value).unwrap();
+            let mut built = build_node(&node, 13.0, None).unwrap();
+            assert_eq!(
+                built.as_widget().size_hint(),
+                native.as_widget().size_hint(),
+                "{source}"
+            );
+            let limits = layout::Limits::new(Size::ZERO, Size::new(300.0, 200.0));
+            let mut built_tree = Tree::new(&built);
+            let mut native_tree = Tree::new(&native);
+            let actual = built
+                .as_widget_mut()
+                .layout(&mut built_tree, &renderer, &limits);
+            let expected = native
+                .as_widget_mut()
+                .layout(&mut native_tree, &renderer, &limits);
+            assert_eq!(actual.bounds(), expected.bounds(), "{source}");
+        }
+    }
 
     #[test]
     fn style_setters_parse_build_and_gate_by_type() {

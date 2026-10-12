@@ -112,6 +112,8 @@ pub enum WidgetEvent {
     /// Click a popup item: run the widget's `on_action()` with the item
     /// key, then re-render menu and cell.
     PopupSelect(Id, String),
+    /// Intrinsic content height measured by the popup's live renderer.
+    PopupMeasured(Id, u64, u32),
     /// Click a cell button (`ui.button` in a `render()` tree): run the
     /// owning widget's `on_action()` with the button key, then
     /// re-render that widget (a toggle flips its next output). Carries

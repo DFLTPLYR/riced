@@ -87,16 +87,25 @@ pub(crate) enum WidgetNode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NodeLength {
+    /// No setter: use the native widget's content-derived sizing strategy.
+    Native,
     Fill,
     Shrink,
     Fixed(f32),
 }
 
 impl NodeLength {
+    pub(crate) fn resolve(&self, native: iced::Length) -> iced::Length {
+        match self {
+            Self::Native => native,
+            other => other.clone().iced(),
+        }
+    }
+
     pub(crate) fn iced(self) -> iced::Length {
         match self {
             Self::Fill => iced::Length::Fill,
-            Self::Shrink => iced::Length::Shrink,
+            Self::Native | Self::Shrink => iced::Length::Shrink,
             Self::Fixed(px) => iced::Length::Fixed(px.max(1.0)),
         }
     }
