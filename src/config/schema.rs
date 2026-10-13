@@ -1528,6 +1528,47 @@ mod tests {
     }
 
     #[test]
+    fn per_monitor_config_defaults_and_patches_roundtrip_without_losing_freeform() {
+        let mut config: Config = toml::from_str(
+            r#"
+            [background]
+            mode = "per-monitor"
+            [[background.monitor]]
+            output = "DP-1"
+            path = "one.png"
+            [[background.monitor]]
+            output = "DP-2"
+            path = "two.png"
+            fit = "center"
+            [[background.image]]
+            path = "freeform.png"
+            x = 17.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.background.mode, WallpaperMode::PerMonitor);
+        assert_eq!(config.background.monitor[0].fit, WallpaperFit::Expand);
+        assert_eq!(config.background.monitor[1].fit, WallpaperFit::Center);
+        config.apply(ConfigPatch::MonitorWallpaper(MonitorWallpaper {
+            output: "DP-1".into(),
+            path: "changed.png".into(),
+            fit: WallpaperFit::Stretch,
+        }));
+        assert_eq!(config.background.monitor.len(), 2);
+        assert_eq!(config.background.monitor[1].path, "two.png");
+        config.apply(ConfigPatch::WallpaperMode(WallpaperMode::FreeForm));
+        assert_eq!(config.background.image[0].x, 17.0);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&saved).unwrap().background,
+            config.background
+        );
+        let legacy: Config = toml::from_str("[[background.image]]\npath='legacy.png'").unwrap();
+        assert_eq!(legacy.background.mode, WallpaperMode::FreeForm);
+        assert!(legacy.background.monitor.is_empty());
+    }
+
+    #[test]
     fn slots_serialize_clean_placements_as_names() {
         let clean = WidgetPlacement {
             id: "w9".to_string(),

@@ -215,6 +215,11 @@ impl Setting {
         self.map_view = view;
     }
 
+    pub(crate) fn cancel_wallpaper_drag(&mut self) {
+        self.map_view.drag = None;
+        self.map_view.selected = None;
+    }
+
     /// Switch the selected page on `SettingEvent::Select`. Opening the
     /// Wallpaper page builds the map canvases fresh, whose first frames can
     /// go out empty like new Background surfaces — schedule the same heals.

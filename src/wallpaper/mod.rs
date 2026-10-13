@@ -74,12 +74,18 @@ pub(crate) fn source_images(
 
 /// Headless theme generation uses the last applied monitor geometry.
 pub(crate) fn cached_outputs() -> Vec<OutputSpec> {
-    std::fs::read(cache_dir().join("applied.json"))
+    cached_outputs_from(&cache_dir())
+}
+
+fn cached_outputs_from(dir: &Path) -> Vec<OutputSpec> {
+    let mut outputs: Vec<_> = std::fs::read(dir.join("applied.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
-        .filter(|manifest| manifest.version == 2)
+        .filter(|manifest| matches!(manifest.version, 1..=3))
         .map(|manifest| manifest.tiles.into_iter().map(|tile| tile.spec).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    outputs.sort_by(|a, b| a.key.cmp(&b.key));
+    outputs
 }
 
 /// Commit the derived manifest and editable recipe, restoring the previous
@@ -242,8 +248,27 @@ struct SavedTile {
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: u32,
+    #[serde(deserialize_with = "decode_recipe")]
     images: BackgroundConfig,
     tiles: Vec<SavedTile>,
+}
+
+fn decode_recipe<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BackgroundConfig, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Recipe {
+        Current(BackgroundConfig),
+        Legacy(Vec<BackgroundImage>),
+    }
+    Ok(match Recipe::deserialize(deserializer)? {
+        Recipe::Current(recipe) => recipe,
+        Recipe::Legacy(image) => BackgroundConfig {
+            image,
+            ..Default::default()
+        },
+    })
 }
 
 fn load_cached(
@@ -253,28 +278,52 @@ fn load_cached(
 ) -> Option<Batch> {
     let manifest: Manifest =
         serde_json::from_slice(&std::fs::read(dir.join("applied.json")).ok()?).ok()?;
-    if manifest.version != 2 || manifest.images != *images {
+    if !matches!(manifest.version, 1..=3)
+        || (images.mode == WallpaperMode::PerMonitor && manifest.version != 3)
+        || manifest.images != *images
+    {
         return None;
     }
-    let mut tiles = HashMap::new();
+    // Resolve and validate manifest entries before decoding anything.
+    let mut entries = Vec::with_capacity(outputs.len());
     for (id, spec) in outputs {
         let saved = manifest.tiles.iter().find(|tile| tile.spec == *spec)?;
         // Derived paths must remain inside this cache, even for a stale manifest.
         if !saved.path.starts_with(dir) {
             return None;
         }
-        let source = raster::Source::load(&saved.path).ok()?;
-        if (source.width, source.height) != spec.pixels {
-            return None;
-        }
-        tiles.insert(
-            *id,
-            Tile {
-                spec: spec.clone(),
-                path: saved.path.clone(),
-                handle: source.handle.clone(),
-            },
-        );
+        entries.push((*id, spec, saved.path.clone()));
+    }
+    // Bound concurrent PNG decoder temporaries while restoring independent tiles.
+    let concurrency = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let mut tiles = HashMap::new();
+    for chunk in entries.chunks(concurrency) {
+        let decoded = std::thread::scope(|scope| {
+            let decoders: Vec<_> = chunk
+                .iter()
+                .map(|(id, spec, path)| {
+                    scope.spawn(move || {
+                        let source = raster::Source::load(path).ok()?;
+                        ((source.width, source.height) == spec.pixels).then(|| {
+                            (
+                                *id,
+                                Tile {
+                                    spec: (*spec).clone(),
+                                    path: path.clone(),
+                                    handle: source.handle.clone(),
+                                },
+                            )
+                        })
+                    })
+                })
+                .collect();
+            // Join every decoder before checking errors, including later panics.
+            decoders
+                .into_iter()
+                .map(|decoder| decoder.join().ok().flatten())
+                .collect::<Vec<_>>()
+        });
+        tiles.extend(decoded.into_iter().collect::<Option<Vec<_>>>()?);
     }
     Some(Batch { tiles })
 }
@@ -302,7 +351,7 @@ pub(crate) fn bake(request: &Request, dir: &Path) -> Result<Batch, String> {
     let active = source_images(&request.images, &specs);
     let sources = raster::load_sources(&active, request.sources.clone())?;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    2_u32.hash(&mut hash);
+    3_u32.hash(&mut hash);
     serde_json::to_vec(&request.images)
         .map_err(|error| error.to_string())?
         .hash(&mut hash);
@@ -352,7 +401,7 @@ pub(crate) fn save_manifest(
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let manifest = Manifest {
-        version: 2,
+        version: 3,
         images: images.clone(),
         tiles: batch
             .tiles

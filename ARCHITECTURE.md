@@ -153,6 +153,17 @@ the latest valid result. Recipe persistence is atomic and cache-manifest
 publication is rolled back on persistence failure. Originals remain editable
 and untouched. Desktop surfaces use one applied tile per output; original
 decoded buffers are held by the editor/bake job rather than the desktop.
+The recipe retains both Free Form placements and name-keyed Per Monitor
+assignments. Per Monitor placement resolves fit/expand/stretch/center in oriented
+native pixels, then converts to desktop coordinates; each output is composited
+independently onto opaque black. Preview loading only includes connected active
+sources, and the map clips each preview to its output. Version 3 manifests encode
+this compositing policy; legacy Free Form manifests remain restorable. Cached
+output geometry is sorted by name for deterministic headless theme sampling.
+Preview sources carry file stamps shared with the generic UI asset cache. Reloads
+replace only changed sources; Apply jobs retain immutable accepted source buffers.
+Cache restoration validates the complete manifest before decoding in batches of
+at most four outputs, joins every worker, and publishes only complete batches.
 Dynamic-theme generation uses applied output composites. Generic UI image
 handles are cached independently without changing their pixel dimensions.
 Wallpaper publication carries an explicit origin: editor Apply can request

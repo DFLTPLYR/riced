@@ -508,6 +508,49 @@ displayed wallpapers and editor originals stay full resolution.
 
 ## Wallpaper editing and quality
 
+### Per-monitor wallpapers
+
+In **Settings → Wallpaper**, choose **Per Monitor**, select a display in the map
+or display picker, then choose its image and content fit. **Apply** publishes the
+whole draft; **Discard** restores the applied recipe. Switching back to
+**Free Form** preserves its original image placements. Each mode keeps its own
+recipe, so switching modes does not erase the other layout.
+
+- **Fit**: show the whole image with black margins, preserving aspect ratio.
+- **Expand** (default): fill the display, cropping centrally and preserving aspect ratio.
+- **Stretch**: fill the display without preserving aspect ratio.
+- **Center**: center original pixels at 1:1 native resolution; oversized images are cropped.
+
+Assignments use output names such as `DP-1`, so they survive reconnects and
+Wayland ID changes. Disconnected assignments are retained without loading their
+files. Unassigned displays and transparent image regions have a black background.
+Preview images are clipped to their assigned display and cannot be dragged or
+scaled individually in this mode. The output diagram stays fixed and auto-fitted;
+clicking a display selects it without dragging or zooming the layout.
+
+```toml
+[background]
+mode = "per-monitor" # "free-form" is the default for older configurations
+
+[[background.monitor]]
+output = "DP-1"
+path = "~/Pictures/landscape.png"
+fit = "expand"
+
+[[background.monitor]]
+output = "DP-2"
+path = "~/Pictures/portrait.png"
+fit = "center"
+```
+
+The daemon only regenerates the dynamic theme after explicit Apply. The explicit
+`riced generate-theme` command uses cached output geometry in Per Monitor mode;
+apply wallpapers once before running it. Cache restoration accepts older Free
+Form manifests, while Per Monitor tiles are rebuilt for the opaque-black format.
+
+### Applying and retaining image quality
+
+
 The Wallpaper page owns a draft with full-resolution source buffers. Drag,
 Ctrl+wheel scale, image properties, add, and remove operations update only
 that preview. **Discard** restores the current applied layout; **Apply** runs
@@ -530,6 +573,12 @@ Closing the editor releases its application-owned source buffers. Desktop
 surfaces retain only their applied tiles. Lua UI image nodes also reuse
 revisioned, full-resolution decoded handles; caching does not introduce
 thumbnails or lossy image compression.
+
+Preview reloads reuse unchanged source buffers, decode new or replaced files,
+and drop removed sources. File identity includes modification metadata and atomic
+replacement identity. Apply retains the accepted full-resolution pixel snapshot.
+Startup restores cached output tiles with at most four concurrent PNG decoders;
+a failed restoration falls back to baking without publishing a partial tile set.
 
 Native window-close confirmation also reclaims unreferenced decoded-image
 cache entries and requests allocator trimming after UI/renderer teardown.

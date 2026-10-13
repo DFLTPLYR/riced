@@ -129,6 +129,9 @@ impl MapLayer {
 
     /// Images correspond one-to-one with outputs and are clipped to them.
     pub(crate) fn with_monitors(mut self, names: Vec<String>, selected: Option<String>) -> Self {
+        // Per Monitor is a fixed output diagram, not the Free Form editor.
+        // Ignore its saved pan/zoom/drag state and always fit the output layout.
+        self.view = MapView::default();
         self.monitors = Some((names, selected));
         self
     }
@@ -348,6 +351,27 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
         if self.kind != LayerKind::Outputs {
             return None;
         }
+        if let Some((names, _)) = &self.monitors {
+            if !matches!(
+                event,
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+            ) {
+                return None;
+            }
+            let pos = cursor.position_in(bounds)?;
+            let (zoom, off_x, off_y) = Self::effective(bounds.size(), self.bbox(), &self.view);
+            let g = ((pos.x - off_x) / zoom, (pos.y - off_y) / zoom);
+            let index = self
+                .outputs
+                .iter()
+                .position(|&(x, y, w, h)| g.0 >= x && g.0 < x + w && g.1 >= y && g.1 < y + h)?;
+            return Some(
+                Action::publish(Plant::SettingPlot(
+                    crate::shell::SettingEvent::SelectMonitor(self.id, names[index].clone()),
+                ))
+                .and_capture(),
+            );
+        }
         let select = |view: MapView| {
             Plant::SettingPlot(crate::shell::SettingEvent::MapViewChanged { id: self.id, view })
         };
@@ -357,26 +381,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 let mut view = self.pinned(bounds.size(), self.view);
                 let zoom = view.zoom.unwrap_or(1.0);
                 let g = ((pos.x - view.off_x) / zoom, (pos.y - view.off_y) / zoom);
-                if let Some((names, _)) = &self.monitors {
-                    if let Some(index) = self.outputs.iter().position(|&(x, y, w, h)| {
-                        g.0 >= x && g.0 < x + w && g.1 >= y && g.1 < y + h
-                    }) {
-                        return Some(
-                            Action::publish(Plant::SettingPlot(
-                                crate::shell::SettingEvent::SelectMonitor(
-                                    self.id,
-                                    names[index].clone(),
-                                ),
-                            ))
-                            .and_capture(),
-                        );
-                    }
-                }
-                let hit = if self.monitors.is_some() {
-                    None
-                } else {
-                    self.hit(g)
-                };
+                let hit = self.hit(g);
                 // Click/drag selects the image; empty space deselects.
                 view.selected = hit;
                 view.drag = Some(if let Some(i) = hit {
@@ -447,7 +452,7 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                 // zooming: the hovered image wins, otherwise the selected
                 // one. First tick over a new image just selects it so the
                 // highlight lands before anything grows.
-                if view.ctrl && self.monitors.is_none() {
+                if view.ctrl {
                     let g = ((pos.x - view.off_x) / zoom, (pos.y - view.off_y) / zoom);
                     if let Some(i) = self.hit(g).or(view.selected) {
                         if view.selected != Some(i) {
@@ -578,10 +583,9 @@ impl canvas::Program<Plant, Theme, Renderer> for MapLayer {
                             Rectangle::new(origin, Size::new(ow * zoom, oh * zoom)),
                             |frame| {
                                 frame.draw_image(
-                                    Rectangle::new(
-                                        Point::new(top_left.x - origin.x, top_left.y - origin.y),
-                                        size,
-                                    ),
+                                    // with_clip keeps canvas coordinates; it
+                                    // does not translate the image to the clip origin.
+                                    Rectangle::new(top_left, size),
                                     &handle,
                                 );
                             },
@@ -698,6 +702,191 @@ impl From<MapLayer> for Element<'_, Plant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_preview_draws_fitted_images_inside_nonzero_output_bounds() {
+        use crate::config::{MonitorWallpaper, WallpaperFit};
+        use crate::wallpaper::{
+            OutputSpec,
+            raster::{Source, monitor_image},
+        };
+        use iced::advanced::{graphics::geometry::Renderer as _, renderer::Headless};
+        use iced::widget::canvas::Program as _;
+        let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let pixels = bytes::Bytes::from(
+            image::RgbaImage::from_fn(40, 20, |x, _| {
+                if x < 10 {
+                    image::Rgba([255, 0, 0, 255])
+                } else {
+                    image::Rgba([0, 0, 255, 255])
+                }
+            })
+            .into_raw(),
+        );
+        let source = Source {
+            width: 40,
+            height: 20,
+            handle: Handle::from_rgba(40, 20, pixels.clone()),
+            pixels,
+            revision: None,
+        };
+        let specs = [
+            OutputSpec {
+                key: "DP-1".into(),
+                rect: (200.0, 100.0, 100.0, 100.0),
+                pixels: (100, 100),
+            },
+            OutputSpec {
+                key: "DP-2".into(),
+                rect: (310.0, 100.0, 100.0, 100.0),
+                pixels: (100, 100),
+            },
+        ];
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(500.0, 240.0));
+        for fit in [
+            WallpaperFit::Fit,
+            WallpaperFit::Expand,
+            WallpaperFit::Stretch,
+            WallpaperFit::Center,
+        ] {
+            let images = specs
+                .iter()
+                .map(|spec| {
+                    monitor_image(
+                        spec,
+                        &MonitorWallpaper {
+                            output: spec.key.clone(),
+                            path: "memory-only.png".into(),
+                            fit,
+                        },
+                        &source,
+                    )
+                })
+                .collect();
+            let map = MapLayer::images(
+                window::Id::unique(),
+                specs.iter().map(|s| s.rect).collect(),
+                images,
+                vec![Some(source.handle.clone()); 2],
+                MapView::default(),
+            )
+            .with_monitors(specs.iter().map(|s| s.key.clone()).collect(), None)
+            .with_file_sizes(vec![Some((40.0, 20.0)); 2]);
+            for geometry in map.draw(
+                &(),
+                &renderer,
+                &iced::Theme::Dark,
+                bounds,
+                mouse::Cursor::Unavailable,
+            ) {
+                renderer.draw_geometry(geometry);
+            }
+            let screenshot = renderer.screenshot(Size::new(500, 240), 1.0, iced::Color::WHITE);
+            let (zoom, ox, oy) = MapLayer::effective(bounds.size(), map.bbox(), &map.view);
+            let sample = |spec: &OutputSpec, x: f32, y: f32| {
+                let px = ((spec.rect.0 + x * spec.rect.2) * zoom + ox).floor() as usize;
+                let py = ((spec.rect.1 + y * spec.rect.3) * zoom + oy).floor() as usize;
+                let offset = (py * 500 + px) * 4;
+                screenshot[offset..offset + 3].to_vec()
+            };
+            for spec in &specs {
+                assert_eq!(
+                    sample(spec, 0.5, 0.5),
+                    [0, 0, 255],
+                    "{fit:?}: image disappeared inside {:?}",
+                    spec.rect
+                );
+                let expected_top = if matches!(fit, WallpaperFit::Fit | WallpaperFit::Center) {
+                    [0, 0, 0]
+                } else {
+                    [0, 0, 255]
+                };
+                assert_eq!(
+                    sample(spec, 0.5, 0.1),
+                    expected_top,
+                    "{fit:?}: incorrect vertical fitting"
+                );
+                let expected_left = match fit {
+                    WallpaperFit::Expand => [0, 0, 255],
+                    WallpaperFit::Center => [0, 0, 0],
+                    _ => [255, 0, 0],
+                };
+                assert_eq!(
+                    sample(spec, 0.1, 0.5),
+                    expected_left,
+                    "{fit:?}: incorrect horizontal fitting"
+                );
+            }
+            iced::advanced::Renderer::reset(&mut renderer, bounds);
+        }
+    }
+
+    #[test]
+    fn monitor_map_selects_outputs_without_editing_freeform_images() {
+        use iced::widget::canvas::Program as _;
+        let id = window::Id::unique();
+        let view = MapView {
+            zoom: Some(1.0),
+            ctrl: true,
+            selected: Some(0),
+            drag: Some(MapDrag {
+                image: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let map = MapLayer::outputs(
+            id,
+            vec![(0.0, 0.0, 100.0, 100.0)],
+            vec![BackgroundImage::default()],
+            vec![None],
+            view,
+        )
+        .with_monitors(vec!["DP-1".into()], Some("DP-1".into()))
+        .with_file_sizes(vec![None]);
+        assert!(map.view.drag.is_none());
+        assert!(map.view.selected.is_none());
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(100.0, 100.0));
+        let cursor = mouse::Cursor::Available(Point::new(50.0, 50.0));
+        let action = map
+            .update(
+                &mut (),
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                cursor,
+            )
+            .unwrap();
+        assert!(
+            matches!(action.into_inner().0, Some(Plant::SettingPlot(crate::shell::SettingEvent::SelectMonitor(target, name))) if target == id && name == "DP-1")
+        );
+        assert!(map.view.zoom.is_none());
+        for event in [
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+            }),
+            Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(70.0, 70.0),
+            }),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ] {
+            assert!(map.update(&mut (), &event, bounds, cursor).is_none());
+        }
+        // Empty-space presses cannot start panning, either.
+        assert!(
+            map.update(
+                &mut (),
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                mouse::Cursor::Available(Point::new(1.0, 1.0))
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn cached_dimensions_drive_drag_without_file_io_and_publish_only_draft_edits() {

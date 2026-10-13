@@ -4,17 +4,9 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
-    time::SystemTime,
 };
 
-#[derive(PartialEq)]
-struct Stamp {
-    length: u64,
-    modified: Option<SystemTime>,
-    #[cfg(unix)]
-    changed: (i64, i64, u64, u64),
-}
-type Revision = Option<Stamp>;
+type Revision = Option<crate::shared::files::FileStamp>;
 struct Entry {
     revision: Revision,
     image: Option<(u32, u32, Handle)>,
@@ -38,21 +30,7 @@ pub(crate) fn release_unused() {
 }
 
 pub(crate) fn image(path: &Path) -> Option<Handle> {
-    let revision = std::fs::metadata(path).ok().map(|metadata| {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        Stamp {
-            length: metadata.len(),
-            modified: metadata.modified().ok(),
-            #[cfg(unix)]
-            changed: (
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-                metadata.ino(),
-                metadata.dev(),
-            ),
-        }
-    });
+    let revision = crate::shared::files::stamp(path);
     {
         let mut cache = CACHE.lock().ok()?;
         cache.clock += 1;

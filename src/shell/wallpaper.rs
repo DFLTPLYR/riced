@@ -41,7 +41,7 @@ impl Plots {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    wallpaper::raster::load_sources(&images, sources)
+                    wallpaper::raster::load_preview_sources(&images, sources)
                 })
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()))

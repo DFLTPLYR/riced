@@ -962,12 +962,13 @@ impl Plots {
                     patch,
                     ConfigPatch::AddImage(_) | ConfigPatch::RemoveImage { .. }
                 );
-                // Discrete wallpaper edits (add/remove/scale/size/z) arm a regen
-                // 2s out. Per-move patches are deliberately excluded: drags
-                // stay silent until drop or panel close.
+                // Live recipe patches rebuild tiles without generating a theme.
+                // Settings wallpaper controls use their separate draft events.
                 let wallpaper_touched = matches!(
                     patch,
                     ConfigPatch::AddImage(_)
+                        | ConfigPatch::WallpaperMode(_)
+                        | ConfigPatch::MonitorWallpaper(_)
                         | ConfigPatch::MoveImage { .. }
                         | ConfigPatch::RemoveImage { .. }
                         | ConfigPatch::SetImageScale { .. }
@@ -1198,6 +1199,9 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::WallpaperPatch(id, patch)) => {
                 if let Some(setting) = self.windows.settings.get_mut(&id) {
+                    if matches!(&patch, ConfigPatch::WallpaperMode(_)) {
+                        setting.cancel_wallpaper_drag();
+                    }
                     if let ConfigPatch::RemoveImage { index } = &patch {
                         setting.image_removed(*index);
                     }
@@ -1776,6 +1780,7 @@ mod tests {
             height: 256,
             handle: iced::widget::image::Handle::from_rgba(512, 256, pixels.clone()),
             pixels,
+            revision: None,
         });
         let weak = std::sync::Arc::downgrade(&source);
         let mut draft = crate::wallpaper::draft::Draft::new(&Default::default());

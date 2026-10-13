@@ -10,10 +10,12 @@ pub struct Source {
     pub height: u32,
     pub pixels: Bytes,
     pub handle: Handle,
+    pub(crate) revision: Option<crate::shared::files::FileStamp>,
 }
 
 impl Source {
     pub fn load(path: &std::path::Path) -> Result<Arc<Self>, String> {
+        let revision = crate::shared::files::stamp(path);
         let rgba = image::open(path)
             .map_err(|error| format!("{}: {error}", path.display()))?
             .to_rgba8();
@@ -28,6 +30,7 @@ impl Source {
             height,
             pixels,
             handle,
+            revision,
         }))
     }
 
@@ -38,6 +41,16 @@ impl Source {
 }
 
 pub(crate) type Sources = HashMap<PathBuf, Arc<Source>>;
+
+/// Reuse unchanged preview pixels, re-decode changed paths, and release removals.
+/// Apply uses `load_sources` instead, keeping its accepted pixel snapshot intact.
+pub(crate) fn load_preview_sources(
+    images: &[BackgroundImage],
+    mut sources: Sources,
+) -> Result<Sources, String> {
+    sources.retain(|path, source| source.revision == crate::shared::files::stamp(path));
+    load_sources(images, sources)
+}
 
 /// Resolve per-monitor placement in oriented native pixels, then convert to
 /// desktop coordinates. Center therefore stays 1:1 even on scaled displays.
@@ -94,7 +107,14 @@ pub(crate) fn compose_output(
         }
         None => Vec::new(),
     };
-    compose(spec.rect, spec.pixels, &images, sources)
+    let mut pixels = compose(spec.rect, spec.pixels, &images, sources)?;
+    // Per-monitor margins and unassigned displays are explicitly black.
+    // Composite alpha in place so this needs no second full-resolution buffer.
+    for pixel in pixels.pixels_mut() {
+        let rgb = rgb_over_black(&pixel.0);
+        *pixel = image::Rgba([rgb[0], rgb[1], rgb[2], 255]);
+    }
+    Ok(pixels)
 }
 
 pub(crate) fn load_sources(

@@ -52,7 +52,11 @@ pub(super) fn view<'a>(setting: &'a Setting, id: window::Id, plots: &Plots) -> E
         );
     }
     let mut content = column![modes,
-        section_heading("Display layout", "Arrange the original images in the preview. Apply saves lossless, native-resolution wallpapers for each display."),
+        section_heading("Display layout", if per_monitor {
+            "Select a display, choose its wallpaper and content fit, then Apply. Unassigned displays stay black."
+        } else {
+            "Arrange the original images in the preview. Apply saves lossless, native-resolution wallpapers for each display."
+        }),
         row![button(text("Add wallpaper…").size(13).color(theme::button_text()))
             .on_press_maybe((!per_monitor).then_some(Plant::SettingPlot(SettingEvent::PickWallpaper(id)))).padding(8).style(theme::menu_button(theme::RADIUS)),
             Space::new().width(Length::Fill),
@@ -96,6 +100,7 @@ fn monitor_grid(
     let rects: Vec<_> = outputs.iter().map(|(_, spec)| spec.rect).collect();
     let mut images = Vec::new();
     let mut handles = Vec::new();
+    let mut sizes = Vec::new();
     for (_, spec) in &outputs {
         let wallpaper = draft.recipe.monitor.iter().find(|m| m.output == spec.key);
         let source = wallpaper.and_then(|m| {
@@ -113,17 +118,21 @@ fn monitor_grid(
                     spec, wallpaper, source,
                 ));
                 handles.push(Some(source.handle.clone()));
+                sizes.push(Some((source.width as f32, source.height as f32)));
             }
             _ => {
                 images.push(BackgroundImage::default());
                 handles.push(None);
+                sizes.push(None);
             }
         }
     }
     let images_canvas = MapLayer::images(id, rects.clone(), images.clone(), handles.clone(), view)
-        .with_monitors(names.clone(), selected.clone());
-    let outputs_canvas =
-        MapLayer::outputs(id, rects, images, handles, view).with_monitors(names, selected);
+        .with_monitors(names.clone(), selected.clone())
+        .with_file_sizes(sizes.clone());
+    let outputs_canvas = MapLayer::outputs(id, rects, images, handles, view)
+        .with_monitors(names, selected)
+        .with_file_sizes(sizes);
     container(stack![
         iced::widget::canvas(images_canvas)
             .width(Length::Fill)
@@ -157,11 +166,19 @@ fn monitor_controls(
     draft: &crate::wallpaper::draft::Draft,
 ) -> Element<'static, Plant> {
     let outputs = crate::wallpaper::outputs(context.output_infos);
-    let Some(selected) = selected_monitor(draft, &outputs) else {
+    monitor_controls_for(id, &outputs, draft)
+}
+
+fn monitor_controls_for(
+    id: window::Id,
+    outputs: &[(OutputId, crate::wallpaper::OutputSpec)],
+    draft: &crate::wallpaper::draft::Draft,
+) -> Element<'static, Plant> {
+    let Some(selected) = selected_monitor(draft, outputs) else {
         return hint("No displays connected.");
     };
     let mut picker = row![].spacing(8);
-    for (_, spec) in &outputs {
+    for (_, spec) in outputs {
         picker = picker.push(
             button(text(spec.key.clone()).size(13))
                 .padding(8)
@@ -440,4 +457,141 @@ enum Property {
 }
 fn change(id: window::Id, patch: ConfigPatch) -> Plant {
     Plant::SettingPlot(SettingEvent::WallpaperPatch(id, patch))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_monitor_buttons_dispatch_the_selected_output_and_preserve_other_assignments() {
+        use crate::{
+            config::BackgroundConfig,
+            wallpaper::{OutputSpec, draft::Draft},
+        };
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let id = window::Id::unique();
+        let outputs = [
+            (
+                OutputId(1),
+                OutputSpec {
+                    key: "DP-1".into(),
+                    rect: (0.0, 0.0, 100.0, 100.0),
+                    pixels: (100, 100),
+                },
+            ),
+            (
+                OutputId(2),
+                OutputSpec {
+                    key: "DP-2".into(),
+                    rect: (100.0, 0.0, 100.0, 100.0),
+                    pixels: (100, 100),
+                },
+            ),
+        ];
+        let base = BackgroundConfig {
+            mode: WallpaperMode::PerMonitor,
+            monitor: vec![
+                MonitorWallpaper {
+                    output: "DP-1".into(),
+                    path: "one.png".into(),
+                    fit: WallpaperFit::Expand,
+                },
+                MonitorWallpaper {
+                    output: "DP-2".into(),
+                    path: "two.png".into(),
+                    fit: WallpaperFit::Expand,
+                },
+            ],
+            ..Default::default()
+        };
+        let click = |draft: &Draft, row_index: usize, button_index: usize| {
+            let mut element = monitor_controls_for(id, &outputs, draft);
+            let mut tree = Tree::new(&element);
+            let size = iced::Size::new(700.0, 500.0);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            let root = iced::advanced::Layout::new(&node);
+            let target = root
+                .children()
+                .nth(row_index)
+                .unwrap()
+                .children()
+                .nth(button_index)
+                .unwrap();
+            let cursor = iced::mouse::Cursor::Available(target.bounds().center());
+            let mut messages = Vec::new();
+            for event in [
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    root,
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &iced::Rectangle::with_size(size),
+                );
+            }
+            assert_eq!(messages.len(), 1);
+            messages.remove(0)
+        };
+        for selected in [0, 1] {
+            let mut draft = Draft::new(&base);
+            draft.selected_output = Some(base.monitor[selected].output.clone());
+            for (index, fit) in [
+                WallpaperFit::Fit,
+                WallpaperFit::Expand,
+                WallpaperFit::Stretch,
+                WallpaperFit::Center,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let message = click(&draft, 5, index);
+                let Plant::SettingPlot(SettingEvent::WallpaperPatch(
+                    target,
+                    ConfigPatch::MonitorWallpaper(assignment),
+                )) = message
+                else {
+                    panic!("fit patch expected");
+                };
+                assert_eq!(target, id);
+                assert_eq!(assignment.output, base.monitor[selected].output);
+                assert_eq!(assignment.path, base.monitor[selected].path);
+                assert_eq!(assignment.fit, fit);
+                draft.patch(ConfigPatch::MonitorWallpaper(assignment));
+                assert_eq!(
+                    draft.recipe.monitor[1 - selected],
+                    base.monitor[1 - selected]
+                );
+            }
+            assert!(
+                matches!(click(&draft,3,0), Plant::SettingPlot(SettingEvent::PickMonitorWallpaper(target, output)) if target == id && output == base.monitor[selected].output)
+            );
+            let Plant::SettingPlot(SettingEvent::WallpaperPatch(
+                _,
+                ConfigPatch::MonitorWallpaper(cleared),
+            )) = click(&draft, 3, 1)
+            else {
+                panic!("clear patch expected");
+            };
+            assert_eq!(cleared.output, base.monitor[selected].output);
+            assert!(cleared.path.is_empty());
+            assert_eq!(cleared.fit, WallpaperFit::Center);
+            assert_eq!(draft.base, base, "button clicks must stay in the draft");
+        }
+    }
 }
