@@ -31,17 +31,7 @@ pub(super) fn run_due(
         let edited = context.sync_revision(resolved);
         context.placements.last_run.insert(resolved.id.clone(), now);
         let result = context.render(resolved, *bar);
-        let key = (*bar, resolved.id.clone());
-        let before = (
-            context.placements.outputs.get(&key).cloned(),
-            context.placements.trees.get(&key).cloned(),
-        );
-        context.ingest(resolved, *bar, result);
-        let after = (
-            context.placements.outputs.get(&key).cloned(),
-            context.placements.trees.get(&key).cloned(),
-        );
-        changed |= before != after || edited;
+        changed |= context.ingest(resolved, *bar, result) || edited;
     }
     changed
 }

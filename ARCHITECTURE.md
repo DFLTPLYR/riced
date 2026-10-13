@@ -164,6 +164,11 @@ Preview sources carry file stamps shared with the generic UI asset cache. Reload
 replace only changed sources; Apply jobs retain immutable accepted source buffers.
 Cache restoration validates the complete manifest before decoding in batches of
 at most four outputs, joins every worker, and publishes only complete batches.
+Placement ingestion reports content changes without cloning before/after trees;
+unchanged trees and declared lists keep their state while Lua entries still run.
+Popup measurements use a bounded content/width/text-size/output-height cache
+across windows, with image-dependent trees excluded and renderer confirmation
+retained even when a measurement does not require a native resize.
 Dynamic-theme generation uses applied output composites. Generic UI image
 handles are cached independently without changing their pixel dimensions.
 Wallpaper publication carries an explicit origin: editor Apply can request

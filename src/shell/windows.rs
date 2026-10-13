@@ -18,6 +18,7 @@ pub(crate) struct WindowState {
     pub ids: HashMap<window::Id, PlotInfo>,
     pub tops: HashMap<window::Id, Top>,
     pub popups: HashMap<window::Id, Popup>,
+    pub popup_heights: super::screens::popup::MeasurementCache,
     pub settings: HashMap<window::Id, Setting>,
     pub backgrounds: HashMap<OutputId, Background>,
     pub background_ids: HashMap<OutputId, window::Id>,

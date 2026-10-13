@@ -14,6 +14,7 @@ use iced::{Element, Length, Point, Task as Command};
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::OutputId;
+pub(crate) use sizing::MeasurementCache;
 #[cfg(test)]
 use std::collections::HashMap;
 
@@ -50,6 +51,7 @@ pub struct Popup {
     pub auto_height: bool,
     pub max_height: f32,
     pub sizing_revision: u64,
+    pub measured_revision: Option<u64>,
     pub positioner: iced_exwlshell::actions::IcedNewPopupSettings,
 }
 
@@ -105,6 +107,31 @@ impl Popup {
             .unwrap_or(auto_h)
             .round() as u32;
         (w.max(1), h.max(1))
+    }
+
+    pub(crate) fn initial_size(
+        cache: &mut MeasurementCache,
+        sw: f32,
+        sh: f32,
+        content: &PopupContent,
+        size: f32,
+    ) -> (u32, u32) {
+        let (width, height) = Self::content_size(sw, sh, content);
+        if content.height.is_some() {
+            return (width, height);
+        }
+        let key = sizing::measurement_key(
+            &content.text,
+            &content.items,
+            content.tree.as_ref(),
+            width,
+            size.max(1.0),
+            sh.max(1.0),
+        );
+        (
+            width,
+            cache.get(key).unwrap_or(height).min(sh.max(1.0) as u32),
+        )
     }
 
     /// Parse a `popup()` return into content: a plain string is just
@@ -416,6 +443,7 @@ impl Popup {
             intrinsic,
             id: self.win_id,
             revision: self.sizing_revision,
+            confirmed: self.measured_revision == Some(self.sizing_revision),
             height: self.h,
             max_height: self.max_height,
         })
@@ -482,6 +510,16 @@ impl Popup {
             return Command::none();
         }
         let height = height.max(1).min(popup.max_height.max(1.0) as u32);
+        let key = sizing::measurement_key(
+            &popup.body,
+            &popup.items,
+            popup.tree.as_ref(),
+            popup.w,
+            popup.size,
+            popup.max_height,
+        );
+        plots.windows.popup_heights.remember(key, height);
+        popup.measured_revision = Some(revision);
         if height == popup.h {
             return Command::none();
         }
@@ -702,6 +740,7 @@ mod tests {
                 auto_height: true,
                 max_height: 1080.0,
                 sizing_revision: 0,
+                measured_revision: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),

@@ -59,6 +59,9 @@ impl ListContext<'_> {
             }
         }
         for (id, node) in after {
+            if before.get(&id).copied() == Some(node) {
+                continue;
+            }
             let WidgetNode::ListView {
                 items,
                 horizontal,

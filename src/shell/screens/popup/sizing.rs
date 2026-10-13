@@ -5,21 +5,139 @@ use crate::{
 };
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer, widget};
 use iced::{Element, Event, Length, Rectangle, Size, Vector, window};
+use std::{
+    collections::VecDeque,
+    fmt,
+    hash::{Hash, Hasher},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MeasurementKey {
+    content: u64,
+    width: u32,
+    text_size: u32,
+    max_height: u32,
+}
+
+pub(super) fn measurement_key(
+    text: &str,
+    items: &[super::PopupItem],
+    tree: Option<&WidgetNode>,
+    width: u32,
+    size: f32,
+    max_height: f32,
+) -> Option<MeasurementKey> {
+    // Natural image dimensions can change on disk without changing the tree.
+    if tree.is_some_and(crate::ui::node::contains_images) {
+        return None;
+    }
+    struct Writer<'a>(&'a mut std::collections::hash_map::DefaultHasher);
+    impl fmt::Write for Writer<'_> {
+        fn write_str(&mut self, value: &str) -> fmt::Result {
+            self.0.write(value.as_bytes());
+            Ok(())
+        }
+    }
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hash);
+    // Hash the owned description without retaining it or allocating a Debug string.
+    fmt::write(&mut Writer(&mut hash), format_args!("{items:?}{tree:?}")).ok()?;
+    Some(MeasurementKey {
+        content: hash.finish(),
+        width,
+        text_size: size.to_bits(),
+        max_height: max_height.to_bits(),
+    })
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MeasurementCache(VecDeque<(MeasurementKey, u32)>);
+
+impl MeasurementCache {
+    pub(super) fn get(&mut self, key: Option<MeasurementKey>) -> Option<u32> {
+        let key = key?;
+        let index = self.0.iter().position(|(cached, _)| *cached == key)?;
+        let entry = self.0.remove(index)?;
+        self.0.push_back(entry);
+        Some(entry.1)
+    }
+
+    pub(super) fn remember(&mut self, key: Option<MeasurementKey>, height: u32) {
+        let Some(key) = key else {
+            return;
+        };
+        if let Some(index) = self.0.iter().position(|(cached, _)| *cached == key) {
+            self.0.remove(index);
+        }
+        self.0.push_back((key, height));
+        while self.0.len() > 32 {
+            self.0.pop_front();
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn popup_measurements_are_bounded_and_invalidate_on_layout_changes() {
+        let mut cache = MeasurementCache::default();
+        let key = measurement_key("Session", &[], None, 220, 13.0, 1080.0);
+        cache.remember(key, 183);
+        assert_eq!(cache.get(key), Some(183));
+        assert_eq!(
+            cache.get(measurement_key("Changed", &[], None, 220, 13.0, 1080.0)),
+            None
+        );
+        assert_eq!(
+            cache.get(measurement_key("Session", &[], None, 300, 13.0, 1080.0)),
+            None
+        );
+        assert_eq!(
+            cache.get(measurement_key("Session", &[], None, 220, 18.0, 1080.0)),
+            None
+        );
+        assert_eq!(
+            cache.get(measurement_key("Session", &[], None, 220, 13.0, 300.0)),
+            None
+        );
+        let image = WidgetNode::Image {
+            path: "changing.png".into(),
+            width: NodeLength::Native,
+            height: NodeLength::Native,
+        };
+        assert!(measurement_key("Session", &[], Some(&image), 220, 13.0, 1080.0).is_none());
+        for i in 0..33 {
+            cache.remember(
+                measurement_key(&i.to_string(), &[], None, 220, 13.0, 1080.0),
+                i + 1,
+            );
+        }
+        assert_eq!(cache.0.len(), 32);
+        assert_eq!(cache.get(key), None);
+    }
+}
 
 /// Fill describes space within a window, not the window's intrinsic height.
 /// Keep fixed heights and all widths (including text wrapping) for measurement.
 pub(super) fn intrinsic_height(node: &WidgetNode) -> WidgetNode {
     let mut node = node.clone();
+    naturalize_height(&mut node);
+    node
+}
+
+fn naturalize_height(node: &mut WidgetNode) {
     fn natural(height: &mut NodeLength) {
         if *height == NodeLength::Fill {
             *height = NodeLength::Native;
         }
     }
-    match &mut node {
+    match node {
         WidgetNode::Container { child, height, .. }
         | WidgetNode::Scrollable { child, height, .. } => {
             natural(height);
-            **child = intrinsic_height(child);
+            naturalize_height(child);
         }
         WidgetNode::Row {
             children, height, ..
@@ -29,13 +147,13 @@ pub(super) fn intrinsic_height(node: &WidgetNode) -> WidgetNode {
         } => {
             natural(height);
             for child in children {
-                *child = intrinsic_height(child);
+                naturalize_height(child);
             }
         }
         WidgetNode::ListView { items, height, .. } => {
             natural(height);
             for (_, child) in items {
-                *child = intrinsic_height(child);
+                naturalize_height(child);
             }
         }
         WidgetNode::Text { height, .. }
@@ -48,7 +166,6 @@ pub(super) fn intrinsic_height(node: &WidgetNode) -> WidgetNode {
         WidgetNode::Space { height, .. } | WidgetNode::Image { height, .. } => natural(height),
         _ => {}
     }
-    node
 }
 
 pub(super) struct MeasuredPopup {
@@ -56,6 +173,7 @@ pub(super) struct MeasuredPopup {
     pub intrinsic: Element<'static, Plant>,
     pub id: window::Id,
     pub revision: u64,
+    pub confirmed: bool,
     pub height: u32,
     pub max_height: f32,
 }
@@ -63,6 +181,7 @@ pub(super) struct MeasuredPopup {
 #[derive(Default)]
 struct State {
     height: u32,
+    reported: Option<(u64, u32)>,
 }
 
 impl Widget<Plant, iced::Theme, iced::Renderer> for MeasuredPopup {
@@ -116,8 +235,12 @@ impl Widget<Plant, iced::Theme, iced::Renderer> for MeasuredPopup {
         viewport: &Rectangle,
     ) {
         if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
-            let height = tree.state.downcast_ref::<State>().height;
-            if height != self.height {
+            let state = tree.state.downcast_mut::<State>();
+            let height = state.height;
+            if (height != self.height || !self.confirmed)
+                && state.reported != Some((self.revision, height))
+            {
+                state.reported = Some((self.revision, height));
                 shell.publish(Plant::TopPlot(TopEvent::Widget(
                     WidgetEvent::PopupMeasured(self.id, self.revision, height),
                 )));

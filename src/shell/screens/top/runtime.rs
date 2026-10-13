@@ -89,21 +89,26 @@ impl RuntimeContext<'_> {
         resolved: &ResolvedWidget,
         bar: window::Id,
         result: Result<Value, String>,
-    ) {
+    ) -> bool {
         let key = (bar, resolved.id.clone());
         let scope = format!("{bar:?}/{}", resolved.id);
         let label = resolved.label();
         match result {
             Ok(Value::Table(table)) => {
                 self.placements.errors.remove(&resolved.id);
-                self.placements.outputs.remove(&key);
+                let had_text = self.placements.outputs.remove(&key).is_some();
                 match parse_node(&Value::Table(table)) {
                     Ok(node) => {
-                        let old = self.placements.trees.get(&key).cloned();
-                        if let Err(error) = self.animation.synchronize(&scope, old.as_ref(), &node)
+                        let changed = had_text || self.placements.trees.get(&key) != Some(&node);
+                        if changed
+                            && let Err(error) = self.animation.synchronize(
+                                &scope,
+                                self.placements.trees.get(&key),
+                                &node,
+                            )
                         {
                             self.note_error(&label, error);
-                            return;
+                            return had_text;
                         }
                         let list = self
                             .animation
@@ -127,10 +132,15 @@ impl RuntimeContext<'_> {
                                     self.note_error(&label, error);
                                     self.animation.lists.remove(&scope);
                                     self.placements.trees.insert(key, node);
-                                    return;
+                                    return changed;
                                 }
                             }
                         }
+                        if !changed {
+                            return false;
+                        }
+                        // Move the previous tree instead of cloning it for diffing.
+                        let old = self.placements.trees.remove(&key);
                         let old_is_list = matches!(
                             old,
                             Some(WidgetNode::Row { .. } | WidgetNode::Column { .. })
@@ -185,24 +195,120 @@ impl RuntimeContext<'_> {
                             }
                         }
                         self.placements.trees.insert(key, node);
+                        true
                     }
                     Err(error) => {
-                        self.placements.trees.remove(&key);
+                        let changed = self.placements.trees.remove(&key).is_some() || had_text;
                         self.note_error(&label, error);
+                        changed
                     }
                 }
             }
             Ok(value) => {
                 self.placements.errors.remove(&resolved.id);
-                self.placements.trees.remove(&key);
+                let had_tree = self.placements.trees.remove(&key).is_some();
                 match crate::lua::value::coerce_text(value, "render()") {
                     Ok(text) => {
-                        self.placements.outputs.insert(key, text);
+                        let changed = had_tree || self.placements.outputs.get(&key) != Some(&text);
+                        if changed {
+                            self.placements.outputs.insert(key, text);
+                        }
+                        changed
                     }
-                    Err(error) => self.note_error(&label, error),
+                    Err(error) => {
+                        self.note_error(&label, error);
+                        had_tree
+                    }
                 }
             }
-            Err(error) => self.note_error(&label, error),
+            Err(error) => {
+                self.note_error(&label, error);
+                false
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_views_keep_owned_trees_and_still_execute_lua_entries() {
+        let mut placements = WidgetState::default();
+        let resolved = ResolvedWidget {
+            id: "unchanged".into(),
+            name: "unchanged".into(),
+            path: "/not-real-unchanged.lua".into(),
+            interval: 1.0,
+            size: 13.0,
+            props: HashMap::new(),
+        };
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(&lua,"unchanged",r#"return {
+            calls=0, transition_calls=0,
+            view=function(self) self.calls=self.calls+1; return ui.column({ui.text(self.label or 'Same')}) end,
+            transitions=function(self) self.transition_calls=self.transition_calls+1; return {} end
+        }"#).unwrap();
+        let app: mlua::Table = lua.named_registry_value("riced.widget.app").unwrap();
+        placements.instances.insert(resolved.id.clone(), lua);
+        let mut catalog = vec![];
+        let mut lists = super::super::animation::WidgetLists::new();
+        let mut motion = crate::ui::anim::AnimRuntime::default();
+        let system = sysinfo::System::new();
+        let theme = crate::config::ThemeConfig::default();
+        let outputs = HashMap::new();
+        let notifications = std::collections::VecDeque::new();
+        let toplevels = crate::services::ToplevelCache::default();
+        let workspaces = crate::services::WorkspaceCache::default();
+        let mut context = RuntimeContext {
+            placements: &mut placements,
+            catalog: &mut catalog,
+            animation: ListContext {
+                lists: &mut lists,
+                motion: &mut motion,
+                duration: std::time::Duration::ZERO,
+            },
+            services: ServiceCtx {
+                sys: &system,
+                gpu: None,
+                theme: &theme,
+                outputs: &outputs,
+                notifications: &notifications,
+                toplevels: &toplevels,
+                workspaces: &workspaces,
+            },
+            outputs: HashMap::new(),
+            paths: vec![],
+        };
+        let bar = window::Id::unique();
+        let value = context.render(&resolved, bar);
+        assert!(context.ingest(&resolved, bar, value));
+        let key = (bar, resolved.id.clone());
+        let WidgetNode::Column { children, .. } = &context.placements.trees[&key] else {
+            panic!("column");
+        };
+        let original_children = children.as_ptr();
+        let value = context.render(&resolved, bar);
+        assert!(!context.ingest(&resolved, bar, value));
+        let WidgetNode::Column { children, .. } = &context.placements.trees[&key] else {
+            panic!("column");
+        };
+        assert_eq!(
+            children.as_ptr(),
+            original_children,
+            "unchanged IR must not be cloned or replaced"
+        );
+        assert_eq!(app.get::<u32>("calls").unwrap(), 2);
+        assert_eq!(app.get::<u32>("transition_calls").unwrap(), 2);
+        app.set("label", "Changed").unwrap();
+        let value = context.render(&resolved, bar);
+        assert!(context.ingest(&resolved, bar, value));
+        let WidgetNode::Column { children, .. } = &context.placements.trees[&key] else {
+            panic!("column");
+        };
+        assert!(matches!(&children[0],WidgetNode::Text {content,..} if content == "Changed"));
+        assert!(!context.ingest(&resolved, bar, Err("temporary error".into())));
+        assert!(context.placements.trees.contains_key(&key));
     }
 }

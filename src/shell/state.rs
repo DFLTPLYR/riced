@@ -1544,6 +1544,7 @@ mod tests {
                 auto_height: true,
                 max_height: 1080.0,
                 sizing_revision: 7,
+                measured_revision: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     iced::window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(220, 64).unwrap(),
@@ -1610,6 +1611,24 @@ mod tests {
             iced_exwlshell::reexport::PixelSize::try_px(220, session_height).unwrap()
         );
         assert_eq!(plots.windows.popups[&id].h, session_height);
+        let popup = &plots.windows.popups[&id];
+        let reopen = crate::shell::screens::popup::PopupContent {
+            text: popup.body.clone(),
+            items: popup.items.clone(),
+            tree: popup.tree.clone(),
+            width: Some(220.0),
+            height: None,
+        };
+        assert_eq!(
+            Popup::initial_size(
+                &mut plots.windows.popup_heights,
+                1920.0,
+                1080.0,
+                &reopen,
+                13.0
+            ),
+            (220, session_height)
+        );
         assert!(
             measure(&plots).is_empty(),
             "no resize feedback loop after accepting measurement"
@@ -1953,6 +1972,7 @@ mod tests {
             auto_height: false,
             max_height: 1080.0,
             sizing_revision: 0,
+            measured_revision: None,
             positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                 iced::window::Id::unique(),
                 iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
@@ -2174,6 +2194,7 @@ mod tests {
                 auto_height: false,
                 max_height: 1080.0,
                 sizing_revision: 0,
+                measured_revision: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     iced::window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),

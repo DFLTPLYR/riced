@@ -191,6 +191,9 @@ menu rows. The height updates when content changes and is bounded by the output.
 An inner `:height("fill")` fills that fitted window; it does not force a window
 height. Return `height = 400` alongside `width` and `ui` to request a fixed popup
 height. Popup width retains its default of 280 unless explicitly supplied.
+Measured heights are reused across reopenings through a bounded 32-entry cache.
+Content, width, text size, and output-height changes invalidate the measurement;
+trees with image nodes are remeasured because their files can change size.
 
 Other composition primitives are `ui.container(child)` (width, height,
 padding, background, radius), `ui.scrollable(child)`, `ui.space()`, and
@@ -551,7 +554,6 @@ Form manifests, while Per Monitor tiles are rebuilt for the opaque-black format.
 
 ### Applying and retaining image quality
 
-
 The Wallpaper page owns a draft with full-resolution source buffers. Drag,
 Ctrl+wheel scale, image properties, add, and remove operations update only
 that preview. **Discard** restores the current applied layout; **Apply** runs
@@ -580,6 +582,10 @@ and drop removed sources. File identity includes modification metadata and atomi
 replacement identity. Apply retains the accepted full-resolution pixel snapshot.
 Startup restores cached output tiles with at most four concurrent PNG decoders;
 a failed restoration falls back to baking without publishing a partial tile set.
+Lua polling compares owned descriptions directly, preserving unchanged trees
+and skipping their animation resynchronization and repaint. Lua views, delegates,
+and transition entry points continue executing with their existing budgets and
+self-state semantics.
 
 Native window-close confirmation also reclaims unreferenced decoded-image
 cache entries and requests allocator trimming after UI/renderer teardown.
