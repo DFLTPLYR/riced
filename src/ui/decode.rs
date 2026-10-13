@@ -190,13 +190,13 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             height: opt_length(t, "height", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
         }),
         "space" => Ok(WidgetNode::Space {
-            width: opt_length(t, "width", "iced.space()")?.unwrap_or(NodeLength::Shrink),
-            height: opt_length(t, "height", "iced.space()")?.unwrap_or(NodeLength::Shrink),
+            width: opt_length(t, "width", "iced.space()")?.unwrap_or(NodeLength::Native),
+            height: opt_length(t, "height", "iced.space()")?.unwrap_or(NodeLength::Native),
         }),
         "image" => Ok(WidgetNode::Image {
             path: t.get("path").map_err(|e| e.to_string())?,
-            width: opt_length(t, "width", "iced.image()")?.unwrap_or(NodeLength::Shrink),
-            height: opt_length(t, "height", "iced.image()")?.unwrap_or(NodeLength::Shrink),
+            width: opt_length(t, "width", "iced.image()")?.unwrap_or(NodeLength::Native),
+            height: opt_length(t, "height", "iced.image()")?.unwrap_or(NodeLength::Native),
         }),
         "text" => Ok(WidgetNode::Text {
             content: coerce_text(
@@ -389,5 +389,55 @@ mod tests {
             assert!(parse_node(&value).is_err(), "rejects {bad}");
         }
         assert!(lua.load("return ui.row('flat')").eval::<Value>().is_err());
+    }
+
+    #[test]
+    fn every_primitive_defaults_to_native_auto_sizing() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let native = |source: &str| {
+            let value: Value = lua.load(source).eval().unwrap();
+            parse_node(&value).unwrap()
+        };
+        for source in [
+            "return ui.space()",
+            "return ui.image('memory-only.png')",
+            "return ui.container(ui.text('x'))",
+            "return ui.scrollable(ui.text('x'))",
+            "return ui.row({ui.text('x')})",
+            "return ui.column({ui.text('x')})",
+        ] {
+            let node = native(source);
+            let (width, height) = match &node {
+                WidgetNode::Space { width, height }
+                | WidgetNode::Image { width, height, .. }
+                | WidgetNode::Container { width, height, .. }
+                | WidgetNode::Scrollable { width, height, .. }
+                | WidgetNode::Row { width, height, .. }
+                | WidgetNode::Column { width, height, .. } => (width, height),
+                other => panic!("{source}: unexpected {other:?}"),
+            };
+            assert_eq!(*width, NodeLength::Native, "{source} width");
+            assert_eq!(*height, NodeLength::Native, "{source} height");
+            // Native resolves through the live widget's own strategy, which
+            // layout tests already prove matches hand-built iced widgets.
+            assert_eq!(width.clone().iced(), iced::Length::Shrink);
+        }
+        assert!(matches!(
+            native("return ui.text('x')"),
+            WidgetNode::Text {
+                width: None,
+                height: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            native("return ui.button('go','go')"),
+            WidgetNode::Button {
+                width: None,
+                height: None,
+                ..
+            }
+        ));
     }
 }

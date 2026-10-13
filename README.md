@@ -176,10 +176,11 @@ frames. `pitch` is the estimated item size plus spacing along the list axis;
 without reserving layout slots. The app's `app:transitions()` method is
 supported for automatic button lists.
 
-Omitting width or height on containers, rows, columns, scrollables, and lists
-uses iced's native content-derived sizing on that axis. Containers wrap their
-content and inherit its fill hints; scrollables no longer fill both axes by
-default. Explicit pixel sizes, `"fill"`, and `"shrink"` override the default
+Auto-sizing is the default for every UI primitive: omitting width or height uses
+iced's native content-derived sizing on that axis. Containers, rows, columns,
+scrollables, and lists inherit their children's sizing hints; images and spaces
+size to their own pixels; text and buttons have always sized to their content.
+Explicit pixel sizes, `"fill"`, and `"shrink"` override the default
 independently (`"auto"` remains an alias for `"shrink"`). For example,
 `ui.container(ui.column({ui.text("Hello"), ui.text("World")})):padding(12)`
 needs no dimensions to fit its content.
