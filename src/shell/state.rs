@@ -384,7 +384,9 @@ impl Plots {
             iced::event::listen_with(throttled_graft),
             shell_sub,
             // XDG base windows (Settings) report close so `ids` stays in sync.
-            iced::window::close_events().map(Plant::Uproot),
+            // This is native Closed, not CloseRequested. The backend has
+            // already detached the renderer; never queue another native close.
+            iced::window::close_events().map(|id| Plant::Wayland(LandEvent::Closed(id))),
             // hot-reload poll for config.toml (mtime check only, cheap)
             iced::time::every(Duration::from_millis(500))
                 .map(|_| Plant::Config(ConfigEvent::ConfigTick)),
@@ -528,6 +530,25 @@ impl Plots {
         request_native_close: bool,
     ) -> Command<Plant> {
         let info = self.windows.ids.get(&id).copied();
+        // Compute before any detach drops the owning state. Only windows that
+        // owned decoded images need the full-redraw reclaim; the rest stay
+        // host-only (their renderers die with the window anyway).
+        let owned_images = match info {
+            Some(PlotInfo::Setting) => self.windows.settings.get(&id).is_some_and(|setting| {
+                setting
+                    .wallpaper_draft
+                    .as_ref()
+                    .is_some_and(|draft| !draft.sources.is_empty())
+            }),
+            Some(PlotInfo::Popup(..)) => self.windows.popups.get(&id).is_some_and(|popup| {
+                popup
+                    .tree
+                    .as_ref()
+                    .is_some_and(crate::ui::node::contains_images)
+            }),
+            Some(PlotInfo::Notification(output)) => self.notification.holds_images(output),
+            _ => false,
+        };
         let mut commands = Vec::new();
         if matches!(info, Some(PlotInfo::Top(_))) {
             let children: Vec<_> = self
@@ -564,6 +585,9 @@ impl Plots {
         if closed_last_panel && self.theme_jobs.dirty {
             commands.push(self.fire_regen_theme());
         }
+        // Explicit closes must reclaim too, even if native confirmation is
+        // delayed or missed. The deferred task lets old view/renderer owners drop.
+        commands.push(self.reclaim_image_memory(owned_images));
         Command::batch(commands)
     }
 
@@ -572,7 +596,10 @@ impl Plots {
         self.theme_mtime = crate::theme::poll(&self.config.theme, &None).unwrap_or(None);
         Top::refresh_theme(self);
         super::screens::notification::render_all_notis(self);
-        Command::batch([Popup::refresh_bodies(self), self.reclaim_image_memory()])
+        Command::batch([
+            Popup::refresh_bodies(self),
+            self.reclaim_image_memory(false),
+        ])
     }
 
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
@@ -756,8 +783,7 @@ impl Plots {
                 // Backend confirmation: its renderer and UI cache are already
                 // gone. Also forget app state if the close subscription was
                 // missed, then reclaim only after those references are dropped.
-                let cleanup = self.close_surface(id, false);
-                Command::batch([cleanup, self.reclaim_image_memory()])
+                self.close_surface(id, false)
             }
             Plant::Wayland(LandEvent::WindowOutputChanged { .. }) => Command::none(),
             Plant::Wayland(LandEvent::Locked) => Command::none(),
@@ -1034,7 +1060,7 @@ impl Plots {
                     eprintln!("riced: template: {err}");
                 }
                 if errors.is_empty() {
-                    return self.reclaim_image_memory();
+                    return self.reclaim_image_memory(false);
                 }
                 let n = Notification::internal(
                     &self.config.notifications,
@@ -1054,7 +1080,7 @@ impl Plots {
             }
             Plant::Config(ConfigEvent::ThemeRegenerated(errors)) => {
                 self.theme_jobs.running = false;
-                let mut commands = vec![self.reclaim_image_memory()];
+                let mut commands = vec![self.reclaim_image_memory(false)];
                 if errors.is_empty() && self.config.theme.name == "dynamic" {
                     commands.push(self.refresh_theme());
                 }
@@ -1326,14 +1352,19 @@ impl Plots {
                         }
                     }
                 }
-                Command::batch([self.load_wallpaper_preview(id), self.reclaim_image_memory()])
+                Command::batch([
+                    self.load_wallpaper_preview(id),
+                    self.reclaim_image_memory(false),
+                ])
             }
             Plant::SettingPlot(SettingEvent::ApplyWallpaper(id)) => self.apply_wallpaper(id),
             Plant::SettingPlot(SettingEvent::DiscardWallpaper(id)) => self.discard_wallpaper(id),
             Plant::Config(ConfigEvent::WallpaperBaked { generation, result }) => {
                 self.wallpaper_baked(generation, result)
             }
-            Plant::Config(ConfigEvent::ReclaimImageMemory) => {
+            Plant::Config(ConfigEvent::ReclaimImageMemory { .. }) => {
+                // Host-side cleanup only; a redraw accompanies the message
+                // when scheduled, via `redraw_scope`.
                 crate::ui::assets::release_unused();
                 crate::theme_gen::trim_memory();
                 Command::none()
@@ -1416,8 +1447,12 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Config(ConfigEvent::RegenTimer(_))
         | Plant::Config(ConfigEvent::SaveTimer(_))
         | Plant::Config(ConfigEvent::SaveNow)
-        | Plant::Config(ConfigEvent::ReclaimImageMemory)
+        | Plant::Config(ConfigEvent::ReclaimImageMemory { redraw: false })
         | Plant::IpcPoll => Scope::None,
+        // Closing an image-owning window: repaint every surface so the
+        // live renderers run their insert-gated image-cache trim once the
+        // dropped handles are gone (per-renderer caches die with windows).
+        Plant::Config(ConfigEvent::ReclaimImageMemory { redraw: true }) => Scope::All,
         Plant::Config(ConfigEvent::ConfigReloaded(_))
         | Plant::Config(ConfigEvent::Patch(_))
         | Plant::Config(ConfigEvent::WidgetsReloaded(_)) => Scope::All,
@@ -1768,6 +1803,224 @@ mod tests {
             .named_registry_value("riced.widget.app")
             .unwrap();
         assert_eq!(app.get::<u32>("count").unwrap(), 42);
+    }
+
+    #[test]
+    fn every_settings_close_path_releases_preview_pixels_and_schedules_reclamation() {
+        use iced::futures::StreamExt;
+        use std::sync::Arc;
+        struct Pixels {
+            data: Vec<u8>,
+            _lifetime: Arc<()>,
+        }
+        impl AsRef<[u8]> for Pixels {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        for close in ["request", "native", "toggle"] {
+            let mut plots = wallpaper_test_plots();
+            let id = iced::window::Id::unique();
+            let lifetime = Arc::new(());
+            let weak_pixels = Arc::downgrade(&lifetime);
+            let pixels = bytes::Bytes::from_owner(Pixels {
+                data: vec![127; 512 * 256 * 4],
+                _lifetime: lifetime,
+            });
+            let source = Arc::new(crate::wallpaper::raster::Source {
+                width: 512,
+                height: 256,
+                handle: iced::widget::image::Handle::from_rgba(512, 256, pixels.clone()),
+                pixels,
+                revision: None,
+            });
+            let weak_source = Arc::downgrade(&source);
+            // Canvas handles may outlive the draft until native UI teardown.
+            let preview: Element<'static, Plant> =
+                crate::ui::widgets::display_map::MapLayer::images(
+                    id,
+                    vec![(0.0, 0.0, 512.0, 256.0)],
+                    vec![crate::config::BackgroundImage {
+                        path: "memory-only.png".into(),
+                        ..Default::default()
+                    }],
+                    vec![Some(source.handle.clone())],
+                    Default::default(),
+                )
+                .with_file_sizes(vec![Some((512.0, 256.0))])
+                .into();
+            let mut draft = crate::wallpaper::draft::Draft::new(&plots.config.background);
+            draft.loading = false;
+            draft.sources.insert("memory-only.png".into(), source);
+            let mut setting = Setting::default();
+            setting.wallpaper_draft = Some(draft);
+            plots.windows.settings.insert(id, setting);
+            plots.windows.ids.insert(id, PlotInfo::Setting);
+            let task = match close {
+                "request" => plots.update(Plant::Uproot(id)),
+                "native" => plots.update(Plant::Wayland(LandEvent::Closed(id))),
+                _ => plots.update(Plant::Sprout),
+            };
+            assert!(
+                weak_source.upgrade().is_none(),
+                "{close}: draft still owns the source"
+            );
+            assert!(
+                weak_pixels.upgrade().is_some(),
+                "renderer view must own its pixels until teardown"
+            );
+            drop(preview);
+            assert!(
+                weak_pixels.upgrade().is_none(),
+                "{close}: original pixel buffer survived teardown"
+            );
+            assert!(plots.windows.settings.is_empty());
+            let actions = runtime.block_on(
+                iced_runtime::task::into_stream(task)
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+            );
+            let mut reclaimed = 0;
+            let mut native_closes = 0;
+            for action in actions {
+                match action {
+                    Action::Output(
+                        message @ Plant::Config(ConfigEvent::ReclaimImageMemory { redraw: true }),
+                    ) => {
+                        // This Settings draft owned decoded sources: the close
+                        // must schedule the full-redraw reclaim.
+                        assert_eq!(redraw_scope(&message), Scope::All);
+                        let _ = plots.update(message);
+                        reclaimed += 1;
+                    }
+                    Action::Window(WindowAction::Close(target)) => {
+                        assert_eq!(target, id);
+                        native_closes += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                reclaimed, 1,
+                "{close}: cleanup must not depend on another close notification"
+            );
+            assert_eq!(
+                native_closes,
+                usize::from(close != "native"),
+                "native confirmation must not re-close a dead ID"
+            );
+        }
+    }
+
+    #[test]
+    fn reclamation_redraw_is_gated_to_image_owning_closes() {
+        use crate::ui::node::{NodeLength, WidgetNode};
+        use iced::futures::StreamExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let reclaim_scope = |plots: &mut Plots, close: Plant| -> Option<(bool, Scope)> {
+            let task = plots.update(close);
+            let actions = runtime.block_on(
+                iced_runtime::task::into_stream(task)
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+            );
+            actions.into_iter().find_map(|action| match action {
+                Action::Output(Plant::Config(ConfigEvent::ReclaimImageMemory { redraw })) => {
+                    let message = Plant::Config(ConfigEvent::ReclaimImageMemory { redraw });
+                    Some((redraw, redraw_scope(&message)))
+                }
+                _ => None,
+            })
+        };
+        let popup = |tree: Option<WidgetNode>| Popup {
+            win_id: iced::window::Id::unique(),
+            bar_id: iced::window::Id::unique(),
+            slot: 0,
+            placement: "clock".into(),
+            body: String::new(),
+            items: Vec::new(),
+            tree,
+            size: 13.0,
+            w: 100,
+            h: 100,
+            auto_height: false,
+            max_height: 1080.0,
+            sizing_revision: 0,
+            positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                iced::window::Id::unique(),
+                iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
+                (0, 0),
+            ),
+        };
+        let output = OutputId(7);
+
+        // Popup without image nodes: host-only cleanup, no full redraw.
+        let mut plots = wallpaper_test_plots();
+        let id = iced::window::Id::unique();
+        plots.windows.popups.insert(id, popup(None));
+        plots.windows.ids.insert(id, PlotInfo::Popup(output));
+        assert_eq!(
+            reclaim_scope(&mut plots, Plant::Uproot(id)),
+            Some((false, Scope::None))
+        );
+
+        // Popup whose tree draws an image: full-redraw reclaim.
+        let id = iced::window::Id::unique();
+        plots.windows.popups.insert(
+            id,
+            popup(Some(WidgetNode::Image {
+                path: "memory-only.png".into(),
+                width: NodeLength::Shrink,
+                height: NodeLength::Shrink,
+            })),
+        );
+        plots.windows.ids.insert(id, PlotInfo::Popup(output));
+        assert_eq!(
+            reclaim_scope(&mut plots, Plant::Uproot(id)),
+            Some((true, Scope::All))
+        );
+
+        // Notification surface whose output holds a decoded image.
+        let id = iced::window::Id::unique();
+        plots.windows.ids.insert(id, PlotInfo::Notification(output));
+        plots.windows.notifications.insert(output, id);
+        plots.notification.queue.push_back(Notification {
+            id: 5,
+            output: Some(output),
+            app: "test".into(),
+            title: "image".into(),
+            body: String::new(),
+            icon: String::new(),
+            urgency: 1,
+            received_at: Instant::now(),
+            timeout: Some(Duration::from_secs(4)),
+            actions: Vec::new(),
+            image: Some(iced::widget::image::Handle::from_rgba(
+                4,
+                4,
+                bytes::Bytes::from(vec![255; 4 * 4 * 4]),
+            )),
+        });
+        assert_eq!(
+            reclaim_scope(&mut plots, Plant::Uproot(id)),
+            Some((true, Scope::All))
+        );
+        assert!(!plots.notification.holds_images(output));
+
+        // A bar close without images stays host-only.
+        let id = iced::window::Id::unique();
+        plots.windows.ids.insert(id, PlotInfo::Top(output));
+        assert_eq!(
+            reclaim_scope(&mut plots, Plant::Uproot(id)),
+            Some((false, Scope::None))
+        );
     }
 
     #[test]

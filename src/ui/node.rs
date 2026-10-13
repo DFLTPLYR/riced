@@ -85,6 +85,21 @@ pub(crate) enum WidgetNode {
     },
 }
 
+/// Whether a description tree draws any raster image nodes.
+pub(crate) fn contains_images(node: &WidgetNode) -> bool {
+    match node {
+        WidgetNode::Image { .. } => true,
+        WidgetNode::Container { child, .. } | WidgetNode::Scrollable { child, .. } => {
+            contains_images(child)
+        }
+        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+            children.iter().any(contains_images)
+        }
+        WidgetNode::ListView { items, .. } => items.iter().any(|(_, child)| contains_images(child)),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NodeLength {
     /// No setter: use the native widget's content-derived sizing strategy.

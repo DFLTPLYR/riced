@@ -393,6 +393,14 @@ impl Setting {
                 &mut plots.desktop.context_menu,
             );
         }
+        // Compute before close_all drops the drafts: only image-owning panels
+        // need the full-redraw reclaim (others stay host-only).
+        let owned_images = plots.windows.settings.values().any(|setting| {
+            setting
+                .wallpaper_draft
+                .as_ref()
+                .is_some_and(|draft| !draft.sources.is_empty())
+        });
         let to_close = Self::close_all(&mut plots.windows.settings, &mut plots.windows.ids);
         // Panel edits are done: persist staged config now instead of waiting
         // out the coalescing save timer (Uproot flushes again, harmless).
@@ -405,8 +413,8 @@ impl Setting {
                 WindowAction::Close(id),
             )));
         }
-        // Toggle-closed with pending wallpaper edits: the user is done —
-        // regen now instead of waiting out the countdown.
+        cmds.push(plots.reclaim_image_memory(owned_images));
+        // Consume only requests originating from an accepted explicit Apply.
         if plots.theme_jobs.dirty {
             cmds.push(plots.fire_regen_theme());
         }

@@ -4,12 +4,13 @@ use crate::wallpaper::{self, Batch, Request, draft::Draft, raster::Sources};
 use iced::{Task, window};
 
 impl Plots {
-    /// Native close confirmation happens after the renderer/UI are removed.
-    /// Defer one turn so result-message/request owners have also been dropped.
-    pub(crate) fn reclaim_image_memory(&self) -> Task<Plant> {
+    /// Defer cleanup after a close or worker result so message, view, and
+    /// renderer owners can drop before cache eviction and allocator trimming.
+    /// `redraw` repaints all surfaces so live renderers trim their image caches.
+    pub(crate) fn reclaim_image_memory(&self, redraw: bool) -> Task<Plant> {
         Task::perform(
             async { tokio::time::sleep(std::time::Duration::from_millis(100)).await },
-            |_| Plant::Config(ConfigEvent::ReclaimImageMemory),
+            move |_| Plant::Config(ConfigEvent::ReclaimImageMemory { redraw }),
         )
     }
 
@@ -41,7 +42,11 @@ impl Plots {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    wallpaper::raster::load_preview_sources(&images, sources)
+                    let result = wallpaper::raster::load_preview_sources(&images, sources);
+                    // Decoder temporaries belong to this worker's allocator
+                    // arena; trim after they drop, keeping returned pixels live.
+                    crate::theme_gen::trim_memory();
+                    result
                 })
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()))
@@ -212,7 +217,10 @@ impl Plots {
             .as_ref()
             .is_none_or(|request| request.generation != generation)
         {
-            return Task::batch([self.launch_wallpaper_job(), self.reclaim_image_memory()]);
+            return Task::batch([
+                self.launch_wallpaper_job(),
+                self.reclaim_image_memory(false),
+            ]);
         }
         let request = self
             .desktop
@@ -301,7 +309,7 @@ impl Plots {
                         }
                     }
                 }
-                let mut commands = vec![self.reclaim_image_memory()];
+                let mut commands = vec![self.reclaim_image_memory(false)];
                 if publication.regenerate_theme {
                     self.theme_jobs.dirty = true;
                     commands.push(self.fire_regen_theme());
@@ -329,7 +337,7 @@ impl Plots {
                     draft.applying = false;
                     draft.error = Some(error);
                 }
-                self.reclaim_image_memory()
+                self.reclaim_image_memory(false)
             }
         }
     }

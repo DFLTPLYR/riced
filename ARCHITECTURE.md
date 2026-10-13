@@ -180,7 +180,11 @@ result processing as well as trimming worker temporaries.
 Native `Closed` events perform idempotent app detachment without requesting
 another close for the dead native ID. Image reclamation is deferred until
 result-message and renderer/UI owners can drop; cache entries still referenced
-by active elements remain intact. Wallpaper publication compares actual RGBA
+by active elements remain intact. Closes of windows that owned decoded images
+repaint every surface so live renderers run their insert-gated image-cache trim
+(per-renderer caches die with their windows; the trim frees host entries and
+atlas slots for reuse, it does not shrink GPU pages). Wallpaper publication
+compares actual RGBA
 pixels and reuses previous handles for identical tiles, keeping texture IDs
 stable across repeated Apply operations.
 

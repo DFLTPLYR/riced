@@ -582,6 +582,16 @@ a failed restoration falls back to baking without publishing a partial tile set.
 
 Native window-close confirmation also reclaims unreferenced decoded-image
 cache entries and requests allocator trimming after UI/renderer teardown.
+Explicit close and Settings-toggle paths schedule the same deferred cleanup,
+even if native confirmation is delayed. The preview worker also trims decoder
+temporaries after loading. Native close notifications never request another
+close for an already-destroyed window.
+Closes whose window actually owned decoded images (wallpaper editor sources,
+popup trees with image nodes, notification images) additionally repaint every
+surface once, so the still-live renderers run iced's image-cache trim after the
+handles drop. That trim is insert-gated per renderer and its texture atlas
+never shrinks pages, so this frees host entries and makes atlas space reusable
+rather than reducing driver VRAM. Other closes stay host-only cleanup.
 Applying identical output pixels keeps the existing image handles, avoiding
 another texture upload. Applied tiles remain resident, and graphics-driver
 allocation pools may retain their capacity even after editor buffers are freed.

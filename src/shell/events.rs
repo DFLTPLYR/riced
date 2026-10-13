@@ -57,7 +57,11 @@ pub enum ConfigEvent {
         generation: u64,
         result: Result<crate::wallpaper::Batch, String>,
     },
-    ReclaimImageMemory,
+    /// Deferred image-buffer cleanup. `redraw` additionally repaints every
+    /// surface so live renderers run their insert-gated image-cache trim.
+    ReclaimImageMemory {
+        redraw: bool,
+    },
     /// Widgets dir changed on disk: fresh discovered definitions.
     /// Stored live and repainted (bars re-resolve placements).
     WidgetsReloaded(Vec<crate::config::WidgetDefinition>),

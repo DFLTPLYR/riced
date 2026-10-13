@@ -37,6 +37,19 @@ impl Default for NotificationState {
 }
 
 impl NotificationState {
+    /// Whether this output's live cards or exiting ghosts carry decoded
+    /// images; closing such a window schedules a reclamation redraw.
+    pub(crate) fn holds_images(&self, output: OutputId) -> bool {
+        self.queue
+            .iter()
+            .any(|notification| notification.output == Some(output) && notification.image.is_some())
+            || self
+                .list
+                .ghosts_for(|(owner, _)| *owner == output)
+                .iter()
+                .any(|ghost| self.exit_images.contains_key(&ghost.key.1))
+    }
+
     pub(crate) fn forget_output(
         &mut self,
         output: OutputId,
