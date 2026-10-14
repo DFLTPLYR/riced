@@ -207,7 +207,10 @@ Other composition primitives are `iced.container(child)` (width, height,
 padding, background, radius), `iced.scrollable(child)`, `iced.space()`, and
 `iced.image(path)` (width and height). Text accepts `:wrap("none" | "word" |
 "glyph" | "word-or-glyph")` for each `text::Wrapping` strategy (default is
-word wrapping, matching iced). Card props may supply `padding`, `radius`,
+word wrapping, matching iced). Since iced has no native ellipsis, text also
+accepts `:elide(n)` to keep at most `n` characters including the "…" mark,
+with `:elide_mode("tail" | "head" | "middle")` (default `"tail"`):
+`iced.text(title):wrap("none"):elide(24)`. Card props may supply `padding`, `radius`,
 and `background` to request a styled surface. Images accept file paths or
 `file://` paths. Fades multiply primitive alpha; they are not offscreen
 subtree/group compositing.

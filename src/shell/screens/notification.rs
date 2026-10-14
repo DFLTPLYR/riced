@@ -373,6 +373,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
         height: None,
         wrapping: None,
         color: None,
+        elide: None,
     }];
     for line in body.lines().take(3) {
         children.push(WidgetNode::Text {
@@ -382,6 +383,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
             height: None,
             wrapping: None,
             color: None,
+            elide: None,
         });
     }
     if !actions.is_empty() {
@@ -1388,6 +1390,7 @@ mod tests {
                     height: None,
                     wrapping: None,
                     color: None,
+                    elide: None,
                 },
             )],
         );

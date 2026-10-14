@@ -156,6 +156,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             height: None,
             wrapping: None,
             color: None,
+            elide: None,
         });
     };
     let kind = match t.get::<Value>("type").map_err(|e| e.to_string())? {
@@ -262,17 +263,23 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             width: opt_length(t, "width", "iced.image()")?.unwrap_or(NodeLength::Native),
             height: opt_length(t, "height", "iced.image()")?.unwrap_or(NodeLength::Native),
         }),
-        "text" => Ok(WidgetNode::Text {
-            content: coerce_text(
+        "text" => {
+            let content = coerce_text(
                 t.get::<Value>("text").map_err(|e| e.to_string())?,
                 "iced.text()",
-            )?,
-            size: opt_number(t, "size", "iced.text()")?,
-            width: opt_length(t, "width", "iced.text()")?,
-            height: opt_length(t, "height", "iced.text()")?,
-            wrapping: opt_wrapping(t, "wrap", "iced.text()")?,
-            color: opt_color(t, "color", "iced.text()")?,
-        }),
+            )?;
+            let elide = opt_elide(t)?;
+            let content = elide.map(|spec| spec.apply(&content)).unwrap_or(content);
+            Ok(WidgetNode::Text {
+                content,
+                size: opt_number(t, "size", "iced.text()")?,
+                width: opt_length(t, "width", "iced.text()")?,
+                height: opt_length(t, "height", "iced.text()")?,
+                wrapping: opt_wrapping(t, "wrap", "iced.text()")?,
+                color: opt_color(t, "color", "iced.text()")?,
+                elide,
+            })
+        }
         "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
             Value::String(s) => Ok(WidgetNode::Icon {
                 name: s.to_string_lossy(),
@@ -412,6 +419,43 @@ fn control_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, Str
         return Err(format!("{what} {field} must be finite"));
     }
     Ok(number)
+}
+
+/// `:elide(n)` keeps at most `n` characters including the "…" mark;
+/// `:elide_mode(...)` picks `"tail"` (default), `"head"`, or `"middle"`.
+fn opt_elide(t: &Table) -> Result<Option<super::components::TextElide>, String> {
+    const WHAT: &str = "iced.text()";
+    let max_chars = match node_property(t, "elide").map_err(|e| e.to_string())? {
+        Value::Nil | Value::Function(_) => None,
+        Value::Integer(n) if n >= 1 => Some(n as usize),
+        Value::Number(n) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 => Some(n as usize),
+        other => {
+            return Err(format!(
+                "{WHAT} elide must be a positive character count, got {}",
+                lua_value_kind(&other)
+            ));
+        }
+    };
+    let mode = match node_property(t, "elide_mode").map_err(|e| e.to_string())? {
+        Value::Nil | Value::Function(_) => super::components::ElideMode::Tail,
+        Value::String(s) => {
+            let raw = s.to_string_lossy();
+            crate::shared::enums::lookup(super::components::ELIDE_MODES, &raw).ok_or_else(|| {
+                format!(
+                    "{WHAT} elide_mode must be {}, got {raw:?}",
+                    crate::shared::enums::expected(super::components::ELIDE_MODES)
+                )
+            })?
+        }
+        other => {
+            return Err(format!(
+                "{WHAT} elide_mode must be {}, got {}",
+                crate::shared::enums::expected(super::components::ELIDE_MODES),
+                lua_value_kind(&other)
+            ));
+        }
+    };
+    Ok(max_chars.map(|max_chars| super::components::TextElide { max_chars, mode }))
 }
 fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
     use super::components::*;
@@ -575,6 +619,7 @@ mod tests {
             height: None,
             wrapping: None,
             color: None,
+            elide: None,
         };
         assert_eq!(
             parse_node(&value).unwrap(),
@@ -607,6 +652,63 @@ mod tests {
             assert!(parse_node(&value).is_err(), "rejects {bad}");
         }
         assert!(lua.load("return iced.row('flat')").eval::<Value>().is_err());
+    }
+
+    #[test]
+    fn text_elide_truncates_by_characters_with_head_middle_and_tail_modes() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let content = |source: &str| match parse_node(&lua.load(source).eval().unwrap()).unwrap() {
+            WidgetNode::Text { content, .. } => content,
+            other => panic!("{source}: unexpected {other:?}"),
+        };
+        assert_eq!(
+            content("return iced.text('hello world'):elide(6)"),
+            "hello…"
+        );
+        assert_eq!(
+            content("return iced.text('hello world'):elide(6):elide_mode('head')"),
+            "…world"
+        );
+        assert_eq!(
+            content("return iced.text('hello world'):elide(7):elide_mode('middle')"),
+            "hel…rld"
+        );
+        // Exact fits and short text pass through untouched.
+        assert_eq!(content("return iced.text('hi'):elide(2)"), "hi");
+        assert_eq!(content("return iced.text('hi')"), "hi");
+        assert_eq!(content("return iced.text('hello'):elide(1)"), "…");
+        // Multibyte characters count as one each.
+        assert_eq!(
+            content("return iced.text('héllo wörld'):elide(6)"),
+            "héllo…"
+        );
+        // The budget and mode survive a table export round-trip.
+        let value: Value = lua
+            .load("return iced.text('hello world'):elide(6):elide_mode('head')")
+            .eval()
+            .unwrap();
+        let node = parse_node(&value).unwrap();
+        let exported = crate::ui::encode::to_table(&lua, &node).unwrap();
+        assert_eq!(parse_node(&Value::Table(exported)).unwrap(), node);
+        // Invalid budgets and modes fail before realization.
+        for source in [
+            "return iced.text('hi'):elide(0)",
+            "return iced.text('hi'):elide(-3)",
+            "return iced.text('hi'):elide(2.5)",
+            "return iced.text('hi'):elide('many')",
+            "return iced.text('hi'):elide_mode('both')",
+            "return iced.text('hi'):elide_mode(42)",
+        ] {
+            let value: Value = lua.load(source).eval().unwrap();
+            assert!(parse_node(&value).is_err(), "{source}");
+        }
+        assert!(
+            lua.load("return iced.button('go','go'):elide(4)")
+                .eval::<Value>()
+                .is_err(),
+            "elide is a text-only setter"
+        );
     }
 
     #[test]

@@ -347,6 +347,7 @@ mod tests {
                 height: None,
                 wrapping: None,
                 color: None,
+                elide: None,
             }
         );
         let Value::Table(action) = call_lua_named_action(&lua, "dismiss").unwrap() else {

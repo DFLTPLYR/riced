@@ -982,6 +982,7 @@ mod tests {
                 height: None,
                 wrapping: None,
                 color: None,
+                elide: None,
             }),
             ..Default::default()
         };

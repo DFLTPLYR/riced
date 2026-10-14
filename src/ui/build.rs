@@ -196,6 +196,7 @@ pub(crate) fn realize<M: Clone + 'static>(
             height,
             wrapping,
             color,
+            ..
         } => {
             let mut t = text(content.clone()).size(own.unwrap_or(size).max(1.0));
             if let Some(w) = width {
@@ -893,6 +894,7 @@ mod tests {
             height: None,
             wrapping: None,
             color: None,
+            elide: None,
         };
         let button = WidgetNode::Button {
             label: "go".into(),

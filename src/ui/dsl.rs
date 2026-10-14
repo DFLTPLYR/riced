@@ -238,6 +238,7 @@ mod tests {
             height: None,
             wrapping: None,
             color: None,
+            elide: None,
         }
     }
 
@@ -264,7 +265,8 @@ mod tests {
                 width: None,
                 height: None,
                 wrapping: None,
-                color: None
+                color: None,
+                elide: None
             }
         );
         assert_eq!(
@@ -568,6 +570,7 @@ mod tests {
                 height: None,
                 wrapping: None,
                 color: None,
+                elide: None,
             }
         );
         for (source, wrapping) in [
@@ -592,6 +595,7 @@ mod tests {
                     height: None,
                     wrapping: Some(wrapping),
                     color: None,
+                    elide: None,
                 },
                 "{source}"
             );

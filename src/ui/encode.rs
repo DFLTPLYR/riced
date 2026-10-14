@@ -66,6 +66,7 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 height,
                 wrapping,
                 color,
+                elide,
             } => {
                 fields!("text" => content.as_str(), "size" => *size);
                 sizes!(width.as_ref(), height.as_ref());
@@ -81,6 +82,10 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                     )?;
                 }
                 set_color(lua, table, "color", color)?;
+                if let Some(elide) = elide {
+                    table.set("elide", elide.max_chars)?;
+                    table.set("elide_mode", elide.mode_name())?;
+                }
             }
             WidgetNode::Icon { name, color } => {
                 table.set("name", name.as_str())?;
