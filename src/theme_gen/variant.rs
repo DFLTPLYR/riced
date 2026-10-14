@@ -22,17 +22,19 @@ pub const VARIANT_NAMES: &[&str] = &[
 /// Parse a variant name (case-insensitive, `fruit_salad` accepted);
 /// unknown names fall back to `TonalSpot`, like sys.
 pub fn parse_variant(s: &str) -> Variant {
-    match s.to_lowercase().as_str() {
-        "monochrome" => Variant::Monochrome,
-        "neutral" => Variant::Neutral,
-        "vibrant" => Variant::Vibrant,
-        "expressive" => Variant::Expressive,
-        "fidelity" => Variant::Fidelity,
-        "content" => Variant::Content,
-        "rainbow" => Variant::Rainbow,
-        "fruit_salad" | "fruitsalad" => Variant::FruitSalad,
-        _ => Variant::TonalSpot,
-    }
+    const NAMES: &[(&str, Variant)] = &[
+        ("content", Variant::Content),
+        ("tonalspot", Variant::TonalSpot),
+        ("monochrome", Variant::Monochrome),
+        ("neutral", Variant::Neutral),
+        ("vibrant", Variant::Vibrant),
+        ("expressive", Variant::Expressive),
+        ("fidelity", Variant::Fidelity),
+        ("rainbow", Variant::Rainbow),
+        ("fruit_salad", Variant::FruitSalad),
+        ("fruitsalad", Variant::FruitSalad),
+    ];
+    crate::shared::enums::lookup(NAMES, s).unwrap_or(Variant::TonalSpot)
 }
 #[cfg(test)]
 mod tests {

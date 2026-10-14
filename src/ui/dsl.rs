@@ -39,6 +39,7 @@ fn node(
         "size",
         "width",
         "height",
+        "wrap",
         "spacing",
         "padding",
         "color",
@@ -62,7 +63,11 @@ fn node(
 pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     let ui = lua.create_table()?;
     let shapes: [(&str, &[&str], &'static [&'static str]); 8] = [
-        ("text", &["size", "width", "height", "color"], &["text"]),
+        (
+            "text",
+            &["size", "width", "height", "wrap", "color"],
+            &["text"],
+        ),
         ("icon", &["color"], &["icon"]),
         (
             "rowcol",
@@ -293,6 +298,34 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     ui.set_metatable(Some(methods))?;
+
+    // Strict `size` table: the canonical size strategies as values, with an
+    // __index that raises on unknown keys — `size.fil` errors at the call
+    // site instead of silently becoming an omitted field. Values are the
+    // exact strings the decode tables accept.
+    let size = lua.create_table()?;
+    for &(name, _) in super::decode::LENGTH_NAMES {
+        size.raw_set(name, name)?;
+    }
+    let size_names: Vec<_> = super::decode::LENGTH_NAMES
+        .iter()
+        .map(|(name, _)| format!("size.{name}"))
+        .collect();
+    let size_options: Vec<_> = size_names.iter().map(|name| (name.as_str(), ())).collect();
+    let size_expected = crate::shared::enums::expected(&size_options);
+    let size_mt = lua.create_table()?;
+    size_mt.set(
+        "__index",
+        lua.create_function(move |_, (_table, key): (mlua::Table, mlua::LuaString)| {
+            Err::<(), _>(mlua::Error::RuntimeError(format!(
+                "unknown size {} — expected {size_expected}",
+                key.to_string_lossy()
+            )))
+        })?,
+    )?;
+    size.set_metatable(Some(size_mt))?;
+    lua.globals().set("size", size)?;
+
     lua.globals().set("iced", ui.clone())?;
     lua.globals().set("ui", ui)?;
     Ok(())
@@ -320,6 +353,7 @@ mod tests {
             size: None,
             width: None,
             height: None,
+            wrapping: None,
             color: None,
         }
     }
@@ -346,6 +380,7 @@ mod tests {
                 size: Some(14.0),
                 width: None,
                 height: None,
+                wrapping: None,
                 color: None
             }
         );
@@ -541,6 +576,46 @@ mod tests {
     }
 
     #[test]
+    fn strict_size_table_decodes_identically_and_raises_on_unknown_keys() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let parse = |source: &str| parse_node(&lua.load(source).eval::<Value>().unwrap());
+        // size.* decodes exactly like the equivalent string form.
+        for (table, string, expected) in [
+            ("size.fill", "'fill'", NodeLength::Fill),
+            ("size.shrink", "'shrink'", NodeLength::Shrink),
+            ("size.auto", "'auto'", NodeLength::Shrink),
+        ] {
+            let via_table = parse(&format!("return ui.text('x'):width({table})")).unwrap();
+            let via_string = parse(&format!("return ui.text('x'):width({string})")).unwrap();
+            assert_eq!(via_table, via_string, "{table} vs {string}");
+            assert!(
+                matches!(via_table, WidgetNode::Text { width: Some(w), .. } if w == expected),
+                "{table}"
+            );
+        }
+        // Unknown keys raise at the Lua call site, naming the options —
+        // script errors already surface through the notification path.
+        let error = lua
+            .load("return size.fil")
+            .eval::<Value>()
+            .expect_err("unknown size key must raise");
+        let message = error.to_string();
+        assert!(message.contains("size.fil"), "{message}");
+        assert!(
+            message.contains("\"size.fill\", \"size.shrink\", or \"size.auto\""),
+            "{message}"
+        );
+        // The table is global and shadows nothing shipped (scripts use
+        // `size` only as a table field or local).
+        assert!(
+            lua.load("return size.fill == 'fill'")
+                .eval::<bool>()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn lua_setters_are_repeatable_and_components_are_directly_callable() {
         let lua = Lua::new();
         inject_ui_base(&lua).unwrap();
@@ -600,6 +675,7 @@ mod tests {
 
     #[test]
     fn representative_builders_produce_expected_owned_descriptions() {
+        use iced::widget::text::Wrapping;
         assert_eq!(
             description("return ui.text('x'):size(14):size(16):width('auto')"),
             WidgetNode::Text {
@@ -607,8 +683,49 @@ mod tests {
                 size: Some(16.0),
                 width: Some(NodeLength::Shrink),
                 height: None,
+                wrapping: None,
                 color: None,
             }
+        );
+        for (source, wrapping) in [
+            ("return ui.text('x'):wrap('none')", Wrapping::None),
+            ("return ui.text('x'):wrap('word')", Wrapping::Word),
+            ("return ui.text('x'):wrap('glyph')", Wrapping::Glyph),
+            (
+                "return ui.text('x'):wrap('word-or-glyph')",
+                Wrapping::WordOrGlyph,
+            ),
+            (
+                "return ui.text('x'):wrap('WORD_OR_GLYPH'):wrap('word')",
+                Wrapping::Word,
+            ),
+        ] {
+            assert_eq!(
+                description(source),
+                WidgetNode::Text {
+                    content: "x".into(),
+                    size: None,
+                    width: None,
+                    height: None,
+                    wrapping: Some(wrapping),
+                    color: None,
+                },
+                "{source}"
+            );
+        }
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        assert!(
+            lua.load("return ui.text('x'):wrap('wide')")
+                .eval::<Value>()
+                .is_ok_and(|value| parse_node(&value).is_err()),
+            "unknown wrap modes are rejected at decode"
+        );
+        assert!(
+            lua.load("return ui.row({ui.text('x')}):wrap('word')")
+                .eval::<Value>()
+                .is_err(),
+            "wrap is a text-only setter"
         );
         assert_eq!(
             description("return ui.row({ui.icon('cpu'), ui.text('x')}):spacing(5)"),

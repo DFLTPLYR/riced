@@ -68,22 +68,77 @@ pub(crate) fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<ice
         )),
     }
 }
+/// Size-strategy names shared by the strict `size` table and error messages.
+pub(crate) const LENGTH_NAMES: &[(&str, NodeLength)] = &[
+    ("fill", NodeLength::Fill),
+    ("shrink", NodeLength::Shrink),
+    ("auto", NodeLength::Shrink),
+];
+
 pub(crate) fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<NodeLength>, String> {
     match node_property(t, field).map_err(|e| e.to_string())? {
         Value::Nil | Value::Function(_) => Ok(None),
         Value::Integer(i) => Ok(Some(NodeLength::Fixed(i as f32))),
         Value::Number(n) => Ok(Some(NodeLength::Fixed(n as f32))),
-        Value::String(s) => match s.to_string_lossy().to_lowercase().as_str() {
-            "fill" => Ok(Some(NodeLength::Fill)),
-            "shrink" | "auto" => Ok(Some(NodeLength::Shrink)),
-            other => Err(format!(
-                "{what} {field} must be a number, \"fill\", \"shrink\", or \"auto\", got {other:?}"
-            )),
-        },
+        Value::String(s) => {
+            let raw = s.to_string_lossy();
+            crate::shared::enums::lookup(LENGTH_NAMES, &raw)
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "{what} {field} must be a number, {}, got {raw:?}",
+                        crate::shared::enums::expected(LENGTH_NAMES)
+                    )
+                })
+        }
         other => Err(format!(
-            "{what} {field} must be a number, \"fill\", \"shrink\", or \"auto\", got {}",
+            "{what} {field} must be a number, {}, got {}",
+            crate::shared::enums::expected(LENGTH_NAMES),
             lua_value_kind(&other)
         )),
+    }
+}
+
+/// Canonical wrap-strategy names used for decoding and error messages.
+const WRAPPING_NAMES: &[(&str, iced::widget::text::Wrapping)] = &[
+    ("none", iced::widget::text::Wrapping::None),
+    ("word", iced::widget::text::Wrapping::Word),
+    ("glyph", iced::widget::text::Wrapping::Glyph),
+    ("word_or_glyph", iced::widget::text::Wrapping::WordOrGlyph),
+];
+
+pub(crate) fn opt_wrapping(
+    t: &Table,
+    field: &str,
+    what: &str,
+) -> Result<Option<iced::widget::text::Wrapping>, String> {
+    let expected = crate::shared::enums::expected(WRAPPING_NAMES);
+    match node_property(t, field).map_err(|e| e.to_string())? {
+        Value::Nil | Value::Function(_) => Ok(None),
+        Value::String(s) => {
+            let raw = s.to_string_lossy();
+            crate::shared::enums::lookup(WRAPPING_NAMES, &raw)
+                .map(Some)
+                .ok_or_else(|| format!("{what} {field} must be {expected}, got {raw:?}"))
+        }
+        other => Err(format!(
+            "{what} {field} must be {expected}, got {}",
+            lua_value_kind(&other)
+        )),
+    }
+}
+
+const AXES: &[(&str, bool)] = &[("horizontal", true), ("vertical", false)];
+
+/// Listview `axis` is case-insensitive and hyphen-tolerant through the shared
+/// tables; non-strings and omissions keep the default vertical axis.
+fn opt_axis(t: &Table) -> Result<bool, String> {
+    match node_property(t, "axis").map_err(|e| e.to_string())? {
+        Value::String(s) => {
+            let raw = s.to_string_lossy();
+            Ok(crate::shared::enums::lookup(AXES, &raw).unwrap_or(false))
+        }
+        _ => Ok(false),
     }
 }
 
@@ -94,6 +149,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             size: None,
             width: None,
             height: None,
+            wrapping: None,
             color: None,
         });
     };
@@ -151,7 +207,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             Ok(WidgetNode::ListView {
                 id,
                 items,
-                horizontal: matches!(node_property(t,"axis").map_err(|e|e.to_string())?,Value::String(s) if s.to_string_lossy()=="horizontal"),
+                horizontal: opt_axis(t)?,
                 pitch: opt_number(t, "pitch", "iced.listview()")?
                     .unwrap_or(32.0)
                     .max(1.0),
@@ -206,6 +262,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             size: opt_number(t, "size", "ui.text()")?,
             width: opt_length(t, "width", "ui.text()")?,
             height: opt_length(t, "height", "ui.text()")?,
+            wrapping: opt_wrapping(t, "wrap", "ui.text()")?,
             color: opt_color(t, "color", "ui.text()")?,
         }),
         "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
@@ -356,6 +413,7 @@ mod tests {
             size: None,
             width: None,
             height: None,
+            wrapping: None,
             color: None,
         };
         assert_eq!(
@@ -389,6 +447,58 @@ mod tests {
             assert!(parse_node(&value).is_err(), "rejects {bad}");
         }
         assert!(lua.load("return ui.row('flat')").eval::<Value>().is_err());
+    }
+
+    #[test]
+    fn listview_axis_is_case_insensitive_and_unknown_values_default_to_vertical() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let horizontal = |axis: &str| {
+            let value: Value = lua
+                .load(format!(
+                    "return ui.listview({{}}):id('a'):key('id'):delegate(function() return ui.text('x') end):axis('{axis}')"
+                ))
+                .eval()
+                .unwrap();
+            match parse_node(&value).unwrap() {
+                WidgetNode::ListView { horizontal, .. } => horizontal,
+                other => panic!("{axis}: unexpected {other:?}"),
+            }
+        };
+        assert!(horizontal("horizontal"));
+        assert!(horizontal("Horizontal"));
+        assert!(horizontal("HORIZONTAL"));
+        assert!(!horizontal("vertical"));
+        assert!(!horizontal("Vertical"));
+        // Omission keeps the default vertical axis.
+        let value: Value = lua
+            .load("return ui.listview({}):id('a'):key('id'):delegate(function() return ui.text('x') end)")
+            .eval()
+            .unwrap();
+        assert!(matches!(
+            parse_node(&value).unwrap(),
+            WidgetNode::ListView {
+                horizontal: false,
+                ..
+            }
+        ));
+        assert!(!horizontal("diagonal"));
+        for axis in ["false", "42", "{}", "function() end"] {
+            let value: Value = lua
+                .load(format!("return ui.listview({{}}):id('a'):key('id'):delegate(function() return ui.text('x') end):axis({axis})"))
+                .eval()
+                .unwrap();
+            assert!(
+                matches!(
+                    parse_node(&value).unwrap(),
+                    WidgetNode::ListView {
+                        horizontal: false,
+                        ..
+                    }
+                ),
+                "{axis}"
+            );
+        }
     }
 
     #[test]

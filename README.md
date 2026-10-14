@@ -180,8 +180,16 @@ Auto-sizing is the default for every UI primitive: omitting width or height uses
 iced's native content-derived sizing on that axis. Containers, rows, columns,
 scrollables, and lists inherit their children's sizing hints; images and spaces
 size to their own pixels; text and buttons have always sized to their content.
-Explicit pixel sizes, `"fill"`, and `"shrink"` override the default
-independently (`"auto"` remains an alias for `"shrink"`). For example,
+Use `size.fill`, `size.shrink`, or `size.auto` to override the default
+independently on either axis (`size.auto` is an alias for `size.shrink`):
+
+```lua
+ui.text("Hello"):width(size.fill):height(size.shrink)
+```
+
+The strict `size` table contains canonical string aliases; unknown keys such
+as `size.fil` raise at the call site. Explicit pixel sizes and the plain
+strings `"fill"`, `"shrink"`, and `"auto"` remain supported. For example,
 `ui.container(ui.column({ui.text("Hello"), ui.text("World")})):padding(12)`
 needs no dimensions to fit its content.
 
@@ -197,7 +205,9 @@ trees with image nodes are remeasured because their files can change size.
 
 Other composition primitives are `ui.container(child)` (width, height,
 padding, background, radius), `ui.scrollable(child)`, `ui.space()`, and
-`ui.image(path)` (width and height). Card props may supply `padding`, `radius`,
+`ui.image(path)` (width and height). Text accepts `:wrap("none" | "word" |
+"glyph" | "word-or-glyph")` for each `text::Wrapping` strategy (default is
+word wrapping, matching iced). Card props may supply `padding`, `radius`,
 and `background` to request a styled surface. Images accept file paths or
 `file://` paths. Fades multiply primitive alpha; they are not offscreen
 subtree/group compositing.

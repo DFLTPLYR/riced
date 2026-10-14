@@ -222,6 +222,7 @@ mod tests {
                         .into();
                 content
             },
+            None,
         );
         let mut element = elements.remove(0);
         let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(

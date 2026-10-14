@@ -166,6 +166,7 @@ pub(crate) fn build_node_opacity(
             size: own,
             width,
             height,
+            wrapping,
             color,
         } => {
             let mut t = text(content.clone()).size(own.unwrap_or(size).max(1.0));
@@ -174,6 +175,9 @@ pub(crate) fn build_node_opacity(
             }
             if let Some(h) = height {
                 t = t.height(h.clone().iced());
+            }
+            if let Some(wrapping) = wrapping {
+                t = t.wrapping(*wrapping);
             }
             if color.is_some() || opacity < 1.0 {
                 t = t.color(color.unwrap_or_else(theme::text).scale_alpha(opacity));
@@ -340,6 +344,62 @@ mod tests {
     use super::*;
     use crate::ui::decode::parse_node;
     use mlua::{Lua, Value};
+
+    #[test]
+    fn text_wrap_word_folds_narrow_text_while_none_keeps_one_line() {
+        use iced::Size;
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        use iced::widget::text::Wrapping;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = lua();
+        let layout_height = |source: &str| {
+            let value: Value = lua.load(format!("return {source}")).eval().unwrap();
+            let node = parse_node(&value).unwrap();
+            let mut built = build_node(&node, 13.0, None).unwrap();
+            let mut tree = Tree::new(&built);
+            let limits = layout::Limits::new(Size::ZERO, Size::new(300.0, 400.0));
+            built
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .bounds()
+                .height
+        };
+        let body = "word ".repeat(24).trim_end().to_string();
+        let word_h = layout_height(&format!(
+            "ui.text('{body}'):size(24):width(120):wrap('word')"
+        ));
+        let none_h = layout_height(&format!(
+            "ui.text('{body}'):size(24):width(120):wrap('none')"
+        ));
+        assert!(
+            word_h > none_h * 2.0,
+            "word wrap should fold into several lines ({word_h} vs {none_h})"
+        );
+        assert!(
+            none_h < 40.0,
+            "no wrap should keep one clipped line ({none_h})"
+        );
+        let native_h = {
+            let mut native: Element<'static, Plant> = text(body.clone())
+                .size(24.0)
+                .width(120)
+                .wrapping(Wrapping::Word)
+                .into();
+            let mut tree = Tree::new(&native);
+            let limits = layout::Limits::new(Size::ZERO, Size::new(300.0, 400.0));
+            native
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .bounds()
+                .height
+        };
+        assert_eq!(word_h, native_h, "lua wrap must match native iced");
+    }
 
     #[test]
     fn omitted_dimensions_and_axis_overrides_match_native_iced_layout() {
@@ -532,6 +592,7 @@ mod tests {
             size: None,
             width: None,
             height: None,
+            wrapping: None,
             color: None,
         };
         let button = WidgetNode::Button {

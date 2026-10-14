@@ -355,13 +355,16 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
     /// data), each entry renders through `render(key, content, motion,
     /// live)` and shifts by its live `(x, y)` without disturbing
     /// layout; ghosts render inert. Settled items skip the wrapper
-    /// (flat tree at rest).
+    /// (flat tree at rest). `ghost_filter` scopes exits to one surface:
+    /// shared lists (notification stacks span every output) must not
+    /// paint another surface's ghosts.
     pub fn items<'a, Message, Theme, Renderer>(
         &self,
         runtime: &MotionRuntime,
         live_keys: &[K],
         content: &dyn Fn(&K) -> Option<C>,
         render: impl Fn(&K, C, ItemMotion, bool) -> Element<'a, Message, Theme, Renderer>,
+        ghost_filter: Option<&dyn Fn(&K) -> bool>,
     ) -> Vec<Element<'a, Message, Theme, Renderer>>
     where
         Message: 'a,
@@ -370,7 +373,11 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
     {
         let mut out: Vec<Element<'a, Message, Theme, Renderer>> = Vec::new();
         let mut overlays = Vec::new();
-        for ghost in self.ghosts.iter() {
+        for ghost in self
+            .ghosts
+            .iter()
+            .filter(|ghost| ghost_filter.is_none_or(|filter| filter(&ghost.key)))
+        {
             let motion = self.motion_of(runtime, &ghost.key);
             let el = render(&ghost.key, ghost.content.clone(), motion.clone(), false);
             let anchor = ghost.index as f32 * self.pitch;
@@ -705,6 +712,7 @@ mod tests {
             &keys(&["a", "c"]),
             &content,
             render,
+            None,
         );
         // Exits are overlays on the first live delegate, not layout slots.
         assert_eq!(els.len(), 2);

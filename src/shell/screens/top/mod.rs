@@ -76,11 +76,15 @@ impl SlotAlign {
     /// Parse a persisted alignment (`[[bar]] aligns`); unknown or empty
     /// strings fall back to `Center`, never an error.
     pub(crate) fn from_str(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
-            "start" | "left" | "top" => Self::Start,
-            "end" | "right" | "bottom" => Self::End,
-            _ => Self::Center,
-        }
+        const NAMES: &[(&str, SlotAlign)] = &[
+            ("start", SlotAlign::Start),
+            ("left", SlotAlign::Start),
+            ("top", SlotAlign::Start),
+            ("end", SlotAlign::End),
+            ("right", SlotAlign::End),
+            ("bottom", SlotAlign::End),
+        ];
+        crate::shared::enums::lookup(NAMES, s).unwrap_or_default()
     }
 
     fn iced(self) -> iced::Alignment {
@@ -492,7 +496,8 @@ pub(crate) fn build_with_lists(
                 .unwrap_or_else(|error| text(error).into())
             };
             let elements = if let Some(list) = lists.get(&owner) {
-                list.items(runtime, &keys, &content, render)
+                // Widget lists are already scoped per owner: no ghost filter.
+                list.items(runtime, &keys, &content, render, None)
             } else {
                 items
                     .iter()
@@ -676,13 +681,13 @@ impl Top {
     /// Parse a config `anchor` value (`top`/`bottom`/`left`/`right`,
     /// case-insensitive). `None` logs nothing — the caller warns.
     pub fn parse_anchor(s: &str) -> Option<Anchor> {
-        match s.trim().to_lowercase().as_str() {
-            "top" => Some(Anchor::Top),
-            "bottom" => Some(Anchor::Bottom),
-            "left" => Some(Anchor::Left),
-            "right" => Some(Anchor::Right),
-            _ => None,
-        }
+        const NAMES: &[(&str, Anchor)] = &[
+            ("top", Anchor::Top),
+            ("bottom", Anchor::Bottom),
+            ("left", Anchor::Left),
+            ("right", Anchor::Right),
+        ];
+        crate::shared::enums::lookup(NAMES, s)
     }
 
     pub fn anchor(&self) -> Anchor {

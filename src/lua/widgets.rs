@@ -332,6 +332,7 @@ mod tests {
                 size: None,
                 width: None,
                 height: None,
+                wrapping: None,
                 color: None,
             }
         );

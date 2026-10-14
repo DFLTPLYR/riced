@@ -371,6 +371,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
         size: Some(14.0),
         width: None,
         height: None,
+        wrapping: None,
         color: None,
     }];
     for line in body.lines().take(3) {
@@ -379,6 +380,7 @@ fn default_tree(n: Option<&Notification>) -> WidgetNode {
             size: Some(12.0),
             width: None,
             height: None,
+            wrapping: None,
             color: None,
         });
     }
@@ -505,10 +507,15 @@ pub(crate) fn view(context: ViewContext<'_>, output: OutputId) -> Element<'_, Pl
             el
         }
     };
-    let elements = context
-        .state
-        .list
-        .items(context.motion, &live_keys, &content, render);
+    let elements = context.state.list.items(
+        context.motion,
+        &live_keys,
+        &content,
+        render,
+        // The list is shared across outputs: only this surface's exits
+        // may paint here, or every dismissal flashes on every monitor.
+        Some(&|key: &(OutputId, u32)| key.0 == output),
+    );
     let mut keys: Vec<u32> = live_keys.iter().map(|(_, id)| *id).collect();
     if keys.is_empty() && !elements.is_empty() {
         keys.push(0);
@@ -517,6 +524,9 @@ pub(crate) fn view(context: ViewContext<'_>, output: OutputId) -> Element<'_, Pl
     scrollable(stack)
         .width(Length::Fill)
         .height(Length::Fill)
+        .direction(iced::widget::scrollable::Direction::Vertical(
+            iced::widget::scrollable::Scrollbar::hidden(),
+        ))
         .on_scroll(move |viewport| {
             Plant::Notify(NotifyEvent::Scrolled(output, viewport.absolute_offset().y))
         })
@@ -864,6 +874,48 @@ mod tests {
     use crate::lua::widgets::{inject_ui, new_widget_lua};
     use crate::ui::decode::parse_node;
     use crate::ui::node::WidgetNode;
+
+    #[test]
+    fn exiting_ghosts_never_render_in_other_outputs_windows() {
+        use aura_anim::core::runtime::MotionRuntime;
+        use std::cell::RefCell;
+        use std::time::Duration;
+        let o1 = OutputId(1);
+        let o2 = OutputId(2);
+        let mut runtime = MotionRuntime::new();
+        let mut list = crate::ui::listview::ListView::<(OutputId, u32), WidgetNode>::new(108.0);
+        // A dismissal on output 1 retires its card into an exit ghost.
+        list.update(
+            &mut runtime,
+            Duration::from_millis(250),
+            crate::ui::listview::Axis::Vertical,
+            &[(o1, 1)],
+            &[],
+            &[(0, (o1, 1), WidgetNode::Spinner)],
+        );
+        assert_eq!(list.ghosts_for(|_| true).len(), 1);
+        // Output 2's window builds its own stack while the ghost is live.
+        let recorded = RefCell::new(Vec::new());
+        let elements = list.items(
+            &runtime,
+            &[(o2, 2)],
+            &|_: &(OutputId, u32)| Some(WidgetNode::Spinner),
+            |key, _node, _motion: ItemMotion, _live| {
+                recorded.borrow_mut().push(*key);
+                let element: Element<'static, Plant, iced::Theme, iced::Renderer> =
+                    iced::widget::Space::new().width(10).height(10).into();
+                element
+            },
+            // Output 2's window only paints output 2's exits.
+            Some(&|key: &(OutputId, u32)| key.0 == o2),
+        );
+        assert_eq!(elements.len(), 1);
+        assert!(
+            !recorded.borrow().iter().any(|key| key.0 == o1),
+            "output-1 exit ghost leaked into output-2's window: {:?}",
+            recorded.borrow()
+        );
+    }
 
     #[test]
     fn new_surface_is_non_focusing_and_click_through_until_its_card_mask_is_installed() {
@@ -1337,6 +1389,7 @@ mod tests {
                     size: None,
                     width: None,
                     height: None,
+                    wrapping: None,
                     color: None,
                 },
             )],

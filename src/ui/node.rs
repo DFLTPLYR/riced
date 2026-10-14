@@ -42,6 +42,7 @@ pub(crate) enum WidgetNode {
         size: Option<f32>,
         width: Option<NodeLength>,
         height: Option<NodeLength>,
+        wrapping: Option<iced::widget::text::Wrapping>,
         color: Option<iced::Color>,
     },
     Icon {
