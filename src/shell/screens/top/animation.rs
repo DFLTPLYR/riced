@@ -139,7 +139,7 @@ mod tests {
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
         for suffix in ["", ":width(80)", ":width('shrink')", ":height(60)"] {
             let source = format!(
-                "return ui.container(ui.scrollable(ui.column({{ui.listview({{{{id=1}}}}):id('sizing'):key('id'):delegate(function() return ui.space():width('fill'):height(20) end){suffix}}}))):padding(7)"
+                "return iced.container(iced.scrollable(iced.column({{iced.listview({{{{id=1}}}}):id('sizing'):key('id'):delegate(function() return iced.space():width('fill'):height(20) end){suffix}}}))):padding(7)"
             );
             let value: mlua::Value = lua.load(source).eval().unwrap();
             let node = crate::ui::decode::parse_node(&value).unwrap();

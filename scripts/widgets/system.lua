@@ -3,12 +3,12 @@ local app = {}
 local allowed = { suspend = true, hibernate = true, reboot = true, poweroff = true }
 
 function app:view()
-    return ui.icon("power")
+    return iced.icon("power")
 end
 
 function app:popup()
     return {
-        ui = ui.card({ title = "Session", icon = "power", body = ui.menu({
+        ui = iced.card({ title = "Session", icon = "power", body = iced.menu({
             id = "session-actions",
             items = {
                 { label = "Suspend", action = "suspend" },

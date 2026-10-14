@@ -1,7 +1,7 @@
 //! Runnable M0 plain-window demo. iced view is pure: Lua renders dirty IR
 //! in the host update/boot, then view realizes the cached owned tree.
 use super::{LuaRuntime, Message, WindowId};
-use crate::ui::build::build_node;
+use crate::ui::build::realize;
 use iced::{
     Element, Length, Task,
     widget::{button, column, container, text},
@@ -87,7 +87,7 @@ impl Demo {
                     }
                 }
             }
-            Message::LuaEvent { .. } => {
+            Message::LuaEvent { .. } | Message::Action(_) => {
                 if let Some(runtime) = &mut self.runtime
                     && runtime.update(&message).is_ok()
                 {
@@ -120,9 +120,8 @@ impl Demo {
                 );
             }
             if let Some(node) = runtime.cached_view(MAIN_WINDOW) {
-                match build_node(node, 14.0, None) {
-                    // M0 is static. M2 routes CallbackId messages instead.
-                    Ok(element) => content = content.push(element.map(|_| Message::Tick)),
+                match realize(node, 14.0, std::sync::Arc::new(Message::Action), true, 1.0) {
+                    Ok(element) => content = content.push(element),
                     Err(error) => content = content.push(text(format!("IR error: {error}"))),
                 }
             }
@@ -143,7 +142,7 @@ pub fn run(path: Option<PathBuf>) -> iced::Result {
         Demo::update,
         Demo::view,
     )
-    .title("riced — Lua runtime M0")
+    .title("riced — Lua runtime")
     .window_size((560.0, 360.0))
     .subscription(|_: &Demo| iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick))
     .run()
@@ -152,6 +151,47 @@ pub fn run(path: Option<PathBuf>) -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn controls_demo_refreshes_all_controls_from_typed_actions() {
+        use crate::ui::action::{Action, ActionValue};
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/controls.lua");
+        let mut demo = Demo::new(Some(path));
+        for (key, value) in [
+            ("enabled", ActionValue::Boolean(true)),
+            ("volume", ActionValue::Number(73.0)),
+            ("query", ActionValue::Text("hello".into())),
+            ("choice", ActionValue::Text("two".into())),
+        ] {
+            let _ = demo.update(Message::Action(Action::change(key.into(), value)));
+            assert!(demo.runtime.as_ref().unwrap().last_error.is_none());
+        }
+        let node = demo
+            .runtime
+            .as_ref()
+            .unwrap()
+            .cached_view(MAIN_WINDOW)
+            .unwrap();
+        let crate::ui::node::WidgetNode::Column { children, .. } = node else {
+            panic!("controls column")
+        };
+        assert!(matches!(
+            children[1],
+            crate::ui::node::WidgetNode::Checkbox { checked: true, .. }
+        ));
+        assert!(matches!(
+            children[4],
+            crate::ui::node::WidgetNode::Slider { value: 73.0, .. }
+        ));
+        assert!(
+            matches!(&children[5], crate::ui::node::WidgetNode::TextInput { value, .. } if value == "hello")
+        );
+        assert!(
+            matches!(&children[6], crate::ui::node::WidgetNode::PickList { selected: Some(value), .. } if value == "two")
+        );
+        let _ = demo.view();
+        let _ = demo.update(Message::Action("reset".into()));
+        assert!(demo.runtime.as_ref().unwrap().last_error.is_none());
+    }
     #[test]
     fn embedded_app_builds_the_entire_window_content() {
         let demo = Demo::new(None);

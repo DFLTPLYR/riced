@@ -115,14 +115,14 @@ pub enum WidgetEvent {
     Changed,
     /// Click a popup item: run the widget's `on_action()` with the item
     /// key, then re-render menu and cell.
-    PopupSelect(Id, String),
+    PopupSelect(Id, crate::ui::action::Action),
     /// Intrinsic content height measured by the popup's live renderer.
     PopupMeasured(Id, u64, u32),
-    /// Click a cell button (`ui.button` in a `render()` tree): run the
+    /// Click a cell button (`iced.button` in a `render()` tree): run the
     /// owning widget's `on_action()` with the button key, then
     /// re-render that widget (a toggle flips its next output). Carries
     /// the origin bar so `on_action` sees that bar's `bar.output`.
-    CellAction(Id, String, String),
+    CellAction(Id, String, crate::ui::action::Action),
 }
 
 /// Bar/layout configuration events: geometry and per-slot layout,

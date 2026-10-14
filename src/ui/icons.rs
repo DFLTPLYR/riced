@@ -46,6 +46,13 @@ pub(crate) fn icon_segments(output: &str) -> Vec<Segment<'_>> {
     segments
 }
 pub(crate) fn rich_text(output: String, size: f32, spacing: f32) -> Element<'static, Plant> {
+    rich_text_for(output, size, spacing)
+}
+pub(crate) fn rich_text_for<M: 'static>(
+    output: String,
+    size: f32,
+    spacing: f32,
+) -> Element<'static, M> {
     let size = size.max(1.0);
     if !output.contains("{icon:") {
         return text(output).size(size).into();

@@ -167,7 +167,7 @@ mod tests {
             function app:view(props)
                 assert(self.props == props)
                 self.calls = self.calls + 1
-                return ui.container(ui.text(props.label .. self.calls)):width(props.width)
+                return iced.container(iced.text(props.label .. self.calls)):width(props.width)
             end
             return app
         "#,
@@ -214,7 +214,7 @@ mod tests {
         }
         std::fs::write(
             &path,
-            "return {defaults={}, view=function(self, props) return ui.text('recovered') end}",
+            "return {defaults={}, view=function(self, props) return iced.text('recovered') end}",
         )
         .unwrap();
         let repaired = engine
@@ -279,7 +279,7 @@ mod tests {
         engine
             .render_checked("menu", &frame, host(), &theme, None, validate)
             .unwrap();
-        std::fs::write(&frame_path, "return {view=function(self,p) return ui.container(ui.text('invalid')):width(p.width):height('fill') end}").unwrap();
+        std::fs::write(&frame_path, "return {view=function(self,p) return iced.container(iced.text('invalid')):width(p.width):height('fill') end}").unwrap();
         frame.props.insert("width".into(), PropValue::Number(220.0));
         let retained = engine
             .render_checked("menu", &frame, host(), &theme, None, validate)
@@ -355,7 +355,7 @@ mod tests {
                 .render("one", &config, json!({}), &theme, None)
                 .is_none()
         );
-        std::fs::write(&path, "local app={defaults={color=theme.primary}}; function app:view(props) return ui.text('ready'):color(props.color) end; return app").unwrap();
+        std::fs::write(&path, "local app={defaults={color=theme.primary}}; function app:view(props) return iced.text('ready'):color(props.color) end; return app").unwrap();
         assert!(
             engine
                 .render("one", &config, json!({}), &theme, None)

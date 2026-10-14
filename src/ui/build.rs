@@ -1,6 +1,7 @@
 //! Realize owned nodes into iced elements. Host actions stay opaque callbacks.
+use super::action::{Action, ActionValue, Sender};
 use super::{
-    icons::{icon_bytes, rich_text},
+    icons::{icon_bytes, rich_text_for as rich_text},
     node::{NodeLength, WidgetNode},
 };
 use crate::{shell::Plant, theme};
@@ -16,6 +17,14 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         _ => base,
     };
     match node {
+        WidgetNode::Checkbox { size, .. }
+        | WidgetNode::Radio { size, .. }
+        | WidgetNode::Toggler { size, .. } => size.unwrap_or(base).max(base * 1.4),
+        WidgetNode::Slider { height, .. } => height.unwrap_or(22.0),
+        WidgetNode::TextInput { size, padding, .. }
+        | WidgetNode::PickList { size, padding, .. } => {
+            size.unwrap_or(base) * 1.4 + padding.unwrap_or(6.0) * 2.0
+        }
         WidgetNode::Text { size: own, .. } => own.unwrap_or(base).max(1.0) * 1.4,
         WidgetNode::Icon { .. } | WidgetNode::Spinner => base * 1.5,
         WidgetNode::Separator { height, .. } => height.max(1.0),
@@ -58,16 +67,35 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
 pub(crate) fn build_node(
     node: &WidgetNode,
     size: f32,
-    button_msg: Option<&dyn Fn(String) -> Plant>,
+    button_msg: Option<Sender>,
 ) -> Result<Element<'static, Plant>, String> {
     build_node_opacity(node, size, button_msg, 1.0)
 }
 pub(crate) fn build_node_opacity(
     node: &WidgetNode,
     size: f32,
-    button_msg: Option<&dyn Fn(String) -> Plant>,
+    button_msg: Option<Sender>,
     opacity: f32,
 ) -> Result<Element<'static, Plant>, String> {
+    let interactive = button_msg.is_some();
+    realize(
+        node,
+        size,
+        button_msg.unwrap_or_else(|| std::sync::Arc::new(|_| Plant::Tend)),
+        interactive,
+        opacity,
+    )
+}
+
+/// Realize a description for any host message type. The owned sender captures
+/// routing identity; native control callbacks never borrow a Lua VM or host.
+pub(crate) fn realize<M: Clone + 'static>(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Sender<M>,
+    interactive: bool,
+    opacity: f32,
+) -> Result<Element<'static, M>, String> {
     match node {
         WidgetNode::ListView {
             items,
@@ -93,7 +121,7 @@ pub(crate) fn build_node_opacity(
                     height: height.clone(),
                 }
             };
-            build_node_opacity(&layout, size, button_msg, opacity)
+            realize(&layout, size, button_msg, interactive, opacity)
         }
         WidgetNode::Container {
             child,
@@ -109,7 +137,7 @@ pub(crate) fn build_node_opacity(
             let radius = *radius;
             let border = border.map(|c| c.scale_alpha(opacity));
             let border_width = *border_width;
-            let content = container(build_node_opacity(child, size, button_msg, opacity)?);
+            let content = container(realize(child, size, button_msg, interactive, opacity)?);
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
                 .width(width.resolve(hints.width))
@@ -132,7 +160,7 @@ pub(crate) fn build_node_opacity(
             height,
         } => {
             let content =
-                iced::widget::scrollable(build_node_opacity(child, size, button_msg, opacity)?);
+                iced::widget::scrollable(realize(child, size, button_msg, interactive, opacity)?);
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
                 .width(width.resolve(hints.width))
@@ -185,7 +213,7 @@ pub(crate) fn build_node_opacity(
             Ok(t.into())
         }
         WidgetNode::Icon { name, color } => {
-            let base: Element<'static, Plant> = match icon_bytes(name) {
+            let base: Element<'static, M> = match icon_bytes(name) {
                 Some(bytes) => lucide_iced::themed_icon(bytes, size.max(1.0)),
                 None => text(format!("{{icon:{name}}}")).size(size.max(1.0)).into(),
             };
@@ -213,7 +241,13 @@ pub(crate) fn build_node_opacity(
                 .spacing(spacing.max(0.0))
                 .align_y(iced::Alignment::Center);
             for child in children {
-                row = row.push(build_node_opacity(child, size, button_msg, opacity)?);
+                row = row.push(realize(
+                    child,
+                    size,
+                    button_msg.clone(),
+                    interactive,
+                    opacity,
+                )?);
             }
             let hints = iced::advanced::Widget::size(&row);
             Ok(row
@@ -231,7 +265,13 @@ pub(crate) fn build_node_opacity(
                 .spacing(spacing.max(0.0))
                 .align_x(iced::Alignment::Center);
             for child in children {
-                column = column.push(build_node_opacity(child, size, button_msg, opacity)?);
+                column = column.push(realize(
+                    child,
+                    size,
+                    button_msg.clone(),
+                    interactive,
+                    opacity,
+                )?);
             }
             let hints = iced::advanced::Widget::size(&column);
             Ok(column
@@ -282,10 +322,269 @@ pub(crate) fn build_node_opacity(
             if let Some(h) = height {
                 item = item.height(h.clone().iced());
             }
-            if let Some(make_msg) = button_msg {
-                item = item.on_press(make_msg(action.clone()));
+            if interactive {
+                item = item.on_press(button_msg(action.clone().into()));
             }
             Ok(item.into())
+        }
+        WidgetNode::Checkbox {
+            label,
+            checked,
+            on_toggle,
+            width,
+            size: own,
+            spacing,
+        } => {
+            let mut item = iced::widget::checkbox(*checked)
+                .label(label.clone())
+                .spacing(*spacing);
+            if opacity < 1.0 {
+                item = item.style(move |theme, status| {
+                    let mut style = iced::widget::checkbox::primary(theme, status);
+                    style.background = style.background.scale_alpha(opacity);
+                    style.icon_color = style.icon_color.scale_alpha(opacity);
+                    style.border.color = style.border.color.scale_alpha(opacity);
+                    style.text_color = Some(
+                        style
+                            .text_color
+                            .unwrap_or_else(crate::theme::text)
+                            .scale_alpha(opacity),
+                    );
+                    style
+                });
+            }
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(size) = own {
+                item = item.size(*size);
+            }
+            if interactive && let Some(key) = on_toggle {
+                let key = key.clone();
+                item = item.on_toggle(move |value| {
+                    button_msg(Action::change(key.clone(), ActionValue::Boolean(value)))
+                });
+            }
+            Ok(item.into())
+        }
+        WidgetNode::Toggler {
+            label,
+            enabled,
+            on_toggle,
+            width,
+            size: own,
+            spacing,
+        } => {
+            let mut item = iced::widget::toggler(*enabled)
+                .label(label.clone())
+                .spacing(*spacing);
+            if opacity < 1.0 {
+                item = item.style(move |theme, status| {
+                    let mut style = iced::widget::toggler::default(theme, status);
+                    style.background = style.background.scale_alpha(opacity);
+                    style.foreground = style.foreground.scale_alpha(opacity);
+                    style.background_border_color =
+                        style.background_border_color.scale_alpha(opacity);
+                    style.foreground_border_color =
+                        style.foreground_border_color.scale_alpha(opacity);
+                    style.text_color = Some(
+                        style
+                            .text_color
+                            .unwrap_or_else(crate::theme::text)
+                            .scale_alpha(opacity),
+                    );
+                    style
+                });
+            }
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(size) = own {
+                item = item.size(*size);
+            }
+            if interactive && let Some(key) = on_toggle {
+                let key = key.clone();
+                item = item.on_toggle(move |value| {
+                    button_msg(Action::change(key.clone(), ActionValue::Boolean(value)))
+                });
+            }
+            Ok(item.into())
+        }
+        WidgetNode::Slider {
+            min,
+            max,
+            value,
+            step,
+            on_change,
+            on_release,
+            width,
+            height,
+        } => {
+            let key = on_change.clone().unwrap_or_default();
+            let sender = button_msg.clone();
+            let mut item = iced::widget::slider(*min..=*max, *value, move |value| {
+                sender(Action::change(key.clone(), ActionValue::Number(value)))
+            })
+            .step(*step);
+            if opacity < 1.0 {
+                item = item.style(move |theme, status| {
+                    let mut style = iced::widget::slider::default(theme, status);
+                    style.rail.backgrounds.0 = style.rail.backgrounds.0.scale_alpha(opacity);
+                    style.rail.backgrounds.1 = style.rail.backgrounds.1.scale_alpha(opacity);
+                    style.rail.border.color = style.rail.border.color.scale_alpha(opacity);
+                    style.handle.background = style.handle.background.scale_alpha(opacity);
+                    style.handle.border_color = style.handle.border_color.scale_alpha(opacity);
+                    style
+                });
+            }
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(height) = height {
+                item = item.height(*height);
+            }
+            if interactive && let Some(key) = on_release {
+                item = item.on_release(button_msg(key.clone().into()));
+            }
+            let element = item.into();
+            Ok(if interactive && on_change.is_some() {
+                element
+            } else {
+                super::motion::shifted(element, 0.0, 0.0, false)
+            })
+        }
+        WidgetNode::TextInput {
+            placeholder,
+            value,
+            on_input,
+            on_submit,
+            width,
+            size: own,
+            padding,
+            secure,
+        } => {
+            let mut item = iced::widget::text_input(placeholder, value).secure(*secure);
+            if opacity < 1.0 {
+                item = item.style(move |theme, status| {
+                    let mut style = iced::widget::text_input::default(theme, status);
+                    style.background = style.background.scale_alpha(opacity);
+                    style.border.color = style.border.color.scale_alpha(opacity);
+                    style.icon = style.icon.scale_alpha(opacity);
+                    style.placeholder = style.placeholder.scale_alpha(opacity);
+                    style.value = style.value.scale_alpha(opacity);
+                    style.selection = style.selection.scale_alpha(opacity);
+                    style
+                });
+            }
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(size) = own {
+                item = item.size(*size);
+            }
+            if let Some(padding) = padding {
+                item = item.padding(*padding);
+            }
+            if interactive && let Some(key) = on_submit {
+                item = item.on_submit(button_msg(key.clone().into()));
+            }
+            if interactive && let Some(key) = on_input {
+                let key = key.clone();
+                item = item.on_input(move |value| {
+                    button_msg(Action::change(key.clone(), ActionValue::Text(value)))
+                });
+            }
+            Ok(item.into())
+        }
+        WidgetNode::PickList {
+            options,
+            selected,
+            on_select,
+            width,
+            placeholder,
+            padding,
+            size: own,
+        } => {
+            let key = on_select.clone().unwrap_or_default();
+            let mut item =
+                iced::widget::pick_list(options.clone(), selected.clone(), move |value| {
+                    button_msg(Action::change(key.clone(), ActionValue::Text(value)))
+                });
+            if opacity < 1.0 {
+                item = item.style(move |theme, status| {
+                    let mut style = iced::widget::pick_list::default(theme, status);
+                    style.background = style.background.scale_alpha(opacity);
+                    style.border.color = style.border.color.scale_alpha(opacity);
+                    style.text_color = style.text_color.scale_alpha(opacity);
+                    style.placeholder_color = style.placeholder_color.scale_alpha(opacity);
+                    style.handle_color = style.handle_color.scale_alpha(opacity);
+                    style
+                });
+            }
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(placeholder) = placeholder {
+                item = item.placeholder(placeholder.clone());
+            }
+            if let Some(padding) = padding {
+                item = item.padding(*padding);
+            }
+            if let Some(size) = own {
+                item = item.text_size(*size);
+            }
+            let element = item.into();
+            Ok(if interactive && on_select.is_some() {
+                element
+            } else {
+                super::motion::shifted(element, 0.0, 0.0, false)
+            })
+        }
+        WidgetNode::Radio {
+            label,
+            value,
+            selected,
+            on_select,
+            width,
+            size: own,
+            spacing,
+        } => {
+            let key = on_select.clone().unwrap_or_default();
+            let value = value.clone();
+            let mut item = iced::widget::radio(
+                label.clone(),
+                true,
+                Some(selected.as_ref() == Some(&value)),
+                move |_| button_msg(Action::change(key, ActionValue::Text(value))),
+            )
+            .spacing(*spacing);
+            if opacity < 1.0 {
+                item = item.style(move |theme, status| {
+                    let mut style = iced::widget::radio::default(theme, status);
+                    style.background = style.background.scale_alpha(opacity);
+                    style.dot_color = style.dot_color.scale_alpha(opacity);
+                    style.border_color = style.border_color.scale_alpha(opacity);
+                    style.text_color = Some(
+                        style
+                            .text_color
+                            .unwrap_or_else(crate::theme::text)
+                            .scale_alpha(opacity),
+                    );
+                    style
+                });
+            }
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(size) = own {
+                item = item.size(*size);
+            }
+            let element = item.into();
+            Ok(if interactive && on_select.is_some() {
+                element
+            } else {
+                super::motion::shifted(element, 0.0, 0.0, false)
+            })
         }
         WidgetNode::Progress {
             value,
@@ -371,10 +670,10 @@ mod tests {
         };
         let body = "word ".repeat(24).trim_end().to_string();
         let word_h = layout_height(&format!(
-            "ui.text('{body}'):size(24):width(120):wrap('word')"
+            "iced.text('{body}'):size(24):width(120):wrap('word')"
         ));
         let none_h = layout_height(&format!(
-            "ui.text('{body}'):size(24):width(120):wrap('none')"
+            "iced.text('{body}'):size(24):width(120):wrap('none')"
         ));
         assert!(
             word_h > none_h * 2.0,
@@ -415,43 +714,43 @@ mod tests {
         let fill = || Space::new().width(Length::Fill).height(20);
         let cases: Vec<(&str, Element<'static, Plant>)> = vec![
             (
-                "ui.container(ui.space():width(40):height(20)):padding(7)",
+                "iced.container(iced.space():width(40):height(20)):padding(7)",
                 container(fixed()).padding(7).into(),
             ),
             (
-                "ui.container(ui.space():width('fill'):height(20)):padding(7)",
+                "iced.container(iced.space():width('fill'):height(20)):padding(7)",
                 container(fill()).padding(7).into(),
             ),
             (
-                "ui.container(ui.space():width(40):height(20)):width('fill')",
+                "iced.container(iced.space():width(40):height(20)):width('fill')",
                 container(fixed()).width(Length::Fill).into(),
             ),
             (
-                "ui.container(ui.space():width('fill'):height(20)):height(60)",
+                "iced.container(iced.space():width('fill'):height(20)):height(60)",
                 container(fill()).height(60).into(),
             ),
             (
-                "ui.container(ui.space():width('fill'):height(20)):width('shrink')",
+                "iced.container(iced.space():width('fill'):height(20)):width('shrink')",
                 container(fill()).width(Length::Shrink).into(),
             ),
             (
-                "ui.scrollable(ui.space():width(40):height(20))",
+                "iced.scrollable(iced.space():width(40):height(20))",
                 iced::widget::scrollable(fixed()).into(),
             ),
             (
-                "ui.scrollable(ui.space():width('fill'):height(20))",
+                "iced.scrollable(iced.space():width('fill'):height(20))",
                 iced::widget::scrollable(fill()).into(),
             ),
             (
-                "ui.row({ui.space():width('fill'):height(20)}):width('shrink')",
+                "iced.row({iced.space():width('fill'):height(20)}):width('shrink')",
                 row![fill()].width(Length::Shrink).into(),
             ),
             (
-                "ui.column({ui.space():width('fill'):height(20)}):width(80)",
+                "iced.column({iced.space():width('fill'):height(20)}):width(80)",
                 iced::widget::column![fill()].width(80).into(),
             ),
             (
-                "ui.container(ui.column({ui.text('Hello'),ui.text('World')}):spacing(8)):padding(12)",
+                "iced.container(iced.column({iced.text('Hello'),iced.text('World')}):spacing(8)):padding(12)",
                 container(
                     iced::widget::column![text("Hello").size(13), text("World").size(13)]
                         .spacing(8)
@@ -489,17 +788,17 @@ mod tests {
         let lua = lua();
         for (source, width, has_color) in [
             (
-                r##"return ui.container(ui.text('x')):border('#ff0000')"##,
+                r##"return iced.container(iced.text('x')):border('#ff0000')"##,
                 1.0,
                 true,
             ),
             (
-                r##"return ui.container(ui.text('x')):border('#ff0000'):border_width(3)"##,
+                r##"return iced.container(iced.text('x')):border('#ff0000'):border_width(3)"##,
                 3.0,
                 true,
             ),
             (
-                "return ui.container(ui.text('x')):border_width(3)",
+                "return iced.container(iced.text('x')):border_width(3)",
                 3.0,
                 false,
             ),
@@ -521,7 +820,7 @@ mod tests {
             }
         }
         let value: Value = lua
-            .load(r##"return ui.button('go','run'):background('#00ff00')"##)
+            .load(r##"return iced.button('go','run'):background('#00ff00')"##)
             .eval()
             .unwrap();
         assert!(matches!(
@@ -532,7 +831,7 @@ mod tests {
             }
         ));
         let value: Value = lua
-            .load(r##"return ui.progress(0.5):color('#ff0000'):background('#0000ff')"##)
+            .load(r##"return iced.progress(0.5):color('#ff0000'):background('#0000ff')"##)
             .eval()
             .unwrap();
         assert!(matches!(
@@ -544,7 +843,7 @@ mod tests {
             }
         ));
         let value: Value = lua
-            .load("return ui.separator():color({r=1,g=0,b=0})")
+            .load("return iced.separator():color({r=1,g=0,b=0})")
             .eval()
             .unwrap();
         assert!(matches!(
@@ -552,28 +851,28 @@ mod tests {
             WidgetNode::Separator { color: Some(_), .. }
         ));
         for source in [
-            r##"return ui.container(ui.text('x')):background('#112233'):border('#ff0000'):radius(8)"##,
-            r##"return ui.button('go','run'):background('#00ff00'):color('#000000')"##,
-            r##"return ui.progress(0.5):color('#ff0000'):background('#0000ff')"##,
-            r##"return ui.separator():color('#ff0000')"##,
+            r##"return iced.container(iced.text('x')):background('#112233'):border('#ff0000'):radius(8)"##,
+            r##"return iced.button('go','run'):background('#00ff00'):color('#000000')"##,
+            r##"return iced.progress(0.5):color('#ff0000'):background('#0000ff')"##,
+            r##"return iced.separator():color('#ff0000')"##,
         ] {
             let value: Value = lua.load(source).eval().unwrap();
             let _ = build_node(&parse_node(&value).unwrap(), 13.0, None).unwrap();
         }
         for source in [
-            "return ui.button('go','run'):background(42)",
-            "return ui.separator():color(42)",
+            "return iced.button('go','run'):background(42)",
+            "return iced.separator():color(42)",
         ] {
             let value: Value = lua.load(source).eval().unwrap();
             assert!(parse_node(&value).is_err());
         }
         assert!(
-            lua.load(r##"return ui.text('x'):background('#fff')"##)
+            lua.load(r##"return iced.text('x'):background('#fff')"##)
                 .eval::<Value>()
                 .is_err()
         );
         assert!(
-            lua.load(r##"return ui.button('go','run'):border('#fff')"##)
+            lua.load(r##"return iced.button('go','run'):border('#fff')"##)
                 .eval::<Value>()
                 .is_err()
         );
@@ -642,18 +941,18 @@ mod tests {
         ] {
             let _ = build_node(&node, 13.0, None).unwrap();
         }
-        let _ = build_node(&button, 13.0, Some(&|_| Plant::Tend)).unwrap();
+        let _ = build_node(&button, 13.0, Some(std::sync::Arc::new(|_| Plant::Tend))).unwrap();
     }
 
     #[test]
     fn ui_spinner_parses_and_builds() {
         let lua = lua();
-        let value: Value = lua.load("return ui.spinner()").eval().unwrap();
+        let value: Value = lua.load("return iced.spinner()").eval().unwrap();
         let node = parse_node(&value).unwrap();
         assert_eq!(node, WidgetNode::Spinner);
         let _ = build_node(&node, 13.0, None).unwrap();
         let value: Value = lua
-            .load("return ui.row({ui.spinner(),ui.text('x')})")
+            .load("return iced.row({iced.spinner(),iced.text('x')})")
             .eval()
             .unwrap();
         assert!(

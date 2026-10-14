@@ -59,13 +59,13 @@ fn render_slot_widgets(
                 .unwrap_or(crate::config::WidgetDefaults::default().size);
             let scope = format!("{bar:?}/{id}");
             let action_id = id.clone();
-            let message = move |action| {
+            let message: crate::ui::action::Sender = std::sync::Arc::new(move |action| {
                 Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(
                     bar,
                     action_id.clone(),
                     action,
                 )))
-            };
+            });
             let built = match node {
                 WidgetNode::Row {
                     children,
@@ -86,7 +86,7 @@ fn render_slot_widgets(
                     height.clone(),
                     matches!(node, WidgetNode::Row { .. }),
                     size,
-                    &message,
+                    message.clone(),
                     context.motion,
                     context.lists,
                 ),
@@ -94,7 +94,7 @@ fn render_slot_widgets(
                     node,
                     &scope,
                     size,
-                    Some(&message),
+                    Some(message),
                     context.motion,
                     context.lists,
                 ),

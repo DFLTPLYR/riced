@@ -11,7 +11,7 @@ end
 
 function app:view(props)
     local color = props.color or theme.primary
-    return ui.container(ui.space())
+    return iced.container(iced.space())
         :width(props.width):height(props.height)
         :background(alpha(color, props.fill_alpha))
         :border(color):border_width(props.border_width):radius(props.radius)

@@ -72,7 +72,7 @@ mod tests {
         let mut registry = Registry::default();
         let good = vec![(
             PathBuf::from("builder.lua"),
-            "ui.define('test', function(p) return ui.text(p.text) end)".into(),
+            "iced.define('test', function(p) return iced.text(p.text) end)".into(),
         )];
         assert_eq!(
             registry.select(Profile::Widget, good.clone()).unwrap(),
@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(registry.select(Profile::Widget, runaway).unwrap(), good);
         let repaired = vec![(
             PathBuf::from("builder.lua"),
-            "ui.define('test', function(p) return ui.text('repaired') end)".into(),
+            "iced.define('test', function(p) return iced.text('repaired') end)".into(),
         )];
         assert_eq!(
             registry.select(Profile::Widget, repaired.clone()).unwrap(),

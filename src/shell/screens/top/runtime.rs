@@ -247,7 +247,7 @@ mod tests {
         let lua = new_widget_lua().unwrap();
         load_widget_script(&lua,"unchanged",r#"return {
             calls=0, transition_calls=0,
-            view=function(self) self.calls=self.calls+1; return ui.column({ui.text(self.label or 'Same')}) end,
+            view=function(self) self.calls=self.calls+1; return iced.column({iced.text(self.label or 'Same')}) end,
             transitions=function(self) self.transition_calls=self.transition_calls+1; return {} end
         }"#).unwrap();
         let app: mlua::Table = lua.named_registry_value("riced.widget.app").unwrap();

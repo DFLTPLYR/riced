@@ -80,7 +80,9 @@ mod tests {
             let mut element = crate::ui::build::build_node(
                 &node,
                 12.0,
-                Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
+                Some(std::sync::Arc::new(|action| {
+                    context_menu_message(&action.key).unwrap_or(Plant::Tend)
+                })),
             )
             .unwrap();
             let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
@@ -193,7 +195,9 @@ mod tests {
             let content = crate::ui::build::build_node(
                 &menu,
                 12.0,
-                Some(&|action| context_menu_message(&action).unwrap_or(Plant::Tend)),
+                Some(std::sync::Arc::new(|action| {
+                    context_menu_message(&action.key).unwrap_or(Plant::Tend)
+                })),
             )
             .unwrap();
             let bounds: crate::ui::widgets::anchored::Bounds = Default::default();
@@ -958,10 +962,11 @@ impl Background {
             return Space::new().width(0).height(0).into();
         }
         let node = Self::context_menu_node(plots, output, avail);
-        let message =
-            |action| Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action));
+        let message: crate::ui::action::Sender = std::sync::Arc::new(move |action| {
+            Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action.key))
+        });
         let content =
-            crate::ui::build::build_node(&node, 12.0, Some(&message)).expect("validated menu tree");
+            crate::ui::build::build_node(&node, 12.0, Some(message)).expect("validated menu tree");
         crate::ui::widgets::anchored::anchored(
             content,
             Point::new(lx, ly),

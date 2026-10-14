@@ -727,7 +727,7 @@ pub use paths::config_path;
 /// ```lua
 /// local app = {}
 /// function app:view()
-///     return ui.row({ ui.icon("cpu"), ui.text("42%") })
+///     return iced.row({ iced.icon("cpu"), iced.text("42%") })
 /// end
 /// return app
 /// ```
@@ -753,7 +753,7 @@ pub use paths::config_path;
 ///     },
 /// }
 /// function app:view()
-///     return ui.text(os.date(self.props.format))
+///     return iced.text(os.date(self.props.format))
 /// end
 /// return app
 /// ```
@@ -775,29 +775,29 @@ pub use paths::config_path;
 ///
 /// ## `ui.*` declarative constructors
 ///
-/// - `ui.text(s)`: themed text (icon placeholders resolved).
-/// - `ui.icon(name)`: full Lucide set by name (`"bot"`,
+/// - `iced.text(s)`: themed text (icon placeholders resolved).
+/// - `iced.icon(name)`: full Lucide set by name (`"bot"`,
 ///   `"robot-vacuum"`, `"memory-stick"` — case/separators ignored)
 ///   plus short aliases (`mem`, `vol`, `up`...). Unknown names render
 ///   literal so typos stay visible.
-/// - `ui.row({...} [, spacing])` / `ui.column({...} [, spacing])`:
+/// - `iced.row({...} [, spacing])` / `iced.column({...} [, spacing])`:
 ///   nest freely.
-/// - `ui.button(label, action)`: per-widget MouseArea — clicking calls
+/// - `iced.button(label, action)`: per-widget MouseArea — clicking calls
 ///   that widget's `on_action(action)` directly (missing `on_action`
 ///   is a silent no-op), never the slot popup/`on_press` fallback.
 ///   `:background()` repaints the resting surface; hover/press stay
 ///   themed so clicks still read.
-/// - `ui.progress(0.0-1.0 [, width])`: bar, clamped, 120px default.
+/// - `iced.progress(0.0-1.0 [, width])`: bar, clamped, 120px default.
 ///   `:color()` repaints the fill, `:background()` the track.
-/// - `ui.spinner()`: loading ring for slow fetches — return it first,
+/// - `iced.spinner()`: loading ring for slow fetches — return it first,
 ///   swap in cached data on later ticks (see clinepass seed).
-/// - `ui.separator()`: horizontal hairline, theme border color
+/// - `iced.separator()`: horizontal hairline, theme border color
 ///   unless `:color()` overrides. Always full-width.
-/// - `ui.container(child)`: the styling base — `:background()`,
+/// - `iced.container(child)`: the styling base — `:background()`,
 ///   `:border()` (implies 1px; `:border_width()` adjusts, bare width
 ///   without a color paints nothing), `:radius()`, `:padding()`.
 ///   Compose it (directly or via `iced.define`) for cards, chips and
-///   panels: `ui.container(body):background(theme.surface)`
+///   panels: `iced.container(body):background(theme.surface)`
 ///   `:border(theme.outline):radius(8)`.
 ///
 /// ## Chaining (iced-spelled setters)
@@ -806,11 +806,11 @@ pub use paths::config_path;
 /// builders — each setter writes its field and returns the node:
 ///
 /// ```lua
-/// ui.progress(p / 100):width(200):height(12)
-/// ui.progress(p / 100):width("fill")
-/// ui.text("hi"):size(14):height(20)
-/// ui.row({...}):spacing(8):width("fill")
-/// ui.button("go", "run"):width(120):height(36):padding(4)
+/// iced.progress(p / 100):width(200):height(12)
+/// iced.progress(p / 100):width("fill")
+/// iced.text("hi"):size(14):height(20)
+/// iced.row({...}):spacing(8):width("fill")
+/// iced.button("go", "run"):width(120):height(36):padding(4)
 /// ```
 ///
 /// Sizes are numbers (px, backward-compat), `"fill"`, or `"shrink"`
@@ -839,7 +839,7 @@ pub use paths::config_path;
 ///
 /// One native list component (`layers::listview::ListView`) serves every
 /// animated list in the shell, with QML-style `on_entered` / `on_exit`
-/// / `on_displaced` transitions. Direct `ui.button` children of a cell's
+/// / `on_displaced` transitions. Direct `iced.button` children of a cell's
 /// top-level row/column animate on add/remove (keyed by `action`,
 /// driven by aura-anim): entering items fade/slide in, removed items linger
 /// as inert ghosts fading out, then leave. Notification cards use the
@@ -904,7 +904,7 @@ pub use paths::config_path;
 ///
 /// local app = {}
 /// function app:view()
-///     return ui.stat({ icon = "cpu", value = "42%" }):width("fill")
+///     return iced.stat({ icon = "cpu", value = "42%" }):width("fill")
 /// end
 /// return app
 /// ```
@@ -942,7 +942,7 @@ pub use paths::config_path;
 /// menu with its return — either body text or a table with `text`,
 /// `width`/`height`, clickable `items` (`{ label, action }` rows
 /// calling `on_action(action)`), and a composed `ui` body (any `ui.*`
-/// tree, rendered above the items). `ui.button`s inside the body work
+/// tree, rendered above the items). `iced.button`s inside the body work
 /// exactly like `items` rows (same `on_action` key); `items` remains
 /// the shorthand for uniform full-width menu rows. Otherwise
 /// `on_press()` runs as a
@@ -952,15 +952,15 @@ pub use paths::config_path;
 /// hit-tested per widget (each cell widget owns a mouse area), so
 /// every widget in a slot gets its own popup/`on_press` calls.
 /// Presses record their target and only the matching release acts,
-/// which also keeps inner `ui.button` clicks from double-firing the
+/// which also keeps inner `iced.button` clicks from double-firing the
 /// widget. Gap clicks fall back to the slot (first popup, else first
 /// `on_press`).
 ///
 /// ```lua
 /// local app = { details = false }
-/// function app:view() return ui.text("Details") end
+/// function app:view() return iced.text("Details") end
 /// function app:popup()
-///     return { ui = ui.row({ ui.icon("clock"), ui.text(os.date("%H:%M")) }),
+///     return { ui = iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) }),
 ///              width = 300, height = 200 }
 /// end
 ///

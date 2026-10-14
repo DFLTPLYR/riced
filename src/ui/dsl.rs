@@ -2,13 +2,13 @@
 use crate::lua::value::lua_value_kind;
 use mlua::{Function, Lua, Table, Value};
 
-fn setter(lua: &Lua, field: &str, types: &'static [&'static str]) -> mlua::Result<Function> {
+fn setter(lua: &Lua, field: &str, expected: &'static str) -> mlua::Result<Function> {
     let key = field.to_owned();
     lua.create_function(move |_, (node, value): (Table, Value)| {
         let kind: String = node.get("type")?;
-        if !types.contains(&kind.as_str()) {
+        if kind != expected {
             return Err(mlua::Error::RuntimeError(format!(
-                "ui {kind} has no :{key}() setter"
+                "iced.{kind} has no :{key}() setter"
             )));
         }
         let properties: Table = node.raw_get("_properties")?;
@@ -25,7 +25,7 @@ fn mt_for(lua: &Lua, methods: &[(&str, Function)]) -> mlua::Result<Table> {
     mt.set("__index", index)?;
     Ok(mt)
 }
-fn node(
+pub(super) fn node(
     lua: &Lua,
     kind: &str,
     mt: Table,
@@ -35,24 +35,11 @@ fn node(
     table.set("type", kind)?;
     build(&table)?;
     let properties = lua.create_table()?;
-    for field in [
-        "size",
-        "width",
-        "height",
-        "wrap",
-        "spacing",
-        "padding",
-        "color",
-        "background",
-        "border",
-        "border_width",
-        "radius",
-        "id",
-        "key",
-        "delegate",
-        "axis",
-        "pitch",
-    ] {
+    let component = super::components::COMPONENTS
+        .iter()
+        .find(|component| component.name == kind)
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("unknown iced component {kind}")))?;
+    for &field in component.setters {
         properties.set(field, table.raw_get::<Value>(field)?)?;
         table.raw_set(field, Value::Nil)?;
     }
@@ -61,62 +48,16 @@ fn node(
     Ok(table)
 }
 pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
-    let ui = lua.create_table()?;
-    let shapes: [(&str, &[&str], &'static [&'static str]); 8] = [
-        (
-            "text",
-            &["size", "width", "height", "wrap", "color"],
-            &["text"],
-        ),
-        ("icon", &["color"], &["icon"]),
-        (
-            "rowcol",
-            &["spacing", "width", "height"],
-            &["row", "column"],
-        ),
-        (
-            "button",
-            &[
-                "width",
-                "height",
-                "padding",
-                "radius",
-                "background",
-                "color",
-            ],
-            &["button"],
-        ),
-        (
-            "progress",
-            &["width", "height", "color", "background"],
-            &["progress"],
-        ),
-        ("bare", &[], &["spinner"]),
-        ("separator", &["height", "color"], &["separator"]),
-        (
-            "listview",
-            &[
-                "id", "key", "delegate", "axis", "pitch", "spacing", "width", "height",
-            ],
-            &["listview"],
-        ),
-    ];
+    let iced = lua.create_table()?;
     let mts = lua.create_table()?;
-    for (shape, fields, types) in shapes {
+    let schemas = lua.create_table()?;
+    for component in super::components::COMPONENTS {
+        let kind = component.name;
         let mut methods = Vec::new();
-        for field in fields {
-            let allowed = match (shape, *field) {
-                ("listview", _) => &["listview"][..],
-                ("separator", "height") => &["separator"][..],
-                (_, "width" | "height") => &["text", "row", "column", "button", "progress"][..],
-                (_, "color") => &["text", "icon", "button", "progress", "separator"][..],
-                (_, "background") => &["container", "button", "progress"][..],
-                ("button", "radius") => &["button", "container"][..],
-                _ => types,
-            };
-            methods.push((*field, setter(lua, field, allowed)?));
+        for &field in component.setters {
+            methods.push((field, setter(lua, field, kind)?));
         }
-        if shape == "listview" {
+        if kind == "listview" {
             for (method, slot) in [
                 ("onEntered", "add"),
                 ("onExit", "remove"),
@@ -133,109 +74,52 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
             }
         }
         let mt = mt_for(lua, &methods)?;
-        mts.set(shape, mt.clone())?;
-        if shape != "listview" {
-            lua.globals().set(format!("_riced_ui_mt_{shape}"), mt)?;
-        }
-    }
-    for kind in ["container", "scrollable", "space", "image"] {
-        let mut methods = vec![
-            (
-                "width",
-                setter(lua, "width", &["container", "scrollable", "space", "image"])?,
-            ),
-            (
-                "height",
-                setter(
-                    lua,
-                    "height",
-                    &["container", "scrollable", "space", "image"],
-                )?,
-            ),
-        ];
-        if kind == "container" {
-            for field in ["padding", "background", "radius", "border", "border_width"] {
-                let allowed = if field == "background" {
-                    &["container", "button", "progress"][..]
-                } else {
-                    &["container"][..]
-                };
-                methods.push((field, setter(lua, field, allowed)?));
-            }
-        }
-        let mt = mt_for(lua, &methods)?;
-        ui.set(
-            kind,
-            lua.create_function(move |lua, value: Value| {
-                node(lua, kind, mt.clone(), |t| match kind {
-                    "container" | "scrollable" => t.set("child", value),
-                    "image" => t.set("path", value),
-                    _ => Ok(()),
-                })
-            })?,
+        mts.set(kind, mt.clone())?;
+        let schema = lua.create_table()?;
+        schema.set("rust_type", component.rust_type)?;
+        schema.set(
+            "arguments",
+            lua.create_sequence_from(component.arguments.iter().copied())?,
         )?;
-    }
-    for (kind, field) in [("text", "text"), ("icon", "name")] {
-        let mt: Table = mts.get(kind)?;
-        ui.set(
-            kind,
-            lua.create_function(move |lua, value: Value| {
-                node(lua, kind, mt.clone(), |t| t.set(field, value))
-            })?,
+        schema.set(
+            "setters",
+            lua.create_sequence_from(methods.iter().map(|(name, _)| *name))?,
         )?;
-    }
-    for kind in ["row", "column"] {
-        let mt: Table = mts.get("rowcol")?;
-        ui.set(
+        schemas.set(kind, schema)?;
+        iced.set(
             kind,
-            lua.create_function(move |lua, (children, spacing): (Table, Value)| {
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                if matches!(kind, "row" | "column" | "listview" | "pick_list")
+                    && !matches!(args.front(), Some(Value::Table(_)))
+                {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "iced.{kind} needs an array table"
+                    )));
+                }
                 node(lua, kind, mt.clone(), |t| {
-                    t.set("children", children)?;
-                    t.set("spacing", spacing)
+                    for (index, &field) in component.arguments.iter().enumerate() {
+                        t.set(field, args.get(index).cloned().unwrap_or(Value::Nil))?;
+                    }
+                    if kind == "listview" {
+                        t.set("transitions", lua.create_table()?)?;
+                    }
+                    Ok(())
                 })
             })?,
         )?;
     }
-    let mt: Table = mts.get("button")?;
-    ui.set(
-        "button",
-        lua.create_function(move |lua, (label, action): (Value, Value)| {
-            node(lua, "button", mt.clone(), |t| {
-                t.set("label", label)?;
-                t.set("action", action)
-            })
-        })?,
-    )?;
-    let mt: Table = mts.get("progress")?;
-    ui.set(
-        "progress",
-        lua.create_function(move |lua, (value, width): (Value, Value)| {
-            node(lua, "progress", mt.clone(), |t| {
-                t.set("value", value)?;
-                t.set("width", width)
-            })
-        })?,
-    )?;
-    for (kind, shape) in [("spinner", "bare"), ("separator", "separator")] {
-        let mt: Table = mts.get(shape)?;
-        ui.set(
-            kind,
-            lua.create_function(move |lua, _: Value| node(lua, kind, mt.clone(), |_| Ok(())))?,
-        )?;
-    }
-    let mt: Table = mts.get("listview")?;
-    ui.set(
-        "listview",
-        lua.create_function(move |lua, data: Table| {
-            node(lua, "listview", mt.clone(), |t| {
-                t.set("data", data)?;
-                t.set("transitions", lua.create_table()?)
-            })
+    lua.set_named_registry_value("riced.iced.metatables", mts)?;
+    iced.set("components", schemas)?;
+    iced.set(
+        "to_table",
+        lua.create_function(|lua, value: Value| {
+            let node = super::decode::parse_node(&value).map_err(mlua::Error::RuntimeError)?;
+            super::encode::to_table(lua, &node)
         })?,
     )?;
     lua.globals()
         .set("_riced_components", lua.create_table()?)?;
-    ui.set(
+    iced.set(
         "define",
         lua.create_function(|lua, (name, func): (String, Function)| {
             let namespace: Table = lua.globals().get("iced")?;
@@ -252,7 +136,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    ui.set(
+    iced.set(
         "use",
         lua.create_function(|lua, (name, props): (String, Value)| {
             let registry: Table = lua.globals().get("_riced_components")?;
@@ -297,7 +181,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
             )?))
         })?,
     )?;
-    ui.set_metatable(Some(methods))?;
+    iced.set_metatable(Some(methods))?;
 
     // Strict `size` table: the canonical size strategies as values, with an
     // __index that raises on unknown keys — `size.fil` errors at the call
@@ -326,8 +210,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     size.set_metatable(Some(size_mt))?;
     lua.globals().set("size", size)?;
 
-    lua.globals().set("iced", ui.clone())?;
-    lua.globals().set("ui", ui)?;
+    lua.globals().set("iced", iced)?;
     Ok(())
 }
 
@@ -364,7 +247,7 @@ mod tests {
         inject_ui_base(&lua).unwrap();
         let parse = |source: &str| parse_node(&lua.load(source).eval::<Value>().unwrap()).unwrap();
         assert_eq!(
-            parse("return ui.progress(0.5):width(200)"),
+            parse("return iced.progress(0.5):width(200)"),
             WidgetNode::Progress {
                 value: 0.5,
                 width: NodeLength::Fixed(200.0),
@@ -374,7 +257,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse("return ui.text('hi'):size(14)"),
+            parse("return iced.text('hi'):size(14)"),
             WidgetNode::Text {
                 content: "hi".into(),
                 size: Some(14.0),
@@ -385,7 +268,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse("return ui.button('go','run'):width(120):padding(4)"),
+            parse("return iced.button('go','run'):width(120):padding(4)"),
             WidgetNode::Button {
                 label: "go".into(),
                 action: "run".into(),
@@ -398,7 +281,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse("return ui.row({ui.text('x')}):spacing(8)"),
+            parse("return iced.row({iced.text('x')}):spacing(8)"),
             WidgetNode::Row {
                 children: vec![text("x")],
                 width: NodeLength::Native,
@@ -408,18 +291,18 @@ mod tests {
         );
         assert!(
             !lua.load(
-                "local ok=pcall(function() return ui.progress(0.5):padding(4) end); return ok"
+                "local ok=pcall(function() return iced.progress(0.5):padding(4) end); return ok"
             )
             .eval::<bool>()
             .unwrap()
         );
         let value: Value = lua
-            .load("return ui.progress(0.5):width('wide')")
+            .load("return iced.progress(0.5):width('wide')")
             .eval()
             .unwrap();
         assert!(parse_node(&value).is_err());
         assert_eq!(
-            parse("return ui.progress(0.5):width(200):height(12)"),
+            parse("return iced.progress(0.5):width(200):height(12)"),
             WidgetNode::Progress {
                 value: 0.5,
                 width: NodeLength::Fixed(200.0),
@@ -429,14 +312,14 @@ mod tests {
             }
         );
         assert!(matches!(
-            parse("return ui.button('go','run'):height(36)"),
+            parse("return iced.button('go','run'):height(36)"),
             WidgetNode::Button {
                 height: Some(_),
                 ..
             }
         ));
         assert!(matches!(
-            parse("return ui.text('hi'):height(20)"),
+            parse("return iced.text('hi'):height(20)"),
             WidgetNode::Text {
                 height: Some(_),
                 ..
@@ -449,7 +332,7 @@ mod tests {
         let lua = Lua::new();
         inject_ui_base(&lua).unwrap();
         let node: Table = lua
-            .load("return ui.row({ui.icon('cpu'),ui.text('42%')},8)")
+            .load("return iced.row({iced.icon('cpu'),iced.text('42%')},8)")
             .eval()
             .unwrap();
         assert_eq!(node.get::<String>("type").unwrap(), "row");
@@ -465,7 +348,7 @@ mod tests {
             .unwrap();
         assert_eq!(children.len(), 2);
         let value: Value = lua
-            .load("return ui.column({ui.progress(0.5)})")
+            .load("return iced.column({iced.progress(0.5)})")
             .eval()
             .unwrap();
         assert_eq!(
@@ -483,7 +366,7 @@ mod tests {
                 spacing: 4.0
             }
         );
-        let value: Value = lua.load("return ui.progress(0.5,200)").eval().unwrap();
+        let value: Value = lua.load("return iced.progress(0.5,200)").eval().unwrap();
         assert_eq!(
             parse_node(&value).unwrap(),
             WidgetNode::Progress {
@@ -494,7 +377,7 @@ mod tests {
                 background: None
             }
         );
-        let value: Value = lua.load("return ui.progress(0.5,'wide')").eval().unwrap();
+        let value: Value = lua.load("return iced.progress(0.5,'wide')").eval().unwrap();
         assert!(parse_node(&value).is_err());
     }
 
@@ -502,11 +385,11 @@ mod tests {
     fn separator_parses_defaults_and_chains() {
         let lua = Lua::new();
         inject_ui_base(&lua).unwrap();
-        assert!(lua.load("return ui==iced").eval::<bool>().unwrap());
+        assert!(lua.load("return ui == nil").eval::<bool>().unwrap());
         for (source, height) in [
             ("return iced.separator()", 1.0),
             ("return iced.separator():height(3)", 3.0),
-            ("return ui.separator()", 1.0),
+            ("return iced.separator()", 1.0),
         ] {
             let value: Value = lua.load(source).eval().unwrap();
             assert_eq!(
@@ -526,7 +409,7 @@ mod tests {
         inject_ui_base(&lua).unwrap();
         let parse = |source: &str| parse_node(&lua.load(source).eval::<Value>().unwrap()).unwrap();
         assert_eq!(
-            parse("return ui.progress(0.5):width('fill')"),
+            parse("return iced.progress(0.5):width('fill')"),
             WidgetNode::Progress {
                 value: 0.5,
                 width: NodeLength::Fill,
@@ -536,7 +419,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse("return ui.row({ui.text('x')}):width('FILL'):height('shrink')"),
+            parse("return iced.row({iced.text('x')}):width('FILL'):height('shrink')"),
             WidgetNode::Row {
                 children: vec![text("x")],
                 width: NodeLength::Fill,
@@ -545,19 +428,19 @@ mod tests {
             }
         );
         assert!(matches!(
-            parse("return ui.text('hi'):width('fill')"),
+            parse("return iced.text('hi'):width('fill')"),
             WidgetNode::Text {
                 width: Some(NodeLength::Fill),
                 ..
             }
         ));
         let value: Value = lua
-            .load("return ui.progress(0.5):width('huge')")
+            .load("return iced.progress(0.5):width('huge')")
             .eval()
             .unwrap();
         assert!(parse_node(&value).is_err());
         assert_eq!(
-            parse("return ui.row({ui.text('x')})"),
+            parse("return iced.row({iced.text('x')})"),
             WidgetNode::Row {
                 children: vec![text("x")],
                 width: NodeLength::Native,
@@ -586,8 +469,8 @@ mod tests {
             ("size.shrink", "'shrink'", NodeLength::Shrink),
             ("size.auto", "'auto'", NodeLength::Shrink),
         ] {
-            let via_table = parse(&format!("return ui.text('x'):width({table})")).unwrap();
-            let via_string = parse(&format!("return ui.text('x'):width({string})")).unwrap();
+            let via_table = parse(&format!("return iced.text('x'):width({table})")).unwrap();
+            let via_string = parse(&format!("return iced.text('x'):width({string})")).unwrap();
             assert_eq!(via_table, via_string, "{table} vs {string}");
             assert!(
                 matches!(via_table, WidgetNode::Text { width: Some(w), .. } if w == expected),
@@ -677,7 +560,7 @@ mod tests {
     fn representative_builders_produce_expected_owned_descriptions() {
         use iced::widget::text::Wrapping;
         assert_eq!(
-            description("return ui.text('x'):size(14):size(16):width('auto')"),
+            description("return iced.text('x'):size(14):size(16):width('auto')"),
             WidgetNode::Text {
                 content: "x".into(),
                 size: Some(16.0),
@@ -688,15 +571,15 @@ mod tests {
             }
         );
         for (source, wrapping) in [
-            ("return ui.text('x'):wrap('none')", Wrapping::None),
-            ("return ui.text('x'):wrap('word')", Wrapping::Word),
-            ("return ui.text('x'):wrap('glyph')", Wrapping::Glyph),
+            ("return iced.text('x'):wrap('none')", Wrapping::None),
+            ("return iced.text('x'):wrap('word')", Wrapping::Word),
+            ("return iced.text('x'):wrap('glyph')", Wrapping::Glyph),
             (
-                "return ui.text('x'):wrap('word-or-glyph')",
+                "return iced.text('x'):wrap('word-or-glyph')",
                 Wrapping::WordOrGlyph,
             ),
             (
-                "return ui.text('x'):wrap('WORD_OR_GLYPH'):wrap('word')",
+                "return iced.text('x'):wrap('WORD_OR_GLYPH'):wrap('word')",
                 Wrapping::Word,
             ),
         ] {
@@ -716,19 +599,19 @@ mod tests {
         let lua = Lua::new();
         inject_ui_base(&lua).unwrap();
         assert!(
-            lua.load("return ui.text('x'):wrap('wide')")
+            lua.load("return iced.text('x'):wrap('wide')")
                 .eval::<Value>()
                 .is_ok_and(|value| parse_node(&value).is_err()),
             "unknown wrap modes are rejected at decode"
         );
         assert!(
-            lua.load("return ui.row({ui.text('x')}):wrap('word')")
+            lua.load("return iced.row({iced.text('x')}):wrap('word')")
                 .eval::<Value>()
                 .is_err(),
             "wrap is a text-only setter"
         );
         assert_eq!(
-            description("return ui.row({ui.icon('cpu'), ui.text('x')}):spacing(5)"),
+            description("return iced.row({iced.icon('cpu'), iced.text('x')}):spacing(5)"),
             WidgetNode::Row {
                 children: vec![
                     WidgetNode::Icon {
@@ -744,7 +627,7 @@ mod tests {
         );
         assert_eq!(
             description(
-                "return ui.container(ui.column({ui.button('go','go'):radius(3),ui.progress(0.4,100)})):padding(4)"
+                "return iced.container(iced.column({iced.button('go','go'):radius(3),iced.progress(0.4,100)})):padding(4)"
             ),
             WidgetNode::Container {
                 child: Box::new(WidgetNode::Column {
@@ -783,7 +666,7 @@ mod tests {
         let defaults: ListView<String, WidgetNode> = ListView::default();
         assert_eq!(
             description(
-                "return ui.listview({{id=1}}):id('test'):key('id'):delegate(function(item) return ui.text(item.id) end)"
+                "return iced.listview({{id=1}}):id('test'):key('id'):delegate(function(item) return iced.text(item.id) end)"
             ),
             WidgetNode::ListView {
                 id: "test".into(),
@@ -802,7 +685,7 @@ mod tests {
         );
         assert_eq!(
             description(
-                "ui.define('custom', function(p) return ui.separator():height(p.h) end); return ui.custom({h=2})"
+                "iced.define('custom', function(p) return iced.separator():height(p.h) end); return iced.custom({h=2})"
             ),
             WidgetNode::Separator {
                 height: 2.0,

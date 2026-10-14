@@ -468,14 +468,14 @@ impl Popup {
             // Trees failing to build were rejected at parse/refresh.
             // Buttons route like item rows: the click carries this
             // popup, so `on_action` receives the key.
-            let msg = move |action: String| {
+            let msg: crate::ui::action::Sender = std::sync::Arc::new(move |action| {
                 Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(win_id, action)))
-            };
+            });
             if let Ok(node) = super::top::build_with_lists(
                 tree,
                 &format!("popup:{win_id:?}"),
                 self.size,
-                Some(&msg),
+                Some(msg),
                 &plots.animation.motion,
                 &plots.animation.widgets,
             ) {
@@ -489,7 +489,8 @@ impl Popup {
                     .width(Length::Fill)
                     .padding(6)
                     .on_press(Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(
-                        win_id, action,
+                        win_id,
+                        action.into(),
                     ))))
                     .style(theme::menu_button(theme::RADIUS)),
             );
@@ -620,7 +621,7 @@ impl Popup {
     pub(crate) fn handle_select(
         plots: &mut Plots,
         id: window::Id,
-        action: String,
+        action: crate::ui::action::Action,
     ) -> Command<Plant> {
         let Some(placement_id) = plots.windows.popups.get(&id).map(|p| p.placement.clone()) else {
             return Command::none();
@@ -639,7 +640,7 @@ impl Popup {
         }
         let outcome = resolved.as_ref().and_then(|resolved| {
             let output = bar.map(|b| Top::output_name(plots, b)).unwrap_or_default();
-            plots.placements.action(
+            plots.placements.ui_action(
                 resolved,
                 &crate::lua::widgets::EntryContext {
                     services: crate::services::ServiceCtx::from_plots(
@@ -702,7 +703,7 @@ mod tests {
             Popup::parse_popup_content(lua.load("return {items='nope'}").eval().unwrap()).is_err()
         );
         let content = Popup::parse_popup_content(
-            lua.load("return {ui=ui.row({ui.icon('cpu'),ui.text('x')})}")
+            lua.load("return {ui=iced.row({iced.icon('cpu'),iced.text('x')})}")
                 .eval()
                 .unwrap(),
         )
@@ -710,7 +711,7 @@ mod tests {
         assert!(content.text.is_empty() && content.items.is_empty());
         assert!(matches!(content.tree.unwrap(), WidgetNode::Row { .. }));
         let content = Popup::parse_popup_content(
-            lua.load("return {ui=ui.button('Reboot','reboot')}")
+            lua.load("return {ui=iced.button('Reboot','reboot')}")
                 .eval()
                 .unwrap(),
         )
@@ -811,11 +812,11 @@ mod tests {
         let mut lists = HashMap::new();
         lists.insert("session/session-actions".into(), ListView::new(32.0));
         let popup_id = window::Id::unique();
-        let handler =
-            |key: String| Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(popup_id, key)));
+        let handler: crate::ui::action::Sender = std::sync::Arc::new(move |key| {
+            Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(popup_id, key)))
+        });
         let mut element =
-            top::build_with_lists(&tree, "session", 13.0, Some(&handler), &runtime, &lists)
-                .unwrap();
+            top::build_with_lists(&tree, "session", 13.0, Some(handler), &runtime, &lists).unwrap();
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             iced::Font::DEFAULT,
             iced::Pixels(13.0),
@@ -871,7 +872,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(actions, ["suspend", "hibernate", "reboot", "poweroff"]);
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.key.as_str())
+                .collect::<Vec<_>>(),
+            ["suspend", "hibernate", "reboot", "poweroff"]
+        );
     }
 
     #[test]

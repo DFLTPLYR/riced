@@ -2,22 +2,22 @@
 local app = { details = false }
 
 function app:view()
-    return ui.row({
-        ui.icon("cpu"), ui.text(string.format("%.0f%%", system.cpu_usage)),
-        ui.icon("memory-stick"), ui.text(string.format("%.0f%%", system.mem_usage)),
+    return iced.row({
+        iced.icon("cpu"), iced.text(string.format("%.0f%%", system.cpu_usage)),
+        iced.icon("memory-stick"), iced.text(string.format("%.0f%%", system.mem_usage)),
     })
 end
 
 function app:popup()
     local lines = {
-        ui.row({ ui.icon("cpu"), ui.text(string.format("CPU  %.1f%%", system.cpu_usage)) }),
-        ui.row({ ui.icon("memory-stick"), ui.text(string.format("Mem  %.1f%%", system.mem_usage)) }),
+        iced.row({ iced.icon("cpu"), iced.text(string.format("CPU  %.1f%%", system.cpu_usage)) }),
+        iced.row({ iced.icon("memory-stick"), iced.text(string.format("Mem  %.1f%%", system.mem_usage)) }),
     }
     if self.details then
-        lines[#lines + 1] = ui.row({ ui.icon("cpu"), ui.text("Cores " .. system.cpu_count) })
+        lines[#lines + 1] = iced.row({ iced.icon("cpu"), iced.text("Cores " .. system.cpu_count) })
     end
     return {
-        ui = ui.card({ title = "System stats", body = ui.column(lines) }),
+        ui = iced.card({ title = "System stats", body = iced.column(lines) }),
         width = 300,
         items = {{ label = self.details and "{icon:arrow-up} Less" or "{icon:arrow-down} More", action = "toggle" }},
     }

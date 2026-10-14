@@ -2,7 +2,7 @@
 local app = {}
 
 function app:view()
-    return ui.text(string.format("%.0f%%", system.cpu_usage))
+    return iced.text(string.format("%.0f%%", system.cpu_usage))
 end
 
 return app

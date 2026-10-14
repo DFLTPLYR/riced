@@ -6,17 +6,17 @@ function app:view(n)
     if n.urgency >= 2 then head = "! " .. head end
     local icon
     if not n.has_image then icon = "bell" end
-    local content = ui.card({
+    local content = iced.card({
         title = head, icon = icon,
         color = n.urgency >= 2 and theme.error or nil,
-        body = ui.text(n.body),
+        body = iced.text(n.body),
     })
     if #(n.actions or {}) == 0 then return content end
     local actions = {}
     for _, action in ipairs(n.actions) do
-        actions[#actions + 1] = ui.button(action.label, action.key)
+        actions[#actions + 1] = iced.button(action.label, action.key)
     end
-    return ui.column({ content, ui.row(actions) })
+    return iced.column({ content, iced.row(actions) })
 end
 
 function app:transitions()

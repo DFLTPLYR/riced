@@ -332,7 +332,7 @@ fn build_anim_list(
     height: NodeLength,
     is_row: bool,
     size: f32,
-    button_msg: &dyn Fn(String) -> Plant,
+    button_msg: crate::ui::action::Sender,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
     lists: &std::collections::HashMap<
         String,
@@ -352,7 +352,14 @@ fn build_anim_list(
     };
     let mut items = Vec::new();
     for child in children {
-        let el = build_with_lists(child, widget, size, Some(button_msg), anim_runtime, lists)?;
+        let el = build_with_lists(
+            child,
+            widget,
+            size,
+            Some(button_msg.clone()),
+            anim_runtime,
+            lists,
+        )?;
         match child {
             WidgetNode::Button { action, .. } => {
                 let (x, y) = shift_of(action);
@@ -363,7 +370,7 @@ fn build_anim_list(
                             .opacity
                     })
                     .unwrap_or(1.0);
-                let el = build_node_opacity(child, size, Some(button_msg), opacity)?;
+                let el = build_node_opacity(child, size, Some(button_msg.clone()), opacity)?;
                 items.push(crate::ui::motion::shifted(el, x, y, true));
             }
             _ => items.push(el),
@@ -454,7 +461,7 @@ pub(crate) fn build_with_lists(
     node: &WidgetNode,
     widget: &str,
     size: f32,
-    message: Option<&dyn Fn(String) -> Plant>,
+    message: Option<crate::ui::action::Sender>,
     runtime: &aura_anim::core::runtime::MotionRuntime,
     lists: &WidgetLists,
 ) -> Result<Element<'static, Plant>, String> {
@@ -487,11 +494,11 @@ pub(crate) fn build_with_lists(
                     build_node_opacity(
                         &child,
                         size,
-                        if live { message } else { None },
+                        if live { message.clone() } else { None },
                         motion.opacity,
                     )
                 } else {
-                    build_with_lists(&child, widget, size, message, runtime, lists)
+                    build_with_lists(&child, widget, size, message.clone(), runtime, lists)
                 }
                 .unwrap_or_else(|error| text(error).into())
             };
@@ -501,7 +508,9 @@ pub(crate) fn build_with_lists(
             } else {
                 items
                     .iter()
-                    .map(|(_, c)| build_with_lists(c, widget, size, message, runtime, lists))
+                    .map(|(_, c)| {
+                        build_with_lists(c, widget, size, message.clone(), runtime, lists)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             };
             // from_vecs deliberately does not infer sizing from children.
@@ -550,7 +559,7 @@ pub(crate) fn build_with_lists(
         } => {
             let elements = children
                 .iter()
-                .map(|c| build_with_lists(c, widget, size, message, runtime, lists))
+                .map(|c| build_with_lists(c, widget, size, message.clone(), runtime, lists))
                 .collect::<Result<Vec<_>, _>>()?;
             let content = iced::widget::Row::new().spacing(*spacing).extend(elements);
             let hints = iced::advanced::Widget::size(&content);
@@ -567,7 +576,7 @@ pub(crate) fn build_with_lists(
         } => {
             let elements = children
                 .iter()
-                .map(|c| build_with_lists(c, widget, size, message, runtime, lists))
+                .map(|c| build_with_lists(c, widget, size, message.clone(), runtime, lists))
                 .collect::<Result<Vec<_>, _>>()?;
             let content = iced::widget::Column::new()
                 .spacing(*spacing)
@@ -1535,13 +1544,13 @@ impl Top {
         plots: &mut Plots,
         bar: window::Id,
         placement_id: String,
-        action: String,
+        action: crate::ui::action::Action,
     ) -> Command<Plant> {
         let gpu = Popup::gpu_usage_percent();
         let resolved = Self::resolve_placement_id(plots, &placement_id);
         let outcome = resolved.as_ref().and_then(|resolved| {
             let output = Self::output_name(plots, bar);
-            plots.placements.action(
+            plots.placements.ui_action(
                 resolved,
                 &crate::lua::widgets::EntryContext {
                     services: crate::services::ServiceCtx::from_plots(plots, gpu),
@@ -1820,7 +1829,7 @@ impl Top {
 
     /// Release on one widget's own mouse area: clicks only when the
     /// press target matches (same slot/widget, under hold). A press
-    /// captured by an inner `ui.button` records no target, so cell
+    /// captured by an inner `iced.button` records no target, so cell
     /// buttons never also trigger the widget click.
     pub(crate) fn handle_widget_release(
         plots: &mut Plots,
@@ -2621,7 +2630,7 @@ mod tests {
             )],
         );
         assert_eq!(list.ghosts_for(|_| true).len(), 1);
-        let msg = |_: String| Plant::Tend;
+        let msg: crate::ui::action::Sender = std::sync::Arc::new(|_| Plant::Tend);
         let mut lists = std::collections::HashMap::new();
         lists.insert("demo".to_string(), list);
         // Live + ghost merge builds (ghost renders inert), rows and
@@ -2635,7 +2644,7 @@ mod tests {
                 NodeLength::Shrink,
                 is_row,
                 13.0,
-                &msg,
+                msg.clone(),
                 &rt,
                 &lists,
             )

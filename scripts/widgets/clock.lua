@@ -33,11 +33,11 @@ local function stamp(props)
 end
 
 function app:view()
-    return ui.row({ ui.icon("clock"), ui.text(stamp(self.props)) })
+    return iced.row({ iced.icon("clock"), iced.text(stamp(self.props)) })
 end
 
 function app:popup()
-    return { ui = ui.card({ title = "Clock", icon = "clock", body = stamp(self.props) }), width = 300 }
+    return { ui = iced.card({ title = "Clock", icon = "clock", body = stamp(self.props) }), width = 300 }
 end
 
 return app

@@ -6,7 +6,12 @@ use mlua::{Table, Value};
 
 pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
     if let Ok(properties) = t.raw_get::<Table>("_properties") {
-        return properties.raw_get(field);
+        let value = properties.raw_get::<Value>(field)?;
+        return if value == Value::Nil {
+            t.raw_get(field)
+        } else {
+            Ok(value)
+        };
     }
     t.get(field)
 }
@@ -164,6 +169,9 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
         }
     };
     match kind.as_str() {
+        "checkbox" | "toggler" | "slider" | "text_input" | "pick_list" | "radio" => {
+            parse_control(t, &kind)
+        }
         "listview" => {
             let id = match node_property(t, "id").map_err(|e| e.to_string())? {
                 Value::String(s) => s.to_string_lossy(),
@@ -257,22 +265,22 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
         "text" => Ok(WidgetNode::Text {
             content: coerce_text(
                 t.get::<Value>("text").map_err(|e| e.to_string())?,
-                "ui.text()",
+                "iced.text()",
             )?,
-            size: opt_number(t, "size", "ui.text()")?,
-            width: opt_length(t, "width", "ui.text()")?,
-            height: opt_length(t, "height", "ui.text()")?,
-            wrapping: opt_wrapping(t, "wrap", "ui.text()")?,
-            color: opt_color(t, "color", "ui.text()")?,
+            size: opt_number(t, "size", "iced.text()")?,
+            width: opt_length(t, "width", "iced.text()")?,
+            height: opt_length(t, "height", "iced.text()")?,
+            wrapping: opt_wrapping(t, "wrap", "iced.text()")?,
+            color: opt_color(t, "color", "iced.text()")?,
         }),
         "icon" => match t.get::<Value>("name").map_err(|e| e.to_string())? {
             Value::String(s) => Ok(WidgetNode::Icon {
                 name: s.to_string_lossy(),
-                color: opt_color(t, "color", "ui.icon()")?,
+                color: opt_color(t, "color", "iced.icon()")?,
             }),
-            Value::Nil => Err("ui.icon() needs a name".into()),
+            Value::Nil => Err("iced.icon() needs a name".into()),
             other => Err(format!(
-                "ui.icon() name must be a string, got {}",
+                "iced.icon() name must be a string, got {}",
                 lua_value_kind(&other)
             )),
         },
@@ -289,7 +297,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 Value::Nil => Vec::new(),
                 other => {
                     return Err(format!(
-                        "ui.{}() children must be an array, got {}",
+                        "iced.{}() children must be an array, got {}",
                         kind,
                         lua_value_kind(&other)
                     ));
@@ -301,16 +309,16 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 Value::Number(n) => n as f32,
                 other => {
                     return Err(format!(
-                        "ui.{}() spacing must be a number, got {}",
+                        "iced.{}() spacing must be a number, got {}",
                         kind,
                         lua_value_kind(&other)
                     ));
                 }
             };
             let what = if kind == "row" {
-                "ui.row()"
+                "iced.row()"
             } else {
-                "ui.column()"
+                "iced.column()"
             };
             let width = opt_length(t, "width", what)?.unwrap_or(NodeLength::Native);
             let height = opt_length(t, "height", what)?.unwrap_or(NodeLength::Native);
@@ -333,18 +341,18 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
         "button" => Ok(WidgetNode::Button {
             label: coerce_text(
                 t.get::<Value>("label").map_err(|e| e.to_string())?,
-                "ui.button() label",
+                "iced.button() label",
             )?,
             action: coerce_text(
                 t.get::<Value>("action").map_err(|e| e.to_string())?,
-                "ui.button() action",
+                "iced.button() action",
             )?,
-            width: opt_length(t, "width", "ui.button()")?,
-            height: opt_length(t, "height", "ui.button()")?,
-            padding: opt_number(t, "padding", "ui.button()")?,
-            color: opt_color(t, "color", "ui.button()")?,
-            background: opt_color(t, "background", "ui.button()")?,
-            radius: opt_number(t, "radius", "ui.button()")?.map(|r| r.max(0.0)),
+            width: opt_length(t, "width", "iced.button()")?,
+            height: opt_length(t, "height", "iced.button()")?,
+            padding: opt_number(t, "padding", "iced.button()")?,
+            color: opt_color(t, "color", "iced.button()")?,
+            background: opt_color(t, "background", "iced.button()")?,
+            radius: opt_number(t, "radius", "iced.button()")?.map(|r| r.max(0.0)),
         }),
         "progress" => {
             let value = match t.get::<Value>("value").map_err(|e| e.to_string())? {
@@ -353,27 +361,179 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
                 Value::Number(n) => n as f32,
                 other => {
                     return Err(format!(
-                        "ui.progress() value must be a number, got {}",
+                        "iced.progress() value must be a number, got {}",
                         lua_value_kind(&other)
                     ));
                 }
             };
             Ok(WidgetNode::Progress {
                 value,
-                width: opt_length(t, "width", "ui.progress()")?.unwrap_or(NodeLength::Fixed(120.0)),
-                height: opt_length(t, "height", "ui.progress()")?,
-                color: opt_color(t, "color", "ui.progress()")?,
-                background: opt_color(t, "background", "ui.progress()")?,
+                width: opt_length(t, "width", "iced.progress()")?
+                    .unwrap_or(NodeLength::Fixed(120.0)),
+                height: opt_length(t, "height", "iced.progress()")?,
+                color: opt_color(t, "color", "iced.progress()")?,
+                background: opt_color(t, "background", "iced.progress()")?,
             })
         }
         "spinner" => Ok(WidgetNode::Spinner),
         "separator" => Ok(WidgetNode::Separator {
-            height: opt_number(t, "height", "ui.separator()")?
+            height: opt_number(t, "height", "iced.separator()")?
                 .unwrap_or(1.0)
                 .max(1.0),
-            color: opt_color(t, "color", "ui.separator()")?,
+            color: opt_color(t, "color", "iced.separator()")?,
         }),
         other => Err(format!("unknown ui node type {other:?}")),
+    }
+}
+
+fn control_string(t: &Table, field: &str, what: &str) -> Result<Option<String>, String> {
+    match node_property(t, field).map_err(|error| error.to_string())? {
+        Value::Nil => Ok(None),
+        Value::String(value) => Ok(Some(value.to_string_lossy())),
+        value => Err(format!(
+            "{what} {field} must be a string, got {}",
+            lua_value_kind(&value)
+        )),
+    }
+}
+fn control_bool(t: &Table, field: &str, what: &str) -> Result<bool, String> {
+    match node_property(t, field).map_err(|error| error.to_string())? {
+        Value::Nil => Ok(false),
+        Value::Boolean(value) => Ok(value),
+        value => Err(format!(
+            "{what} {field} must be a boolean, got {}",
+            lua_value_kind(&value)
+        )),
+    }
+}
+fn control_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
+    let number = opt_number(t, field, what)?;
+    if number.is_some_and(|number| !number.is_finite()) {
+        return Err(format!("{what} {field} must be finite"));
+    }
+    Ok(number)
+}
+fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
+    use super::components::*;
+    let what = format!("iced.{kind}()");
+    let width = opt_length(t, "width", &what)?;
+    if matches!(width, Some(NodeLength::Fixed(value)) if !value.is_finite()) {
+        return Err(format!("{what} width must be finite"));
+    }
+    let size = control_number(t, "size", &what)?;
+    if size.is_some_and(|value| value <= 0.0) {
+        return Err(format!("{what} size must be positive"));
+    }
+    let spacing = control_number(t, "spacing", &what)?.unwrap_or(8.0).max(0.0);
+    let label = || {
+        coerce_text(
+            t.get::<Value>("label").map_err(|error| error.to_string())?,
+            &what,
+        )
+    };
+    let string = |key| control_string(t, key, &what);
+    match kind {
+        "checkbox" => Ok(CheckboxNode {
+            label: label()?,
+            checked: control_bool(t, "checked", &what)?,
+            on_toggle: string("on_toggle")?,
+            width,
+            size,
+            spacing,
+        }
+        .into()),
+        "toggler" => Ok(TogglerNode {
+            label: label()?,
+            enabled: control_bool(t, "enabled", &what)?,
+            on_toggle: string("on_toggle")?,
+            width,
+            size,
+            spacing,
+        }
+        .into()),
+        "slider" => {
+            let min = control_number(t, "min", &what)?
+                .ok_or_else(|| format!("{what} needs a minimum"))?;
+            let max = control_number(t, "max", &what)?
+                .ok_or_else(|| format!("{what} needs a maximum"))?;
+            let step = control_number(t, "step", &what)?.unwrap_or(1.0);
+            if min >= max || !(max - min).is_finite() || step <= 0.0 {
+                return Err(format!(
+                    "{what} needs min < max and a positive step with finite range"
+                ));
+            }
+            let value = control_number(t, "value", &what)?
+                .unwrap_or(min)
+                .clamp(min, max);
+            let height = control_number(t, "height", &what)?;
+            if height.is_some_and(|value| value <= 0.0) {
+                return Err(format!("{what} height must be positive"));
+            }
+            Ok(SliderNode {
+                min,
+                max,
+                value,
+                step,
+                on_change: string("on_change")?,
+                on_release: string("on_release")?,
+                width,
+                height,
+            }
+            .into())
+        }
+        "text_input" => Ok(TextInputNode {
+            placeholder: string("placeholder")?.unwrap_or_default(),
+            value: string("value")?.unwrap_or_default(),
+            on_input: string("on_input")?,
+            on_submit: string("on_submit")?,
+            width,
+            size,
+            padding: control_number(t, "padding", &what)?.map(|value| value.max(0.0)),
+            secure: control_bool(t, "secure", &what)?,
+        }
+        .into()),
+        "pick_list" => {
+            let options: Table = t.get("options").map_err(|error| error.to_string())?;
+            let options = options
+                .sequence_values::<Value>()
+                .map(|value| match value.map_err(|error| error.to_string())? {
+                    Value::String(value) => Ok(value.to_string_lossy()),
+                    _ => Err(format!("{what} options must contain strings")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let selected = string("selected")?;
+            if selected
+                .as_ref()
+                .is_some_and(|value| !options.contains(value))
+            {
+                return Err(format!("{what} selected value must be in options"));
+            }
+            let mut seen = std::collections::HashSet::new();
+            if options.iter().any(|value| !seen.insert(value)) {
+                return Err(format!("{what} options must be unique"));
+            }
+            Ok(PickListNode {
+                options,
+                selected,
+                on_select: string("on_select")?,
+                width,
+                placeholder: string("placeholder")?,
+                padding: control_number(t, "padding", &what)?.map(|value| value.max(0.0)),
+                size,
+            }
+            .into())
+        }
+        "radio" => Ok(RadioNode {
+            label: label()?,
+            value: string("value")?.ok_or_else(|| format!("{what} needs a string value"))?,
+            selected: string("selected")?,
+            on_select: string("on_select")?,
+            width,
+            size,
+            spacing,
+        }
+        .into()),
+        _ => Err(format!("unknown iced control {kind}")),
     }
 }
 
@@ -390,7 +550,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let value: Value = lua.load("return ui.listview({{key='a',label='x'},{key='b',label='y'}}):id('s'):key('key'):delegate(function(item) if item.key=='a' then return ui.text(item.label) else return ui.wsbtn({label=item.label,action='go'}) end end)").eval().unwrap();
+        let value: Value = lua.load("return iced.listview({{key='a',label='x'},{key='b',label='y'}}):id('s'):key('key'):delegate(function(item) if item.key=='a' then return iced.text(item.label) else return iced.wsbtn({label=item.label,action='go'}) end end)").eval().unwrap();
         match parse_node(&value).unwrap() {
             WidgetNode::ListView { items, .. } => {
                 assert_eq!(items.len(), 2);
@@ -407,7 +567,7 @@ mod tests {
     fn parse_node_reads_full_trees_and_rejects_junk() {
         let lua = mlua::Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
-        let value: Value = lua.load(r#"return ui.row({ui.text('hi'),ui.button('go','run'),7,{type='icon',name='cpu'}})"#).eval().unwrap();
+        let value: Value = lua.load(r#"return iced.row({iced.text('hi'),iced.button('go','run'),7,{type='icon',name='cpu'}})"#).eval().unwrap();
         let text = |content: &str| WidgetNode::Text {
             content: content.into(),
             size: None,
@@ -446,7 +606,7 @@ mod tests {
             let value: Value = lua.load(bad).eval().unwrap();
             assert!(parse_node(&value).is_err(), "rejects {bad}");
         }
-        assert!(lua.load("return ui.row('flat')").eval::<Value>().is_err());
+        assert!(lua.load("return iced.row('flat')").eval::<Value>().is_err());
     }
 
     #[test]
@@ -456,7 +616,7 @@ mod tests {
         let horizontal = |axis: &str| {
             let value: Value = lua
                 .load(format!(
-                    "return ui.listview({{}}):id('a'):key('id'):delegate(function() return ui.text('x') end):axis('{axis}')"
+                    "return iced.listview({{}}):id('a'):key('id'):delegate(function() return iced.text('x') end):axis('{axis}')"
                 ))
                 .eval()
                 .unwrap();
@@ -472,7 +632,7 @@ mod tests {
         assert!(!horizontal("Vertical"));
         // Omission keeps the default vertical axis.
         let value: Value = lua
-            .load("return ui.listview({}):id('a'):key('id'):delegate(function() return ui.text('x') end)")
+            .load("return iced.listview({}):id('a'):key('id'):delegate(function() return iced.text('x') end)")
             .eval()
             .unwrap();
         assert!(matches!(
@@ -485,7 +645,7 @@ mod tests {
         assert!(!horizontal("diagonal"));
         for axis in ["false", "42", "{}", "function() end"] {
             let value: Value = lua
-                .load(format!("return ui.listview({{}}):id('a'):key('id'):delegate(function() return ui.text('x') end):axis({axis})"))
+                .load(format!("return iced.listview({{}}):id('a'):key('id'):delegate(function() return iced.text('x') end):axis({axis})"))
                 .eval()
                 .unwrap();
             assert!(
@@ -510,12 +670,12 @@ mod tests {
             parse_node(&value).unwrap()
         };
         for source in [
-            "return ui.space()",
-            "return ui.image('memory-only.png')",
-            "return ui.container(ui.text('x'))",
-            "return ui.scrollable(ui.text('x'))",
-            "return ui.row({ui.text('x')})",
-            "return ui.column({ui.text('x')})",
+            "return iced.space()",
+            "return iced.image('memory-only.png')",
+            "return iced.container(iced.text('x'))",
+            "return iced.scrollable(iced.text('x'))",
+            "return iced.row({iced.text('x')})",
+            "return iced.column({iced.text('x')})",
         ] {
             let node = native(source);
             let (width, height) = match &node {
@@ -534,7 +694,7 @@ mod tests {
             assert_eq!(width.clone().iced(), iced::Length::Shrink);
         }
         assert!(matches!(
-            native("return ui.text('x')"),
+            native("return iced.text('x')"),
             WidgetNode::Text {
                 width: None,
                 height: None,
@@ -542,7 +702,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            native("return ui.button('go','go')"),
+            native("return iced.button('go','go')"),
             WidgetNode::Button {
                 width: None,
                 height: None,

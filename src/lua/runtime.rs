@@ -15,9 +15,10 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u64);
 
-/// Owned boundary messages. Callback dispatch is introduced in M2.
+/// Owned boundary messages, including native control keys and typed values.
 #[derive(Debug, Clone)]
 pub enum Message {
+    Action(crate::ui::action::Action),
     LuaEvent {
         handler: String,
         payload: serde_json::Value,
@@ -179,8 +180,10 @@ impl LuaRuntime {
     }
 
     pub fn update(&mut self, message: &Message) -> mlua::Result<Vec<Effect>> {
-        let Message::LuaEvent { handler, payload } = message else {
-            return Ok(Vec::new());
+        let handler = match message {
+            Message::LuaEvent { handler, .. } => handler.as_str(),
+            Message::Action(_) if self.has_handler("on_action") => "on_action",
+            _ => return Ok(Vec::new()),
         };
         let result = (|| {
             self.begin()?;
@@ -190,12 +193,14 @@ impl LuaRuntime {
                     .ok_or_else(|| mlua::Error::RuntimeError("No Lua app loaded".into()))?,
             )?;
             // Serialization values exist only for this entry; they never enter IR.
-            super::entry::invoke(
-                &self.lua,
-                app,
-                handler,
-                mlua::MultiValue::from_vec(vec![self.lua.to_value(payload)?]),
-            )?;
+            let arguments = match message {
+                Message::Action(action) => action.arguments(&self.lua)?,
+                Message::LuaEvent { payload, .. } => {
+                    mlua::MultiValue::from_vec(vec![self.lua.to_value(payload)?])
+                }
+                _ => unreachable!("handler selected above"),
+            };
+            super::entry::invoke(&self.lua, app, handler, arguments)?;
             let pending: Table = self.lua.named_registry_value("riced.effects")?;
             let mut effects = Vec::new();
             for effect in pending.sequence_values::<String>() {
@@ -308,6 +313,24 @@ impl LuaRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn control_actions_update_owned_app_state_and_invalidate_cached_views() {
+        use crate::ui::action::{Action, ActionValue};
+        let mut runtime = super::LuaRuntime::new().unwrap();
+        runtime.load("return {value=0, view=function(self) return iced.slider(0,100,self.value):on_change('volume') end, on_action=function(self,key,value) assert(key=='volume'); self.value=value end}").unwrap();
+        let window = super::WindowId(1);
+        runtime.view(window).unwrap();
+        runtime
+            .update(&super::Message::Action(Action::change(
+                "volume".into(),
+                ActionValue::Number(42.0),
+            )))
+            .unwrap();
+        assert!(matches!(
+            runtime.view(window).unwrap(),
+            crate::ui::node::WidgetNode::Slider { value: 42.0, .. }
+        ));
+    }
     use super::*;
 
     #[test]
@@ -317,7 +340,7 @@ mod tests {
         let child = root.join("child.lua");
         std::fs::write(
             &child,
-            "return {view=function(self,props) return ui.space() end}",
+            "return {view=function(self,props) return iced.space() end}",
         )
         .unwrap();
         let mut runtime = LuaRuntime::new().unwrap();
@@ -330,7 +353,7 @@ mod tests {
                 .contains("instruction budget exceeded")
         );
         runtime
-            .load("return {view=function(self,id) return ui.text('recovered') end}")
+            .load("return {view=function(self,id) return iced.text('recovered') end}")
             .unwrap();
         assert!(runtime.view(WindowId(1)).is_ok());
         std::fs::remove_dir_all(root).unwrap();
@@ -338,7 +361,7 @@ mod tests {
     #[test]
     fn dirty_views_cache_owned_ir_and_updates_receive_serialized_payloads() {
         let mut runtime = LuaRuntime::new().unwrap();
-        runtime.load("local app = {calls=0, count=0}; function app:view(w) self.calls=self.calls+1; return ui.text(self.count .. ':' .. self.calls) end; function app:increment(n) self.count=self.count+n.delta; riced.invalidate() end; return app").unwrap();
+        runtime.load("local app = {calls=0, count=0}; function app:view(w) self.calls=self.calls+1; return iced.text(self.count .. ':' .. self.calls) end; function app:increment(n) self.count=self.count+n.delta; riced.invalidate() end; return app").unwrap();
         assert!(runtime.has_handler("increment"));
         assert!(!runtime.has_handler("missing"));
         let a = runtime.view(WindowId(1)).unwrap();
@@ -366,7 +389,7 @@ mod tests {
                 .contains("budget exceeded")
         );
         runtime
-            .load("return { view=function() return ui.text('recovered') end }")
+            .load("return { view=function() return iced.text('recovered') end }")
             .unwrap();
         assert!(runtime.view(WindowId(1)).is_ok());
         assert!(runtime.last_error.is_none());
@@ -375,7 +398,7 @@ mod tests {
     fn broken_reload_preserves_last_app_and_reports_traceback() {
         let mut runtime = LuaRuntime::new().unwrap();
         runtime
-            .load("return { view=function() return ui.text('good') end }")
+            .load("return { view=function() return iced.text('good') end }")
             .unwrap();
         let before = runtime.view(WindowId(1)).unwrap();
         assert!(runtime.load_named("error('broken')", "bad.lua").is_err());
@@ -395,10 +418,12 @@ mod tests {
     fn app_environments_do_not_leak_globals_between_loads() {
         let mut runtime = LuaRuntime::new().unwrap();
         runtime
-            .load("private_value='old'; return {view=function() return ui.text(private_value) end}")
+            .load(
+                "private_value='old'; return {view=function() return iced.text(private_value) end}",
+            )
             .unwrap();
         runtime.view(WindowId(1)).unwrap();
-        runtime.load("return {view=function() return ui.text(private_value == nil and 'isolated' or 'leaked') end}").unwrap();
+        runtime.load("return {view=function() return iced.text(private_value == nil and 'isolated' or 'leaked') end}").unwrap();
         assert!(
             matches!(runtime.view(WindowId(1)).unwrap(), Node::Text { content, .. } if content == "isolated")
         );
@@ -407,7 +432,7 @@ mod tests {
     #[test]
     fn allocation_limit_becomes_a_runtime_error() {
         let mut runtime = LuaRuntime::new().unwrap();
-        assert!(runtime.load("local huge = string.rep('x', 80 * 1024 * 1024); return {view=function() return ui.text(huge) end}").is_err());
+        assert!(runtime.load("local huge = string.rep('x', 80 * 1024 * 1024); return {view=function() return iced.text(huge) end}").is_err());
         assert!(
             runtime
                 .last_error
@@ -427,7 +452,7 @@ mod tests {
             matches!(runtime.view(WindowId(1)).unwrap(), Node::Text { content, .. } if content == "hello")
         );
         // The application host and widget loader share the bundled builders.
-        runtime.load("return {view=function() return ui.card({title='Shared components',body=ui.space():height(8)}) end}").unwrap();
+        runtime.load("return {view=function() return iced.card({title='Shared components',body=iced.space():height(8)}) end}").unwrap();
         assert!(matches!(
             runtime.view(WindowId(1)).unwrap(),
             Node::Column { .. }

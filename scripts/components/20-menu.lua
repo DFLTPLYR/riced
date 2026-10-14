@@ -1,10 +1,10 @@
 -- Reusable keyed ListView. Give each menu in a tree a distinct props.id.
-ui.define("menu", function(props)
+iced.define("menu", function(props)
     props = props or {}
-    local list = ui.listview(props.items or {})
+    local list = iced.listview(props.items or {})
         :id(props.id or "menu"):key("action"):pitch(props.pitch or 32):spacing(props.spacing or 4)
         :delegate(function(item)
-            return ui.styled_button({
+            return iced.styled_button({
                 label = item.label or "?", action = item.action or "", width = "fill",
                 color = props.color, background = props.background, padding = props.padding,
             })

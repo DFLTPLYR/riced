@@ -33,13 +33,13 @@ function app:view()
             id = ws.name,
         }
     end
-    if #cells == 0 then return ui.text("--") end
-    return ui.listview(cells)
+    if #cells == 0 then return iced.text("--") end
+    return iced.listview(cells)
         :id("wayland-strip")
         :key("key")
         :axis("horizontal")
         :delegate(function(item)
-            return ui.button(item.label or "?", item.id or "")
+            return iced.button(item.label or "?", item.id or "")
         end)
         :onEntered({ opacity = { from = 0, to = 1 }, duration = 250 })
         :onExit({ opacity = { to = 0 }, duration = 250 })

@@ -249,7 +249,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("builder.lua"),
-            "ui.define('example', function(props) return ui.text('ok') end)",
+            "iced.define('example', function(props) return iced.text('ok') end)",
         )
         .unwrap();
         let files = shared_component_files_in(&dir);

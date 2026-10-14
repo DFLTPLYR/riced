@@ -98,10 +98,10 @@ local app = {
     },
 }
 function app:view()
-    return ui.row({ ui.icon("clock"), ui.text(os.date(self.props.format)) })
+    return iced.row({ iced.icon("clock"), iced.text(os.date(self.props.format)) })
 end
 function app:popup()
-    return { ui = ui.text(os.date("%A, %d %B %Y")), width = 300, height = 200 }
+    return { ui = iced.text(os.date("%A, %d %B %Y")), width = 300, height = 200 }
 end
 return app
 ```
@@ -123,18 +123,18 @@ return app
   empty where unsupported, no focus), plus `bar.output` (the
   rendering bar's connector, nil when unknown),
   republished before every due render/popup/action.
-  `ui.*` (`text`, `icon` — full Lucide set, `row`, `column`,
-  `button`, `progress`, `spinner`, `separator`).
-  `ui.define(name, fn)` registers reusable builders called as `ui.name(props)`;
+  `iced.*` (`text`, `icon` — full Lucide set, `row`, `column`,
+   `button`, `progress`, `spinner`, `separator`, plus the native controls below).
+  `iced.define(name, fn)` registers reusable builders called as `iced.name(props)`;
   components from `components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a
   widgets-dir rescan.
 - **Clicks**: `app:popup()` toggles a menu (`text`/`width`/`height`/
-  `items`/`ui`); else `app:on_press()` runs. Cell `ui.button`s call
+  `items`/`ui`); else `app:on_press()` runs. Cell `iced.button`s call
   that app's `app:on_action(key)` directly; popup rows do the same.
-- **Slow fetches**: return `ui.spinner()` first, keep cached data on
+- **Slow fetches**: return `iced.spinner()` first, keep cached data on
   the app instance, then show cached rows (see `clinepass.lua`).
-- **List transitions**: top-level row/column `ui.button`s animate on
+- **List transitions**: top-level row/column `iced.button`s animate on
   add/remove (slide, keyed by action, animation-speed duration).
   Notification cards share the same machine, keyed by id. Label edits
   swap instantly; first paint settles with no animation. An optional
@@ -150,16 +150,16 @@ Full contract with shapes and edge cases lives on `WidgetDef` in
 
 ### Component-built animated lists
 
-Registered components are called directly (`ui.card(props)`). Setters are repeatable;
+Registered components are called directly (`iced.card(props)`). Setters are repeatable;
 properties are stored separately from methods.
 
 ```lua
 function app:popup()
-    return { width = 320, height = 400, ui = ui.scrollable(
-        ui.listview(notifications)
+    return { width = 320, height = 400, ui = iced.scrollable(
+        iced.listview(notifications)
             :id("center"):key("id"):pitch(32):spacing(4)
             :delegate(function(n)
-                return ui.button(n.title, "dismiss:" .. n.id):width("fill")
+                return iced.button(n.title, "dismiss:" .. n.id):width(size.fill)
             end)
             :onEntered({ x = { from = 200, to = 0 },
                          opacity = { from = 0, to = 1 }, duration = 250 })
@@ -184,13 +184,13 @@ Use `size.fill`, `size.shrink`, or `size.auto` to override the default
 independently on either axis (`size.auto` is an alias for `size.shrink`):
 
 ```lua
-ui.text("Hello"):width(size.fill):height(size.shrink)
+iced.text("Hello"):width(size.fill):height(size.shrink)
 ```
 
 The strict `size` table contains canonical string aliases; unknown keys such
 as `size.fil` raise at the call site. Explicit pixel sizes and the plain
 strings `"fill"`, `"shrink"`, and `"auto"` remain supported. For example,
-`ui.container(ui.column({ui.text("Hello"), ui.text("World")})):padding(12)`
+`iced.container(iced.column({iced.text("Hello"), iced.text("World")})):padding(12)`
 needs no dimensions to fit its content.
 
 For `app:popup()`, omitting the returned table's `height` fits the native popup
@@ -203,9 +203,9 @@ Measured heights are reused across reopenings through a bounded 32-entry cache.
 Content, width, text size, and output-height changes invalidate the measurement;
 trees with image nodes are remeasured because their files can change size.
 
-Other composition primitives are `ui.container(child)` (width, height,
-padding, background, radius), `ui.scrollable(child)`, `ui.space()`, and
-`ui.image(path)` (width and height). Text accepts `:wrap("none" | "word" |
+Other composition primitives are `iced.container(child)` (width, height,
+padding, background, radius), `iced.scrollable(child)`, `iced.space()`, and
+`iced.image(path)` (width and height). Text accepts `:wrap("none" | "word" |
 "glyph" | "word-or-glyph")` for each `text::Wrapping` strategy (default is
 word wrapping, matching iced). Card props may supply `padding`, `radius`,
 and `background` to request a styled surface. Images accept file paths or
@@ -219,6 +219,66 @@ working library. Notification queue changes refresh widgets and open center
 popups immediately.
 
 ## Declarative Lua runtime: M0 demo
+
+### Native controls and Rust component structs
+
+`iced.*` is the constructor namespace; there is no `ui` global.
+Popup return tables still use the
+`ui` field, for example `{ ui = iced.text("Popup"), width = 300 }`.
+
+| Constructor | Interaction setter | Payload | Rust description |
+| --- | --- | --- | --- |
+| `iced.checkbox(label, checked)` | `:on_toggle(key)` | boolean | `CheckboxNode` |
+| `iced.toggler(label, enabled)` | `:on_toggle(key)` | boolean | `TogglerNode` |
+| `iced.slider(min, max, value)` | `:on_change(key)` | number | `SliderNode` |
+| `iced.text_input(placeholder, value)` | `:on_input(key)` | string | `TextInputNode` |
+| `iced.pick_list(options, selected)` | `:on_select(key)` | string | `PickListNode` |
+| `iced.radio(label, value, selected)` | `:on_select(key)` | string | `RadioNode` |
+
+All accept `:width(...)`; the other supported setters are listed in
+`iced.components.<name>.setters`. Slider supports `:step(number)`, pixel
+`:height(number)`, and `:on_release(key)`. Text input supports
+`:secure(boolean)` and `:on_submit(key)`. Submit, release, and button actions
+send only the key. Controls without an interaction key stay inert.
+Slider ranges must be finite with `min < max` and a positive step. Values
+are clamped to the range. Pick-list options are unique strings; selection
+is either nil or one of those options. Radio values and selections are strings.
+
+State is owned by Lua and fed back into each view. Widget placements and the
+plain-window demo dispatch changes to `app:on_action(key, value)`; existing
+one-argument handlers continue working. Popup changes refresh the content
+without dismissing the popup. Keyboard input requires a keyboard-capable host;
+passive bar/background/notification surfaces do not acquire keyboard focus.
+Notification and built-in context-menu actions keep their key-only protocols.
+
+```lua
+local app = { volume = 25 }
+function app:view()
+    return iced.slider(0, 100, self.volume):on_change("volume")
+end
+function app:on_action(key, value)
+    if key == "volume" then self.volume = value end
+end
+return app
+```
+
+`src/ui/components.rs` declares each named Rust description and its Lua schema
+together, including existing `TextNode`, `ContainerNode`, `RowNode`, and the
+other primitives. Structs implement `mlua::FromLua` and `mlua::IntoLua` in a
+host with the iced namespace installed. They own their data and can survive
+the source VM or be exported into another VM. `WidgetNode` is the common IR.
+`iced.components.text.rust_type` reports `"TextNode"`, and
+`iced.to_table(node)` exports a normalized, chainable description. Listviews
+export resolved keyed nodes with a fresh pure delegate; the original delegate
+and data-source functions are not retained in the Rust description.
+
+Try all six controls with:
+
+```bash
+riced lua-demo --script scripts/controls.lua
+```
+
+### Running the application demo
 
 ```bash
 nix develop --command cargo run -- lua-demo
@@ -273,11 +333,11 @@ skips seeding those numbered copies when the override exists.
 The styled builders accept props and support subsequent setter chaining:
 
 ```lua
-ui.surface({ body = ui.text("Hello"), background = theme.surface,
+iced.surface({ body = iced.text("Hello"), background = theme.surface,
              border = theme.secondary, border_width = 1, radius = 8, padding = 10 })
-ui.styled_button({ label = "Go", action = "go", background = theme.surface })
-ui.styled_progress({ value = 0.5, color = theme.primary, background = theme.surface })
-ui.styled_separator({ color = theme.secondary, height = 2 })
+iced.styled_button({ label = "Go", action = "go", background = theme.surface })
+iced.styled_progress({ value = 0.5, color = theme.primary, background = theme.surface })
+iced.styled_separator({ color = theme.secondary, height = 2 })
 ```
 
 `surface` forwards container sizing and styling, `styled_button` forwards
@@ -305,7 +365,7 @@ are excluded from automatic shared-builder loading, and return an app table:
 local app = { defaults = { radius = 4, border_width = 1 } }
 
 function app:view(props)
-    return ui.container(ui.space())
+    return iced.container(iced.space())
         :width(props.width):height(props.height)
         :background(theme.surface)
         :border(theme.primary):border_width(props.border_width):radius(props.radius)
@@ -393,7 +453,7 @@ and `[composable.menu]` is removed. Context-menu width takes precedence over
 generic menu width; generic height transfers when no context-menu height
 override exists. Unused generic padding/spacing/rounding are retired. Before
 rewriting the config, migration preserves `config.toml.pre-composable`.
-The shared `ui.menu` list builder is independent of this retired config table.
+The shared `iced.menu` list builder is independent of this retired config table.
 
 Popup/bar/notification frames and interactive settings components remain the
 next migration stages.
@@ -426,7 +486,7 @@ timeout_ms = 5000
   `app:view(n)` over `{ id, app, title, body, icon, urgency, actions,
   has_image }`
   (`actions` is a 1-based array of `{ key, label }` tables, empty when
-  the sender offers none) with the full `ui.*` set; edits re-render
+  the sender offers none) with the full `iced.*` set; edits re-render
   visible cards on save, and deleting the file restores the built-in
   card. Policy (timeout, position, cap) stays in TOML.
 - **Behavior**: one layer window per showing output (closed when

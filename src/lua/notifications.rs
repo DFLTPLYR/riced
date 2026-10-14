@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn renderer_publishes_notification_metadata_services_and_bound_self() {
         let lua = super::super::widgets::new_widget_lua().unwrap();
-        super::super::widgets::load_widget_script(&lua, "card", "return {calls=0,view=function(self,n) self.calls=self.calls+1; assert(bar.output==nil); return ui.text(n.title..':'..n.actions[1].key..':'..tostring(n.has_image)..':'..#notifications..':'..self.calls) end}").unwrap();
+        super::super::widgets::load_widget_script(&lua, "card", "return {calls=0,view=function(self,n) self.calls=self.calls+1; assert(bar.output==nil); return iced.text(n.title..':'..n.actions[1].key..':'..tostring(n.has_image)..':'..#notifications..':'..self.calls) end}").unwrap();
         let renderer = NotificationRenderer {
             lua: Some(lua),
             ..Default::default()

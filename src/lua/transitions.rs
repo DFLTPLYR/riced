@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(e.from.x, 16.0);
         assert_eq!(x.to.x, -16.0);
         assert!(d.duration.is_none());
-        load_widget_script(&lua, "transitions", r#"local app={view=function() return ui.text('x') end}; function app:transitions() return {
+        load_widget_script(&lua, "transitions", r#"local app={view=function() return iced.text('x') end}; function app:transitions() return {
             add={x={from=200,to=0},opacity={from=0,to=1},duration=250}, remove={x={to=-200},duration=250}, displaced={duration=300}
         } end; return app"#).unwrap();
         let (e, x, d, custom) = parse_transitions(&lua, &enter, &exit, &displaced).unwrap();

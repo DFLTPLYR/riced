@@ -1,7 +1,7 @@
 local app = {}
 
 function app:view()
-    return ui.text("hello")
+    return iced.text("hello")
 end
 
 return app

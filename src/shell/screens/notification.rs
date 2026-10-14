@@ -441,21 +441,18 @@ pub(crate) fn view(context: ViewContext<'_>, output: OutputId) -> Element<'_, Pl
         let id = key.1;
         // Live buttons invoke actions; ghosts (and build failures
         // falling back to the default tree) stay inert.
-        let msg = move |action: String| Plant::Notify(NotifyEvent::Invoke(id, action));
-        let body: Element<'_, Plant> = crate::ui::build::build_node_opacity(
-            &node,
-            13.0,
-            live.then_some(&msg as &dyn Fn(String) -> Plant),
-            motion.opacity,
-        )
-        .unwrap_or_else(|_| {
-            build_node(
-                &default_tree(context.state.queue.iter().find(|n| n.id == id)),
-                13.0,
-                None,
-            )
-            .expect("default tree builds")
-        });
+        let msg: crate::ui::action::Sender =
+            std::sync::Arc::new(move |action| Plant::Notify(NotifyEvent::Invoke(id, action.key)));
+        let body: Element<'_, Plant> =
+            crate::ui::build::build_node_opacity(&node, 13.0, live.then_some(msg), motion.opacity)
+                .unwrap_or_else(|_| {
+                    build_node(
+                        &default_tree(context.state.queue.iter().find(|n| n.id == id)),
+                        13.0,
+                        None,
+                    )
+                    .expect("default tree builds")
+                });
         // App image (decoded D-Bus `image-data` / `image-path` / icon
         // path): a 36px thumbnail left of the Lua body. Ghosts already
         // left the queue, so their exits render text-only.

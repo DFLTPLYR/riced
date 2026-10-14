@@ -13,11 +13,11 @@ fn seed_components_define_working_builders() {
     let lua = new_widget_lua().unwrap();
     load_seed_components(&lua);
     for source in [
-        r##"return ui.surface({body='x',border='#f00',border_width=0})"##,
-        r##"return ui.styled_button({label='Go',action='go',background='#123'})"##,
-        r##"return ui.styled_progress({value=0.5,color='#f00',background='#123'})"##,
-        r##"return ui.styled_separator({height=2,color='#f00'})"##,
-        r##"return ui.card({title='T',border='#f00',separator_color='#123'})"##,
+        r##"return iced.surface({body='x',border='#f00',border_width=0})"##,
+        r##"return iced.styled_button({label='Go',action='go',background='#123'})"##,
+        r##"return iced.styled_progress({value=0.5,color='#f00',background='#123'})"##,
+        r##"return iced.styled_separator({height=2,color='#f00'})"##,
+        r##"return iced.card({title='T',border='#f00',separator_color='#123'})"##,
         "return iced.use('spacer',{h=4})",
         "return iced.use('card',{title='T',body='b'})",
         "return iced.use('menu',{items={{label='Go',action='go'}}})",
@@ -26,7 +26,7 @@ fn seed_components_define_working_builders() {
         parse_node(&value).unwrap();
     }
     let value: Value = lua
-        .load(r##"return ui.surface({body='x',border='#f00',border_width=0})"##)
+        .load(r##"return iced.surface({body='x',border='#f00',border_width=0})"##)
         .eval()
         .unwrap();
     assert!(matches!(

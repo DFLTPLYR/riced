@@ -43,7 +43,14 @@ pub(crate) fn lua_has_func(states: &HashMap<String, Lua>, id: &str, method: &str
     })
 }
 
+#[cfg(test)]
 pub(crate) fn call_lua_named_action(lua: &Lua, action: &str) -> Result<Value, String> {
+    call_lua_action(lua, &action.into())
+}
+pub(crate) fn call_lua_action(
+    lua: &Lua,
+    action: &crate::ui::action::Action,
+) -> Result<Value, String> {
     let app: Table = lua
         .named_registry_value("riced.widget.app")
         .map_err(|error| error.to_string())?;
@@ -54,13 +61,10 @@ pub(crate) fn call_lua_named_action(lua: &Lua, action: &str) -> Result<Value, St
     ) {
         return Ok(Value::Nil);
     }
-    let key = lua
-        .create_string(action)
-        .map_err(|error| error.to_string())?;
     call_widget_method(
         lua,
         "on_action",
-        mlua::MultiValue::from_vec(vec![Value::String(key)]),
+        action.arguments(lua).map_err(|error| error.to_string())?,
     )
 }
 
@@ -170,15 +174,24 @@ impl WidgetState {
 
     /// Missing instances are stale host messages and are ignored. Actions do
     /// not construct a new VM or reset the placement's existing self state.
+    #[cfg(test)]
     pub(crate) fn action(
         &self,
         resolved: &ResolvedWidget,
         context: &EntryContext<'_>,
         action: &str,
     ) -> Option<Result<Value, String>> {
+        self.ui_action(resolved, context, &action.into())
+    }
+    pub(crate) fn ui_action(
+        &self,
+        resolved: &ResolvedWidget,
+        context: &EntryContext<'_>,
+        action: &crate::ui::action::Action,
+    ) -> Option<Result<Value, String>> {
         self.instances.get(&resolved.id).map(|lua| {
             Self::publish_entry(lua, resolved, context)?;
-            call_lua_named_action(lua, action)
+            call_lua_action(lua, action)
         })
     }
 
@@ -320,7 +333,7 @@ mod tests {
     #[test]
     fn module_methods_bind_self_without_exporting_globals() {
         let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "module", "return {count=0, view=function(self) return ui.text(tostring(self.count)) end, on_press=function(self) self.count=self.count+1 end, on_action=function(self,key) return {dismiss=self.count, key=key} end}").unwrap();
+        load_widget_script(&lua, "module", "return {count=0, view=function(self) return iced.text(tostring(self.count)) end, on_press=function(self) self.count=self.count+1 end, on_action=function(self,key) return {dismiss=self.count, key=key} end}").unwrap();
         for name in ["render", "view", "on_press", "on_action"] {
             assert_eq!(lua.globals().get::<Value>(name).unwrap(), Value::Nil);
         }
@@ -386,7 +399,7 @@ mod tests {
     #[test]
     fn entries_publish_fresh_output_and_props_and_ignore_stale_actions() {
         let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "entry", "return {view=function(self) return bar.output..self.props.label end, on_action=function(self,key) return bar.output..self.props.label..key end, on_press=function(self) self.last=bar.output..self.props.label end}").unwrap();
+        load_widget_script(&lua, "entry", "return {view=function(self) return bar.output..self.props.label end, on_action=function(self,key,value) self.value=value; return bar.output..self.props.label..key end, on_press=function(self) self.last=bar.output..self.props.label end}").unwrap();
         let mut state = WidgetState::default();
         state.instances.insert("placement".into(), lua);
         let mut resolved = ResolvedWidget {
@@ -444,6 +457,36 @@ mod tests {
             .named_registry_value("riced.widget.app")
             .unwrap();
         assert_eq!(app.get::<String>("last").unwrap(), "DP-3/second/");
+        for value in [
+            crate::ui::action::ActionValue::Boolean(true),
+            crate::ui::action::ActionValue::Number(12.5),
+            crate::ui::action::ActionValue::Text("a:b|query".into()),
+        ] {
+            let action = crate::ui::action::Action::change("changed".into(), value.clone());
+            assert_eq!(
+                state
+                    .ui_action(&resolved, &context("DP-4"), &action)
+                    .unwrap()
+                    .unwrap()
+                    .as_string()
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                "DP-4/second/changed"
+            );
+            let stored: Value = app.get("value").unwrap();
+            match value {
+                crate::ui::action::ActionValue::Boolean(value) => {
+                    assert_eq!(stored, Value::Boolean(value))
+                }
+                crate::ui::action::ActionValue::Number(value) => {
+                    assert_eq!(stored, Value::Number(f64::from(value)))
+                }
+                crate::ui::action::ActionValue::Text(value) => {
+                    assert_eq!(stored.as_string().unwrap().to_str().unwrap(), value)
+                }
+            }
+        }
         resolved.id = "removed".into();
         assert!(state.action(&resolved, &context("DP-1"), "click").is_none());
         assert!(state.press(&resolved, &context("DP-1")).is_none());

@@ -1519,7 +1519,7 @@ mod tests {
         .unwrap();
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
         crate::lua::test_support::load_seed_components(&lua);
-        let value = lua.load(r#"return {width=220, ui=ui.card({title='Session',icon='power',body=ui.menu({id='session-actions',items={
+        let value = lua.load(r#"return {width=220, ui=iced.card({title='Session',icon='power',body=iced.menu({id='session-actions',items={
             {label='Suspend',action='suspend'}, {label='Hibernate',action='hibernate'},
             {label='Reboot',action='reboot'}, {label='Power off',action='poweroff'}
         }})}):height('fill')}"#).eval().unwrap();
@@ -1674,7 +1674,7 @@ mod tests {
                 Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(target, key)))
                     if *target == id =>
                 {
-                    Some(key.as_str())
+                    Some(key.key.as_str())
                 }
                 _ => None,
             })
@@ -1782,7 +1782,7 @@ mod tests {
                 schema: Default::default(),
             });
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
-        crate::lua::widgets::load_widget_script(&lua,"theme-test","return {count=41,view=function(self) self.count=self.count+1; return ui.text(theme.primary) end}").unwrap();
+        crate::lua::widgets::load_widget_script(&lua,"theme-test","return {count=41,view=function(self) self.count=self.count+1; return iced.text(theme.primary) end}").unwrap();
         plots.placements.instances.insert("keep-self".into(), lua);
         (plots, bar)
     }

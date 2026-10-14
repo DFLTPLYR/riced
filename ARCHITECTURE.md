@@ -297,6 +297,16 @@ and dependency boundaries determine extraction scope.
 
 ## Verification
 
+The iced Lua component schema lives in `ui/components.rs`: one declaration
+generates named owned Rust descriptions, the `WidgetNode` variants, conversions,
+and constructor/setter metadata. `ui/dsl.rs` installs the sole `iced` namespace;
+`ui/encode.rs` exports chainable descriptions into a VM.
+`ui/action.rs` carries owned keys and boolean/number/string values. Native
+callbacks use an owned routing sender, never a borrowed Lua VM. Placement and
+demo hosts dispatch those values to `on_action(key, value)` and invalidate their
+views. Native input/layout tests cover controls, disabled behavior, exports,
+and cross-VM ownership in addition to the seed contracts.
+
 Run `just check` for formatting, the complete test suite, clippy, and diff
 whitespace checks in the Nix development environment. Test behavior at
 boundaries: Lua contracts, placement identity, fixed/automatic layout,
