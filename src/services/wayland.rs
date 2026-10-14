@@ -73,7 +73,8 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
 /// the other half of the monitor match. Bounded: logs on change.
 fn debug_geometry_table(geometry: &[(String, [f32; 4])]) {
     use std::sync::{Mutex, OnceLock};
-    static LAST: OnceLock<Mutex<Vec<(String, [f32; 4])>>> = OnceLock::new();
+    type GeometryTable = Vec<(String, [f32; 4])>;
+    static LAST: OnceLock<Mutex<GeometryTable>> = OnceLock::new();
     let debug = std::env::var("RICED_DEBUG")
         .map(|v| v.split(',').any(|s| s.trim() == "workspaces"))
         .unwrap_or(false);

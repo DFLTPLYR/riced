@@ -519,6 +519,10 @@ samples the already-resident applied pixels through a virtual monitor strip
 into a bounded 128×128 image, without constructing/encoding/re-decoding a
 full-resolution combined wallpaper. This affects palette sampling only;
 displayed wallpapers and editor originals stay full resolution.
+Lanczos sampling processes one intermediate row at a time, with reusable
+filter weights, rather than retaining a full-width 128-row float buffer.
+Daemon generation runs on a joined, short-lived worker; completion is reported
+after its inputs and thread-local scratch storage have been released.
 
 ## Wallpaper editing and quality
 
@@ -603,12 +607,15 @@ Explicit close and Settings-toggle paths schedule the same deferred cleanup,
 even if native confirmation is delayed. The preview worker also trims decoder
 temporaries after loading. Native close notifications never request another
 close for an already-destroyed window.
+Large wallpaper preview sources use anonymous, read-only mappings shared by
+their pixel data and image handles. Common 8-bit images decode directly into
+mapped storage; the last owner releases the mapping even when decoding and
+closing happen on different threads. Original files are never mapped or changed.
 Closes whose window actually owned decoded images (wallpaper editor sources,
 popup trees with image nodes, notification images) additionally repaint every
-surface once, so the still-live renderers run iced's image-cache trim after the
-handles drop. That trim is insert-gated per renderer and its texture atlas
-never shrinks pages, so this frees host entries and makes atlas space reusable
-rather than reducing driver VRAM. Other closes stay host-only cleanup.
+surface once. Renderer image-cache eviction is insert-gated, so a redraw alone
+does not guarantee eviction; iced's texture atlas also retains its pages for
+reuse. Other closes stay host-only cleanup.
 Applying identical output pixels keeps the existing image handles, avoiding
 another texture upload. Applied tiles remain resident, and graphics-driver
 allocation pools may retain their capacity even after editor buffers are freed.

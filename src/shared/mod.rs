@@ -2,3 +2,4 @@
 pub(crate) mod enums;
 pub(crate) mod files;
 pub mod geometry;
+pub(crate) mod pixels;

@@ -291,34 +291,32 @@ impl Plots {
         Command::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let generated = if applied.is_empty() {
-                        let views = crate::theme_gen::render_views(&rects, &images);
-                        crate::theme_gen::generate_from_views(&views, &variant, darkmode)
-                    } else {
-                        let views: Vec<_> = applied.into_iter().map(|(_, pixels)| pixels).collect();
-                        crate::theme_gen::generate_from_pixels(&views, &variant, darkmode)
-                    };
-                    let errors = match generated {
-                        Ok(g) => {
-                            let mut errors = Vec::new();
-                            if let Err(e) = crate::theme_gen::write_dynamic_theme(&g.payload) {
-                                errors.push(format!("cannot write dynamic.json: {e}"));
-                            } else if let Some(dir) = templates {
-                                errors.extend(crate::theme_gen::process_templates(
-                                    &dir,
-                                    &g.variables,
-                                ));
+                    crate::theme_gen::worker::run(move || {
+                        let generated = if applied.is_empty() {
+                            let views = crate::theme_gen::render_views(&rects, &images);
+                            crate::theme_gen::generate_from_views(&views, &variant, darkmode)
+                        } else {
+                            let views: Vec<_> =
+                                applied.into_iter().map(|(_, pixels)| pixels).collect();
+                            crate::theme_gen::generate_from_pixels(&views, &variant, darkmode)
+                        };
+                        match generated {
+                            Ok(g) => {
+                                let mut errors = Vec::new();
+                                if let Err(e) = crate::theme_gen::write_dynamic_theme(&g.payload) {
+                                    errors.push(format!("cannot write dynamic.json: {e}"));
+                                } else if let Some(dir) = templates {
+                                    errors.extend(crate::theme_gen::process_templates(
+                                        &dir,
+                                        &g.variables,
+                                    ));
+                                }
+                                errors
                             }
-                            errors
+                            Err(e) => vec![e],
                         }
-                        Err(e) => vec![e],
-                    };
-                    // Views + quantization buffers peak in the tens of MB
-                    // and are all dropped here; without a trim glibc
-                    // arenas retain the high-water RSS forever on this
-                    // pooled worker thread.
-                    crate::theme_gen::trim_memory();
-                    errors
+                    })
+                    .unwrap_or_else(|error| vec![error])
                 })
                 .await
                 .unwrap_or_else(|e| vec![format!("theme regen failed: {e}")])
@@ -2040,6 +2038,109 @@ mod tests {
         assert_eq!(
             reclaim_scope(&mut plots, Plant::Uproot(id)),
             Some((false, Scope::None))
+        );
+    }
+
+    #[test]
+    fn late_and_stale_preview_results_release_source_pixels() {
+        use std::sync::Arc;
+        for closed in [false, true] {
+            let mut plots = wallpaper_test_plots();
+            let id = iced::window::Id::unique();
+            let mut setting = Setting::default();
+            let mut draft = crate::wallpaper::draft::Draft::new(&plots.config.background);
+            draft.assets_revision = 2;
+            draft.preview_running = Some(1);
+            draft.loading = false;
+            setting.wallpaper_draft = Some(draft);
+            plots.windows.settings.insert(id, setting);
+            plots.windows.ids.insert(id, PlotInfo::Setting);
+            if closed {
+                let _ = plots.update(Plant::Uproot(id));
+            }
+            let owner: Arc<[u8]> = vec![127; 512 * 256 * 4].into();
+            let weak_pixels = Arc::downgrade(&owner);
+            let pixels = bytes::Bytes::from_owner(owner);
+            let source = Arc::new(crate::wallpaper::raster::Source {
+                width: 512,
+                height: 256,
+                handle: iced::widget::image::Handle::from_rgba(512, 256, pixels.clone()),
+                pixels,
+                revision: None,
+            });
+            let weak_source = Arc::downgrade(&source);
+            let sources = [("memory-only.png".into(), source)].into_iter().collect();
+            let _ = plots.update(Plant::SettingPlot(SettingEvent::WallpaperPreviewReady {
+                id,
+                revision: 1,
+                result: Ok(sources),
+            }));
+            assert!(
+                weak_source.upgrade().is_none(),
+                "closed={closed}: source retained"
+            );
+            assert!(
+                weak_pixels.upgrade().is_none(),
+                "closed={closed}: pixels retained"
+            );
+            if !closed {
+                let draft = plots.windows.settings[&id]
+                    .wallpaper_draft
+                    .as_ref()
+                    .unwrap();
+                assert!(draft.sources.is_empty());
+                assert!(draft.preview_running.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn closing_settings_during_apply_releases_sources_when_the_job_finishes() {
+        use std::sync::Arc;
+        let mut plots = wallpaper_test_plots();
+        let id = iced::window::Id::unique();
+        let owner: Arc<[u8]> = vec![127; 512 * 256 * 4].into();
+        let weak_pixels = Arc::downgrade(&owner);
+        let pixels = bytes::Bytes::from_owner(owner);
+        let source = Arc::new(crate::wallpaper::raster::Source {
+            width: 512,
+            height: 256,
+            handle: iced::widget::image::Handle::from_rgba(512, 256, pixels.clone()),
+            pixels,
+            revision: None,
+        });
+        let sources: crate::wallpaper::raster::Sources =
+            [("memory-only.png".into(), source)].into_iter().collect();
+        let mut draft = crate::wallpaper::draft::Draft::new(&plots.config.background);
+        draft.sources = sources.clone();
+        draft.loading = false;
+        draft.applying = true;
+        let mut setting = Setting::default();
+        setting.wallpaper_draft = Some(draft);
+        plots.windows.settings.insert(id, setting);
+        plots.windows.ids.insert(id, PlotInfo::Setting);
+        plots.desktop.wallpaper.running = Some(1);
+        plots.desktop.wallpaper.pending = Some(crate::wallpaper::Request {
+            generation: 1,
+            editor: Some((id, 0)),
+            images: plots.config.background.clone(),
+            base: plots.config.background.clone(),
+            outputs: Vec::new(),
+            sources,
+        });
+        let _ = plots.update(Plant::Uproot(id));
+        assert!(plots.windows.settings.is_empty());
+        assert!(
+            weak_pixels.upgrade().is_some(),
+            "Apply still owns its accepted snapshot"
+        );
+        // Failure finishes the accepted job without publishing files/config.
+        let _ = plots.wallpaper_baked(1, Err("test job finished".into()));
+        assert!(plots.desktop.wallpaper.pending.is_none());
+        assert!(plots.desktop.wallpaper.running.is_none());
+        assert!(
+            weak_pixels.upgrade().is_none(),
+            "finished Apply retained the source buffer"
         );
     }
 

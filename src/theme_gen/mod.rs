@@ -23,10 +23,12 @@
 //! `riced generate-theme`, apply a stored theme with
 //! `riced apply-templates`.
 
+mod sample;
 pub mod scheme;
 pub mod templates;
 pub mod variant;
 pub mod views;
+pub(crate) mod worker;
 
 pub(crate) use scheme::generate_from_pixels;
 pub(crate) use scheme::trim_memory;

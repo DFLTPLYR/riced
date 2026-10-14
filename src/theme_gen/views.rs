@@ -77,12 +77,7 @@ fn sample_strip<'a>(views: impl IntoIterator<Item = View<'a>>) -> Option<image::
     if strip.width == 0 || strip.height == 0 {
         return None;
     }
-    Some(image::imageops::resize(
-        &strip,
-        128,
-        128,
-        image::imageops::FilterType::Lanczos3,
-    ))
+    Some(super::sample::resize(&strip))
 }
 
 pub(crate) fn sample_views(views: &[image::RgbImage]) -> Option<image::RgbImage> {

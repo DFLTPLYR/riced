@@ -289,9 +289,11 @@ mod tests {
 
     #[test]
     fn effective_templates_dir_honors_off_and_explicit() {
-        let mut cfg = ThemeConfig::default();
         // explicit dir wins as-is (existence is the renderer's problem)
-        cfg.templates_dir = "/tmp/riced-explicit-tpl".to_string();
+        let mut cfg = ThemeConfig {
+            templates_dir: "/tmp/riced-explicit-tpl".to_string(),
+            ..Default::default()
+        };
         assert_eq!(
             effective_templates_dir(&cfg),
             Some(PathBuf::from("/tmp/riced-explicit-tpl"))

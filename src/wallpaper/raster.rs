@@ -16,14 +16,10 @@ pub struct Source {
 impl Source {
     pub fn load(path: &std::path::Path) -> Result<Arc<Self>, String> {
         let revision = crate::shared::files::stamp(path);
-        let rgba = image::open(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?
-            .to_rgba8();
-        let (width, height) = rgba.dimensions();
+        let (width, height, pixels) = crate::shared::pixels::decode(path)?;
         if width == 0 || height == 0 {
             return Err(format!("{}: image is empty", path.display()));
         }
-        let pixels = Bytes::from(rgba.into_raw());
         let handle = Handle::from_rgba(width, height, pixels.clone());
         Ok(Arc::new(Self {
             width,

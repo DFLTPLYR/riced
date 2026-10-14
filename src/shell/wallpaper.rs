@@ -6,7 +6,8 @@ use iced::{Task, window};
 impl Plots {
     /// Defer cleanup after a close or worker result so message, view, and
     /// renderer owners can drop before cache eviction and allocator trimming.
-    /// `redraw` repaints all surfaces so live renderers trim their image caches.
+    /// `redraw` repaints all surfaces after image-owning closes. Renderer cache
+    /// eviction is backend-dependent; a redraw alone does not guarantee it.
     pub(crate) fn reclaim_image_memory(&self, redraw: bool) -> Task<Plant> {
         Task::perform(
             async { tokio::time::sleep(std::time::Duration::from_millis(100)).await },

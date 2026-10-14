@@ -304,3 +304,19 @@ shifted input, notification masks, native service snapshots, reload fallback,
 and one-time initialization. RSS probes execute in an isolated test process
 so parallel Lua/renderer allocations cannot contaminate memory measurements.
 Do not replace these with tests of file names.
+
+Manual release memory probes must run separately to keep allocator warm-up
+and peak RSS independent:
+
+```bash
+nix develop --command cargo test --release palette_sampling_memory_probe -- --ignored --nocapture --test-threads=1
+RICED_SAMPLE_REFERENCE=1 nix develop --command cargo test --release palette_sampling_memory_probe -- --ignored --nocapture --test-threads=1
+nix develop --command cargo test --release settings_decode_memory_probe -- --ignored --nocapture --test-threads=1
+RICED_DECODE_REFERENCE=1 nix develop --command cargo test --release settings_decode_memory_probe -- --ignored --nocapture --test-threads=1
+```
+
+The palette probe uses a procedural 7680×2160 source, isolating scratch memory.
+The decode probe loads and releases a 3840×2160 PNG six times on a persistent
+blocking pool. These measure CPU allocation behavior; live compositor/renderer
+memory requires a separate daemon session. Ownership regressions cover native,
+explicit, and toggle closes, plus late/stale preview results.

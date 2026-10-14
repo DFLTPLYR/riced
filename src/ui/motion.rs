@@ -319,13 +319,14 @@ mod tests {
 
     #[test]
     fn exit_delegate_does_not_reserve_layout_space() {
-        let content: Element<'static, (), (), ()> =
+        let renderer = layout_renderer();
+        let content: Element<'static, (), (), iced::Renderer> =
             iced::widget::Space::new().width(80).height(100).into();
         let mut element = ghost(content, -200.0, 108.0);
         let mut tree = widget::Tree::new(&element);
         let layout = element.as_widget_mut().layout(
             &mut tree,
-            &(),
+            &renderer,
             &layout::Limits::new(Size::ZERO, Size::new(320.0, 800.0)),
         );
         assert_eq!(layout.size(), Size::ZERO);
@@ -334,9 +335,10 @@ mod tests {
 
     #[test]
     fn stack_retains_zero_space_exit_delegate() {
-        let content: Element<'static, (), (), ()> =
+        let renderer = layout_renderer();
+        let content: Element<'static, (), (), iced::Renderer> =
             iced::widget::Space::new().width(80).height(30).into();
-        let mut element: Element<'static, (), (), ()> =
+        let mut element: Element<'static, (), (), iced::Renderer> =
             iced::widget::stack![iced::widget::Space::new().width(100).height(50)]
                 .push(ghost(content, -200.0, 0.0))
                 .into();
@@ -348,7 +350,7 @@ mod tests {
         );
         let node = element.as_widget_mut().layout(
             &mut tree,
-            &(),
+            &renderer,
             &layout::Limits::new(Size::ZERO, Size::new(220.0, 300.0)),
         );
         assert_eq!(node.size(), Size::new(100.0, 50.0));
@@ -357,8 +359,9 @@ mod tests {
 
     #[test]
     fn shifted_click_uses_visible_coordinates_and_ghost_is_inert() {
+        let renderer = layout_renderer();
         for clickable in [true, false] {
-            let content: Element<'static, (), (), ()> =
+            let content: Element<'static, (), (), iced::Renderer> =
                 iced::widget::mouse_area(iced::widget::Space::new().width(50).height(50))
                     .on_press(())
                     .into();
@@ -366,7 +369,7 @@ mod tests {
             let mut tree = widget::Tree::new(&element);
             let node = element.as_widget_mut().layout(
                 &mut tree,
-                &(),
+                &renderer,
                 &layout::Limits::new(Size::ZERO, Size::new(320.0, 800.0)),
             );
             let mut messages = Vec::new();
@@ -375,12 +378,22 @@ mod tests {
                 &Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
                 Layout::new(&node),
                 mouse::Cursor::Available(iced::Point::new(110.0, 10.0)),
-                &(),
+                &renderer,
                 &mut iced::advanced::clipboard::Null,
                 &mut Shell::new(&mut messages),
                 &Rectangle::with_size(Size::new(320.0, 800.0)),
             );
             assert_eq!(messages.len(), usize::from(clickable));
         }
+    }
+
+    fn layout_renderer() -> iced::Renderer {
+        use iced::advanced::renderer::Headless;
+        iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .expect("headless layout renderer")
     }
 }

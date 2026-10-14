@@ -21,7 +21,8 @@ pub(crate) fn trim_memory() {
         unsafe extern "C" {
             fn malloc_trim(pad: usize) -> i32;
         }
-        // Best effort: failure just keeps the status quo.
+        // SAFETY: glibc's malloc_trim takes a size_t padding value, requires no
+        // caller-owned pointers, and is thread-safe. This is best effort only.
         unsafe {
             malloc_trim(0);
         }
@@ -555,12 +556,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Realistic wallpaper pixels so arena effects show.
         let img = test_image(&dir, "wall.png", 512, [0x45, 0x85, 0x88]);
-        let images = std::slice::from_ref(&img);
         let mut rss = Vec::new();
         for _ in 0..14 {
-            let views = render_views(&[(0.0, 0.0, 512.0, 512.0)], images);
-            let generated = generate_from_views(&views, "content", true).unwrap();
-            std::hint::black_box(generated);
+            let img = img.clone();
+            let generated = super::super::worker::run(move || {
+                let views = render_views(&[(0.0, 0.0, 512.0, 512.0)], &[img]);
+                generate_from_views(&views, "content", true)
+            })
+            .unwrap()
+            .unwrap();
+            drop(std::hint::black_box(generated));
             rss.push(rss_kb());
         }
         // Medians, not endpoints. This subprocess runs only the RSS probe,

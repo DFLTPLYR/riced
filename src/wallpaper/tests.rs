@@ -1,6 +1,86 @@
 use super::*;
 use image::{Rgba, RgbaImage};
 
+/// Run alone in release mode to distinguish decoder arena retention from live
+/// Settings sources. RICED_DECODE_REFERENCE=1 reproduces the previous RGBA copy.
+#[test]
+#[ignore = "manual isolated release Settings decode memory comparison"]
+#[cfg(target_os = "linux")]
+fn settings_decode_memory_probe() {
+    fn memory() -> String {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    let dir = directory("decode-memory");
+    let path = dir.join("wallpaper.png");
+    RgbaImage::from_fn(3840, 2160, |x, y| {
+        Rgba([(x / 16) as u8, (y / 9) as u8, 120, 255])
+    })
+    .save(&path)
+    .unwrap();
+    crate::theme_gen::trim_memory();
+    let reference = std::env::var_os("RICED_DECODE_REFERENCE").is_some();
+    let dedicated = std::env::var_os("RICED_DECODE_DEDICATED").is_some();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    println!(
+        "reference={reference}, dedicated={dedicated}, before: {}",
+        memory()
+    );
+    for cycle in 0..6 {
+        let path = path.clone();
+        let source = runtime
+            .block_on(async {
+                tokio::task::spawn_blocking(move || {
+                    let decode = move || {
+                        let source = if reference {
+                            let rgba = image::open(&path).unwrap().to_rgba8();
+                            let pixels = bytes::Bytes::from(rgba.into_raw());
+                            std::sync::Arc::new(raster::Source {
+                                width: 3840,
+                                height: 2160,
+                                handle: iced::widget::image::Handle::from_rgba(
+                                    3840,
+                                    2160,
+                                    pixels.clone(),
+                                ),
+                                pixels,
+                                revision: None,
+                            })
+                        } else {
+                            raster::Source::load(&path).unwrap()
+                        };
+                        crate::theme_gen::trim_memory();
+                        source
+                    };
+                    if dedicated {
+                        crate::theme_gen::worker::run(decode).unwrap()
+                    } else {
+                        decode()
+                    }
+                })
+                .await
+            })
+            .unwrap();
+        let weak = std::sync::Arc::downgrade(&source);
+        println!("cycle={cycle}, loaded: {}", memory());
+        drop(source);
+        assert!(weak.upgrade().is_none());
+        drop(weak);
+        crate::theme_gen::trim_memory();
+        println!("cycle={cycle}, closed: {}", memory());
+    }
+    drop(runtime);
+    crate::theme_gen::trim_memory();
+    println!("workers exited: {}", memory());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn per_monitor_fits_use_native_pixels_with_opaque_black_margins() {
     use crate::config::{MonitorWallpaper, WallpaperFit};

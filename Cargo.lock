@@ -4064,6 +4064,7 @@ dependencies = [
  "include_dir",
  "lucide-iced",
  "material-colors",
+ "memmap2",
  "mlua",
  "regex",
  "resvg",

@@ -139,12 +139,13 @@ pub(crate) fn decode_handle(
 ) -> Option<(u32, u32, iced::widget::image::Handle)> {
     use iced::widget::image::Handle;
 
-    let img = image::open(path).ok()?;
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
+    let rgba = image::open(path).ok()?.into_rgba8();
+    let (w, h) = rgba.dimensions();
     if w == 0 || h == 0 {
         return None;
     }
+    // The generic asset cache uses Bytes::is_unique for eviction. Owned
+    // mappings cannot report uniqueness, so keep cache pixels Vec-backed.
     let handle = Handle::from_rgba(w, h, bytes::Bytes::from(rgba.into_raw()));
     Some((w, h, handle))
 }
