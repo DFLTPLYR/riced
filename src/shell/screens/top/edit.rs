@@ -17,25 +17,10 @@ pub(super) struct EditContext<'a> {
     pub saved: &'a mut Vec<TopConfig>,
 }
 
-pub(super) fn serialize_slots(
-    catalog: &[WidgetDefinition],
-    widgets: &[Vec<WidgetPlacement>],
-) -> Vec<SlotWidgets> {
+pub(super) fn serialize_slots(widgets: &[Vec<WidgetPlacement>]) -> Vec<SlotWidgets> {
     widgets
         .iter()
-        .map(|slot| {
-            let placements: Vec<_> = slot
-                .iter()
-                .map(|placement| {
-                    catalog
-                        .iter()
-                        .find(|definition| definition.name == placement.name)
-                        .map(|definition| placement.materialized(&definition.defaults))
-                        .unwrap_or_else(|| placement.clone())
-                })
-                .collect();
-            SlotWidgets::from_placements(&placements)
-        })
+        .map(|slot| SlotWidgets::from_placements(slot))
         .collect()
 }
 
@@ -140,7 +125,7 @@ impl EditContext<'_> {
                 .iter()
                 .map(|align| align.as_str().to_string())
                 .collect(),
-            widgets: serialize_slots(self.catalog, &local.widgets),
+            widgets: serialize_slots(&local.widgets),
             slot_padding: local.slot_padding,
             slot_spacing: local.slot_spacing,
             opacity: TopLocal::snap_opacity(local.opacity),
@@ -252,8 +237,8 @@ mod tests {
         let SlotEntry::Full(placement) = &entries[0] else {
             panic!("placement");
         };
-        assert_eq!(placement.interval, Some(5.0));
-        assert_eq!(placement.size, Some(20.0));
+        assert_eq!(placement.interval, None);
+        assert_eq!(placement.size, None);
         assert_eq!(placement.props.len(), 1);
         assert!(!placement.props.contains_key("inherited"));
         let (_, persisted) = context.change(bar, false, |local, _| local.opacity = 0.5);

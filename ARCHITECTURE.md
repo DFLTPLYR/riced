@@ -299,6 +299,14 @@ and dependency boundaries determine extraction scope.
 
 ## Verification
 
+`config/format.rs` defines the human-facing TOML representation separately from
+resolved Rust layout fields. Bar slots group alignment and widget placements;
+monitor wallpapers are keyed by output; free-form images use `[x, y]` positions;
+bar margin/radius accept uniform numbers or named tables. `format_migration.rs`
+converts old flat keys once on file load, backed up as `config.toml.pre-structured`.
+Settings saves compact slots/geometry and omits defaults; widget inheritance is
+preserved instead of materializing Lua defaults into placement overrides.
+
 Composables use one optional `[composable]` table of source strings. Default
 filenames are omitted on save; sizing and appearance live in Lua `app.defaults`.
 Old source tables migrate at the file-load boundary, with the original config

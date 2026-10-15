@@ -4074,6 +4074,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "toml",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-log",
  "tracing-subscriber",

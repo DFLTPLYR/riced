@@ -18,7 +18,7 @@ pub(crate) use util::decode_handle;
 /// Shell appearance is supplied by Lua app modules under components/:
 /// ```toml
 /// [composable]
-/// context_menu = "custom-menu.lua"
+/// context-menu = "custom-menu.lua"
 /// ```
 /// Default sources are omitted on save. Appearance lives in Lua `app.defaults`.
 ///
@@ -29,7 +29,7 @@ pub(crate) use util::decode_handle;
 /// ```toml
 /// [theme]
 /// name = "gruvbox"
-/// darkmode = true
+/// mode = "dark"
 /// ```
 ///
 /// Global animation speed for every animated transition (selection fade,
@@ -48,32 +48,18 @@ pub(crate) use util::decode_handle;
 /// output = ""        # connector name (e.g. "DP-1"), "" = every output
 /// length = 100.0     # % of the output long axis (1-100)
 /// thickness = 50.0   # px (1-thin output axis)
-/// slots = 3          # grid cells along the long axis: columns when
-///                    # horizontal (top/bottom), rows when vertical
-///                    # (left/right); 1..=32
-/// aligns = ["start", "center", "end"]
-///                    # child position per slot along the bar
-///                    # (cross axis stays centered)
-/// widgets = [["cpu", "ram"], ["clock"]]
-///                    # placements from discovered widgets by slot
-///                    # position; each slot renders its entries together.
-///                    # A bare "name" inherits all definition defaults;
-///                    # tables override per instance, e.g.
-///                    # `{ name = "clock", size = 16.0 }`.
-///                    # (`none`/unknown render empty)
-/// slot_padding = 4.0   # px inset inside every slot, around content
-/// slot_spacing = 4.0   # px gap between slots (also icon/text runs)
+/// slots = [
+///   { align = "start", widgets = ["cpu", "ram"] },
+///   { align = "center", widgets = [{ name = "clock", size = 16 }] },
+///   { align = "end", widgets = [] },
+/// ]
+/// slot-padding = 4.0 # px inset inside every slot
+/// slot-spacing = 4.0 # px gap between slots
 /// opacity = 1.0      # bar backdrop opacity, snapped to steps
 ///                    # 0.0 0.25 0.5 0.75 1.0
 /// floating = false
-/// margin_top = 8
-/// margin_right = 8
-/// margin_bottom = 8
-/// margin_left = 8
-/// radius_top_left = 12.0
-/// radius_top_right = 12.0
-/// radius_bottom_left = 12.0
-/// radius_bottom_right = 12.0
+/// margin = 8
+/// radius = { top-left = 12, top-right = 12, bottom-left = 4, bottom-right = 4 }
 /// ```
 /// Bars added via the context menu are appended here on creation and
 /// panel edits update the entry by index (coalesced save), so bars survive
@@ -90,10 +76,10 @@ pub struct Config {
     pub animation: AnimationConfig,
     #[serde(rename = "notification")]
     pub notifications: NotificationConfig,
-    #[serde(rename = "overlay")]
+    #[serde(rename = "overlay", skip_serializing_if = "Vec::is_empty")]
     pub overlays: Vec<OverlayConfig>,
     /// Bar presets as a direct array (`[[bar]]`), no redundant key name.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bar: Vec<TopConfig>,
     /// Legacy `[top.<name>]` tables: read for migration, never written.
     #[serde(default, skip_serializing)]
@@ -154,11 +140,12 @@ fn default_notification_source() -> String {
 /// enabled = true
 /// output = "mouse"  # or an output name like "DP-1" to pin it
 /// source = "notifications.lua"  # relative to components/, absolute paths allowed
-/// timeout_ms = 5000
+/// timeout-ms = 5000
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct NotificationConfig {
+    #[serde(skip_serializing_if = "is_true")]
     pub enabled: bool,
     #[serde(default = "default_notification_output")]
     pub output: String,
@@ -166,6 +153,9 @@ pub struct NotificationConfig {
     pub source: String,
     #[serde(default = "default_notification_timeout_ms")]
     pub timeout_ms: u64,
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Default for NotificationConfig {
@@ -245,10 +235,11 @@ pub struct AnimationConfig {
 /// `variant` is the Material You scheme variant used by
 /// `riced generate-theme` (ported from `sys/src/colorgen.rs`), one of
 /// `content tonalspot monochrome neutral vibrant expressive fidelity
-/// rainbow fruitsalad`. `templates_dir` points at a `[templates]` dir
+/// rainbow fruitsalad`. `templates-dir` points at a `[templates]` dir
 /// (same format as reshell `core/theme/`); empty uses the seeded
 /// `~/.config/riced/templates/` copy, `"off"` disables template rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "super::format::Theme", into = "super::format::Theme")]
 pub struct ThemeConfig {
     #[serde(default = "default_theme_name")]
     pub name: String,
@@ -273,7 +264,7 @@ impl Default for ThemeConfig {
 
 /// Source filenames in one `[composable]` table; styling belongs to Lua.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ComposableConfig {
     pub selection_rect: String,
     pub context_menu: String,
@@ -324,13 +315,13 @@ impl Serialize for ComposableConfig {
         let mut map = serializer.serialize_map(None)?;
         for (name, source, default) in [
             (
-                "selection_rect",
+                "selection-rect",
                 &self.selection_rect,
                 &defaults.selection_rect,
             ),
-            ("context_menu", &self.context_menu, &defaults.context_menu),
+            ("context-menu", &self.context_menu, &defaults.context_menu),
             (
-                "context_menu_item",
+                "context-menu-item",
                 &self.context_menu_item,
                 &defaults.context_menu_item,
             ),
@@ -347,7 +338,7 @@ impl Serialize for ComposableConfig {
 /// (content inset) and per-corner rounding. Applied when the bar spawns;
 /// panel edits write back by index (coalesced save), so bars survive restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "super::format::Bar", into = "super::format::Bar")]
 pub struct TopConfig {
     #[serde(default = "default_bar_anchor")]
     pub anchor: String,
@@ -445,10 +436,9 @@ pub enum SlotWidgets {
 
 /// Wallpaper images under `[background.*]`, e.g.:
 /// ```toml
-/// [[background.image]]
+/// [[background.images]]
 /// path = "/home/user/pic.png"
-/// x = 0.0
-/// y = 0.0
+/// position = [0.0, 0.0]
 /// z = 0
 /// scale = 1.0
 /// width = 1920.0
@@ -457,7 +447,7 @@ pub enum SlotWidgets {
 /// Global coords like the selection rect; `width`/`height` of `0` mean native
 /// image size at load; `z` orders overlapping images on the map.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "super::format::Background", into = "super::format::Background")]
 pub struct BackgroundConfig {
     pub mode: WallpaperMode,
     pub monitor: Vec<MonitorWallpaper>,
@@ -510,7 +500,7 @@ impl BackgroundConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "super::format::Image", into = "super::format::Image")]
 pub struct BackgroundImage {
     #[serde(default)]
     pub path: String,
@@ -705,7 +695,7 @@ pub use paths::config_path;
 /// `props` key (a bare `"clock"` string inherits everything):
 ///
 /// ```toml
-/// widgets = [[{ name = "clock", size = 16.0, props = { show_seconds = true } }]]
+/// slots = [{ widgets = [{ name = "clock", size = 16.0, props = { show_seconds = true } }] }]
 /// ```
 ///
 /// Before every `view()`/`popup()`/`on_action()`, the engine sets
@@ -1039,11 +1029,9 @@ impl WidgetDefinition {
 /// travels with drags and keys the Lua state); `name` selects the
 /// discovered definition; `interval`/`size`/`file`/`props` override the
 /// definition defaults when present. Serialized without `id` — ids are
-/// a runtime concern, regenerated on load. Saved placements write
-/// effective `interval`/`size` plus the explicit `props` overrides, so
-/// the file shows what the bar renders while absent props keep
-/// inheriting widget defaults; a bare `"name"` string in hand-written
-/// config still means "inherit everything".
+/// a runtime concern, regenerated on load. Saved placements retain explicit
+/// overrides only; absent values keep inheriting Lua defaults. A bare
+/// `"name"` string means "inherit everything".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetPlacement {
@@ -1083,22 +1071,6 @@ impl WidgetPlacement {
         let mut out = defaults.clone();
         out.extend(self.props.clone());
         out
-    }
-
-    /// Materialize effective scalar values: overrides win, missing
-    /// interval/size fill from the definition defaults. Props stay
-    /// sparse (overrides only) — absent keys inherit widget defaults at
-    /// render. Saved placements persist in this form so the file shows
-    /// exactly what the bar renders.
-    pub fn materialized(&self, defaults: &WidgetDefaults) -> WidgetPlacement {
-        WidgetPlacement {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            file: self.file.clone(),
-            interval: Some(self.effective_interval(defaults)),
-            size: Some(self.effective_size(defaults)),
-            props: self.props.clone(),
-        }
     }
 
     /// `true` when nothing is overridden (serializes as a bare name).
@@ -1155,8 +1127,7 @@ impl SlotEntry {
 
 impl SlotWidgets {
     /// Serialize one slot: placements write full tables with
-    /// effective `interval`/`size` materialized (see
-    /// [`WidgetPlacement::materialized`]) and explicit `props`
+    /// explicit `interval`/`size` and `props`
     /// overrides only — except placements already bare, which stay
     /// bare strings. Ids are runtime-only and never written.
     pub fn from_placements(slot: &[WidgetPlacement]) -> Self {
@@ -1336,7 +1307,7 @@ mod tests {
     fn slot_entries_read_names_and_tables() {
         // Bare names inherit everything; tables carry overrides.
         let cfg: Config = toml::from_str(
-            "[[bar]]\nanchor = \"top\"\nwidgets = [[\"clock\", { name = \"clock\", size = 16.0 }]]\n",
+            "[[bar]]\nslots = [{ widgets = [\"clock\", { name = \"clock\", size = 16.0 }] }]\n",
         )
         .unwrap();
         assert!(matches!(cfg.bar[0].widgets[0], SlotWidgets::Many(_)));
@@ -1357,7 +1328,7 @@ mod tests {
         }
         // Integer prop values and legacy string slots still parse.
         let cfg: Config = toml::from_str(
-            "[[bar]]\nanchor = \"top\"\nwidgets = [[{ name = \"x\", props = { n = 2 } }], \"clock\"]\n",
+            "[[bar]]\nslots = [{ widgets = [{ name = \"x\", props = { n = 2 } }] }, { widgets = [\"clock\"] }]\n",
         )
         .unwrap();
         let SlotWidgets::Many(entries) = &cfg.bar[0].widgets[0] else {
@@ -1420,22 +1391,23 @@ mod tests {
     }
 
     #[test]
-    fn materialized_fills_effective_values() {
+    fn placement_overrides_roundtrip_without_materializing_defaults() {
         let mut defaults = WidgetDefaults::default();
         defaults
             .props
             .insert("format".to_string(), PropValue::Text("%H:%M".to_string()));
-        // Bare placement materializes scalars from defaults; props
-        // stay sparse (overrides only, inheriting the rest).
+        // Saving must preserve inheritance rather than freezing Lua defaults.
         let bare = WidgetPlacement {
             id: "w1".to_string(),
             name: "clock".to_string(),
             ..Default::default()
         };
-        let full = bare.materialized(&defaults);
-        assert_eq!(full.interval, Some(1.0));
-        assert_eq!(full.size, Some(13.0));
+        let saved = toml::to_string(&bare).unwrap();
+        let full: WidgetPlacement = toml::from_str(&saved).unwrap();
+        assert_eq!(full.interval, None);
+        assert_eq!(full.size, None);
         assert!(full.props.is_empty(), "absent props inherit");
+        assert_eq!(full.resolve_props(&defaults.props), defaults.props);
         // Overrides win; unknown keys survive.
         let custom = WidgetPlacement {
             interval: Some(5.0),
@@ -1444,9 +1416,10 @@ mod tests {
                 .collect(),
             ..bare
         };
-        let full = custom.materialized(&defaults);
+        let saved = toml::to_string(&custom).unwrap();
+        let full: WidgetPlacement = toml::from_str(&saved).unwrap();
         assert_eq!(full.interval, Some(5.0));
-        assert_eq!(full.size, Some(13.0));
+        assert_eq!(full.size, None);
         assert_eq!(full.props.len(), 1);
         assert_eq!(full.props["extra"], PropValue::Bool(true));
     }
@@ -1457,16 +1430,14 @@ mod tests {
             r#"
             [background]
             mode = "per-monitor"
-            [[background.monitor]]
-            output = "DP-1"
+            [background.monitors.DP-1]
             path = "one.png"
-            [[background.monitor]]
-            output = "DP-2"
+            [background.monitors.DP-2]
             path = "two.png"
             fit = "center"
-            [[background.image]]
+            [[background.images]]
             path = "freeform.png"
-            x = 17.0
+            position = [17.0, 0.0]
         "#,
         )
         .unwrap();
@@ -1487,7 +1458,7 @@ mod tests {
             toml::from_str::<Config>(&saved).unwrap().background,
             config.background
         );
-        let legacy: Config = toml::from_str("[[background.image]]\npath='legacy.png'").unwrap();
+        let legacy: Config = toml::from_str("[[background.images]]\npath='legacy.png'").unwrap();
         assert_eq!(legacy.background.mode, WallpaperMode::FreeForm);
         assert!(legacy.background.monitor.is_empty());
     }
@@ -1530,8 +1501,8 @@ mod tests {
         let cfg: Config = toml::from_str(
             r#"
             [composable]
-            context_menu = "custom-frame.lua"
-            context_menu_item = "custom-item.lua"
+            context-menu = "custom-frame.lua"
+            context-menu-item = "custom-item.lua"
         "#,
         )
         .unwrap();
@@ -1572,8 +1543,8 @@ mod tests {
     #[test]
     fn parses_background_image_entries() {
         let cfg: Config = toml::from_str(
-            "[[background.image]]\npath = \"/a.png\"\nx = 10.0\ny = 20.0\nz = 2\n\
-             [[background.image]]\npath = \"/b.png\"\n",
+            "[[background.images]]\npath = \"/a.png\"\nposition = [10.0, 20.0]\nz = 2\n\
+             [[background.images]]\npath = \"/b.png\"\n",
         )
         .unwrap();
         assert_eq!(cfg.background.image.len(), 2);
@@ -1692,7 +1663,7 @@ mod tests {
     #[test]
     fn theme_section_parses_name_and_darkmode() {
         let cfg: Config =
-            toml::from_str("[theme]\nname = \"dracula\"\ndarkmode = false\n").unwrap();
+            toml::from_str("[theme]\nname = \"dracula\"\nmode = \"light\"\n").unwrap();
         assert_eq!(cfg.theme.name, "dracula");
         assert!(!cfg.theme.darkmode);
     }
@@ -1700,7 +1671,7 @@ mod tests {
     #[test]
     fn bar_section_parses_direct_array_with_defaults() {
         let cfg: Config = toml::from_str(
-            "[[bar]]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\nfloating = true\nmargin_top = 8\n",
+            "[[bar]]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\nfloating = true\nmargin = { top = 8 }\n",
         )
         .unwrap();
         assert_eq!(cfg.bar.len(), 1);
@@ -1722,9 +1693,11 @@ mod tests {
     }
 
     #[test]
-    fn bar_slots_parses_explicit_count() {
-        let cfg: Config =
-            toml::from_str("[[bar]]\nanchor = \"left\"\noutput = \"DP-1\"\nslots = 4\n").unwrap();
+    fn bar_slots_infer_count() {
+        let cfg: Config = toml::from_str(
+            "[[bar]]\nanchor = \"left\"\noutput = \"DP-1\"\nslots = [{}, {}, {}, {}]\n",
+        )
+        .unwrap();
         assert_eq!(cfg.bar.len(), 1);
         assert_eq!(cfg.bar[0].slots, 4);
     }
@@ -1732,9 +1705,10 @@ mod tests {
     #[test]
     fn bar_aligns_default_empty_and_parse_names() {
         let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
-        assert!(sparse.bar[0].aligns.is_empty());
+        assert_eq!(sparse.bar[0].aligns, ["center"]);
         let cfg: Config =
-            toml::from_str("[[bar]]\nanchor = \"top\"\naligns = [\"start\", \"end\"]\n").unwrap();
+            toml::from_str("[[bar]]\nslots = [{ align = \"start\" }, { align = \"end\" }]\n")
+                .unwrap();
         assert_eq!(
             cfg.bar[0].aligns,
             vec!["start".to_string(), "end".to_string()]
@@ -1744,10 +1718,12 @@ mod tests {
     #[test]
     fn bar_widgets_default_empty_and_parse_names() {
         let sparse: Config = toml::from_str("[[bar]]\nanchor = \"top\"\n").unwrap();
-        assert!(sparse.bar[0].widgets.is_empty());
+        assert!(
+            matches!(&sparse.bar[0].widgets[0], SlotWidgets::Many(entries) if entries.is_empty())
+        );
         // Flat names and nested lists read the same shape.
         let cfg: Config = toml::from_str(
-            "[[bar]]\nanchor = \"top\"\nwidgets = [[\"cpu\", \"ram\"], \"clock\"]\n",
+            "[[bar]]\nslots = [{ widgets = [\"cpu\", \"ram\"] }, { widgets = [\"clock\"] }]\n",
         )
         .unwrap();
         assert!(matches!(
@@ -1758,7 +1734,7 @@ mod tests {
         ));
         assert!(matches!(
             cfg.bar[0].widgets[1],
-            SlotWidgets::One(ref name) if name == "clock"
+            SlotWidgets::Many(ref entries) if entries == &[SlotEntry::Name("clock".into())]
         ));
     }
 
@@ -1783,7 +1759,7 @@ mod tests {
         let config: Config = toml::from_str(
             r##"
             [composable]
-            selection_rect = "custom-selection.lua"
+            selection-rect = "custom-selection.lua"
         "##,
         )
         .unwrap();
@@ -1799,7 +1775,7 @@ mod tests {
         assert_eq!(sparse.bar[0].slot_padding, 0.0);
         assert_eq!(sparse.bar[0].slot_spacing, 4.0);
         let cfg: Config =
-            toml::from_str("[[bar]]\nanchor = \"top\"\nslot_padding = 6.0\nslot_spacing = 2.0\n")
+            toml::from_str("[[bar]]\nanchor = \"top\"\nslot-padding = 6.0\nslot-spacing = 2.0\n")
                 .unwrap();
         assert_eq!(cfg.bar[0].slot_padding, 6.0);
         assert_eq!(cfg.bar[0].slot_spacing, 2.0);
@@ -1842,7 +1818,7 @@ mod tests {
         assert_eq!(empty.notifications.source, "notifications.lua");
         assert_eq!(empty.notifications.timeout_ms, 5000);
         let cfg: Config = toml::from_str(
-            "[notification]\nenabled = false\noutput = \"DP-1\"\nsource = \"custom.lua\"\ntimeout_ms = 8000\n",
+            "[notification]\nenabled = false\noutput = \"DP-1\"\nsource = \"custom.lua\"\ntimeout-ms = 8000\n",
         )
         .unwrap();
         assert!(!cfg.notifications.enabled);

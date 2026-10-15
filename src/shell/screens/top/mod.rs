@@ -1711,14 +1711,11 @@ impl Top {
             .unwrap_or_default()
     }
 
-    /// Serialize one bar's slots with effective values materialized,
-    /// so the file always shows exactly what the bar renders.
-    /// Placements of unknown widgets persist as written.
+    /// Preserve explicit overrides without materializing Lua defaults.
     fn serialize_slots(
-        plots: &Plots,
         widgets: &[Vec<crate::config::WidgetPlacement>],
     ) -> Vec<crate::config::SlotWidgets> {
-        edit::serialize_slots(&plots.catalog.definitions, widgets)
+        edit::serialize_slots(widgets)
     }
 
     /// Write the bar's current state back to its `[[bar]]` entry and
@@ -2150,7 +2147,7 @@ impl Top {
         fn persist_new(plots: &mut Plots, top: &mut Top, anchor: Anchor, output: String) {
             let l = top.local.clone();
             let aligns: Vec<String> = l.aligns.iter().map(|a| a.as_str().to_string()).collect();
-            let widgets: Vec<crate::config::SlotWidgets> = Top::serialize_slots(plots, &l.widgets);
+            let widgets: Vec<crate::config::SlotWidgets> = Top::serialize_slots(&l.widgets);
             plots.config.bar.push(crate::config::TopConfig {
                 anchor: anchor_name(anchor).to_lowercase(),
                 output,

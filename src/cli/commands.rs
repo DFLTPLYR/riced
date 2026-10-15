@@ -11,7 +11,7 @@ pub(crate) fn run_apply_templates(
     let dir = templates.or_else(|| colorgen::effective_templates_dir(&config.theme));
     let Some(dir) = dir else {
         eprintln!(
-            "riced: no templates dir (pass --templates, set [theme] templates_dir, or seed ~/.config/riced/templates/)"
+            "riced: no templates dir (pass --templates, set [theme] templates-dir, or seed ~/.config/riced/templates/)"
         );
         std::process::exit(1);
     };

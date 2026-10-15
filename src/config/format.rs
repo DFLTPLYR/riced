@@ -1,0 +1,608 @@
+//! Human-facing TOML shapes, separate from the shell's resolved layout fields.
+use super::schema::*;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Settings saves use compact slot/geometry values rather than nested widget
+/// tables. Both compact and expanded input forms deserialize identically.
+pub(super) fn to_string(config: &Config) -> Result<String, String> {
+    let text = toml::to_string_pretty(config).map_err(|error| error.to_string())?;
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error: toml_edit::TomlError| error.to_string())?;
+    if let Some(bars) = document
+        .get_mut("bar")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+    {
+        for bar in bars.iter_mut() {
+            for key in ["margin", "radius"] {
+                if let Some(item) = bar.get_mut(key) {
+                    item.make_value();
+                }
+            }
+            if let Some(item) = bar.get_mut("slots") {
+                item.make_value();
+                if let Some(slots) = item.as_array_mut() {
+                    for slot in slots.iter_mut() {
+                        slot.decor_mut().set_prefix("\n    ");
+                    }
+                    slots.set_trailing_comma(true);
+                    slots.set_trailing("\n");
+                }
+            }
+        }
+    }
+    if let Some(images) = document
+        .get_mut("background")
+        .and_then(|background| background.get_mut("images"))
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+    {
+        for image in images.iter_mut() {
+            if let Some(position) = image
+                .get_mut("position")
+                .and_then(toml_edit::Item::as_array_mut)
+            {
+                position.fmt();
+            }
+        }
+    }
+    Ok(document.to_string())
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct Bar {
+    #[serde(skip_serializing_if = "is_top")]
+    anchor: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    output: String,
+    #[serde(skip_serializing_if = "is_full_length")]
+    length: f32,
+    #[serde(skip_serializing_if = "is_default_thickness")]
+    thickness: f32,
+    slots: Vec<Slot>,
+    #[serde(skip_serializing_if = "is_default")]
+    slot_padding: f32,
+    #[serde(skip_serializing_if = "is_default_spacing")]
+    slot_spacing: f32,
+    #[serde(skip_serializing_if = "is_one")]
+    opacity: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    floating: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    margin: Option<Margin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    radius: Option<Radius>,
+}
+fn is_top(value: &str) -> bool {
+    value == "top"
+}
+fn is_full_length(value: &f32) -> bool {
+    *value == 100.0
+}
+fn is_default_thickness(value: &f32) -> bool {
+    *value == 50.0
+}
+fn is_default_spacing(value: &f32) -> bool {
+    *value == 4.0
+}
+fn is_one(value: &f32) -> bool {
+    *value == 1.0
+}
+
+impl Default for Bar {
+    fn default() -> Self {
+        Self {
+            anchor: "top".into(),
+            output: String::new(),
+            length: 100.0,
+            thickness: 50.0,
+            slots: vec![Slot::default()],
+            slot_padding: 0.0,
+            slot_spacing: 4.0,
+            opacity: 1.0,
+            floating: false,
+            margin: None,
+            radius: None,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Slot {
+    #[serde(skip_serializing_if = "is_center")]
+    align: String,
+    widgets: Vec<SlotEntry>,
+}
+fn is_center(value: &str) -> bool {
+    value == "center"
+}
+impl Default for Slot {
+    fn default() -> Self {
+        Self {
+            align: "center".into(),
+            widgets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Margin {
+    Uniform(i32),
+    Sides(Sides),
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Sides {
+    #[serde(skip_serializing_if = "is_default")]
+    top: i32,
+    #[serde(skip_serializing_if = "is_default")]
+    right: i32,
+    #[serde(skip_serializing_if = "is_default")]
+    bottom: i32,
+    #[serde(skip_serializing_if = "is_default")]
+    left: i32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Radius {
+    Uniform(f32),
+    Corners(Corners),
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+struct Corners {
+    #[serde(skip_serializing_if = "is_default")]
+    top_left: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    top_right: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    bottom_left: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    bottom_right: f32,
+}
+
+impl From<Bar> for TopConfig {
+    fn from(value: Bar) -> Self {
+        let margin = match value.margin {
+            Some(Margin::Uniform(n)) => Sides {
+                top: n,
+                right: n,
+                bottom: n,
+                left: n,
+            },
+            Some(Margin::Sides(sides)) => sides,
+            None => Sides::default(),
+        };
+        let radius = match value.radius {
+            Some(Radius::Uniform(n)) => Corners {
+                top_left: n,
+                top_right: n,
+                bottom_left: n,
+                bottom_right: n,
+            },
+            Some(Radius::Corners(corners)) => corners,
+            None => Corners::default(),
+        };
+        Self {
+            anchor: value.anchor,
+            output: value.output,
+            length: value.length,
+            thickness: value.thickness,
+            slots: value.slots.len() as u32,
+            aligns: value.slots.iter().map(|slot| slot.align.clone()).collect(),
+            widgets: value
+                .slots
+                .into_iter()
+                .map(|slot| SlotWidgets::Many(slot.widgets))
+                .collect(),
+            slot_padding: value.slot_padding,
+            slot_spacing: value.slot_spacing,
+            opacity: value.opacity,
+            floating: value.floating,
+            margin_top: margin.top,
+            margin_right: margin.right,
+            margin_bottom: margin.bottom,
+            margin_left: margin.left,
+            radius_top_left: radius.top_left,
+            radius_top_right: radius.top_right,
+            radius_bottom_left: radius.bottom_left,
+            radius_bottom_right: radius.bottom_right,
+        }
+    }
+}
+impl From<TopConfig> for Bar {
+    fn from(value: TopConfig) -> Self {
+        let margins = [
+            value.margin_top,
+            value.margin_right,
+            value.margin_bottom,
+            value.margin_left,
+        ];
+        let radii = [
+            value.radius_top_left,
+            value.radius_top_right,
+            value.radius_bottom_left,
+            value.radius_bottom_right,
+        ];
+        let margin = if margins == [0; 4] {
+            None
+        } else if margins.iter().all(|n| *n == margins[0]) {
+            Some(Margin::Uniform(margins[0]))
+        } else {
+            Some(Margin::Sides(Sides {
+                top: margins[0],
+                right: margins[1],
+                bottom: margins[2],
+                left: margins[3],
+            }))
+        };
+        let radius = if radii == [0.0; 4] {
+            None
+        } else if radii.iter().all(|n| *n == radii[0]) {
+            Some(Radius::Uniform(radii[0]))
+        } else {
+            Some(Radius::Corners(Corners {
+                top_left: radii[0],
+                top_right: radii[1],
+                bottom_left: radii[2],
+                bottom_right: radii[3],
+            }))
+        };
+        let slots = (0..value.slots)
+            .map(|index| {
+                let index = index as usize;
+                let widgets = match value.widgets.get(index) {
+                    Some(SlotWidgets::One(name)) => vec![SlotEntry::Name(name.clone())],
+                    Some(SlotWidgets::Many(entries)) => entries.clone(),
+                    None => Vec::new(),
+                };
+                Slot {
+                    align: value
+                        .aligns
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| "center".into()),
+                    widgets,
+                }
+            })
+            .collect();
+        Self {
+            anchor: value.anchor,
+            output: value.output,
+            length: value.length,
+            thickness: value.thickness,
+            slots,
+            slot_padding: value.slot_padding,
+            slot_spacing: value.slot_spacing,
+            opacity: value.opacity,
+            floating: value.floating,
+            margin,
+            radius,
+        }
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct Background {
+    #[serde(skip_serializing_if = "is_default")]
+    mode: WallpaperMode,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    monitors: BTreeMap<String, Wallpaper>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    images: Vec<BackgroundImage>,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Wallpaper {
+    path: String,
+    #[serde(skip_serializing_if = "is_default")]
+    fit: WallpaperFit,
+}
+impl From<Background> for BackgroundConfig {
+    fn from(value: Background) -> Self {
+        Self {
+            mode: value.mode,
+            image: value.images,
+            monitor: value
+                .monitors
+                .into_iter()
+                .map(|(output, wallpaper)| MonitorWallpaper {
+                    output,
+                    path: wallpaper.path,
+                    fit: wallpaper.fit,
+                })
+                .collect(),
+        }
+    }
+}
+impl From<BackgroundConfig> for Background {
+    fn from(value: BackgroundConfig) -> Self {
+        Self {
+            mode: value.mode,
+            images: value.image,
+            monitors: value
+                .monitor
+                .into_iter()
+                .map(|wallpaper| {
+                    (
+                        wallpaper.output,
+                        Wallpaper {
+                            path: wallpaper.path,
+                            fit: wallpaper.fit,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct Image {
+    path: String,
+    #[serde(skip_serializing_if = "is_default", deserialize_with = "position")]
+    position: [f32; 2],
+    #[serde(skip_serializing_if = "is_default")]
+    z: i32,
+    #[serde(skip_serializing_if = "is_one")]
+    scale: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    width: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    height: f32,
+}
+fn position<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<[f32; 2], D::Error> {
+    let values = Vec::<f32>::deserialize(deserializer)?;
+    values.try_into().map_err(|_: Vec<f32>| {
+        serde::de::Error::custom("position must contain exactly two numbers: [x, y]")
+    })
+}
+impl Default for Image {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            position: [0.0; 2],
+            z: 0,
+            scale: 1.0,
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+}
+impl From<Image> for BackgroundImage {
+    fn from(value: Image) -> Self {
+        Self {
+            path: value.path,
+            x: value.position[0],
+            y: value.position[1],
+            z: value.z,
+            scale: value.scale,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+impl From<BackgroundImage> for Image {
+    fn from(value: BackgroundImage) -> Self {
+        Self {
+            path: value.path,
+            position: [value.x, value.y],
+            z: value.z,
+            scale: value.scale,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct Theme {
+    name: String,
+    mode: ThemeMode,
+    #[serde(skip_serializing_if = "is_content")]
+    variant: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    templates_dir: String,
+}
+fn is_content(value: &str) -> bool {
+    value == "content"
+}
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            name: "gruvbox".into(),
+            mode: ThemeMode::Dark,
+            variant: "content".into(),
+            templates_dir: String::new(),
+        }
+    }
+}
+impl From<Theme> for ThemeConfig {
+    fn from(value: Theme) -> Self {
+        Self {
+            name: value.name,
+            darkmode: matches!(value.mode, ThemeMode::Dark),
+            variant: value.variant,
+            templates_dir: value.templates_dir,
+        }
+    }
+}
+impl From<ThemeConfig> for Theme {
+    fn from(value: ThemeConfig) -> Self {
+        Self {
+            name: value.name,
+            mode: if value.darkmode {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            variant: value.variant,
+            templates_dir: value.templates_dir,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_and_expanded_slots_have_identical_layout_and_saved_form() {
+        let inline: Config = toml::from_str(
+            r#"
+            [[bar]]
+            output = "DP-1"
+            slots = [
+                { align = "start", widgets = ["clock", { name = "stats", size = 17 }] },
+                { align = "end", widgets = [] },
+            ]
+        "#,
+        )
+        .unwrap();
+        let expanded: Config = toml::from_str(
+            r#"
+            [[bar]]
+            output = "DP-1"
+            [[bar.slots]]
+            align = "start"
+            widgets = ["clock", { name = "stats", size = 17 }]
+            [[bar.slots]]
+            align = "end"
+            widgets = []
+        "#,
+        )
+        .unwrap();
+        assert_eq!(inline.bar[0].slots, 2);
+        assert_eq!(inline.bar[0].aligns, ["start", "end"]);
+        assert_eq!(
+            serde_json::to_value(&inline).unwrap(),
+            serde_json::to_value(&expanded).unwrap()
+        );
+        let saved = to_string(&inline).unwrap();
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            serde_json::to_value(&inline).unwrap(),
+            serde_json::to_value(&reloaded).unwrap()
+        );
+        assert!(
+            matches!(&reloaded.bar[0].widgets[1], SlotWidgets::Many(entries) if entries.is_empty())
+        );
+        assert!(!saved.contains("aligns ="));
+        assert!(!saved.contains("interval ="));
+        assert!(!saved.contains("floating ="));
+        assert!(!saved.contains("margin"));
+        assert!(!saved.contains("[[bar.slots"));
+    }
+
+    #[test]
+    fn grouped_and_uniform_geometry_roundtrip_without_swapping_corners() {
+        let config: Config = toml::from_str(
+            r#"
+            [[bar]]
+            margin = { top = -2, right = 3, bottom = 4, left = 5 }
+            radius = { top-left = 1, top-right = 2, bottom-left = 3, bottom-right = 4 }
+            [[bar]]
+            margin = 8
+            radius = 10
+        "#,
+        )
+        .unwrap();
+        let bar = &config.bar[0];
+        assert_eq!(
+            [
+                bar.margin_top,
+                bar.margin_right,
+                bar.margin_bottom,
+                bar.margin_left
+            ],
+            [-2, 3, 4, 5]
+        );
+        assert_eq!(
+            [
+                bar.radius_top_left,
+                bar.radius_top_right,
+                bar.radius_bottom_left,
+                bar.radius_bottom_right
+            ],
+            [1.0, 2.0, 3.0, 4.0]
+        );
+        let saved = to_string(&config).unwrap();
+        assert!(saved.contains("margin = 8"));
+        assert!(saved.contains("radius = 10"));
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(&reloaded).unwrap()
+        );
+    }
+
+    #[test]
+    fn keyed_wallpapers_keep_both_recipes_and_native_image_defaults() {
+        let config: Config = toml::from_str(
+            r#"
+            [background]
+            mode = "per-monitor"
+            [background.monitors.DP-2]
+            path = "portrait.png"
+            fit = "stretch"
+            [background.monitors.DP-1]
+            path = "landscape.png"
+            [[background.images]]
+            path = "free-form.png"
+            position = [-291.53717, -132.1731]
+            z = 1
+            [theme]
+            mode = "light"
+            templates-dir = "off"
+            [notification]
+            timeout-ms = 9000
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.background.monitor[0].output, "DP-1");
+        assert_eq!(config.background.monitor[1].fit, WallpaperFit::Stretch);
+        assert_eq!(config.background.image[0].width, 0.0);
+        assert!(!config.theme.darkmode);
+        assert_eq!(config.notifications.timeout_ms, 9000);
+        let saved = to_string(&config).unwrap();
+        assert!(!saved.contains("width ="));
+        assert!(!saved.contains("scale ="));
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.background, config.background);
+    }
+
+    #[test]
+    fn malformed_structured_fields_fail_instead_of_being_ignored() {
+        for source in [
+            "[[bar]]\nmargin = { sideways = 8 }",
+            "[[bar]]\nradius = { top_left = 8 }",
+            "[[bar]]\nslots = [{ align = 'start', widgets = 4 }]",
+            "[[background.images]]\nposition = [1, 2, 3]",
+            "[background.monitors.DP-1]\nfit = 'squish'",
+            "[theme]\nmode = 'bright'",
+        ] {
+            assert!(
+                toml::from_str::<Config>(source).is_err(),
+                "accepted {source}"
+            );
+        }
+    }
+}

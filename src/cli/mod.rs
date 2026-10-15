@@ -51,7 +51,7 @@ pub enum Commands {
     /// regenerating. Defaults to the configured theme + `[theme]
     /// templates_dir`.
     ApplyTemplates {
-        /// Templates dir to render. Defaults to `[theme] templates_dir`.
+        /// Templates dir to render. Defaults to `[theme] templates-dir`.
         #[arg(long)]
         templates: Option<PathBuf>,
         /// Theme object to pass. Defaults to `[theme] name`.

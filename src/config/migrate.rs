@@ -261,7 +261,7 @@ mod tests {
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!has_legacy_composables(&saved));
         assert!(!saved.contains("[composable."));
-        assert!(saved.contains("context_menu = \"custom-menu.lua\""));
+        assert!(saved.contains("context-menu = \"custom-menu.lua\""));
         assert_eq!(
             std::fs::read_to_string(path.with_extension("toml.pre-composable-sources")).unwrap(),
             content

@@ -1,5 +1,7 @@
 //! Configuration schema, discovery, migration, installation policy, and I/O.
 pub mod discovery;
+mod format;
+mod format_migration;
 mod io;
 pub mod migrate;
 mod paths;

@@ -72,6 +72,77 @@ src/app/app.rs:99       subscription: listen_with(throttled_graft) + shell_event
 src/app/app.rs:454      redraw_scope: SelectionTick|Button => All, CursorMoved => None
 ```
 
+## Configuration format
+
+`~/.config/riced/config.toml` uses kebab-case keys. Component appearance belongs
+in Lua; TOML selects sources and describes shell placement. Saves omit default
+bar geometry and native image dimensions, and preserve widget inheritance.
+An explicit widget override stays explicit, even if it currently matches a Lua
+default. Bare widget names follow their Lua defaults as those defaults change.
+
+Compact slots keep alignment next to their ordered widgets; their count is inferred:
+
+```toml
+[[bar]]
+output = "DP-1"
+anchor = "top"
+thickness = 34
+slot-spacing = 11
+slots = [
+  { align = "start", widgets = [{ name = "workspaces", size = 8 }, "stats"] },
+  { align = "center", widgets = ["clock", "notifycenter"] },
+  { align = "end", widgets = [] },
+]
+```
+
+Expanded slots are the same schema, useful for larger configurations:
+
+```toml
+[[bar]]
+output = "DP-1"
+thickness = 34
+
+[[bar.slots]]
+align = "start"
+widgets = ["workspaces", { name = "stats", size = 16 }]
+
+[[bar.slots]]
+align = "center"
+widgets = ["clock"]
+```
+
+Slots default to center alignment and empty widgets. An omitted `slots` field
+creates one empty slot. Empty slots in an explicit list are retained.
+Settings writes compact slot arrays, including inline widget overrides.
+
+Margins and radii accept uniform numbers or named sides/corners:
+
+```toml
+[[bar]]
+floating = true
+margin = 8
+radius = 10
+
+[[bar]]
+margin = { top = 8, right = 12, bottom = 8, left = 12 }
+radius = { top-left = 10, top-right = 10, bottom-left = 4, bottom-right = 4 }
+```
+
+Unspecified sides/corners default to zero. Other bar defaults are `anchor = "top"`,
+`output = ""` (all outputs), `length = 100`, `thickness = 50`, `slot-padding = 0`,
+`slot-spacing = 4`, `opacity = 1`, and `floating = false`.
+
+Wallpaper assignments use `[background.monitors.<output>]`; ordered free-form
+layers use `[[background.images]]` with `position = [x, y]`. Both recipes are
+retained when switching modes. Image defaults are position `[0, 0]`, `z = 0`,
+`scale = 1`, and native dimensions (`width = 0`, `height = 0`).
+Theme selection uses `mode = "dark"` or `"light"`, with optional `templates-dir`.
+Notification timeout is spelled `timeout-ms`.
+
+Old flat layouts migrate once at file load, preserving the original as
+`config.toml.pre-structured`. Conflicting old/new fields fail validation instead
+of silently overriding one another. Saved configs use only the new structure.
+
 ## Widgets (Lua)
 
 Bar cells are Lua scripts in `~/.config/riced/widgets/` — each file
@@ -83,7 +154,7 @@ hello/stats/cpu/ram/gpu/workspaces/clinepass examples — add a
 ```toml
 # [[bar]] widgets entry: bare name inherits everything, tables
 # override per instance.
-widgets = [[{ name = "clock", size = 16.0 }]]
+slots = [{ widgets = [{ name = "clock", size = 16.0 }] }]
 ```
 
 ```lua
@@ -355,9 +426,9 @@ Shell composables use one optional source-selection table:
 
 ```toml
 [composable]
-selection_rect = "selection_rect.lua"
-context_menu = "context_menu.lua"
-context_menu_item = "context_menu_item.lua"
+selection-rect = "selection_rect.lua"
+context-menu = "context_menu.lua"
+context-menu-item = "context_menu_item.lua"
 ```
 
 These are the defaults: omit the entire table unless using custom filenames.
@@ -476,7 +547,7 @@ rendered per output — mouse output by default, pinnable by name:
 enabled = true
 output = "mouse"  # or "DP-1" to pin
 source = "notifications.lua"
-timeout_ms = 5000
+timeout-ms = 5000
 ```
 
 `source` resolves relative to `~/.config/riced/components/` (absolute paths also work),
@@ -599,7 +670,7 @@ ignored `terminal` block. Selected in `config.toml` (mirrors reshell
 ```toml
 [theme]
 name = "gruvbox" # ~/.config/riced/theme/{name}.json (user file wins, else vendored copy)
-darkmode = true  # picks the dark vs light variant
+mode = "dark"   # "dark" or "light"
 variant = "content" # Material You scheme variant for generate-theme
 ```
 
@@ -624,7 +695,7 @@ Default templates ship in `templates/` (copied from reshell `core/theme/`:
 kitty, hypr, gtk, helix, rofi, btop, discord, nvim, … plus its `config.toml`).
 First run seeds them to `~/.config/riced/templates/` (missing files only,
 never overwrites), and that copy is what renders by default — edit it
-freely. `[theme] templates_dir` overrides the dir, `"off"` disables.
+freely. `[theme] templates-dir` overrides the dir, `"off"` disables.
 
 Switching themes re-renders templates too (sys `change_theme`): picking a
 theme in Settings (or `riced apply-templates [--templates DIR] [--name X]`)
@@ -634,7 +705,7 @@ update thread, reporting per-template errors without freezing the shell.
 Wallpaper edits in Settings are preview-only. Press **Apply** to bake and
 publish the new desktop; dynamic-theme generation then runs once from the
 applied output composites. Closing Settings does not apply a wallpaper draft.
-External changes to `[[background.image]]` rebuild the applied tiles. Theme
+External changes to `[[background.images]]` rebuild the applied tiles. Theme
 generation remains off the update thread and runs only when the selected
 theme is `dynamic`.
 
@@ -681,13 +752,11 @@ clicking a display selects it without dragging or zooming the layout.
 [background]
 mode = "per-monitor" # "free-form" is the default for older configurations
 
-[[background.monitor]]
-output = "DP-1"
+[background.monitors.DP-1]
 path = "~/Pictures/landscape.png"
 fit = "expand"
 
-[[background.monitor]]
-output = "DP-2"
+[background.monitors.DP-2]
 path = "~/Pictures/portrait.png"
 fit = "center"
 ```
