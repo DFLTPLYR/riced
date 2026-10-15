@@ -351,14 +351,20 @@ button sizing, padding, radius, label color and resting background, and
 
 ### App-backed shell composables
 
-The first migrated shell surface is the drag-selection rectangle:
+Shell composables use one optional source-selection table:
 
 ```toml
-[composable.selection_rect]
-src = "selection_rect.lua"
+[composable]
+selection_rect = "selection_rect.lua"
+context_menu = "context_menu.lua"
+context_menu_item = "context_menu_item.lua"
 ```
 
-Relative `src` paths resolve under `~/.config/riced/components/`; absolute
+These are the defaults: omit the entire table unless using custom filenames.
+Saves omit default filenames and write only custom sources. Sizing and styling
+live in each Lua module's `app.defaults`, rather than TOML property tables.
+
+Relative source paths resolve under `~/.config/riced/components/`; absolute
 paths are also supported. The bundled file is seeded without overwriting
 existing files. App-backed modules start with `-- riced:composable` so they
 are excluded from automatic shared-builder loading, and return an app table:
@@ -378,8 +384,7 @@ return app
 ```
 
 `props` and `self.props` are the same resolved table: Lua `app.defaults`, then
-optional `[composable.selection_rect.props]` scalar overrides, then host-owned
-state. Rust supplies `width`, `height`, output-local `x`/`y`, `opacity`,
+host-owned state. Rust supplies `width`, `height`, output-local `x`/`y`, `opacity`,
 `selecting`, and an `output` geometry table. The host positions and fades the
 returned tree, so the component should not apply `opacity` a second time.
 The bundled appearance defaults (`radius`, `border_width`, `fill_alpha`) live
@@ -394,22 +399,14 @@ the bounded Lua host (instruction budget and memory limit).
 
 ### Lua context menu
 
-The background right-click menu and its entries are also app-backed:
+The background right-click menu and its entries use `context_menu.lua` and
+`context_menu_item.lua` by default. Select replacements in `[composable]`.
 
-```toml
-[composable.context_menu]
-src = "context_menu.lua"
-
-[composable.context_menu_item]
-src = "context_menu_item.lua"
-```
-
-The seeded frame declares `width = 178`, `height = 92`, `auto_sizing = true`, `padding = 4`,
+The seeded frame declares `width = 150`, `height = 92`, `auto_sizing = true`, `padding = 4`,
 `spacing = 5`, and `rounding = 3` in `app.defaults`. Entry defaults are
-`padding = 5` and `rounding = 3`. Change those defaults in Lua or use sparse
-`[composable.context_menu.props]` / `[composable.context_menu_item.props]`
-overrides. Settings exposes the source paths and resolved scalar properties;
-Reset removes an override so it inherits from the Lua app again.
+`padding = 5` and `rounding = 3`. Change those defaults directly in Lua;
+source edits reload live. Settings exposes the source paths, while appearance
+is configured in the selected Lua files.
 
 Rust supplies the frame's `props.items`:
 
@@ -420,21 +417,23 @@ Rust supplies the frame's `props.items`:
 }
 ```
 
-It also supplies `props.item_component = { src = ..., props = ... }` and an
+It also supplies `props.item_component = { src = ..., props = {} }` and an
 `output` geometry table. The frame uses
 `riced.component(props.item_component.src, props.item_component.props, item)`
 to invoke the item app's `app:view(props)`. Nested apps share the parent's
-live theme and instruction/memory limits; their defaults are merged before
-config overrides and host `label`/`action` props.
+live theme and instruction/memory limits; their Lua defaults are merged before
+host `label`/`action` props. The frame can supply its own overrides through the
+second `riced.component()` argument.
 
 With `auto_sizing = true`, the seeded menu's height fits its entries, padding,
 and spacing. Disable it to use the numeric `height` property. Width stays
-178px by default; set `width = "auto"` to fit the labels as well:
+150px by default; set `width = "auto"` in the frame's Lua defaults to fit labels:
 
-```toml
-[composable.context_menu.props]
-auto_sizing = true
-width = "auto"
+```lua
+local app = {
+    defaults = { width = "auto", height = 92, auto_sizing = true,
+        padding = 4, spacing = 5, rounding = 3, border_width = 1 },
+}
 ```
 
 Lua containers accept `:width("auto")` / `:height("auto")` as aliases for
@@ -449,13 +448,12 @@ positioning it; output-edge clamping and click containment use those measured
 bounds, including when a menu is constrained by a small output. Rust owns opening, outside-click dismissal,
 and the two action handlers; unknown actions are ignored with a diagnostic.
 Broken sources or invalid geometry keep the last working tree, with a native
-menu fallback supporting automatic and fixed sizing when no working tree exists.
+menu fallback with a fixed width and content-height sizing when no working tree exists.
 
-Legacy context-menu scalar settings migrate on load into sparse overrides,
-and `[composable.menu]` is removed. Context-menu width takes precedence over
-generic menu width; generic height transfers when no context-menu height
-override exists. Unused generic padding/spacing/rounding are retired. Before
-rewriting the config, migration preserves `config.toml.pre-composable`.
+Old `[composable.<name>]` tables migrate on file load to source strings.
+TOML appearance overrides and `[composable.menu]` are retired; transfer any
+custom appearance values to the corresponding Lua `app.defaults`. Before
+rewriting the config, migration preserves `config.toml.pre-composable-sources`.
 The shared `iced.menu` list builder is independent of this retired config table.
 
 Popup/bar/notification frames and interactive settings components remain the
@@ -482,7 +480,7 @@ timeout_ms = 5000
 ```
 
 `source` resolves relative to `~/.config/riced/components/` (absolute paths also work),
-using the same resolver as composable `src` and `riced.component()`.
+using the same resolver as composable sources and `riced.component()`.
 It renders the **whole scene**, including the list, through the shared overlay
 host. Width, placement, spacing, card height, and transitions belong in Lua:
 

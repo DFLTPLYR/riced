@@ -1,6 +1,6 @@
 -- riced:composable
 local app = {
-    defaults = { width = 178, height = 92, auto_sizing = true, padding = 4, spacing = 5, rounding = 3, border_width = 1 },
+    defaults = { width = 150, height = 92, auto_sizing = true, padding = 4, spacing = 5, rounding = 3, border_width = 1 },
 }
 
 function app:view(props)

@@ -122,17 +122,29 @@ pub(super) fn has_legacy_composables(content: &str) -> bool {
     let Some(table) = value.get("composable").and_then(toml::Value::as_table) else {
         return false;
     };
-    table.contains_key("menu")
-        || ["context_menu", "context_menu_item"].iter().any(|name| {
-            table
-                .get(*name)
-                .and_then(toml::Value::as_table)
-                .is_some_and(|entry| {
-                    ["width", "height", "padding", "spacing", "rounding"]
-                        .iter()
-                        .any(|key| entry.contains_key(*key))
-                })
-        })
+    table.values().any(toml::Value::is_table)
+}
+
+/// Retired tables are converted only at the file-load boundary. Styling is
+/// deliberately retired from TOML; the original file is backed up before save.
+pub(super) fn migrate_composable_sources(value: &mut toml::Value) {
+    let Some(table) = value
+        .get_mut("composable")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return;
+    };
+    for name in ["selection_rect", "context_menu", "context_menu_item"] {
+        if let Some(entry) = table.get(name).and_then(toml::Value::as_table) {
+            let source = entry.get("src").cloned();
+            if let Some(source) = source {
+                table.insert(name.into(), source);
+            } else {
+                table.remove(name);
+            }
+        }
+    }
+    table.remove("menu");
 }
 
 /// Move legacy `[top.<name>]` entries into `[[bar]]` when no bars exist
@@ -153,9 +165,9 @@ pub(super) fn migrate_legacy_top(mut cfg: Config) -> Config {
 }
 #[cfg(test)]
 mod tests {
+    use super::super::Config;
     use super::super::io::parse;
     use super::super::seed::seed_components_in;
-    use super::super::{Config, PropValue};
     use super::*;
 
     #[test]
@@ -206,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn composable_migration_preserves_custom_values_and_retires_generic_menu() {
+    fn composable_migration_preserves_sources_and_backs_up_retired_props_once() {
         let dir =
             std::env::temp_dir().join(format!("riced-context-migration-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -219,38 +231,39 @@ mod tests {
             spacing = 0.0
             rounding = 0.0
             [composable.context_menu]
+            src = "custom-menu.lua"
             width = 178.0
             padding = 4.0
             spacing = 5.0
             rounding = 3.0
             [composable.context_menu_item]
+            src = "custom-item.lua"
             padding = 5.0
             rounding = 3.0
+            [composable.selection_rect]
+            src = "custom-selection.lua"
+            [composable.selection_rect.props]
+            radius = 4.0
+            [theme]
+            name = "dynamic"
+            [[bar]]
+            output = "DP-1"
+            thickness = 34.0
         "#;
         std::fs::write(&path, content).unwrap();
         let (cfg, stamp) = Config::load_from(&path);
-        for (key, value) in [
-            ("width", 178.0),
-            ("height", 92.0),
-            ("padding", 4.0),
-            ("spacing", 5.0),
-            ("rounding", 3.0),
-        ] {
-            assert_eq!(
-                cfg.composable.context_menu.props[key],
-                PropValue::Number(value)
-            );
-        }
-        assert_eq!(
-            cfg.composable.context_menu_item.props["padding"],
-            PropValue::Number(5.0)
-        );
+        assert_eq!(cfg.composable.context_menu, "custom-menu.lua");
+        assert_eq!(cfg.composable.context_menu_item, "custom-item.lua");
+        assert_eq!(cfg.composable.selection_rect, "custom-selection.lua");
+        assert_eq!(cfg.theme.name, "dynamic");
+        assert_eq!(cfg.bar[0].output, "DP-1");
+        assert_eq!(cfg.bar[0].thickness, 34.0);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!has_legacy_composables(&saved));
-        assert!(!saved.contains("[composable.menu]"));
-        assert!(saved.contains("src = \"context_menu.lua\""));
+        assert!(!saved.contains("[composable."));
+        assert!(saved.contains("context_menu = \"custom-menu.lua\""));
         assert_eq!(
-            std::fs::read_to_string(path.with_extension("toml.pre-composable")).unwrap(),
+            std::fs::read_to_string(path.with_extension("toml.pre-composable-sources")).unwrap(),
             content
         );
         let (_, reloaded_stamp) = Config::load_from(&path);
@@ -260,19 +273,25 @@ mod tests {
     }
 
     #[test]
-    fn migrates_generic_menu_geometry_only() {
-        let cfg: Config =
-            toml::from_str("[composable.menu]\nwidth = 200.0\nheight = 100.0\npadding = 12.0\n")
-                .unwrap();
-        assert_eq!(
-            cfg.composable.context_menu.props["width"],
-            PropValue::Number(200.0)
-        );
-        assert_eq!(
-            cfg.composable.context_menu.props["height"],
-            PropValue::Number(100.0)
-        );
-        assert!(!cfg.composable.context_menu.props.contains_key("padding"));
+    fn retired_style_only_tables_use_default_sources() {
+        let cfg =
+            parse("[composable.menu]\nwidth = 200.0\n[composable.context_menu]\npadding = 12.0\n");
+        assert_eq!(cfg.composable, super::super::ComposableConfig::default());
+        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("composable"));
+    }
+
+    #[test]
+    fn invalid_legacy_source_does_not_rewrite_the_file() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-invalid-composable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let content = "[composable.context_menu]\nsrc = 42\n";
+        std::fs::write(&path, content).unwrap();
+        Config::load_from(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        assert!(!path.with_extension("toml.pre-composable-sources").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

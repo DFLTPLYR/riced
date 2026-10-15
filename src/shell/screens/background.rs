@@ -37,7 +37,7 @@ pub struct SelectionRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ComposableConfig, PropValue, SourceComposable, ThemeConfig};
+    use crate::config::ThemeConfig;
     use serde_json::json;
 
     fn seeded_menu(auto_sizing: bool) -> WidgetNode {
@@ -51,14 +51,13 @@ mod tests {
         runtime.load(crate::config::SEED_CONTEXT_MENU).unwrap();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("scripts/components/context_menu_item.lua");
-        let mut item = SourceComposable::new(&path.to_string_lossy());
-        item.props.insert("padding".into(), PropValue::Number(7.0));
+        let item = path.to_string_lossy();
         let (node, props) = runtime
             .component_view(&overrides, &context_menu_host(&item), &theme)
             .unwrap();
         assert_eq!(
             props["width"],
-            overrides.get("width").cloned().unwrap_or(json!(178))
+            overrides.get("width").cloned().unwrap_or(json!(150))
         );
         node
     }
@@ -74,7 +73,7 @@ mod tests {
                     panic!("column")
                 };
                 assert!(
-                    matches!(&children[0], WidgetNode::Button {label, action, padding: Some(7.0), radius: Some(3.0), ..} if label == "Add Top" && action == "add-top")
+                    matches!(&children[0], WidgetNode::Button {label, action, padding: Some(5.0), radius: Some(3.0), ..} if label == "Add Top" && action == "add-top")
                 );
             }
             let mut element = crate::ui::build::build_node(
@@ -97,7 +96,7 @@ mod tests {
                 &renderer,
                 &layout::Limits::new(iced::Size::ZERO, iced::Size::new(800.0, 600.0)),
             );
-            assert_eq!(layout.size().width, 178.0);
+            assert_eq!(layout.size().width, 150.0);
             if auto_sizing {
                 assert!(layout.size().height > 0.0 && layout.size().height < 92.0);
             } else {
@@ -136,17 +135,8 @@ mod tests {
     }
 
     #[test]
-    fn native_fallback_supports_both_sizing_modes() {
-        let mut config = ComposableConfig::default();
-        config
-            .context_menu
-            .props
-            .insert("width".into(), PropValue::Number(250.0));
-        config
-            .context_menu
-            .props
-            .insert("height".into(), PropValue::Number(120.0));
-        let automatic = Background::native_context_menu_node(&config);
+    fn native_fallback_has_valid_content_height() {
+        let automatic = Background::native_context_menu_node();
         validate_menu_size(&automatic).unwrap();
         assert!(matches!(
             automatic,
@@ -155,14 +145,6 @@ mod tests {
                 ..
             }
         ));
-        config
-            .context_menu
-            .props
-            .insert("auto_sizing".into(), PropValue::Bool(false));
-        assert_eq!(
-            fixed_menu_size(&Background::native_context_menu_node(&config)).unwrap(),
-            (250.0, 120.0)
-        );
         assert!(
             fixed_menu_size(&WidgetNode::Space {
                 width: NodeLength::Shrink,
@@ -342,14 +324,14 @@ fn fixed_menu_size(node: &WidgetNode) -> Result<(f32, f32), String> {
     Err("context menu must return a container with finite positive fixed width and height".into())
 }
 
-pub(crate) fn context_menu_host(item: &crate::config::SourceComposable) -> serde_json::Value {
-    let path = crate::lua::composable::source_path(&item.src);
+pub(crate) fn context_menu_host(item: &str) -> serde_json::Value {
+    let path = crate::lua::composable::source_path(item);
     let stamp = std::fs::metadata(path)
         .ok()
         .map(|m| format!("{:?}/{}", m.modified().ok(), m.len()));
     serde_json::json!({
         "items": [{ "label": "Add Top", "action": "add-top" }, { "label": "Open Settings", "action": "open-settings" }],
-        "item_component": item,
+        "item_component": { "src": item, "props": {} },
         "_item_revision": stamp,
     })
 }
@@ -873,40 +855,19 @@ impl Background {
         {
             return rendered.node;
         }
-        Self::native_context_menu_node(&plots.config.composable)
+        Self::native_context_menu_node()
     }
 
-    fn native_context_menu_node(config: &crate::config::ComposableConfig) -> WidgetNode {
-        let automatic = |key: &str| {
-            matches!(config.context_menu.props.get(key),
-            Some(crate::config::PropValue::Text(value)) if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("shrink"))
-        };
-        let auto_width = automatic("width");
-        let number =
-            |source: &crate::config::SourceComposable, key: &str, fallback: f32| match source
-                .props
-                .get(key)
-            {
-                Some(crate::config::PropValue::Number(value))
-                    if value.is_finite() && *value >= 0.0 && *value <= f32::MAX as f64 =>
-                {
-                    *value as f32
-                }
-                _ => fallback,
-            };
+    fn native_context_menu_node() -> WidgetNode {
         let children = [("Add Top", "add-top"), ("Open Settings", "open-settings")]
             .into_iter()
             .map(|(label, action)| WidgetNode::Button {
                 label: label.into(),
                 action: action.into(),
-                width: Some(if auto_width {
-                    NodeLength::Shrink
-                } else {
-                    NodeLength::Fill
-                }),
+                width: Some(NodeLength::Fill),
                 height: None,
-                padding: Some(number(&config.context_menu_item, "padding", 5.0)),
-                radius: Some(number(&config.context_menu_item, "rounding", 3.0)),
+                padding: Some(5.0),
+                radius: Some(3.0),
                 color: None,
                 background: None,
             })
@@ -914,30 +875,14 @@ impl Background {
         WidgetNode::Container {
             child: Box::new(WidgetNode::Column {
                 children,
-                spacing: number(&config.context_menu, "spacing", 5.0),
-                width: if auto_width {
-                    NodeLength::Shrink
-                } else {
-                    NodeLength::Fill
-                },
+                spacing: 5.0,
+                width: NodeLength::Fill,
                 height: NodeLength::Shrink,
             }),
-            width: if auto_width {
-                NodeLength::Shrink
-            } else {
-                NodeLength::Fixed(number(&config.context_menu, "width", 178.0).max(1.0))
-            },
-            height: if matches!(
-                config.context_menu.props.get("auto_sizing"),
-                Some(crate::config::PropValue::Bool(false))
-            ) && !automatic("height")
-            {
-                NodeLength::Fixed(number(&config.context_menu, "height", 92.0).max(1.0))
-            } else {
-                NodeLength::Shrink
-            },
-            padding: number(&config.context_menu, "padding", 4.0),
-            radius: number(&config.context_menu, "rounding", 3.0),
+            width: NodeLength::Fixed(150.0),
+            height: NodeLength::Shrink,
+            padding: 4.0,
+            radius: 3.0,
             background: Some(theme::card()),
             border: Some(theme::border_color()),
             border_width: 1.0,

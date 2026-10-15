@@ -22,6 +22,8 @@ build:
 # Build release and install to ~/.local/bin (already on PATH)
 install: build
     install -Dm755 "target/release/riced" "{{ home_directory() }}/.local/bin/riced"
+    pkill riced
+    riced > /dev/null 2>&1 & disown
 
 # Remove the installed binary
 uninstall:

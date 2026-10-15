@@ -7,7 +7,7 @@ pub(crate) use discovery::{
     poll_components, widgets_dir_mtime,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 pub(crate) use util::decode_handle;
@@ -17,14 +17,10 @@ pub(crate) use util::decode_handle;
 ///
 /// Shell appearance is supplied by Lua app modules under components/:
 /// ```toml
-/// [composable.context_menu]
-/// src = "context_menu.lua"
-///
-/// [composable.context_menu_item]
-/// src = "context_menu_item.lua"
+/// [composable]
+/// context_menu = "custom-menu.lua"
 /// ```
-/// Optional `[composable.context_menu.props]` overrides Lua defaults.
-/// Legacy scalar tables migrate on load; `[composable.menu]` is retired.
+/// Default sources are omitted on save. Appearance lives in Lua `app.defaults`.
 ///
 /// Theme selection mirrors reshell's `Global` (`general.theme` +
 /// `general.darkmode`): `name` picks `~/.config/riced/theme/{name}.json`
@@ -87,6 +83,7 @@ pub(crate) use util::decode_handle;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    #[serde(skip_serializing_if = "ComposableConfig::is_default")]
     pub composable: ComposableConfig,
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
@@ -274,20 +271,21 @@ impl Default for ThemeConfig {
     }
 }
 
-/// Per-component tables under `[composable.*]`.
-#[derive(Debug, Clone, Serialize)]
+/// Source filenames in one `[composable]` table; styling belongs to Lua.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
 pub struct ComposableConfig {
-    pub selection_rect: SourceComposable,
-    pub context_menu: SourceComposable,
-    pub context_menu_item: SourceComposable,
+    pub selection_rect: String,
+    pub context_menu: String,
+    pub context_menu_item: String,
 }
 
 impl Default for ComposableConfig {
     fn default() -> Self {
         Self {
-            selection_rect: SourceComposable::default(),
-            context_menu: SourceComposable::new("context_menu.lua"),
-            context_menu_item: SourceComposable::new("context_menu_item.lua"),
+            selection_rect: "selection_rect.lua".into(),
+            context_menu: "context_menu.lua".into(),
+            context_menu_item: "context_menu_item.lua".into(),
         }
     }
 }
@@ -300,105 +298,48 @@ pub enum ComposableKind {
 }
 
 impl ComposableConfig {
-    pub fn get(&self, kind: ComposableKind) -> &SourceComposable {
+    pub fn get(&self, kind: ComposableKind) -> &str {
         match kind {
             ComposableKind::SelectionRect => &self.selection_rect,
             ComposableKind::ContextMenu => &self.context_menu,
             ComposableKind::ContextMenuItem => &self.context_menu_item,
         }
     }
-    fn get_mut(&mut self, kind: ComposableKind) -> &mut SourceComposable {
+    fn get_mut(&mut self, kind: ComposableKind) -> &mut String {
         match kind {
             ComposableKind::SelectionRect => &mut self.selection_rect,
             ComposableKind::ContextMenu => &mut self.context_menu,
             ComposableKind::ContextMenuItem => &mut self.context_menu_item,
         }
     }
-}
-
-impl<'de> Deserialize<'de> for ComposableConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(default)]
-        struct Entry {
-            src: Option<String>,
-            props: BTreeMap<String, PropValue>,
-            width: Option<f64>,
-            height: Option<f64>,
-            padding: Option<f64>,
-            spacing: Option<f64>,
-            rounding: Option<f64>,
-        }
-        #[derive(Default, Deserialize)]
-        #[serde(default)]
-        struct Legacy {
-            selection_rect: SourceComposable,
-            context_menu: Entry,
-            context_menu_item: Entry,
-            menu: Entry,
-        }
-        fn convert(entry: Entry, default_src: &str) -> SourceComposable {
-            let mut props = entry.props;
-            for (key, value) in [
-                ("width", entry.width),
-                ("height", entry.height),
-                ("padding", entry.padding),
-                ("spacing", entry.spacing),
-                ("rounding", entry.rounding),
-            ] {
-                if let Some(value) = value {
-                    props.entry(key.into()).or_insert(PropValue::Number(value));
-                }
-            }
-            SourceComposable {
-                src: entry.src.unwrap_or_else(|| default_src.into()),
-                props,
-            }
-        }
-        let raw = Legacy::deserialize(deserializer)?;
-        let mut context_menu = convert(raw.context_menu, "context_menu.lua");
-        // The actual menu width wins over the old independent hit-test width.
-        // Only width/height were read from the retired generic menu table.
-        for (key, value) in [("width", raw.menu.width), ("height", raw.menu.height)] {
-            if let Some(value) = value {
-                context_menu
-                    .props
-                    .entry(key.into())
-                    .or_insert(PropValue::Number(value));
-            }
-        }
-        Ok(Self {
-            selection_rect: raw.selection_rect,
-            context_menu,
-            context_menu_item: convert(raw.context_menu_item, "context_menu_item.lua"),
-        })
+    fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
-/// A Lua app module under components/, with sparse property overrides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SourceComposable {
-    pub src: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub props: BTreeMap<String, PropValue>,
-}
-
-impl Default for SourceComposable {
-    fn default() -> Self {
-        Self {
-            src: "selection_rect.lua".into(),
-            props: BTreeMap::new(),
+impl Serialize for ComposableConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let defaults = Self::default();
+        let mut map = serializer.serialize_map(None)?;
+        for (name, source, default) in [
+            (
+                "selection_rect",
+                &self.selection_rect,
+                &defaults.selection_rect,
+            ),
+            ("context_menu", &self.context_menu, &defaults.context_menu),
+            (
+                "context_menu_item",
+                &self.context_menu_item,
+                &defaults.context_menu_item,
+            ),
+        ] {
+            if source != default {
+                map.serialize_entry(name, source)?;
+            }
         }
-    }
-}
-
-impl SourceComposable {
-    pub fn new(src: &str) -> Self {
-        Self {
-            src: src.into(),
-            props: BTreeMap::new(),
-        }
+        map.end()
     }
 }
 
@@ -611,7 +552,6 @@ pub enum ConfigPatch {
     WallpaperMode(WallpaperMode),
     MonitorWallpaper(MonitorWallpaper),
     ComposableSource(ComposableKind, String),
-    ComposableProp(ComposableKind, String, Option<PropValue>),
     ThemeName(String),
     ThemeDarkmode(bool),
     ThemeVariant(String),
@@ -1340,15 +1280,7 @@ impl Config {
                     self.background.monitor.push(wallpaper);
                 }
             }
-            ConfigPatch::ComposableSource(kind, src) => c.get_mut(kind).src = src,
-            ConfigPatch::ComposableProp(kind, key, value) => {
-                let props = &mut c.get_mut(kind).props;
-                if let Some(value) = value {
-                    props.insert(key, value);
-                } else {
-                    props.remove(&key);
-                }
-            }
+            ConfigPatch::ComposableSource(kind, src) => *c.get_mut(kind) = src,
             ConfigPatch::ThemeName(name) => self.theme.name = name,
             ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
             ConfigPatch::ThemeVariant(variant) => self.theme.variant = variant,
@@ -1594,89 +1526,39 @@ mod tests {
     }
 
     #[test]
-    fn explicit_source_and_props_win_over_legacy_scalars() {
+    fn composable_sources_roundtrip_in_one_sparse_table() {
         let cfg: Config = toml::from_str(
             r#"
-            [composable.menu]
-            width = 180.0
-            height = 92.0
-            [composable.context_menu]
-            src = "custom-frame.lua"
-            width = 178.0
-            [composable.context_menu.props]
-            width = 220.0
-            height = 120.0
-            [composable.context_menu_item]
-            src = "custom-item.lua"
+            [composable]
+            context_menu = "custom-frame.lua"
+            context_menu_item = "custom-item.lua"
         "#,
         )
         .unwrap();
-        assert_eq!(cfg.composable.context_menu.src, "custom-frame.lua");
-        assert_eq!(
-            cfg.composable.context_menu.props["width"],
-            PropValue::Number(220.0)
-        );
-        assert_eq!(
-            cfg.composable.context_menu.props["height"],
-            PropValue::Number(120.0)
-        );
-        assert_eq!(cfg.composable.context_menu_item.src, "custom-item.lua");
+        assert_eq!(cfg.composable.context_menu, "custom-frame.lua");
+        assert_eq!(cfg.composable.context_menu_item, "custom-item.lua");
+        assert_eq!(cfg.composable.selection_rect, "selection_rect.lua");
+        let saved = toml::to_string_pretty(&cfg).unwrap();
+        assert!(saved.contains("[composable]\n"));
+        assert!(!saved.contains("[composable."));
+        assert!(!saved.contains("selection_rect ="));
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.composable, cfg.composable);
     }
 
     #[test]
-    fn parses_composable_context_menu_section() {
-        let cfg: Config = toml::from_str("[composable.context_menu]\nwidth = 250.0\n").unwrap();
-        assert_eq!(
-            cfg.composable.context_menu.props["width"],
-            PropValue::Number(250.0)
-        );
-        assert_eq!(cfg.composable.context_menu.src, "context_menu.lua");
-    }
-
-    #[test]
-    fn composable_context_menu_falls_back_to_defaults() {
+    fn default_composable_sources_are_omitted_on_save() {
         let empty: Config = toml::from_str("").unwrap();
-        assert_eq!(empty.composable.context_menu.src, "context_menu.lua");
-        assert!(empty.composable.context_menu.props.is_empty());
+        assert_eq!(empty.composable, ComposableConfig::default());
+        let saved = toml::to_string_pretty(&empty).unwrap();
+        assert!(!saved.contains("composable"));
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.composable, empty.composable);
     }
 
     #[test]
-    fn partial_composable_style_keeps_provided_values() {
-        // Regression: missing keys must default per-field, not reset the whole file.
-        let cfg: Config = toml::from_str("[composable.context_menu]\npadding = 8.0\n").unwrap();
-        assert_eq!(
-            cfg.composable.context_menu.props["padding"],
-            PropValue::Number(8.0)
-        );
-        assert_eq!(cfg.composable.context_menu.props.len(), 1);
-    }
-
-    #[test]
-    fn parses_composable_context_menu_item_section() {
-        let cfg: Config =
-            toml::from_str("[composable.context_menu_item]\npadding = 4.0\nrounding = 2.0\n")
-                .unwrap();
-        assert_eq!(
-            cfg.composable.context_menu_item.props["padding"],
-            PropValue::Number(4.0)
-        );
-        assert_eq!(
-            cfg.composable.context_menu_item.props["rounding"],
-            PropValue::Number(2.0)
-        );
-    }
-
-    #[test]
-    fn context_menu_item_falls_back_to_defaults() {
-        let empty: Config = toml::from_str("").unwrap();
-        assert_eq!(
-            empty.composable.context_menu_item.src,
-            "context_menu_item.lua"
-        );
-        assert!(empty.composable.context_menu_item.props.is_empty());
-        // unrelated section present, item still defaults
-        let cfg: Config = toml::from_str("[composable.menu]\nwidth = 200.0\n").unwrap();
-        assert!(cfg.composable.context_menu_item.props.is_empty());
+    fn schema_rejects_retired_source_tables() {
+        assert!(toml::from_str::<Config>("[composable.context_menu]\nsrc = 'menu.lua'\n").is_err());
     }
 
     #[test]
@@ -1684,7 +1566,7 @@ mod tests {
         // Restructure note: per-component tables moved under [composable.*].
         // Old flat keys are unknown fields, which serde ignores.
         let cfg: Config = toml::from_str("[menu]\nwidth = 200.0\n").unwrap();
-        assert!(cfg.composable.context_menu.props.is_empty());
+        assert_eq!(cfg.composable, ComposableConfig::default());
     }
 
     #[test]
@@ -1789,29 +1671,13 @@ mod tests {
     #[test]
     fn patch_updates_only_the_targeted_leaf() {
         let mut cfg = Config::default();
-        cfg.apply(ConfigPatch::ComposableProp(
-            ComposableKind::ContextMenu,
-            "rounding".into(),
-            Some(PropValue::Number(6.0)),
-        ));
-        assert_eq!(
-            cfg.composable.context_menu.props["rounding"],
-            PropValue::Number(6.0)
-        );
-        // everything else untouched
-        assert!(cfg.composable.context_menu_item.props.is_empty());
-        assert!(!cfg.composable.context_menu.props.contains_key("padding"));
         cfg.apply(ConfigPatch::ComposableSource(
             ComposableKind::ContextMenuItem,
             "custom-item.lua".into(),
         ));
-        assert_eq!(cfg.composable.context_menu_item.src, "custom-item.lua");
-        cfg.apply(ConfigPatch::ComposableProp(
-            ComposableKind::ContextMenu,
-            "rounding".into(),
-            None,
-        ));
-        assert!(cfg.composable.context_menu.props.is_empty());
+        assert_eq!(cfg.composable.context_menu_item, "custom-item.lua");
+        assert_eq!(cfg.composable.context_menu, "context_menu.lua");
+        assert_eq!(cfg.composable.selection_rect, "selection_rect.lua");
     }
 
     #[test]
@@ -1913,27 +1779,18 @@ mod tests {
     }
 
     #[test]
-    fn selection_composable_uses_src_and_sparse_props() {
+    fn selection_source_resolves_from_components() {
         let config: Config = toml::from_str(
             r##"
-            [composable.selection_rect]
-            src = "custom-selection.lua"
-            [composable.selection_rect.props]
-            radius = 4.0
-            color = "#ff0000"
+            [composable]
+            selection_rect = "custom-selection.lua"
         "##,
         )
         .unwrap();
-        assert_eq!(config.composable.selection_rect.src, "custom-selection.lua");
         assert_eq!(
-            config.composable.selection_rect.props["radius"],
-            PropValue::Number(4.0)
+            crate::lua::composable::source_path(&config.composable.selection_rect),
+            components_dir().join("custom-selection.lua")
         );
-        let saved = toml::to_string(&config.composable.selection_rect).unwrap();
-        let reloaded: SourceComposable = toml::from_str(&saved).unwrap();
-        assert_eq!(reloaded.props, config.composable.selection_rect.props);
-        assert_eq!(SourceComposable::default().src, "selection_rect.lua");
-        assert!(SourceComposable::default().props.is_empty());
     }
 
     #[test]

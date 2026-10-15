@@ -299,7 +299,12 @@ and dependency boundaries determine extraction scope.
 
 ## Verification
 
-Lua source paths share `lua::composable::source_path`: composable `src`,
+Composables use one optional `[composable]` table of source strings. Default
+filenames are omitted on save; sizing and appearance live in Lua `app.defaults`.
+Old source tables migrate at the file-load boundary, with the original config
+preserved as `config.toml.pre-composable-sources`; TOML style overrides are retired.
+
+Lua source paths share `lua::composable::source_path`: composable sources,
 notification/overlay `source`, and `riced.component()` resolve relative names
 under `~/.config/riced/components/`; absolute paths pass through. There is no
 config-root fallback. The notification scene seed lives at
