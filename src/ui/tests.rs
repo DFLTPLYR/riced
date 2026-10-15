@@ -9,6 +9,7 @@ use iced::{Element, Event, Point, Rectangle, Size, mouse};
 use mlua::{FromLua, IntoLua, Lua, Value};
 
 const EXAMPLES: &[&str] = &[
+    "iced.image(_owned_image):width(10):height(10)",
     "iced.text('hello'):size(16):wrap('word_or_glyph'):color({r=0.3,g=0.5,b=0.7,a=0.4})",
     "iced.icon('cpu'):color('#aabbcc')",
     "iced.space():width(size.fill):height(8)",
@@ -33,6 +34,15 @@ const EXAMPLES: &[&str] = &[
 fn lua() -> Lua {
     let lua = Lua::new();
     super::dsl::inject_ui_base(&lua).unwrap();
+    lua.globals()
+        .set(
+            "_owned_image",
+            lua.create_userdata(super::image_value::ImageValue(
+                iced::widget::image::Handle::from_rgba(1, 1, vec![255; 4]),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
     lua
 }
 fn renderer() -> iced::Renderer {
@@ -90,7 +100,7 @@ fn typed_structs_cross_vms_without_retaining_lua_values() {
     let node = {
         let lua = lua();
         let value = lua
-            .load("return iced.text('owned'):width(size.fill):wrap('word')")
+            .load("return iced.text('owned'):width(size.fill):wrap('word'):anchor('right'):margin(16):on_press('title')")
             .eval()
             .unwrap();
         super::components::TextNode::from_lua(value, &lua).unwrap()

@@ -466,6 +466,23 @@ pub(crate) fn build_with_lists(
     lists: &WidgetLists,
 ) -> Result<Element<'static, Plant>, String> {
     match node {
+        WidgetNode::Anchored {
+            child,
+            placement,
+            margin,
+        } => Ok(crate::ui::widgets::anchored::placed(
+            build_with_lists(child, widget, size, message, runtime, lists)?,
+            *placement,
+            *margin,
+        )),
+        WidgetNode::Clickable { child, action } => {
+            let element = build_with_lists(child, widget, size, message.clone(), runtime, lists)?;
+            let mut area = iced::widget::mouse_area(element);
+            if let Some(sender) = message {
+                area = area.on_press(sender(action.clone().into()));
+            }
+            Ok(area.into())
+        }
         WidgetNode::ListView {
             id,
             items,

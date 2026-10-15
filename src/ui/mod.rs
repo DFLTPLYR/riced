@@ -8,9 +8,12 @@ pub mod decode;
 pub mod dsl;
 pub(crate) mod encode;
 pub mod icons;
+pub(crate) mod image_value;
+pub(crate) mod layout_props;
 pub mod listview;
 pub mod motion;
 pub mod node;
+pub(crate) mod placement;
 pub mod style;
 #[cfg(test)]
 mod tests;

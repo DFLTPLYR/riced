@@ -10,21 +10,24 @@ macro_rules! components {
         pub(crate) enum WidgetNode {
             $($variant { $($field: $ty),* },)*
             Spinner,
+            Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: f32 },
+            Clickable { child: Box<WidgetNode>, action: String },
         }
         $(
             #[derive(Debug, Clone, PartialEq)]
-            pub(crate) struct $name { $(pub $field: $ty),* }
+            pub(crate) struct $name { $(pub $field: $ty,)* pub layout: super::layout_props::Common }
 
             impl From<$name> for WidgetNode {
                 fn from(node: $name) -> Self {
-                    let $name { $($field),* } = node;
-                    Self::$variant { $($field),* }
+                    let $name { $($field,)* layout } = node;
+                    layout.wrap(Self::$variant { $($field),* })
                 }
             }
             impl mlua::FromLua for $name {
                 fn from_lua(value: mlua::Value, _: &mlua::Lua) -> mlua::Result<Self> {
-                    match super::decode::parse_node(&value).map_err(mlua::Error::RuntimeError)? {
-                        WidgetNode::$variant { $($field),* } => Ok(Self { $($field),* }),
+                    let (node, layout) = super::layout_props::unwrap(super::decode::parse_node(&value).map_err(mlua::Error::RuntimeError)?);
+                    match node {
+                        WidgetNode::$variant { $($field),* } => Ok(Self { $($field,)* layout }),
                         _ => Err(mlua::Error::RuntimeError(concat!("expected iced.", $lua, " component").into())),
                     }
                 }
@@ -41,7 +44,7 @@ macro_rules! components {
         ];
         impl WidgetNode {
             pub(crate) fn kind(&self) -> &'static str {
-                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner" }
+                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Anchored { child, .. } | Self::Clickable { child, .. } => child.kind() }
             }
         }
     };
@@ -127,6 +130,7 @@ components! {
     }
     Space => SpaceNode, "space", [], ["width", "height"] { width: NodeLength, height: NodeLength }
     Image => ImageNode, "image", ["path"], ["width", "height"] { path: String, width: NodeLength, height: NodeLength }
+    Raster => RasterNode, "image_handle", ["image"], ["width", "height"] { handle: iced::widget::image::Handle, width: NodeLength, height: NodeLength }
     Text => TextNode, "text", ["text"], ["size", "width", "height", "wrap", "color", "elide", "elide_mode"] {
         content: String, size: Option<f32>, width: Option<NodeLength>, height: Option<NodeLength>,
         wrapping: Option<iced::widget::text::Wrapping>, color: Option<iced::Color>,
@@ -167,22 +171,27 @@ components! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SpinnerNode;
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SpinnerNode {
+    pub layout: super::layout_props::Common,
+}
 impl From<SpinnerNode> for WidgetNode {
-    fn from(_: SpinnerNode) -> Self {
-        Self::Spinner
+    fn from(node: SpinnerNode) -> Self {
+        node.layout.wrap(Self::Spinner)
     }
 }
 impl mlua::IntoLua for SpinnerNode {
     fn into_lua(self, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
-        super::encode::to_table(lua, &WidgetNode::Spinner).map(mlua::Value::Table)
+        super::encode::to_table(lua, &self.into()).map(mlua::Value::Table)
     }
 }
 impl mlua::FromLua for SpinnerNode {
     fn from_lua(value: mlua::Value, _: &mlua::Lua) -> mlua::Result<Self> {
-        match super::decode::parse_node(&value).map_err(mlua::Error::RuntimeError)? {
-            WidgetNode::Spinner => Ok(Self),
+        let (node, layout) = super::layout_props::unwrap(
+            super::decode::parse_node(&value).map_err(mlua::Error::RuntimeError)?,
+        );
+        match node {
+            WidgetNode::Spinner => Ok(Self { layout }),
             _ => Err(mlua::Error::RuntimeError(
                 "expected iced.spinner component".into(),
             )),

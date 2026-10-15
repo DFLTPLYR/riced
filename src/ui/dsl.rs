@@ -39,7 +39,7 @@ pub(super) fn node(
         .iter()
         .find(|component| component.name == kind)
         .ok_or_else(|| mlua::Error::RuntimeError(format!("unknown iced component {kind}")))?;
-    for &field in component.setters {
+    for &field in component.setters.iter().chain(super::layout_props::SETTERS) {
         properties.set(field, table.raw_get::<Value>(field)?)?;
         table.raw_set(field, Value::Nil)?;
     }
@@ -54,7 +54,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     for component in super::components::COMPONENTS {
         let kind = component.name;
         let mut methods = Vec::new();
-        for &field in component.setters {
+        for &field in component.setters.iter().chain(super::layout_props::SETTERS) {
             methods.push((field, setter(lua, field, kind)?));
         }
         if kind == "listview" {

@@ -4,10 +4,11 @@ pub(crate) use super::components::WidgetNode;
 /// Whether a description tree draws any raster image nodes.
 pub(crate) fn contains_images(node: &WidgetNode) -> bool {
     match node {
-        WidgetNode::Image { .. } => true,
-        WidgetNode::Container { child, .. } | WidgetNode::Scrollable { child, .. } => {
-            contains_images(child)
-        }
+        WidgetNode::Image { .. } | WidgetNode::Raster { .. } => true,
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. } => contains_images(child),
         WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
             children.iter().any(contains_images)
         }

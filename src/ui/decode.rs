@@ -148,6 +148,27 @@ fn opt_axis(t: &Table) -> Result<bool, String> {
 }
 
 pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
+    let node = parse_component(value)?;
+    let Value::Table(table) = value else {
+        return Ok(node);
+    };
+    let anchor = control_string(table, "anchor", "iced component")?
+        .map(|name| super::placement::Placement::parse(&name))
+        .transpose()?;
+    let margin = control_number(table, "margin", "iced component")?.unwrap_or(0.0);
+    if margin < 0.0 {
+        return Err("margin must be non-negative".into());
+    }
+    let on_press = control_string(table, "on_press", "iced component")?;
+    Ok(super::layout_props::Common {
+        anchor,
+        margin,
+        on_press,
+    }
+    .wrap(node))
+}
+
+fn parse_component(value: &Value) -> Result<WidgetNode, String> {
     let Value::Table(t) = value else {
         return Ok(WidgetNode::Text {
             content: coerce_text(value.clone(), "ui node")?,
@@ -258,11 +279,26 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
             width: opt_length(t, "width", "iced.space()")?.unwrap_or(NodeLength::Native),
             height: opt_length(t, "height", "iced.space()")?.unwrap_or(NodeLength::Native),
         }),
-        "image" => Ok(WidgetNode::Image {
-            path: t.get("path").map_err(|e| e.to_string())?,
-            width: opt_length(t, "width", "iced.image()")?.unwrap_or(NodeLength::Native),
-            height: opt_length(t, "height", "iced.image()")?.unwrap_or(NodeLength::Native),
-        }),
+        "image" | "image_handle" => {
+            let image: Value = t
+                .get(if kind == "image" { "path" } else { "image" })
+                .map_err(|error| error.to_string())?;
+            let width = opt_length(t, "width", "iced.image()")?.unwrap_or(NodeLength::Native);
+            let height = opt_length(t, "height", "iced.image()")?.unwrap_or(NodeLength::Native);
+            if let Value::String(path) = image {
+                Ok(WidgetNode::Image {
+                    path: path.to_string_lossy(),
+                    width,
+                    height,
+                })
+            } else {
+                Ok(WidgetNode::Raster {
+                    handle: super::image_value::handle(image).map_err(|error| error.to_string())?,
+                    width,
+                    height,
+                })
+            }
+        }
         "text" => {
             let content = coerce_text(
                 t.get::<Value>("text").map_err(|e| e.to_string())?,
@@ -478,6 +514,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
     let string = |key| control_string(t, key, &what);
     match kind {
         "checkbox" => Ok(CheckboxNode {
+            layout: Default::default(),
             label: label()?,
             checked: control_bool(t, "checked", &what)?,
             on_toggle: string("on_toggle")?,
@@ -487,6 +524,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
         }
         .into()),
         "toggler" => Ok(TogglerNode {
+            layout: Default::default(),
             label: label()?,
             enabled: control_bool(t, "enabled", &what)?,
             on_toggle: string("on_toggle")?,
@@ -514,6 +552,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
                 return Err(format!("{what} height must be positive"));
             }
             Ok(SliderNode {
+                layout: Default::default(),
                 min,
                 max,
                 value,
@@ -526,6 +565,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
             .into())
         }
         "text_input" => Ok(TextInputNode {
+            layout: Default::default(),
             placeholder: string("placeholder")?.unwrap_or_default(),
             value: string("value")?.unwrap_or_default(),
             on_input: string("on_input")?,
@@ -557,6 +597,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
                 return Err(format!("{what} options must be unique"));
             }
             Ok(PickListNode {
+                layout: Default::default(),
                 options,
                 selected,
                 on_select: string("on_select")?,
@@ -568,6 +609,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
             .into())
         }
         "radio" => Ok(RadioNode {
+            layout: Default::default(),
             label: label()?,
             value: string("value")?.ok_or_else(|| format!("{what} needs a string value"))?,
             selected: string("selected")?,

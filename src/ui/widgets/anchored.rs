@@ -16,6 +16,23 @@ pub(crate) fn anchored<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         anchor,
         output_origin,
         bounds,
+        placement: None,
+        margin: 0.0,
+    })
+}
+
+pub(crate) fn placed<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
+    content: Element<'a, M, T, R>,
+    placement: crate::ui::placement::Placement,
+    margin: f32,
+) -> Element<'a, M, T, R> {
+    Element::new(Anchored {
+        content,
+        placement: Some(placement),
+        margin,
+        anchor: Point::ORIGIN,
+        output_origin: Point::ORIGIN,
+        bounds: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -24,6 +41,8 @@ struct Anchored<'a, M, T, R> {
     anchor: Point,
     output_origin: Point,
     bounds: Bounds,
+    placement: Option<crate::ui::placement::Placement>,
+    margin: f32,
 }
 
 impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Anchored<'_, M, T, R> {
@@ -42,20 +61,36 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Anchored<'_, M, T, R> {
         renderer: &R,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let size = limits.max();
+        let mut size = limits.max();
         let mut child = self.content.as_widget_mut().layout(
             &mut tree.children[0],
             renderer,
-            &layout::Limits::new(Size::ZERO, size),
+            &layout::Limits::new(
+                Size::ZERO,
+                Size::new(
+                    (size.width - 2.0 * self.margin).max(1.0),
+                    (size.height - 2.0 * self.margin).max(1.0),
+                ),
+            ),
         );
-        let position = Point::new(
-            self.anchor
-                .x
-                .clamp(0.0, (size.width - child.size().width).max(0.0)),
-            self.anchor
-                .y
-                .clamp(0.0, (size.height - child.size().height).max(0.0)),
-        );
+        if !size.width.is_finite() {
+            size.width = child.size().width + 2.0 * self.margin;
+        }
+        if !size.height.is_finite() {
+            size.height = child.size().height + 2.0 * self.margin;
+        }
+        let position = if let Some(placement) = self.placement {
+            placement.origin(size, child.size(), self.margin)
+        } else {
+            Point::new(
+                self.anchor
+                    .x
+                    .clamp(0.0, (size.width - child.size().width).max(0.0)),
+                self.anchor
+                    .y
+                    .clamp(0.0, (size.height - child.size().height).max(0.0)),
+            )
+        };
         child.move_to_mut(position);
         *self.bounds.lock().expect("menu layout bounds") = Some(Rectangle::new(
             Point::new(

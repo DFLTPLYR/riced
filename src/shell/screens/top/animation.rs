@@ -26,9 +26,10 @@ fn declared_lists<'a>(
                 declared_lists(child, out)?;
             }
         }
-        WidgetNode::Container { child, .. } | WidgetNode::Scrollable { child, .. } => {
-            declared_lists(child, out)?
-        }
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. } => declared_lists(child, out)?,
         _ => {}
     }
     Ok(())

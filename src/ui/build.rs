@@ -17,6 +17,10 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         _ => base,
     };
     match node {
+        WidgetNode::Anchored { child, .. } | WidgetNode::Clickable { child, .. } => {
+            estimate_height(child, size)
+        }
+        WidgetNode::Raster { height, .. } => px(height).max(base),
         WidgetNode::Checkbox { size, .. }
         | WidgetNode::Radio { size, .. }
         | WidgetNode::Toggler { size, .. } => size.unwrap_or(base).max(base * 1.4),
@@ -97,6 +101,35 @@ pub(crate) fn realize<M: Clone + 'static>(
     opacity: f32,
 ) -> Result<Element<'static, M>, String> {
     match node {
+        WidgetNode::Anchored {
+            child,
+            placement,
+            margin,
+        } => Ok(super::widgets::anchored::placed(
+            realize(child, size, button_msg, interactive, opacity)?,
+            *placement,
+            *margin,
+        )),
+        WidgetNode::Clickable { child, action } => {
+            let element = realize(child, size, button_msg.clone(), interactive, opacity)?;
+            let mut item = iced::widget::mouse_area(element);
+            if interactive {
+                item = item.on_press(button_msg(action.clone().into()));
+            }
+            Ok(item.into())
+        }
+        WidgetNode::Raster {
+            handle,
+            width,
+            height,
+        } => {
+            let item = iced::widget::Image::new(handle.clone()).opacity(opacity);
+            let hints = iced::advanced::Widget::<M, iced::Theme, iced::Renderer>::size(&item);
+            Ok(item
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
+        }
         WidgetNode::ListView {
             items,
             horizontal,

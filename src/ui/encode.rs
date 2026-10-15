@@ -48,6 +48,27 @@ fn set_color(lua: &Lua, table: &Table, key: &str, color: &Option<iced::Color>) -
 }
 
 pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
+    match node {
+        WidgetNode::Anchored {
+            child,
+            placement,
+            margin,
+        } => {
+            let table = to_table(lua, child)?;
+            let properties: Table = table.raw_get("_properties")?;
+            properties.set("anchor", placement.name())?;
+            properties.set("margin", *margin)?;
+            return Ok(table);
+        }
+        WidgetNode::Clickable { child, action } => {
+            let table = to_table(lua, child)?;
+            table
+                .raw_get::<Table>("_properties")?
+                .set("on_press", action.as_str())?;
+            return Ok(table);
+        }
+        _ => {}
+    }
     let mts: Table = lua.named_registry_value("riced.iced.metatables")?;
     let mt = mts.get(node.kind())?;
     super::dsl::node(lua, node.kind(), mt, |table| {
@@ -176,6 +197,20 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 set_color(lua, table, "color", color)?;
             }
             WidgetNode::Spinner => {}
+            WidgetNode::Anchored { .. } | WidgetNode::Clickable { .. } => {
+                unreachable!("handled above")
+            }
+            WidgetNode::Raster {
+                handle,
+                width,
+                height,
+            } => {
+                table.set(
+                    "image",
+                    lua.create_userdata(super::image_value::ImageValue(handle.clone()))?,
+                )?;
+                sizes!(Some(width), Some(height));
+            }
             WidgetNode::Checkbox {
                 label,
                 checked,
