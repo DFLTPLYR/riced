@@ -91,7 +91,10 @@ pub struct Config {
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
     pub animation: AnimationConfig,
+    #[serde(rename = "notification")]
     pub notifications: NotificationConfig,
+    #[serde(rename = "overlay")]
+    pub overlays: Vec<OverlayConfig>,
     /// Bar presets as a direct array (`[[bar]]`), no redundant key name.
     #[serde(default)]
     pub bar: Vec<TopConfig>,
@@ -121,8 +124,6 @@ defs! {
     default_slot_padding: f32 = 0.0,
     default_slot_spacing: f32 = 4.0,
     default_notification_timeout_ms: u64 = 5000,
-    default_notification_max_visible: u32 = 3,
-    default_notification_width: f32 = 360.0,
 }
 
 fn default_bar_anchor() -> String {
@@ -145,19 +146,17 @@ fn default_notification_output() -> String {
     "mouse".to_string()
 }
 
-fn default_notification_position() -> String {
-    "top-right".to_string()
+fn default_notification_source() -> String {
+    "notifications.lua".to_string()
 }
 
-/// Notification layer (`[notifications]`): D-Bus freedesktop server +
-/// internal events, rendered per output (mouse output by default).
-/// The window spans the full output height and the stack scrolls —
-/// `max_visible` is legacy and ignored.
+/// Notification service (`[notification]`) and its Lua scene source.
+/// Presentation is ordinary iced content in the shared overlay host.
 /// ```toml
-/// [notifications]
+/// [notification]
 /// enabled = true
 /// output = "mouse"  # or an output name like "DP-1" to pin it
-/// position = "top-right"  # top-right | top-left | bottom-right | bottom-left
+/// source = "notifications.lua"  # relative to the riced config directory
 /// timeout_ms = 5000
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -166,16 +165,10 @@ pub struct NotificationConfig {
     pub enabled: bool,
     #[serde(default = "default_notification_output")]
     pub output: String,
-    #[serde(default = "default_notification_position")]
-    pub position: String,
+    #[serde(default = "default_notification_source")]
+    pub source: String,
     #[serde(default = "default_notification_timeout_ms")]
     pub timeout_ms: u64,
-    /// Legacy cap, ignored: the window spans the output height and the
-    /// whole stack scrolls. Kept so old configs still parse.
-    #[serde(default = "default_notification_max_visible")]
-    pub max_visible: u32,
-    #[serde(default = "default_notification_width")]
-    pub width: f32,
 }
 
 impl Default for NotificationConfig {
@@ -183,12 +176,21 @@ impl Default for NotificationConfig {
         Self {
             enabled: true,
             output: default_notification_output(),
-            position: default_notification_position(),
+            source: default_notification_source(),
             timeout_ms: default_notification_timeout_ms(),
-            max_visible: default_notification_max_visible(),
-            width: default_notification_width(),
         }
     }
+}
+
+/// Additional Lua scenes share each output's passive fullscreen overlay.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlayConfig {
+    pub id: String,
+    pub source: String,
+    /// Empty means every output; otherwise an exact connector name.
+    pub output: String,
+    pub props: HashMap<String, PropValue>,
 }
 
 /// Global animation speed, applied to every animated transition
@@ -1282,13 +1284,6 @@ pub(crate) use seed::SEED_SYSTEM_LUA;
 #[cfg(test)]
 pub(crate) use seed::{SEED_CONTEXT_MENU, SEED_CONTEXT_MENU_ITEM, SEED_SELECTION_RECT};
 
-/// Seed notification renderer: `render(n)` layouts one notification
-/// card (`n` = `{ id, app, title, body, icon, urgency }`). Edit live —
-/// visible cards re-render on save; delete the file to restore the
-/// built-in layout.
-#[cfg(test)]
-pub(crate) use seed::SEED_NOTIFICATIONS_LUA;
-
 /// Seed notification-center widget: a bell cell counting the live
 /// queue, with a popup listing the newest notifications and a dismiss
 /// button per row. Reads the `notifications` global (republished
@@ -1314,10 +1309,6 @@ pub(crate) use seed::SEED_CLINEPASS_LUA;
 /// `~/.config/riced/widgets.toml` (`$XDG_CONFIG_HOME` aware).
 pub use paths::widgets_path;
 
-/// Directory Lua `file` entries resolve against
-/// (`~/.config/riced/widgets/`).
-pub use paths::widgets_dir;
-
 /// Adopted `widgets.toml` after retirement: definitions came from it,
 /// values folded into placements or Lua defaults.
 pub use paths::widgets_migrated_path;
@@ -1325,7 +1316,7 @@ pub use paths::widgets_migrated_path;
 /// Shared component library dir (`~/.config/riced/components/`):
 /// every `*.lua` file (sorted) is concatenated and executed in each
 /// widget state after `iced` is built, so `iced.define` components are
-/// available to all widgets and the notification renderer. No
+/// available to widgets and overlay scenes. No
 /// `require` needed (and none available — the sandbox nils it).
 pub use paths::components_dir;
 
@@ -1990,18 +1981,16 @@ mod tests {
         let empty: Config = toml::from_str("").unwrap();
         assert!(empty.notifications.enabled);
         assert_eq!(empty.notifications.output, "mouse");
-        assert_eq!(empty.notifications.position, "top-right");
+        assert_eq!(empty.notifications.source, "notifications.lua");
         assert_eq!(empty.notifications.timeout_ms, 5000);
-        assert_eq!(empty.notifications.max_visible, 3);
         let cfg: Config = toml::from_str(
-            "[notifications]\nenabled = false\noutput = \"DP-1\"\nposition = \"bottom-left\"\ntimeout_ms = 8000\nmax_visible = 5\n",
+            "[notification]\nenabled = false\noutput = \"DP-1\"\nsource = \"custom.lua\"\ntimeout_ms = 8000\n",
         )
         .unwrap();
         assert!(!cfg.notifications.enabled);
         assert_eq!(cfg.notifications.output, "DP-1");
-        assert_eq!(cfg.notifications.position, "bottom-left");
+        assert_eq!(cfg.notifications.source, "custom.lua");
         assert_eq!(cfg.notifications.timeout_ms, 8000);
-        assert_eq!(cfg.notifications.max_visible, 5);
     }
 
     #[test]

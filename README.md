@@ -474,28 +474,58 @@ D-Bus freedesktop server (mako replacement) plus internal events,
 rendered per output — mouse output by default, pinnable by name:
 
 ```toml
-[notifications]
+[notification]
 enabled = true
 output = "mouse"  # or "DP-1" to pin
-position = "top-right"
+source = "notifications.lua"
 timeout_ms = 5000
 ```
+
+`source` resolves relative to `~/.config/riced/` (absolute paths also work).
+It renders the **whole scene**, including the list, through the shared overlay
+host. Width, placement, spacing, card height, and transitions belong in Lua:
+
+```lua
+local app = {}
+function app:view(props)
+    return iced.listview(props.notifications)
+        :id("notifications"):key("id")
+        :delegate(function(n)
+            return riced.component("notification_card.lua", n)
+                :on_press("dismiss:" .. n.id)
+        end)
+        :width(360):anchor("right"):margin(16)
+end
+function app:on_action(key)
+    local id = key:match("^dismiss:(%d+)$")
+    if id then return { dismiss = tonumber(id) } end
+end
+return app
+```
+
+The bundled `scripts/notifications.lua` additionally shows images and action
+buttons. `components/notification_card.lua` is the reusable per-card module.
+The scene receives `props.notifications` newest-first, filtered to its output,
+with `{ id, app, title, body, icon, urgency, actions, has_image, image }`.
+`image` is an opaque owned token accepted by `iced.image(n.image)`; image
+pixels are never serialized through Lua. `actions` contains `{ key, label }`.
+Return `{ invoke = { id = id, key = key } }` to invoke a validated D-Bus action.
+
+`[notification]` controls service delivery and expiry. `source = ""` keeps
+the service enabled without its default scene. The old `[notifications]`,
+`position`, `width`, and `max_visible` presentation fields are removed.
 
 - **Sources**: any D-Bus client (`notify-send` works once riced owns
   the bus name; yields silently to mako/dunst if one runs), plus
   internal events — config/widgets parse errors, template failures,
   theme-regen results (critical ones persist until clicked).
-- **Lua layout**: `widgets/notifications.lua` defines
-  `app:view(n)` over `{ id, app, title, body, icon, urgency, actions,
-  has_image }`
-  (`actions` is a 1-based array of `{ key, label }` tables, empty when
-  the sender offers none) with the full `iced.*` set; edits re-render
-  visible cards on save, and deleting the file restores the built-in
-  card. Policy (timeout, position, cap) stays in TOML.
-- **Behavior**: one layer window per showing output (closed when
-  empty), spanning the full output height like a listview — the whole
-  stack shows newest-first and scrolls, no cap (`max_visible` in old
-  configs is ignored). Click a card to dismiss, expiries swept on a
+- **Lua layout**: source and component edits reload through the generic scene
+  runtime. Replacements are installed only after successful view decoding;
+  invalid edits retain the last working runtime and view. Deleted initialized
+  scene files are not re-seeded on restart.
+- **Behavior**: one warm, passive layer window per output (kept mapped with
+  an empty input region when the queue empties), covering the full output — the whole
+  stack shows newest-first and scrolls. Click a card to dismiss, expiries swept on a
   250ms tick that only runs while the queue is non-empty. Actions are
   live: the built-in card renders one button per action, and button
   clicks emit `ActionInvoked` back over D-Bus (then dismiss with
@@ -504,6 +534,45 @@ timeout_ms = 5000
   `image-path` hint, then `app_icon` as a file path — a 36px thumbnail
   left of the card body (themed icon names still render text-only).
   Scripts see `n.has_image` to adapt layout.
+
+### Other overlay scenes and shared layout properties
+
+Additional scenes share the same native `Layer::Overlay` surface on each
+output; they do not create a notification-specific native layer:
+
+```toml
+[[overlay]]
+id = "status"
+source = "status.lua"
+output = "DP-1"   # omit for every output
+[overlay.props]
+label = "Status"
+```
+
+Each output/scene has independent Lua state. `app:view(props)` receives
+configured properties, `props.output = { name, x, y, width, height }`, and
+output-local `props.notifications`. Existing services (`system`, `theme`,
+`wayland`, and metadata-only global `notifications`) are published before entries.
+`app:on_action(key, value)` updates state; optional `app:on_tick()` opts into
+250ms periodic updates. Static scenes only re-run for input/config/service
+changes or source reloads. Notification commands can be returned from any scene.
+
+Every iced component supports `:anchor(...)`, `:margin(number)`, and
+`:on_press(key)`. Anchoring positions its configured/measured size inside its
+parent's available area. Use `left`, `center`, `right`, or the six top/bottom
+corner/center positions; names are case-insensitive with hyphens or underscores.
+`left`/`right` center vertically; `center` centers both axes. Margin is the
+anchor inset. Set an explicit width when you want a content column rather than
+filling the parent. Chaining still targets the underlying component:
+`iced.text("Status"):anchor("right"):size(18):on_press("status")`.
+
+Scenes use native layout measurements for live hit regions and list displacement;
+there is no Rust notification card-height constant. Exit nodes retain their last
+measured bounds and render inert on a full-output canvas, outside list/scroll
+clipping. Shared surfaces stay `Anchor::all()` / `LayerSize::FILL`, with zero native
+margins, no reserved screen area, and keyboard interactivity `None`. Only live
+interactive bounds accept input; empty space and ghosts are click-through.
+Popup/toplevel keyboard/grab policies remain host-owned.
 
 ## Configuration
 

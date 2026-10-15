@@ -170,9 +170,15 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
         operation: &mut dyn widget::Operation,
     ) {
         if self.clickable {
-            self.content
-                .as_widget_mut()
-                .operate(tree, layout, renderer, operation);
+            self.content.as_widget_mut().operate(
+                tree,
+                layout,
+                renderer,
+                &mut super::widgets::measured::Translated {
+                    operation,
+                    offset: self.offset,
+                },
+            );
         }
     }
     fn overlay<'b>(

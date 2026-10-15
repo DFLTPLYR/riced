@@ -14,6 +14,7 @@ pub mod listview;
 pub mod motion;
 pub mod node;
 pub(crate) mod placement;
+pub(crate) mod scene;
 pub mod style;
 #[cfg(test)]
 mod tests;

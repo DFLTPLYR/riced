@@ -1,56 +1,20 @@
-//! Lua-configured notification layer (D-Bus server + internal events).
-//!
-//! One layer-shell window per output that currently shows anything
-//! (usually just the mouse output). Each window spans the full output
-//! height and renders that output's whole stack newest-first in a
-//! scrollable (listview, no cap); windows close when their stack
-//! empties.
-//! Bodies render from `notifications.lua`, falling back to
-//! [`default_tree`] when the script is missing or broken.
-//!
-//! Cards animate on the shared [`crate::ui::listview::ListView`]
-//! keyed `(output, id)`: arrivals fade/slide in from the anchored
-//! edge, dismissals linger as inert ghosts fading out. Placement
-//! honors `[notifications] output`: `"mouse"` resolves the output
-//! under the last-known global cursor (or the compositor's `LastOutput`
-//! equivalent via `OutputOption`), any other value pins by output name
-//! (`OutputInfo.name`, e.g. `"DP-1"`).
-
-mod queue;
-mod runtime;
-mod surface;
-use super::background::Background;
-use crate::config::NotificationConfig;
-use crate::shell::state::Plots;
-use crate::shell::{NotifyEvent, Plant};
-use crate::theme;
-use crate::ui::anim::{ENTER_OFFSET, ItemMotion};
-use crate::ui::build::build_node;
-use crate::ui::node::{NodeLength, WidgetNode};
-use iced::{Element, Length, Task as Command, Vector};
-use iced_exwlshell::reexport::{Anchor, LayerSize, WlRegion};
-#[cfg(test)]
-use iced_exwlshell::reexport::{KeyboardInteractivity, Layer};
-use iced_runtime::Action;
-use iced_runtime::window::Action as WindowAction;
+//! Notification delivery, timeout, output assignment, and D-Bus action policy.
+//! The whole visual list is a configured Lua scene in the generic overlay host.
+use crate::{
+    config::NotificationConfig,
+    shell::{
+        Plant, Plots,
+        overlay::{self, Spec},
+    },
+};
+use iced::Task;
 use iced_wayland_subscriber::OutputId;
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-/// Fixed card geometry (px). Bodies clip past three lines — layer
-/// surfaces need an upfront size and Lua can't measure text.
-const CARD_H: f32 = 100.0;
-const CARD_GAP: f32 = 8.0;
-/// Full card pitch (chrome + gap): the displaced-glide step and the
-/// input-region stride. Chrome is `CARD_H` + 10px padding top/bottom.
-pub(crate) const CARD_PITCH: f32 = CARD_H + CARD_GAP;
-const WINDOW_PAD: f32 = 16.0;
-/// Corner margin left at each anchored edge (matches `placement`'s
-/// `M`): the window spans the full output height minus both margins.
-const WINDOW_MARGIN: f32 = 16.0;
-
-/// One notification: plain data in, layout out. `timeout` of `None`
-/// persists until clicked (critical urgency).
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub id: u32,
@@ -59,21 +23,13 @@ pub struct Notification {
     pub title: String,
     pub body: String,
     pub icon: String,
-    /// freedesktop urgency: 0 low, 1 normal, 2 critical.
     pub urgency: u8,
     pub received_at: Instant,
     pub timeout: Option<Duration>,
-    /// Action `(key, label)` pairs from the D-Bus `actions` array.
     pub actions: Vec<(String, String)>,
-    /// Decoded app image (`image-data` / `image-path` / icon path);
-    /// `None` renders text-only.
     pub image: Option<iced::widget::image::Handle>,
 }
-
-/// One output's geometry for hit-testing: `(id, (x, y, w, h))`.
 pub(crate) type OutputGeom = (OutputId, (f32, f32, f32, f32));
-
-/// D-Bus `Notify` payload before timeout/output resolution.
 pub(crate) struct Incoming {
     pub id: u32,
     pub app: String,
@@ -83,15 +39,100 @@ pub(crate) struct Incoming {
     pub actions: Vec<(String, String)>,
     pub image: Option<iced::widget::image::Handle>,
     pub urgency: u8,
-    /// Client-requested timeout; `None` means server default.
     pub timeout_ms: Option<u64>,
 }
-
-/// Queue changes invalidate render timestamps; globals and open center
-/// popups refresh without waiting for the configured polling interval.
-fn refresh_queue_widgets(plots: &mut Plots) -> Command<Plant> {
+pub(crate) fn output_at(geometries: &[OutputGeom], point: iced::Point) -> Option<OutputId> {
+    geometries.iter().find_map(|(id, (x, y, w, h))| {
+        (point.x >= *x && point.y >= *y && point.x < x + w && point.y < y + h).then_some(*id)
+    })
+}
+pub(crate) fn enqueue(queue: &mut VecDeque<Notification>, notification: Notification) {
+    if let Some(previous) = queue
+        .iter_mut()
+        .find(|previous| previous.id == notification.id)
+    {
+        *previous = notification;
+    } else {
+        queue.push_back(notification);
+    }
+}
+pub(crate) fn resolve_output(plots: &Plots, config: &NotificationConfig) -> Option<OutputId> {
+    if config.output != "mouse"
+        && let Some((id, _)) = plots.windows.output_infos.iter().find(|(_, info)| {
+            info.name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&config.output))
+        })
+    {
+        return Some(*id);
+    }
+    if let Some(cursor) = plots.input.global {
+        let geometry: Vec<_> = plots
+            .windows
+            .output_infos
+            .iter()
+            .map(|(id, info)| (*id, crate::shared::geometry::output_geometry(info)))
+            .collect();
+        if let Some(output) = output_at(&geometry, cursor) {
+            return Some(output);
+        }
+    }
+    plots.windows.output_infos.keys().copied().next()
+}
+pub(crate) fn scene_spec(plots: &Plots, output: OutputId) -> Spec {
+    let records: Vec<_> = plots
+        .notification
+        .queue
+        .iter()
+        .rev()
+        .filter(|item| item.output == Some(output))
+        .cloned()
+        .collect();
+    Spec {
+        id: "notification".into(),
+        source: plots.config.notifications.source.clone(),
+        input: Arc::new(move |lua| {
+            let props = lua.create_table()?;
+            let notifications = lua.create_table()?;
+            for (index, notification) in records.iter().enumerate() {
+                let item = lua.create_table()?;
+                item.set("id", notification.id)?;
+                item.set("app", notification.app.as_str())?;
+                item.set("title", notification.title.as_str())?;
+                item.set("body", notification.body.as_str())?;
+                item.set("icon", notification.icon.as_str())?;
+                item.set("urgency", notification.urgency)?;
+                item.set("has_image", notification.image.is_some())?;
+                item.set(
+                    "actions",
+                    crate::lua::notifications::actions_table(lua, &notification.actions)
+                        .map_err(mlua::Error::RuntimeError)?,
+                )?;
+                if let Some(image) = &notification.image {
+                    item.set(
+                        "image",
+                        lua.create_userdata(crate::ui::image_value::ImageValue(image.clone()))?,
+                    )?;
+                }
+                notifications.set(index + 1, item)?;
+            }
+            props.set("notifications", notifications)?;
+            Ok(props)
+        }),
+    }
+}
+pub(crate) fn command_from_action(value: &mlua::Value, plots: &mut Plots) -> Task<Plant> {
+    use crate::lua::notifications::{NotificationAction, notification_action};
+    match notification_action(value) {
+        Some(NotificationAction::Dismiss(id)) => Notification::handle_dismissed(plots, id),
+        Some(NotificationAction::Invoke(id, key)) => Notification::handle_invoke(plots, id, key),
+        None => Task::none(),
+    }
+}
+fn changed(plots: &mut Plots) -> Task<Plant> {
     plots.placements.last_run.clear();
-    Command::batch(vec![
+    Task::batch([
+        overlay::refresh(plots, true),
         super::top::Top::handle_widget_tick(plots),
         super::popup::Popup::refresh_bodies(plots),
     ])
@@ -100,48 +141,29 @@ fn refresh_queue_widgets(plots: &mut Plots) -> Command<Plant> {
 impl Notification {
     pub fn expired(&self, now: Instant) -> bool {
         self.timeout
-            .is_some_and(|t| now.duration_since(self.received_at) >= t)
+            .is_some_and(|timeout| now.duration_since(self.received_at) >= timeout)
     }
-
-    /// Internal event notification (`app = "riced"`). Critical urgency
-    /// persists until clicked; anything else uses the configured
-    /// default timeout. Caller assigns output via `handle_arrived`.
     pub(crate) fn internal(
-        cfg: &NotificationConfig,
+        config: &NotificationConfig,
         title: &str,
         body: String,
         urgency: u8,
     ) -> Self {
-        let timeout = if urgency >= 2 {
-            None
-        } else {
-            Some(Duration::from_millis(cfg.timeout_ms))
-        };
         Self {
             id: 0,
             output: None,
-            app: "riced".to_string(),
-            title: title.to_string(),
+            app: "riced".into(),
+            title: title.into(),
             body,
             icon: String::new(),
             urgency: urgency.min(2),
             received_at: Instant::now(),
-            timeout,
+            timeout: (urgency < 2).then(|| Duration::from_millis(config.timeout_ms)),
             actions: Vec::new(),
             image: None,
         }
     }
-
-    /// Build from a D-Bus `Notify` call. `timeout_ms` of `None` means
-    /// server default; critical urgency persists until clicked.
     pub(crate) fn from_dbus(incoming: Incoming, default_ms: u64) -> Self {
-        let timeout = if incoming.urgency >= 2 {
-            None
-        } else {
-            Some(Duration::from_millis(
-                incoming.timeout_ms.unwrap_or(default_ms),
-            ))
-        };
         Self {
             id: incoming.id,
             output: None,
@@ -151,1348 +173,110 @@ impl Notification {
             icon: incoming.icon,
             urgency: incoming.urgency.min(2),
             received_at: Instant::now(),
-            timeout,
+            timeout: (incoming.urgency < 2)
+                .then(|| Duration::from_millis(incoming.timeout_ms.unwrap_or(default_ms))),
             actions: incoming.actions,
             image: incoming.image,
         }
     }
-}
-
-/// Pure: output whose rect contains the point (global coords).
-pub(crate) fn output_at(geoms: &[OutputGeom], point: iced::Point) -> Option<OutputId> {
-    geoms.iter().find_map(|(id, (x, y, w, h))| {
-        (point.x >= *x && point.x < x + w && point.y >= *y && point.y < y + h).then_some(*id)
-    })
-}
-
-/// Insert, replacing the same id in place (D-Bus `replaces_id`).
-pub(crate) fn enqueue(queue: &mut VecDeque<Notification>, item: Notification) {
-    if let Some(slot) = queue.iter_mut().find(|n| n.id == item.id) {
-        *slot = item;
-    } else {
-        queue.push_back(item);
-    }
-}
-
-/// Resolve the target output: configured name first (`"mouse"`
-/// means cursor output), then cursor output, then first output.
-pub(crate) fn resolve_output(plots: &Plots, cfg: &NotificationConfig) -> Option<OutputId> {
-    surface::OutputContext {
-        outputs: &plots.windows.output_infos,
-        cursor: plots.input.global,
-    }
-    .resolve(cfg)
-}
-
-/// Corner anchor + outward margins for the configured position.
-fn placement(cfg: &NotificationConfig) -> (Anchor, (i32, i32, i32, i32)) {
-    // Margin order is (top, right, bottom, left); only the two edges
-    // facing the corner get the offset.
-    const M: i32 = WINDOW_MARGIN as i32;
-    match cfg.position.as_str() {
-        "top-left" => (Anchor::Top | Anchor::Left, (M, 0, 0, M)),
-        "bottom-right" => (Anchor::Bottom | Anchor::Right, (0, M, M, 0)),
-        "bottom-left" => (Anchor::Bottom | Anchor::Left, (0, 0, M, M)),
-        _ => (Anchor::Top | Anchor::Right, (M, M, 0, 0)),
-    }
-}
-
-/// Estimated window height for `visible` cards (floor for the
-/// output-height window when geometry is unknown or tiny).
-pub(crate) fn window_height(visible: usize) -> u32 {
-    (WINDOW_PAD + visible.max(1) as f32 * (CARD_H + CARD_GAP)).round() as u32
-}
-
-/// Listview window height: the full output height minus both corner
-/// margins, so the whole stack shows (scrolling) instead of capping
-/// at `max_visible`. Never smaller than one card.
-pub(crate) fn window_height_for_output(output_h: f32) -> u32 {
-    (output_h - 2.0 * WINDOW_MARGIN)
-        .max(window_height(1) as f32)
-        .round() as u32
-}
-
-/// Output height behind `output` (full geometry, ignores bars),
-/// falling back to HD when the compositor hasn't reported it yet.
-fn output_height(plots: &Plots, output: OutputId) -> f32 {
-    plots
-        .windows
-        .output_infos
-        .get(&output)
-        .map(|info| Background::output_geometry(info).3)
-        .unwrap_or(1080.0)
-}
-
-impl Notification {
-    /// Open (or reuse) the layer window for `output` and show this
-    /// stack on it. Windows are per output and span the full output
-    /// height (listview: the whole stack scrolls); the view slices
-    /// nothing. Returns the spawn command when a window was created
-    /// (`None` on reuse — the repaint covers it).
-    pub(crate) fn ensure_window(
-        plots: &mut Plots,
-        output: OutputId,
-        cfg: &NotificationConfig,
-    ) -> Option<Command<Plant>> {
-        surface::SurfaceContext {
-            windows: &mut plots.windows,
-            sizes: &mut plots.notification.sizes,
-            config: cfg,
-        }
-        .ensure(output)
-    }
-}
-
-/// Retire one notification into a ghost on the list: drop it from the
-/// queue but keep its tree, fading/sliding out from its current values
-/// (mid-enter dismissals retarget smoothly instead of jumping).
-/// Survivors below the removed index glide up one slot (`displaced`,
-/// owned by the list diff). Returns false when the id was already gone.
-fn retire_noti(plots: &mut Plots, id: u32) -> bool {
-    queue_context(plots).retire(id)
-}
-
-fn queue_context(plots: &mut Plots) -> queue::QueueContext<'_> {
-    queue::QueueContext {
-        state: &mut plots.notification,
-        motion: &mut plots.animation.motion,
-        config: &plots.config.notifications,
-        duration: plots.config.animation.speed.duration(),
-    }
-}
-
-/// Newest-first keys for one output's stack: the list order shared by
-/// arrive/retire/view.
-fn output_keys(notifications: &VecDeque<Notification>, output: OutputId) -> Vec<(OutputId, u32)> {
-    notifications
-        .iter()
-        .rev()
-        .filter(|n| n.output == Some(output))
-        .map(|n| (output, n.id))
-        .collect()
-}
-
-/// Enter direction for arrivals: sideways toward the anchored corner
-/// (matches the old slide side; bottom corners mirror it).
-fn enter_from(cfg: &NotificationConfig) -> Vector {
-    if cfg.position.starts_with("bottom") {
-        Vector::new(-ENTER_OFFSET, 0.0)
-    } else {
-        Vector::new(ENTER_OFFSET, 0.0)
-    }
-}
-
-/// Visible `(id, output)` in newest-first, per-output view order —
-/// the single ordering both view and retire share. Uncapped: the
-/// window spans the output height and the stack scrolls.
-fn visible_order(notifications: &VecDeque<Notification>) -> Vec<(u32, OutputId)> {
-    let mut by_output: std::collections::HashMap<OutputId, Vec<u32>> = Default::default();
-    for n in notifications {
-        if let Some(output) = n.output {
-            by_output.entry(output).or_default().push(n.id);
-        }
-    }
-    let mut ordered = Vec::new();
-    for (output, mut ids) in by_output {
-        ids.reverse();
-        ordered.extend(ids.into_iter().map(|id| (id, output)));
-    }
-    ordered
-}
-
-/// Drop settled notification exits (called from the shared 16ms
-/// animation loop after it ticks the runtime). Nudged survivors also
-/// glide home here — the second half of the `displaced` pair started
-/// in [`retire_noti`]. Returns per-output input-region pushes for
-/// outputs whose ghost set changed: without this the compositor mask
-/// keeps covering a dismissed card's old rect (dead, unclickable
-/// zone) until the next arrival/dismiss re-pushes it.
-pub(crate) fn sweep_noti_anims(plots: &mut Plots) -> Command<Plant> {
-    let before: std::collections::HashMap<OutputId, usize> = plots
-        .windows
-        .notifications
-        .keys()
-        .copied()
-        .map(|o| {
-            (
-                o,
-                plots.notification.list.ghosts_for(|(go, _)| *go == o).len(),
-            )
-        })
-        .collect();
-    plots.notification.list.sweep(&mut plots.animation.motion);
-    let retained: std::collections::HashSet<u32> = plots
-        .notification
-        .list
-        .ghosts_for(|_| true)
-        .iter()
-        .map(|ghost| ghost.key.1)
-        .collect();
-    plots
-        .notification
-        .exit_images
-        .retain(|id, _| retained.contains(id));
-    let mut cmds = Vec::new();
-    for output in plots
-        .windows
-        .notifications
-        .keys()
-        .copied()
-        .collect::<Vec<_>>()
-    {
-        let after = plots
-            .notification
-            .list
-            .ghosts_for(|(go, _)| *go == output)
-            .len();
-        if before.get(&output).copied().unwrap_or(0) != after {
-            cmds.push(Notification::reconcile(plots, output));
-        } else {
-            cmds.push(Notification::push_input_region(plots, output));
-        }
-    }
-    if cmds.is_empty() {
-        Command::none()
-    } else {
-        Command::batch(cmds)
-    }
-}
-
-/// Default card tree: title + up-to-three body lines + one button
-/// row per action. Used when `notifications.lua` is missing/broken —
-/// and as ghost content, so every visible card (live or ghost) is
-/// always a `WidgetNode`.
-fn default_tree(n: Option<&Notification>) -> WidgetNode {
-    let (title, body, actions) = n
-        .map(|n| (n.title.clone(), n.body.clone(), n.actions.clone()))
-        .unwrap_or_default();
-    let mut children = vec![WidgetNode::Text {
-        content: title,
-        size: Some(14.0),
-        width: None,
-        height: None,
-        wrapping: None,
-        color: None,
-        elide: None,
-    }];
-    for line in body.lines().take(3) {
-        children.push(WidgetNode::Text {
-            content: line.to_string(),
-            size: Some(12.0),
-            width: None,
-            height: None,
-            wrapping: None,
-            color: None,
-            elide: None,
-        });
-    }
-    if !actions.is_empty() {
-        children.push(WidgetNode::Row {
-            children: actions
-                .into_iter()
-                .map(|(key, label)| WidgetNode::Button {
-                    label,
-                    action: key,
-                    width: None,
-                    height: None,
-                    padding: None,
-                    color: None,
-                    background: None,
-                    radius: None,
-                })
-                .collect(),
-            spacing: 4.0,
-            width: NodeLength::Shrink,
-            height: NodeLength::Shrink,
-        });
-    }
-    WidgetNode::Column {
-        children,
-        spacing: 2.0,
-        width: NodeLength::Shrink,
-        height: NodeLength::Shrink,
-    }
-}
-
-/// Stack view for one output's window: all live cards newest-first
-/// plus ghosts merged at their old indices, in a scrollable the
-/// height of the output. Bodies come from cached
-/// `notifications.lua` trees, falling back to [`default_tree`] when
-/// the script is missing or broken. Cards slide from the anchored edge
-/// (down for top corners, up for bottom ones). Action buttons route to
-/// `on_action`-style `Invoke` messages; the rest of a live card is one
-/// dismiss area while ghosts stay inert.
-pub(crate) struct ViewContext<'a> {
-    pub config: &'a NotificationConfig,
-    pub state: &'a crate::shell::notifications::NotificationState,
-    pub motion: &'a crate::ui::anim::AnimRuntime,
-}
-
-pub(crate) fn view(context: ViewContext<'_>, output: OutputId) -> Element<'_, Plant> {
-    use iced::widget::{container, image::Image, mouse_area, row, scrollable};
-    let cfg = context.config;
-    let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
-    let live_keys = output_keys(&context.state.queue, output);
-    let content =
-        move |key: &(OutputId, u32)| -> Option<WidgetNode> {
-            Some(context.state.trees.get(&key.1).cloned().unwrap_or_else(|| {
-                default_tree(context.state.queue.iter().find(|n| n.id == key.1))
-            }))
-        };
-    let render = move |key: &(OutputId, u32), node: WidgetNode, motion: ItemMotion, live: bool| {
-        let id = key.1;
-        // Live buttons invoke actions; ghosts (and build failures
-        // falling back to the default tree) stay inert.
-        let msg: crate::ui::action::Sender =
-            std::sync::Arc::new(move |action| Plant::Notify(NotifyEvent::Invoke(id, action.key)));
-        let body: Element<'_, Plant> =
-            crate::ui::build::build_node_opacity(&node, 13.0, live.then_some(msg), motion.opacity)
-                .unwrap_or_else(|_| {
-                    build_node(
-                        &default_tree(context.state.queue.iter().find(|n| n.id == id)),
-                        13.0,
-                        None,
-                    )
-                    .expect("default tree builds")
-                });
-        // App image (decoded D-Bus `image-data` / `image-path` / icon
-        // path): a 36px thumbnail left of the Lua body. Ghosts already
-        // left the queue, so their exits render text-only.
-        let content_body: Element<'_, Plant> = match context
-            .state
-            .queue
-            .iter()
-            .find(|n| n.id == id)
-            .and_then(|n| n.image.clone())
-            .or_else(|| context.state.exit_images.get(&id).cloned())
-        {
-            Some(handle) => row![
-                Image::new(handle)
-                    .width(36.0)
-                    .height(36.0)
-                    .opacity(motion.opacity),
-                body
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .into(),
-            None => body,
-        };
-        // QML-style motion: `x` slides the card horizontally (enter
-        // from the anchored side, exit toward -x), `opacity` fades it,
-        // `y` glides survivors toward their new slot (displaced). The
-        // overlay transform draws the card shifted without disturbing
-        // layout; the style alpha fades chrome + text together.
-        let opacity = motion.opacity;
-        let chrome: Element<'_, Plant> = container(content_body)
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(CARD_H))
-            .padding(10.0)
-            .clip(true)
-            .style(move |theme| {
-                let mut style = theme::menu_box(theme);
-                style.background = style.background.map(|bg| bg.scale_alpha(opacity));
-                style.border.color = style.border.color.scale_alpha(opacity);
-                style.shadow.color = style.shadow.color.scale_alpha(opacity);
-                style
-            })
-            .into();
-        let el: Element<'_, Plant> = chrome;
-        if live {
-            mouse_area(el)
-                .on_press(Plant::Notify(NotifyEvent::Dismissed(id)))
-                .into()
-        } else {
-            el
-        }
-    };
-    let elements = context.state.list.items(
-        context.motion,
-        &live_keys,
-        &content,
-        render,
-        // The list is shared across outputs: only this surface's exits
-        // may paint here, or every dismissal flashes on every monitor.
-        Some(&|key: &(OutputId, u32)| key.0 == output),
-    );
-    let mut keys: Vec<u32> = live_keys.iter().map(|(_, id)| *id).collect();
-    if keys.is_empty() && !elements.is_empty() {
-        keys.push(0);
-    }
-    let stack = iced::widget::keyed::Column::from_vecs(keys, elements).spacing(CARD_GAP);
-    scrollable(stack)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .direction(iced::widget::scrollable::Direction::Vertical(
-            iced::widget::scrollable::Scrollbar::hidden(),
-        ))
-        .on_scroll(move |viewport| {
-            Plant::Notify(NotifyEvent::Scrolled(output, viewport.absolute_offset().y))
-        })
-        .into()
-}
-/// Render one notification through `render(n)` and cache the tree.
-/// Missing/broken scripts fall back to [`default_tree`] (and clear
-/// any stale cached tree); errors log once per message.
-pub(crate) fn render_noti(plots: &mut Plots, n: &Notification) {
-    runtime::RenderContext {
-        renderer: &mut plots.notification.renderer,
-        trees: &mut plots.notification.trees,
-        list: &mut plots.notification.list,
-        config: &plots.config.notifications,
-        services: crate::services::ServiceCtx {
-            sys: &plots.services.system,
-            gpu: None,
-            theme: &plots.config.theme,
-            outputs: &plots.windows.output_infos,
-            notifications: &plots.notification.queue,
-            toplevels: &plots.services.toplevels,
-            workspaces: &plots.services.workspaces,
-        },
-    }
-    .render(n);
-}
-
-/// Map an `on_action` return value onto notification commands:
-/// `{ dismiss = id }` clicks the card away (reason 2), `{ invoke =
-/// { id, key } }` fires an action button. Anything else (nil, text,
-/// misshaped tables, unknown ids/keys) is `Command::none` — the
-/// existing guards inside the handlers ignore it, so center widgets
-/// can't break the queue.
-pub(crate) fn command_from_action(value: &mlua::Value, plots: &mut Plots) -> Command<Plant> {
-    use crate::lua::notifications::{NotificationAction, notification_action};
-    match notification_action(value) {
-        Some(NotificationAction::Dismiss(id)) => Notification::handle_dismissed(plots, id),
-        Some(NotificationAction::Invoke(id, key)) => Notification::handle_invoke(plots, id, key),
-        None => Command::none(),
-    }
-}
-
-/// Render every cached notification (script edit while visible).
-pub(crate) fn render_all_notis(plots: &mut Plots) {
-    let ids: Vec<u32> = plots.notification.queue.iter().map(|n| n.id).collect();
-    for id in ids {
-        if let Some(n) = plots
-            .notification
-            .queue
-            .iter()
-            .find(|n| n.id == id)
-            .cloned()
-        {
-            render_noti(plots, &n);
-        }
-    }
-}
-
-impl Notification {
-    /// Ingest an arrival: resolve output, assign id when zero, enqueue
-    /// (same id replaces in place), ensure the window. Disabled layer
-    /// drops everything silently.
-    pub(crate) fn handle_arrived(plots: &mut Plots, n: Notification) -> Command<Plant> {
+    pub(crate) fn handle_arrived(plots: &mut Plots, mut notification: Notification) -> Task<Plant> {
         if !plots.config.notifications.enabled {
-            return Command::none();
+            return Task::none();
         }
-        let output = n
+        let Some(output) = notification
             .output
-            .or_else(|| resolve_output(plots, &plots.config.notifications));
-        let Some(output) = output else {
-            return Command::none();
+            .or_else(|| resolve_output(plots, &plots.config.notifications))
+        else {
+            return Task::none();
         };
-        let stored = queue_context(plots).arrive(n, output);
-        render_noti(plots, &stored.notification);
-        queue_context(plots).animate_arrival(&stored);
-        Command::batch(vec![
-            Self::reconcile(plots, output),
-            refresh_queue_widgets(plots),
-        ])
+        notification.output = Some(output);
+        if notification.id == 0 {
+            notification.id = plots.notification.allocate_id();
+        }
+        enqueue(&mut plots.notification.queue, notification);
+        changed(plots)
     }
-
-    /// Dismiss by id (card click). Unknown ids are ignored. Reports
-    /// reason 2 (`dismissed by user`) back over D-Bus.
-    pub(crate) fn handle_dismissed(plots: &mut Plots, id: u32) -> Command<Plant> {
-        if !retire_noti(plots, id) {
-            return Command::none();
+    pub(crate) fn handle_dismissed(plots: &mut Plots, id: u32) -> Task<Plant> {
+        if !plots.notification.queue.iter().any(|item| item.id == id) {
+            return Task::none();
         }
-        Command::batch(vec![
-            Self::reconcile_all(plots),
-            crate::notify::emit_closed(id, 2),
-            refresh_queue_widgets(plots),
-        ])
+        plots.notification.queue.retain(|item| item.id != id);
+        Task::batch([crate::notify::emit_closed(id, 2), changed(plots)])
     }
-
-    /// Silent drop for peer-initiated closes (D-Bus
-    /// `CloseNotification`): the `NotificationClosed` signal (reason 3)
-    /// already went out on the bus, so no second signal here.
-    pub(crate) fn handle_peer_closed(plots: &mut Plots, id: u32) -> Command<Plant> {
-        if !retire_noti(plots, id) {
-            return Command::none();
+    pub(crate) fn handle_peer_closed(plots: &mut Plots, id: u32) -> Task<Plant> {
+        if !plots.notification.queue.iter().any(|item| item.id == id) {
+            return Task::none();
         }
-        Command::batch(vec![
-            Self::reconcile_all(plots),
-            refresh_queue_widgets(plots),
-        ])
+        plots.notification.queue.retain(|item| item.id != id);
+        changed(plots)
     }
-
-    /// Fire one action button: emit `ActionInvoked` for valid keys,
-    /// then dismiss like a click (reason 2). Unknown ids — or keys the
-    /// notification doesn't offer (stale trees) — are ignored.
-    pub(crate) fn handle_invoke(plots: &mut Plots, id: u32, key: String) -> Command<Plant> {
-        let known = queue_context(plots).action_known(id, &key);
-        if !known {
-            return Command::none();
-        }
-        let mut cmds = vec![crate::notify::emit_action_invoked(id, key)];
-        if retire_noti(plots, id) {
-            cmds.push(Self::reconcile_all(plots));
-            cmds.push(crate::notify::emit_closed(id, 2));
-            cmds.push(refresh_queue_widgets(plots));
-        }
-        Command::batch(cmds)
-    }
-
-    /// Expiry sweep tick (+ script hot-reload while visible): retire
-    /// timed-out notifications (reason 1 each), close emptied windows.
-    /// Repaint comes from the `Scope::All` redraw scope.
-    pub(crate) fn handle_tick(plots: &mut Plots) -> Command<Plant> {
-        if plots.notification.renderer.sync_revision() {
-            render_all_notis(plots);
-        }
-        let now = Instant::now();
-        let mut cmds = Vec::new();
-        for id in queue_context(plots).expired(now) {
-            if retire_noti(plots, id) {
-                cmds.push(crate::notify::emit_closed(id, 1));
-            }
-        }
-        if cmds.is_empty() {
-            return Command::none();
-        }
-        cmds.push(Self::reconcile_all(plots));
-        cmds.push(refresh_queue_widgets(plots));
-        Command::batch(cmds)
-    }
-
-    /// Reconcile every showing output (used after dismiss/sweep).
-    fn reconcile_all(plots: &mut Plots) -> Command<Plant> {
-        let outputs: Vec<OutputId> = plots.windows.notifications.keys().copied().collect();
-        let mut cmds = Vec::new();
-        for output in outputs {
-            cmds.push(Self::reconcile(plots, output));
-        }
-        if cmds.is_empty() {
-            Command::none()
-        } else {
-            Command::batch(cmds)
-        }
-    }
-
-    /// Make the window match the stack: open when non-empty, close +
-    /// drop mappings when empty. Ghosts keep the window alive until
-    /// their exit settles. Height follows the output (listview), so
-    /// arrivals and dismissals never resize — only output geometry
-    /// changes do (see [`Self::reapply_for_output`]). Every path that
-    /// changes the stack also re-pushes the input region so only card
-    /// rects stay clickable (see [`Self::push_input_region`]).
-    fn reconcile(plots: &mut Plots, output: OutputId) -> Command<Plant> {
-        let cfg = plots.config.notifications.clone();
-        let live = plots
+    pub(crate) fn handle_invoke(plots: &mut Plots, id: u32, key: String) -> Task<Plant> {
+        if !plots
             .notification
             .queue
             .iter()
-            .filter(|n| n.output == Some(output))
-            .count();
-        let ghosts = plots
-            .notification
-            .list
-            .ghosts_for(|(o, _)| *o == output)
-            .len();
-        let visible = live + ghosts;
-        match plots.windows.notifications.get(&output).copied() {
-            None => {
-                if visible == 0 {
-                    return Command::none();
-                }
-                // ensure_window registers mappings; record its size.
-                let h = window_height_for_output(output_height(plots, output));
-                let cmd = Self::ensure_window(plots, output, &cfg);
-                plots.notification.sizes.insert(output, h);
-                let open = cmd.unwrap_or_else(Command::none);
-                // Install the mask on NewShell, when the native surface is
-                // available. A batched mask update can run before creation.
-                open
-            }
-            Some(id) => {
-                if visible == 0 {
-                    // Keep the transparent surface mapped and clear its mask.
-                    // Recreating a layer/renderer on the next arrival can
-                    // disturb fullscreen/XWayland focus even with keyboard
-                    // interactivity disabled.
-                    plots.notification.scroll.remove(&output);
-                    return Self::push_input_region(plots, output);
-                }
-                let h = window_height_for_output(output_height(plots, output));
-                if plots.notification.sizes.get(&output).copied() == Some(h) {
-                    return Self::push_input_region(plots, output);
-                }
-                plots.notification.sizes.insert(output, h);
-                let (anchor, _) = placement(&cfg);
-                Command::batch(vec![
-                    Command::done(Plant::LayoutChange {
-                        id,
-                        anchor,
-                        size: LayerSize::px(cfg.width.max(200.0) as u32, h),
-                    }),
-                    Self::push_input_region(plots, output),
-                ])
-            }
-        }
-    }
-
-    /// Re-push the output-height window size after a geometry change
-    /// (mirrors `Top::reapply_for_output`). No-op when no window is
-    /// showing on the output or the height didn't move.
-    pub(crate) fn reapply_for_output(plots: &mut Plots, output: OutputId) -> Command<Plant> {
-        let Some(id) = plots.windows.notifications.get(&output).copied() else {
-            return Command::none();
-        };
-        let cfg = plots.config.notifications.clone();
-        let h = window_height_for_output(output_height(plots, output));
-        if plots.notification.sizes.get(&output).copied() == Some(h) {
-            return Command::none();
-        }
-        plots.notification.sizes.insert(output, h);
-        let (anchor, _) = placement(&cfg);
-        Command::done(Plant::LayoutChange {
-            id,
-            anchor,
-            size: LayerSize::px(cfg.width.max(200.0) as u32, h),
-        })
-    }
-
-    /// Card rects for the compositor input region (Quickshell-mask
-    /// equivalent): one `(x, y, w, h)` per visible card, in window
-    /// coords. Everything outside these rects clicks through — the
-    /// tall listview window never swallows background clicks. Y
-    /// offsets mirror the `view` stack (pad + chrome + gap); the
-    /// scroll offset is unknown here, so cards past the viewport map
-    /// to their unscrolled position (harmless: still inside the
-    /// window, still clickable area).
-    pub(crate) fn input_rects(plots: &Plots, output: OutputId) -> Vec<(i32, i32, i32, i32)> {
-        let cfg = &plots.config.notifications;
-        let width = cfg.width.max(200.0) - WINDOW_PAD * 2.0;
-        let viewport = iced::Rectangle::new(
-            iced::Point::ORIGIN,
-            iced::Size::new(
-                cfg.width.max(200.0),
-                window_height_for_output(output_height(plots, output)) as f32,
-            ),
-        );
-        let scroll = plots
-            .notification
-            .scroll
-            .get(&output)
-            .copied()
-            .unwrap_or(0.0);
-        let mut rects = Vec::new();
-        for (index, key) in output_keys(&plots.notification.queue, output)
-            .iter()
-            .enumerate()
+            .any(|item| item.id == id && item.actions.iter().any(|(action, _)| action == &key))
         {
-            let motion = plots
-                .notification
-                .list
-                .motion_of(&plots.animation.motion, key);
-            let bounds = iced::Rectangle::new(
-                iced::Point::new(motion.x, index as f32 * CARD_PITCH + motion.y - scroll),
-                iced::Size::new(width, CARD_H),
-            );
-            if let Some(visible) = bounds.intersection(&viewport) {
-                let x = visible.x.floor() as i32;
-                let y = visible.y.floor() as i32;
-                rects.push((
-                    x,
-                    y,
-                    (visible.x + visible.width).ceil() as i32 - x,
-                    (visible.y + visible.height).ceil() as i32 - y,
-                ));
-            }
+            return Task::none();
         }
-        rects
+        plots.notification.queue.retain(|item| item.id != id);
+        Task::batch([
+            crate::notify::emit_action_invoked(id, key),
+            crate::notify::emit_closed(id, 2),
+            changed(plots),
+        ])
     }
-
-    /// Push [`input_rects`] to the compositor for `output`'s window
-    /// (no-op when no window is showing). Only pushes when the rects
-    /// changed since the last push: every reconcile path calls this,
-    /// and redundant input-region commits re-resolve pointer focus on
-    /// some compositors. Fresh native surfaces reset `mask` (see the
-    /// `NewShell` handler) so the mask is always reinstalled there.
-    pub(crate) fn push_input_region(plots: &mut Plots, output: OutputId) -> Command<Plant> {
-        let Some(id) = plots.windows.notifications.get(&output).copied() else {
-            return Command::none();
-        };
-        let rects = Self::input_rects(plots, output);
-        if plots.notification.masks.get(&output) == Some(&rects) {
-            return Command::none();
-        }
-        plots.notification.masks.insert(output, rects.clone());
-        Command::done(Plant::SetInputRegion {
-            id,
-            callback: iced_exwlshell::actions::ActionCallback::new(move |region: &WlRegion| {
-                for (x, y, w, h) in &rects {
-                    region.add(*x, *y, *w, *h);
-                }
-            }),
-        })
-    }
-
-    /// Drop one output's windows + notifications (compositor close or
-    /// output removal). Transient by nature: nothing migrates.
-    pub(crate) fn remove_for_output(plots: &mut Plots, output: OutputId) -> Command<Plant> {
-        let mut cmds = Vec::new();
-        if let Some(id) = plots.windows.notifications.remove(&output) {
-            plots.forget_window(id);
-            cmds.push(iced_runtime::task::effect(Action::Window(
-                WindowAction::Close(id),
-            )));
+    pub(crate) fn handle_tick(plots: &mut Plots) -> Task<Plant> {
+        let now = Instant::now();
+        let ids: Vec<_> = plots
+            .notification
+            .queue
+            .iter()
+            .filter(|item| item.expired(now))
+            .map(|item| item.id)
+            .collect();
+        if ids.is_empty() {
+            return Task::none();
         }
         plots
             .notification
-            .forget_output(output, &mut plots.animation.motion);
-        if cmds.is_empty() {
-            Command::none()
-        } else {
-            Command::batch(cmds)
-        }
+            .queue
+            .retain(|item| !ids.contains(&item.id));
+        let mut commands: Vec<_> = ids
+            .into_iter()
+            .map(|id| crate::notify::emit_closed(id, 1))
+            .collect();
+        commands.push(changed(plots));
+        Task::batch(commands)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lua::notifications::actions_table;
-    use crate::lua::widgets::{inject_ui, new_widget_lua};
-    use crate::ui::decode::parse_node;
-    use crate::ui::node::WidgetNode;
-
     #[test]
-    fn exiting_ghosts_never_render_in_other_outputs_windows() {
-        use aura_anim::core::runtime::MotionRuntime;
-        use std::cell::RefCell;
-        use std::time::Duration;
-        let o1 = OutputId(1);
-        let o2 = OutputId(2);
-        let mut runtime = MotionRuntime::new();
-        let mut list = crate::ui::listview::ListView::<(OutputId, u32), WidgetNode>::new(108.0);
-        // A dismissal on output 1 retires its card into an exit ghost.
-        list.update(
-            &mut runtime,
-            Duration::from_millis(250),
-            crate::ui::listview::Axis::Vertical,
-            &[(o1, 1)],
-            &[],
-            &[(0, (o1, 1), WidgetNode::Spinner)],
-        );
-        assert_eq!(list.ghosts_for(|_| true).len(), 1);
-        // Output 2's window builds its own stack while the ghost is live.
-        let recorded = RefCell::new(Vec::new());
-        let elements = list.items(
-            &runtime,
-            &[(o2, 2)],
-            &|_: &(OutputId, u32)| Some(WidgetNode::Spinner),
-            |key, _node, _motion: ItemMotion, _live| {
-                recorded.borrow_mut().push(*key);
-                let element: Element<'static, Plant, iced::Theme, iced::Renderer> =
-                    iced::widget::Space::new().width(10).height(10).into();
-                element
-            },
-            // Output 2's window only paints output 2's exits.
-            Some(&|key: &(OutputId, u32)| key.0 == o2),
-        );
-        assert_eq!(elements.len(), 1);
+    fn timeout_replacement_output_and_action_policy_stay_in_the_service() {
+        let config = NotificationConfig::default();
+        let mut queue = VecDeque::new();
+        let mut item = Notification::internal(&config, "first", "body".into(), 1);
+        item.id = 4;
+        item.output = Some(OutputId(1));
+        enqueue(&mut queue, item.clone());
+        item.title = "replacement".into();
+        enqueue(&mut queue, item);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].title, "replacement");
+        assert!(queue[0].expired(Instant::now() + Duration::from_secs(10)));
         assert!(
-            !recorded.borrow().iter().any(|key| key.0 == o1),
-            "output-1 exit ghost leaked into output-2's window: {:?}",
-            recorded.borrow()
+            !Notification::internal(&config, "critical", "body".into(), 2)
+                .expired(Instant::now() + Duration::from_secs(100))
         );
-    }
-
-    #[test]
-    fn new_surface_is_non_focusing_and_click_through_until_its_card_mask_is_installed() {
-        use iced::futures::StreamExt;
-        use iced_wayland_subscriber::shell::{ShellInfo, ShellType};
-
-        let messages = |task: Command<Plant>| match iced_runtime::task::into_stream(task) {
-            Some(stream) => iced::futures::executor::block_on(stream.collect::<Vec<_>>()),
-            None => Vec::new(),
-        };
-        let (_, receiver) = iced_wayland_subscriber::shell::channel();
-        let mut plots = Plots::new(receiver);
-        let output = OutputId(1);
-        plots
-            .notification
-            .queue
-            .push_back(noti(42, 0, Some(5000), 1));
-        let created = messages(Notification::reconcile(&mut plots, output));
-        let [Action::Output(Plant::NewLayerShell { settings, id })] = created.as_slice() else {
-            panic!("initial command must only create a click-through surface");
-        };
-        assert_eq!(settings.keyboard_interactivity, KeyboardInteractivity::None);
-        assert!(settings.events_transparent);
-        assert_eq!(settings.layer, Layer::Overlay);
-        assert_eq!(plots.windows.notifications[&output], *id);
-        let id = *id;
-        let ready = messages(
-            plots.update(Plant::Wayland(crate::shell::LandEvent::NewShell(
-                ShellInfo {
-                    window: id,
-                    shell: ShellType::LayerShell,
-                },
-            ))),
-        );
-        assert!(matches!(ready.as_slice(), [
-            Action::Output(Plant::KeyboardInteractivityChange {id: keyboard_target, keyboard_interactivity: KeyboardInteractivity::None}),
-            Action::Output(Plant::SetInputRegion {id: target, ..}),
-        ] if *keyboard_target == id && *target == id));
-        assert!(
-            !Notification::input_rects(&plots, output).is_empty(),
-            "live cards remain interactive"
-        );
-        let reused = messages(Notification::reconcile(&mut plots, output));
-        assert!(
-            reused.is_empty(),
-            "unchanged card rects must not recommit the input region"
-        );
-    }
-
-    #[test]
-    fn warmed_notification_surface_survives_empty_queue_and_is_reused_on_arrival() {
-        use iced::futures::StreamExt;
-        let messages = |task: Command<Plant>| match iced_runtime::task::into_stream(task) {
-            Some(stream) => iced::futures::executor::block_on(stream.collect::<Vec<_>>()),
-            None => Vec::new(),
-        };
-        let (_, receiver) = iced_wayland_subscriber::shell::channel();
-        let mut plots = Plots::new(receiver);
-        let output = OutputId(1);
-        let config = plots.config.notifications.clone();
-        let created = messages(Notification::ensure_window(&mut plots, output, &config).unwrap());
-        let [Action::Output(Plant::NewLayerShell { id, settings })] = created.as_slice() else {
-            panic!("pre-created surface");
-        };
-        assert!(settings.events_transparent);
-        let id = *id;
-        // Mask commits only fire on rect transitions — never a remap or
-        // close, and never a redundant commit for identical content.
-        for populated in [false, true, false, true, false] {
-            plots.notification.queue.clear();
-            if populated {
-                plots
-                    .notification
-                    .queue
-                    .push_back(noti(42, 0, Some(5000), 1));
-            }
-            for repeat in 0..2 {
-                let updates = messages(Notification::reconcile(&mut plots, output));
-                if repeat == 0 {
-                    assert!(
-                        matches!(updates.as_slice(), [
-                        Action::Output(Plant::SetInputRegion {id: mask_target, ..}),
-                    ] if *mask_target == id),
-                        "rect transition must reinstall the mask"
-                    );
-                } else {
-                    assert!(
-                        updates.is_empty(),
-                        "identical rects must not recommit the input region"
-                    );
-                }
-            }
-            assert_eq!(plots.windows.notifications[&output], id);
-            assert_eq!(
-                Notification::input_rects(&plots, output).is_empty(),
-                !populated
-            );
-        }
-    }
-
-    #[test]
-    fn identical_masks_on_two_outputs_are_installed_and_invalidated_independently() {
-        use iced::futures::StreamExt;
-        use iced_wayland_subscriber::shell::{ShellInfo, ShellType};
-        let messages = |task: Command<Plant>| {
-            iced_runtime::task::into_stream(task)
-                .map(|stream| iced::futures::executor::block_on(stream.collect::<Vec<_>>()))
-                .unwrap_or_default()
-        };
-        let (_, receiver) = iced_wayland_subscriber::shell::channel();
-        let mut plots = Plots::new(receiver);
-        let config = plots.config.notifications.clone();
-        for output in [OutputId(1), OutputId(2)] {
-            let _ = Notification::ensure_window(&mut plots, output, &config);
-            let mut notification = noti(output.0, 0, Some(5000), 1);
-            notification.output = Some(output);
-            plots.notification.queue.push_back(notification);
-        }
-        for output in [OutputId(1), OutputId(2)] {
-            let id = plots.windows.notifications[&output];
-            assert!(
-                matches!(messages(Notification::push_input_region(&mut plots, output)).as_slice(), [Action::Output(Plant::SetInputRegion {id: target, ..})] if *target == id)
-            );
-        }
         assert_eq!(
-            plots.notification.masks[&OutputId(1)],
-            plots.notification.masks[&OutputId(2)]
-        );
-        let id = plots.windows.notifications[&OutputId(1)];
-        let _ = plots.update(Plant::Wayland(crate::shell::LandEvent::NewShell(
-            ShellInfo {
-                window: id,
-                shell: ShellType::LayerShell,
-            },
-        )));
-        assert!(messages(Notification::push_input_region(&mut plots, OutputId(2))).is_empty());
-        let _ = Notification::remove_for_output(&mut plots, OutputId(1));
-        assert!(!plots.notification.masks.contains_key(&OutputId(1)));
-        assert!(plots.notification.masks.contains_key(&OutputId(2)));
-    }
-
-    fn noti(id: u32, age_ms: u64, timeout_ms: Option<u64>, urgency: u8) -> Notification {
-        Notification {
-            id,
-            output: Some(OutputId(1)),
-            app: "test".to_string(),
-            title: "t".to_string(),
-            body: "b".to_string(),
-            icon: String::new(),
-            urgency,
-            received_at: Instant::now() - Duration::from_millis(age_ms),
-            timeout: timeout_ms.map(Duration::from_millis),
-            actions: Vec::new(),
-            image: None,
-        }
-    }
-
-    #[test]
-    fn output_at_hits_rects_and_edges() {
-        let geoms = vec![
-            (OutputId(1), (0.0, 0.0, 1920.0, 1080.0)),
-            (OutputId(2), (1920.0, 0.0, 1920.0, 1080.0)),
-        ];
-        assert_eq!(
-            output_at(&geoms, iced::Point::new(100.0, 100.0)),
+            output_at(
+                &[(OutputId(1), (-100.0, 0.0, 100.0, 100.0))],
+                iced::Point::new(-1.0, 20.0)
+            ),
             Some(OutputId(1))
         );
-        assert_eq!(
-            output_at(&geoms, iced::Point::new(2000.0, 500.0)),
-            Some(OutputId(2))
-        );
-        // Left/top edges inclusive, right/bottom exclusive.
-        assert_eq!(
-            output_at(&geoms, iced::Point::new(1920.0, 0.0)),
-            Some(OutputId(2))
-        );
-        assert_eq!(output_at(&geoms, iced::Point::new(5000.0, 5000.0)), None);
-        assert_eq!(output_at(&[], iced::Point::new(0.0, 0.0)), None);
-    }
-
-    #[test]
-    fn expiry_honours_timeout_and_critical_persist() {
-        let now = Instant::now();
-        assert!(noti(1, 10_000, Some(5_000), 1).expired(now)); // stale normal
-        assert!(!noti(2, 1_000, Some(5_000), 1).expired(now)); // fresh normal
-        assert!(!noti(3, 60_000, None, 2).expired(now)); // critical persists
-        assert!(noti(4, 10_000, Some(5_000), 0).expired(now)); // stale low
-    }
-
-    #[test]
-    fn enqueue_replaces_same_id_in_place() {
-        let mut q = VecDeque::from([noti(1, 0, Some(5_000), 1), noti(2, 0, Some(5_000), 1)]);
-        let mut rep = noti(1, 0, Some(5_000), 1);
-        rep.title = "new".to_string();
-        enqueue(&mut q, rep);
-        assert_eq!(q.len(), 2);
-        assert_eq!(q[0].title, "new");
-        enqueue(&mut q, noti(7, 0, Some(5_000), 1));
-        assert_eq!(q.len(), 3);
-    }
-
-    #[test]
-    fn window_height_scales_with_visible_cards() {
-        assert_eq!(window_height(0), window_height(1));
-        assert!(window_height(3) > window_height(1));
-    }
-
-    #[test]
-    fn window_height_for_output_spans_minus_margins() {
-        // 1080p output minus both 16px corner margins.
-        assert_eq!(window_height_for_output(1080.0), 1048);
-        // Tiny/unknown geometry never collapses below one card.
-        assert_eq!(
-            window_height_for_output(0.0),
-            window_height_for_output(10.0)
-        );
-        assert_eq!(window_height_for_output(10.0), window_height(1));
-    }
-
-    #[test]
-    fn input_rects_cover_each_card_and_nothing_else() {
-        use crate::shell::Plots;
-        use iced_wayland_subscriber::shell::channel;
-        let (_tx, rx) = channel();
-        let mut plots = Plots::new(rx);
-        // Empty stack: no rects, fully click-through.
-        assert!(Notification::input_rects(&plots, OutputId(1)).is_empty());
-        // Two cards on output 1, one on output 2.
-        for (id, output) in [(1, OutputId(1)), (2, OutputId(1)), (3, OutputId(2))] {
-            let mut n = noti(id, 0, Some(5_000), 1);
-            n.output = Some(output);
-            plots.notification.queue.push_back(n);
-        }
-        let rects = Notification::input_rects(&plots, OutputId(1));
-        assert_eq!(rects.len(), 2);
-        let w = (plots.config.notifications.width.max(200.0) - WINDOW_PAD * 2.0).round() as i32;
-        let card = (CARD_PITCH - CARD_GAP).round() as i32;
-        assert_eq!(rects[0], (0, 0, w, card));
-        assert_eq!(rects[1], (0, CARD_PITCH.round() as i32, w, card));
-        // Output 2 sees only its own card.
-        assert_eq!(Notification::input_rects(&plots, OutputId(2)).len(), 1);
-    }
-
-    #[test]
-    fn input_mask_tracks_scroll_and_excludes_exit_delegates() {
-        let (_tx, rx) = iced_wayland_subscriber::shell::channel();
-        let mut plots = Plots::new(rx);
-        plots
-            .notification
-            .queue
-            .push_back(noti(1, 0, Some(5000), 1));
-        plots
-            .notification
-            .queue
-            .push_back(noti(2, 0, Some(5000), 1));
-        plots.notification.scroll.insert(OutputId(1), 50.0);
-        let rects = Notification::input_rects(&plots, OutputId(1));
-        assert_eq!((rects[0].1, rects[0].3), (0, 50));
-        assert_eq!(rects[1].1, 58);
-        assert!(retire_noti(&mut plots, 2));
-        assert_eq!(plots.notification.list.ghosts_for(|_| true).len(), 1);
-        // Only the survivor contributes input, despite the retained ghost.
-        assert_eq!(Notification::input_rects(&plots, OutputId(1)).len(), 1);
-    }
-
-    #[test]
-    fn placement_covers_all_corners() {
-        for (pos, anchor) in [
-            ("top-right", Anchor::Top | Anchor::Right),
-            ("top-left", Anchor::Top | Anchor::Left),
-            ("bottom-right", Anchor::Bottom | Anchor::Right),
-            ("bottom-left", Anchor::Bottom | Anchor::Left),
-            ("nonsense", Anchor::Top | Anchor::Right),
-        ] {
-            let cfg = crate::config::NotificationConfig {
-                position: pos.to_string(),
-                ..Default::default()
-            };
-            assert_eq!(placement(&cfg).0, anchor, "{pos}");
-        }
-    }
-
-    #[test]
-    fn seed_renders_a_card() {
-        use crate::config::SEED_NOTIFICATIONS_LUA;
-        let lua = new_widget_lua().expect("sandbox");
-        inject_ui(&lua).expect("ui");
-        crate::lua::widgets::load_widget_script(&lua, "notifications.lua", SEED_NOTIFICATIONS_LUA)
-            .expect("load");
-        // Critical cards read theme.error (republished live in prod).
-        let theme = lua.create_table().expect("theme");
-        theme.set("error", "#ff0000").expect("set");
-        lua.globals().set("theme", theme).expect("theme");
-        let table = lua.create_table().expect("table");
-        table.set("id", 1).expect("set");
-        table.set("app", "test").expect("set");
-        table.set("title", "hello").expect("set");
-        table.set("body", "world").expect("set");
-        table.set("icon", "").expect("set");
-        table.set("urgency", 1).expect("set");
-        let value = crate::lua::widgets::call_widget_method(
-            &lua,
-            "view",
-            mlua::MultiValue::from_vec(vec![mlua::Value::Table(table)]),
-        )
-        .expect("call");
-        let node = parse_node(&value).expect("parse");
-        assert!(matches!(node, WidgetNode::Column { .. }));
-        // Critical urgency renders without error too.
-        let table2 = lua.create_table().expect("table");
-        table2.set("id", 2).expect("set");
-        for (k, v) in [("app", "t"), ("title", "h"), ("body", "b"), ("icon", "")] {
-            table2.set(k, v).expect("set");
-        }
-        table2.set("urgency", 2).expect("set");
-        let value = crate::lua::widgets::call_widget_method(
-            &lua,
-            "view",
-            mlua::MultiValue::from_vec(vec![mlua::Value::Table(table2)]),
-        )
-        .expect("call");
-        assert!(parse_node(&value).is_ok());
-    }
-
-    #[test]
-    fn notifications_service_exposes_newest_first() {
-        let (_tx, rx) = iced_wayland_subscriber::shell::channel();
-        let mut plots = Plots::new(rx);
-        for id in [1, 2, 3] {
-            plots
-                .notification
-                .queue
-                .push_back(noti(id, 0, Some(5_000), 1));
-        }
-        let lua = mlua::Lua::new();
-        let ctx = crate::services::ServiceCtx::from_plots(&plots, None);
-        crate::services::publish_all(&ctx, &lua).expect("publish");
-        let count: i64 = lua.load("return #notifications").eval().expect("count");
-        assert_eq!(count, 3);
-        // Newest (id 3) first.
-        let first: u32 = lua.load("return notifications[1].id").eval().expect("id");
-        assert_eq!(first, 3);
-        let last: u32 = lua.load("return notifications[3].id").eval().expect("id");
-        assert_eq!(last, 1);
-        let has_image: bool = lua
-            .load("return notifications[1].has_image")
-            .eval()
-            .expect("has_image");
-        assert!(!has_image);
-        // Empty queue publishes an empty table.
-        plots.notification.queue.clear();
-        let ctx = crate::services::ServiceCtx::from_plots(&plots, None);
-        crate::services::publish_all(&ctx, &lua).expect("publish");
-        let count: i64 = lua.load("return #notifications").eval().expect("count");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn command_from_action_maps_dismiss_and_invoke() {
-        let (_tx, rx) = iced_wayland_subscriber::shell::channel();
-        let mut plots = Plots::new(rx);
-        let mut n = noti(5, 0, Some(5_000), 1);
-        n.actions = vec![("open".to_string(), "Open".to_string())];
-        plots.notification.queue.push_back(n);
-        let lua = mlua::Lua::new();
-        // Dismiss maps to a retire (id leaves the queue).
-        let value: mlua::Value = lua.load("return { dismiss = 5 }").eval().expect("eval");
-        let _ = command_from_action(&value, &mut plots);
-        assert!(plots.notification.queue.iter().all(|n| n.id != 5));
-        // Unknown ids are ignored (no panic, queue unchanged).
-        plots
-            .notification
-            .queue
-            .push_back(noti(6, 0, Some(5_000), 1));
-        let value: mlua::Value = lua.load("return { dismiss = 99 }").eval().expect("eval");
-        let _ = command_from_action(&value, &mut plots);
-        assert_eq!(plots.notification.queue.len(), 1);
-        // Invoke with a valid key retires the card too.
-        let mut n = noti(7, 0, Some(5_000), 1);
-        n.actions = vec![("open".to_string(), "Open".to_string())];
-        plots.notification.queue.push_back(n);
-        let value: mlua::Value = lua
-            .load(r#"return { invoke = { id = 7, key = "open" } }"#)
-            .eval()
-            .expect("eval");
-        let _ = command_from_action(&value, &mut plots);
-        assert!(plots.notification.queue.iter().all(|n| n.id != 7));
-        // Non-tables / misshaped tables are no-ops.
-        for src in ["return 42", "return 'x'", "return { other = 1 }"] {
-            let value: mlua::Value = lua.load(src).eval().expect("eval");
-            let _ = command_from_action(&value, &mut plots);
-        }
-    }
-
-    #[test]
-    fn visible_order_is_newest_first_per_output() {
-        let mk = |id: u32, output: Option<OutputId>| Notification {
-            id,
-            output,
-            app: String::new(),
-            title: String::new(),
-            body: String::new(),
-            icon: String::new(),
-            urgency: 1,
-            received_at: Instant::now(),
-            timeout: Some(Duration::from_secs(5)),
-            actions: Vec::new(),
-            image: None,
-        };
-        let queue = VecDeque::from([
-            mk(1, Some(OutputId(1))),
-            mk(2, Some(OutputId(1))),
-            mk(3, Some(OutputId(1))),
-            mk(4, Some(OutputId(1))),
-            mk(5, Some(OutputId(2))),
-            mk(6, None),
-        ]);
-        // Newest first, uncapped (the window scrolls), unplaced excluded.
-        let mut order = visible_order(&queue);
-        order.sort();
-        assert_eq!(
-            order,
-            vec![
-                (1, OutputId(1)),
-                (2, OutputId(1)),
-                (3, OutputId(1)),
-                (4, OutputId(1)),
-                (5, OutputId(2)),
-            ]
-        );
-        // Within one output the newest id sorts last after the sort,
-        // but insertion order is newest-first: check directly.
-        let out1: Vec<u32> = visible_order(&queue)
-            .into_iter()
-            .filter(|(_, o)| *o == OutputId(1))
-            .map(|(id, _)| id)
-            .collect();
-        assert_eq!(out1, vec![4, 3, 2, 1]);
-    }
-
-    #[test]
-    fn notification_lists_share_the_generic_component() {
-        use crate::ui::anim::ENTER_OFFSET;
-        use crate::ui::listview::{Axis, ListView};
-        use aura_anim::core::runtime::MotionRuntime;
-        // Same ListView machine as widget rows, keyed (output, id).
-        let mut rt = MotionRuntime::new();
-        let duration = Duration::from_millis(150);
-        let mut list: ListView<(OutputId, u32), WidgetNode> = ListView::new(CARD_PITCH);
-        list.update(
-            &mut rt,
-            duration,
-            Axis::Vertical,
-            &[],
-            &[(OutputId(1), 7)],
-            &[],
-        );
-        let start = list.motion_of(&rt, &(OutputId(1), 7));
-        assert_eq!((start.x, start.opacity), (ENTER_OFFSET, 0.0));
-        list.update(
-            &mut rt,
-            duration,
-            Axis::Vertical,
-            &[(OutputId(1), 7)],
-            &[],
-            &[(
-                0,
-                (OutputId(1), 7),
-                WidgetNode::Text {
-                    content: "hi".to_string(),
-                    size: None,
-                    width: None,
-                    height: None,
-                    wrapping: None,
-                    color: None,
-                    elide: None,
-                },
-            )],
-        );
-        assert_eq!(list.ghosts_for(|(o, _)| *o == OutputId(1)).len(), 1);
-        // Other outputs untouched by scope clearing.
-        list.update(
-            &mut rt,
-            duration,
-            Axis::Vertical,
-            &[],
-            &[(OutputId(2), 9)],
-            &[],
-        );
-        list.clear_scope(&mut rt, |(o, _)| *o == OutputId(1));
-        assert!(list.ghosts_for(|_| true).is_empty());
-        assert!(list.motion_of(&rt, &(OutputId(2), 9)).x > 0.0);
-    }
-
-    #[test]
-    fn default_tree_renders_title_and_body_lines() {
-        let n = noti(1, 0, Some(5_000), 1);
-        let tree = default_tree(Some(&n));
-        assert!(matches!(tree, WidgetNode::Column { .. }));
-        let _ = tree;
-        let empty = default_tree(None);
-        assert!(matches!(empty, WidgetNode::Column { .. }));
-    }
-
-    #[test]
-    fn default_tree_appends_one_button_row_per_action() {
-        let mut n = noti(1, 0, Some(5_000), 1);
-        // No actions: text only, no trailing row.
-        let bare = default_tree(Some(&n));
-        assert!(matches!(bare, WidgetNode::Column { .. }));
-        n.actions = vec![
-            ("default".to_string(), "Activate".to_string()),
-            ("mute".to_string(), "Mute".to_string()),
-        ];
-        let tree = default_tree(Some(&n));
-        let WidgetNode::Column { children, .. } = tree else {
-            panic!("expected column");
-        };
-        let Some(WidgetNode::Row { children: btns, .. }) = children.last() else {
-            panic!("expected trailing button row");
-        };
-        let keys: Vec<&str> = btns
-            .iter()
-            .filter_map(|b| match b {
-                WidgetNode::Button { action, label, .. } => {
-                    assert!(!label.is_empty());
-                    Some(action.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(keys, vec!["default", "mute"]);
-    }
-
-    #[test]
-    fn from_dbus_carries_actions_through() {
-        let n = Notification::from_dbus(
-            Incoming {
-                id: 7,
-                app: "firefox".to_string(),
-                icon: "firefox".to_string(),
-                title: "t".to_string(),
-                body: "b".to_string(),
-                actions: vec![("default".to_string(), "Activate".to_string())],
-                image: None,
-                urgency: 1,
-                timeout_ms: None,
-            },
-            5_000,
-        );
-        assert_eq!(n.id, 7);
-        assert_eq!(
-            n.actions,
-            vec![("default".to_string(), "Activate".to_string())]
-        );
-        assert!(n.image.is_none());
-    }
-
-    #[test]
-    fn lua_sees_actions_as_key_label_tables() {
-        let lua = new_widget_lua().expect("sandbox");
-        let made = actions_table(
-            &lua,
-            &[
-                ("default".to_string(), "Activate".to_string()),
-                ("mute".to_string(), "Mute".to_string()),
-            ],
-        )
-        .expect("table");
-        lua.globals().set("got", made).expect("set");
-        // 1-based array of {key, label} — the shape the seed consumes.
-        let seen: String = lua
-            .load(r#"return got[1].key .. "=" .. got[1].label .. "," .. got[2].key"#)
-            .eval()
-            .expect("eval");
-        assert_eq!(seen, "default=Activate,mute");
-        let empty = actions_table(&lua, &[]).expect("empty");
-        let len: i64 = empty.len().expect("len");
-        assert_eq!(len, 0);
     }
 }

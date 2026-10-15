@@ -1548,7 +1548,7 @@ impl Top {
     /// redraw scope, not here.
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
         plots.animation.advance(Instant::now());
-        super::notification::sweep_noti_anims(plots)
+        crate::shell::overlay::sweep(plots)
     }
 
     /// Click a cell button: run the owning placement's `on_action(key)`

@@ -242,8 +242,6 @@ pub enum NotifyEvent {
     /// An action button fired: emit `ActionInvoked` for valid keys,
     /// then dismiss like a click. Unknown ids/keys are ignored.
     Invoke(u32, String),
-    /// Actual scroll offset in surface coordinates for the input mask.
-    Scrolled(iced_wayland_subscriber::OutputId, f32),
     /// 250ms expiry sweep tick, gated on a non-empty queue like
     /// `WidgetEvent::Tick` (never repaints by itself).
     Tick,
@@ -304,6 +302,7 @@ pub enum Plant {
     SettingPlot(SettingEvent),
     // Notifications (D-Bus server + internal events)
     Notify(NotifyEvent),
+    Overlay(super::overlay::OverlayEvent),
     // Config
     Config(ConfigEvent),
 }

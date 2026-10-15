@@ -111,9 +111,6 @@ pub(crate) struct ListView<K, C> {
     enter: Transition,
     exit: Transition,
     displaced: Transition,
-    /// Set when a caller declares custom transitions, so per-call
-    /// corner overrides (notification slide side) don't clobber them.
-    enter_locked: bool,
 }
 
 impl<K, C> Default for ListView<K, C> {
@@ -144,7 +141,6 @@ impl<K, C> ListView<K, C> {
                 to: ItemMotion::settled(),
                 duration: None,
             },
-            enter_locked: false,
         }
     }
 
@@ -185,18 +181,16 @@ impl<K, C> ListView<K, C> {
 
     /// Replace all three transitions at once (Lua `transitions()`
     /// specs land here after parsing; see `top::parse_transitions`).
-    /// `custom` locks the enter side so corner overrides don't apply.
     pub fn set_transitions(
         &mut self,
         enter: Transition,
         exit: Transition,
         displaced: Transition,
-        custom: bool,
+        _custom: bool,
     ) {
         self.enter = enter;
         self.exit = exit;
         self.displaced = displaced;
-        self.enter_locked = custom;
     }
 
     /// Current transition specs (Lua specs layer over these).
@@ -212,15 +206,6 @@ impl<K, C> ListView<K, C> {
     /// Current displaced spec (Lua specs layer over this).
     pub fn displaced_spec(&self) -> Transition {
         self.displaced.clone()
-    }
-
-    /// Set the enter transition's `from.x` (the notification list
-    /// mirrors its slide side per anchored corner) while keeping the
-    /// fade and `to`. No-op once a caller declared custom transitions.
-    pub fn set_enter_from_x(&mut self, x: f32) {
-        if !self.enter_locked {
-            self.enter.from.x = x;
-        }
     }
 }
 

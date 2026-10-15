@@ -15,7 +15,8 @@ src/
     wallpaper.rs       serialized bake jobs, draft/apply validation and publication
     catalog.rs         discovered widget definitions and library change stamps
     animation.rs       shared motion clock and widget-list lifetime
-    notifications.rs   notification queue, renderer and per-output presentation state
+    notifications.rs   notification service queue and ID allocation
+    overlay.rs         shared fullscreen surfaces, source runtimes, measured input masks
     events.rs          host messages
     jobs.rs            persistence and theme-regeneration job ownership
     screens/           bar, wallpaper/menu, popup, notification, settings hosts
@@ -26,10 +27,7 @@ src/
         input.rs       bar input identity, slot hit-testing and press matching
         edit.rs        live geometry/slot edits and sparse persistence snapshots
         animation.rs   list-animation synchronization context
-      notification/
-        queue.rs       enqueue/retire/action guards over queue and motion state
-        runtime.rs     renderer/cache/list adapter with service snapshots
-        surface.rs     output selection and passive native-surface creation
+      notification.rs  delivery/output/expiry/action policy and scoped scene data
       popup/
         surface.rs     popup geometry, list synchronization and registration
       setting/         Settings host, explicit page snapshots and shared controls
@@ -39,6 +37,10 @@ src/
         placement.rs   placement properties and catalog-based editor
         editors.rs     schema-driven scalar/choice controls and reset rows
   ui/
+    scene.rs           measured keyed lists, native layout, inert full-canvas exits
+    placement.rs       reusable parent-local anchor geometry
+    layout_props.rs    common anchor/margin/press modifiers for all components
+    image_value.rs     opaque Lua image tokens decoded to owned native handles
     assets.rs          bounded, revisioned full-resolution image-handle cache
     node.rs            owned description IR
     decode.rs          Lua description decoding

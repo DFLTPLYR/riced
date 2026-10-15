@@ -110,6 +110,13 @@ impl Plots {
     /// Detach surface resources; native close commands and saved-bar changes
     /// remain host operations so compositor removal does not delete config.
     pub(crate) fn forget_window(&mut self, id: iced::window::Id) -> Option<PlotInfo> {
+        if let Some(PlotInfo::Overlay(output)) = self.windows.ids.get(&id).copied()
+            && self.windows.overlays.get(&output) == Some(&id)
+        {
+            self.desktop
+                .overlays
+                .forget(output, &mut self.animation.motion);
+        }
         self.input.cursors.remove(&id);
         self.input.presses.remove(&id);
         self.placements.forget_window(id);
@@ -410,6 +417,14 @@ impl Plots {
                     .map(|_| Plant::Notify(NotifyEvent::Tick)),
             );
         }
+        if (self.config.notifications.enabled && !self.config.notifications.source.is_empty())
+            || !self.config.overlays.is_empty()
+        {
+            subs.push(
+                iced::time::every(Duration::from_millis(250))
+                    .map(|_| Plant::Overlay(super::overlay::OverlayEvent::Tick)),
+            );
+        }
 
         // D-Bus notification server: the configured default timeout
         // rides the subscription identity, so editing it restarts the
@@ -489,14 +504,7 @@ impl Plots {
                 .get(&id)
                 .map(|p| p.view(self))
                 .unwrap_or_else(|| Space::new().into()),
-            Some(PlotInfo::Notification(output)) => super::screens::notification::view(
-                super::screens::notification::ViewContext {
-                    config: &self.config.notifications,
-                    state: &self.notification,
-                    motion: &self.animation.motion,
-                },
-                output,
-            ),
+            Some(PlotInfo::Overlay(output)) => super::overlay::view(self, output),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
         }
@@ -544,7 +552,9 @@ impl Plots {
                     .as_ref()
                     .is_some_and(crate::ui::node::contains_images)
             }),
-            Some(PlotInfo::Notification(output)) => self.notification.holds_images(output),
+            Some(PlotInfo::Overlay(output)) => {
+                self.notification.holds_images(output) || self.desktop.overlays.has_images(output)
+            }
             _ => false,
         };
         let mut commands = Vec::new();
@@ -563,11 +573,12 @@ impl Plots {
                 }
             }
         }
-        if let Some(PlotInfo::Notification(output)) = info
-            && self.windows.notifications.get(&output) == Some(&id)
+        if let Some(PlotInfo::Overlay(output)) = info
+            && self.windows.overlays.get(&output) == Some(&id)
         {
-            self.notification
-                .forget_output(output, &mut self.animation.motion);
+            self.desktop
+                .overlays
+                .forget(output, &mut self.animation.motion);
         }
         self.forget_window(id);
         let closed_last_panel =
@@ -593,8 +604,8 @@ impl Plots {
         crate::theme::sync(&self.config.theme);
         self.theme_mtime = crate::theme::poll(&self.config.theme, &None).unwrap_or(None);
         Top::refresh_theme(self);
-        super::screens::notification::render_all_notis(self);
         Command::batch([
+            super::overlay::refresh(self, true),
             Popup::refresh_bodies(self),
             self.reclaim_image_memory(false),
         ])
@@ -602,6 +613,7 @@ impl Plots {
 
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
         match message {
+            Plant::Overlay(event) => super::overlay::update(self, event),
             Plant::Uproot(id) => self.close_surface(id, true),
             Plant::Tend => Command::none(),
             Plant::Sprout => {
@@ -624,12 +636,7 @@ impl Plots {
                 // Warm passive notification surfaces before any arrival. An
                 // arrival then updates an existing renderer/layer instead of
                 // mapping a new surface over the focused fullscreen app.
-                if self.config.notifications.enabled {
-                    let config = self.config.notifications.clone();
-                    if let Some(command) = Notification::ensure_window(self, output_id, &config) {
-                        cmds.push(command);
-                    }
-                }
+                cmds.push(super::overlay::refresh(self, true));
                 // sentinel Top cleanup (delegated to Top layer)
                 for sentinel_id in self.windows.sentinel_bars() {
                     self.forget_window(sentinel_id);
@@ -731,7 +738,7 @@ impl Plots {
                         wallpaper,
                         Self::repaint_burst(),
                         Top::reapply_for_output(self, output_id),
-                        Notification::reapply_for_output(self, output_id),
+                        super::overlay::refresh(self, true),
                     ])
                 } else {
                     wallpaper
@@ -741,7 +748,11 @@ impl Plots {
                 let output_id = OutputId::from(&output);
                 let surfaces = self.windows.on_output(output_id);
                 // Retire notifications while their window binding still exists.
-                let mut cmds = vec![Notification::remove_for_output(self, output_id)];
+                self.notification.forget_output(output_id);
+                self.desktop
+                    .overlays
+                    .forget(output_id, &mut self.animation.motion);
+                let mut cmds = Vec::new();
                 for id in surfaces {
                     if self.forget_window(id).is_some() {
                         cmds.push(iced_runtime::task::effect(Action::Window(
@@ -761,18 +772,18 @@ impl Plots {
             }
             Plant::Wayland(LandEvent::NewShell(info)) => match self.id_info(info.window) {
                 Some(PlotInfo::Background(_)) => Self::repaint_burst(),
-                Some(PlotInfo::Notification(output)) => {
+                Some(PlotInfo::Overlay(output)) => {
                     // Fresh native surface: force the mask reinstall and
                     // assert the passive keyboard policy exactly once. Later
                     // reconciles only push when the card rects actually move.
-                    self.notification.masks.remove(&output);
+                    self.desktop.overlays.masks.remove(&output);
                     Command::batch(vec![
                         Command::done(Plant::KeyboardInteractivityChange {
                             id: info.window,
                             keyboard_interactivity:
                                 iced_exwlshell::reexport::KeyboardInteractivity::None,
                         }),
-                        Notification::push_input_region(self, output),
+                        super::overlay::push_mask(self, output),
                     ])
                 }
                 _ => Command::none(),
@@ -872,7 +883,7 @@ impl Plots {
                 // (same defs, fresh runtimes) and drops the cached
                 // notification renderer so it re-execs the library.
                 if self.catalog.library_changed() {
-                    self.notification.renderer.lua = None;
+                    self.desktop.overlays.invalidate();
                     return Command::batch(vec![
                         Command::done(Plant::Config(ConfigEvent::WidgetsReloaded(
                             self.catalog.definitions.clone(),
@@ -937,6 +948,7 @@ impl Plots {
                     cmds.push(Top::apply_layout(self, bar_id));
                 }
                 if bars_changed {
+                    cmds.push(super::overlay::refresh(self, true));
                     Top::init_widget_lua(self);
                     for id in self.windows.popups.keys().copied().collect::<Vec<_>>() {
                         cmds.push(Popup::handle_dismiss(self, id));
@@ -1192,10 +1204,6 @@ impl Plots {
                 Notification::handle_invoke(self, id, key)
             }
             Plant::Notify(NotifyEvent::Tick) => Notification::handle_tick(self),
-            Plant::Notify(NotifyEvent::Scrolled(output, offset)) => {
-                self.notification.scroll.insert(output, offset);
-                Notification::push_input_region(self, output)
-            }
             Plant::Notify(NotifyEvent::DBusUp) => {
                 eprintln!("riced: notifications: D-Bus server up");
                 Command::none()
@@ -1415,7 +1423,9 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Notify(NotifyEvent::PeerClosed(_))
         | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
-        Plant::Notify(NotifyEvent::DBusUp | NotifyEvent::Scrolled(..)) => Scope::None,
+        Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
+        Plant::Overlay(super::overlay::OverlayEvent::Tick | super::overlay::OverlayEvent::Measured { .. }) => Scope::None,
+        Plant::Overlay(_) => Scope::All,
         // Widget press only records; every other widget event repaints
         // (animation frames while a motion runs, releases opening a
         // popup, actions refreshing tiles, changed outputs).
@@ -2007,8 +2017,8 @@ mod tests {
 
         // Notification surface whose output holds a decoded image.
         let id = iced::window::Id::unique();
-        plots.windows.ids.insert(id, PlotInfo::Notification(output));
-        plots.windows.notifications.insert(output, id);
+        plots.windows.ids.insert(id, PlotInfo::Overlay(output));
+        plots.windows.overlays.insert(output, id);
         plots.notification.queue.push_back(Notification {
             id: 5,
             output: Some(output),
@@ -2030,7 +2040,10 @@ mod tests {
             reclaim_scope(&mut plots, Plant::Uproot(id)),
             Some((true, Scope::All))
         );
-        assert!(!plots.notification.holds_images(output));
+        assert!(
+            plots.notification.holds_images(output),
+            "closing a shared overlay must not delete service notifications"
+        );
 
         // A bar close without images stays host-only.
         let id = iced::window::Id::unique();

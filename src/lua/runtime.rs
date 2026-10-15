@@ -12,6 +12,23 @@ use crate::ui::{decode::parse_node, node::WidgetNode as Node};
 use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua::Result<Value> {
+    let props = component_props(lua, app, overrides, host)?;
+    app.set("props", props.clone())?;
+    let result = (|| {
+        let node = super::entry::invoke(
+            lua,
+            app.clone(),
+            "view",
+            mlua::MultiValue::from_vec(vec![Value::Table(props)]),
+        )?;
+        parse_node(&node).map_err(mlua::Error::RuntimeError)?;
+        Ok(node)
+    })();
+    app.raw_set("props", Value::Nil)?;
+    result
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u64);
 
@@ -57,49 +74,67 @@ impl LuaRuntime {
     pub(crate) fn with_components(
         components: Vec<(std::path::PathBuf, String)>,
     ) -> mlua::Result<Self> {
-        let lua = sandbox::new_lua(sandbox::Profile::App)?;
+        Self::with_profile(sandbox::Profile::App, components)
+    }
+
+    pub(crate) fn with_profile(
+        profile: sandbox::Profile,
+        components: Vec<(std::path::PathBuf, String)>,
+    ) -> mlua::Result<Self> {
+        let lua = sandbox::new_lua(profile)?;
         inject_ui_base(&lua)?;
         // The application host shares the same bundled pure component
         // definitions as the shell's module widgets.
-        super::library::install(&lua, sandbox::Profile::App, components)?;
+        super::library::install(&lua, profile, components)?;
         let api = lua.create_table()?;
         lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
         api.set(
             "component",
             lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
                 let path = composable::source_path(&src);
-                let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
                 let modules: Table = lua.named_registry_value("riced.component_modules")?;
                 let cached: Option<Table> = modules.get(src.as_str())?;
-                let app: Table = if let Some(cached) = &cached
-                    && cached.get::<String>("source")? == source
-                {
-                    cached.get("app")?
-                } else {
-                    let env = lua.create_table()?;
-                    let meta = lua.create_table()?;
-                    meta.set("__index", lua.globals())?;
-                    env.set_metatable(Some(meta))?;
-                    env.set("_G", env.clone())?;
-                    lua.load(&source)
-                        .set_name(format!("@{}", path.display()))
-                        .set_environment(env)
-                        .eval()?
-                };
-                let props = component_props(lua, &app, overrides, host)?;
-                app.set("props", props.clone())?;
-                let node = super::entry::invoke(
-                    lua,
-                    app.clone(),
-                    "view",
-                    mlua::MultiValue::from_vec(vec![Value::Table(props)]),
-                )?;
-                parse_node(&node).map_err(mlua::Error::RuntimeError)?;
-                let entry = lua.create_table()?;
-                entry.set("source", source)?;
-                entry.set("app", app)?;
-                modules.set(src, entry)?;
-                Ok(node)
+                let source = std::fs::read_to_string(&path).map_err(mlua::Error::external);
+                let attempt = (|| -> mlua::Result<(Table, Value, String)> {
+                    let source = source?;
+                    let app: Table = if let Some(cached) = &cached
+                        && cached.get::<String>("source")? == source
+                    {
+                        cached.get("app")?
+                    } else {
+                        let env = lua.create_table()?;
+                        let meta = lua.create_table()?;
+                        meta.set("__index", lua.globals())?;
+                        env.set_metatable(Some(meta))?;
+                        env.set("_G", env.clone())?;
+                        lua.load(&source)
+                            .set_name(format!("@{}", path.display()))
+                            .set_environment(env)
+                            .eval()?
+                    };
+                    let node = component_node(lua, &app, overrides.clone(), host.clone())?;
+                    Ok((app, node, source))
+                })();
+                match attempt {
+                    Ok((app, node, source)) => {
+                        let entry = lua.create_table()?;
+                        entry.set("source", source)?;
+                        entry.set("app", app)?;
+                        modules.set(src, entry)?;
+                        Ok(node)
+                    }
+                    Err(error) => {
+                        let Some(cached) = cached else {
+                            return Err(error);
+                        };
+                        let message = error.to_string();
+                        if cached.get::<Option<String>>("error")?.as_deref() != Some(&message) {
+                            eprintln!("component {}: {message}", path.display());
+                            cached.set("error", message)?;
+                        }
+                        component_node(lua, &cached.get::<Table>("app")?, overrides, host)
+                    }
+                }
             })?,
         )?;
         api.set(
@@ -244,6 +279,93 @@ impl LuaRuntime {
 
     pub fn cached_view(&self, window: WindowId) -> Option<&Node> {
         self.views.get(&window).map(|(_, node)| node)
+    }
+
+    /// Scene hosts publish fresh services and owned input tables at each entry.
+    /// Layout/animation frames realize cached IR and never execute Lua.
+    pub(crate) fn scene_view(
+        &mut self,
+        services: &crate::services::ServiceCtx<'_>,
+        output: &str,
+        props: impl FnOnce(&Lua) -> mlua::Result<Table>,
+    ) -> mlua::Result<Node> {
+        let result = (|| {
+            self.begin()?;
+            crate::services::publish_all(services, &self.lua)?;
+            crate::services::publish_bar(&self.lua, output)?;
+            let app: Table = self.lua.registry_value(
+                self.app
+                    .as_ref()
+                    .ok_or_else(|| mlua::Error::RuntimeError("scene missing".into()))?,
+            )?;
+            let props = super::props::component_props(
+                &self.lua,
+                &app,
+                Value::Table(props(&self.lua)?),
+                Value::Nil,
+            )?;
+            app.set("props", props.clone())?;
+            let value = super::entry::invoke(
+                &self.lua,
+                app,
+                "view",
+                mlua::MultiValue::from_vec(vec![Value::Table(props)]),
+            )?;
+            let node = parse_node(&value).map_err(mlua::Error::RuntimeError)?;
+            // Child module props are entry-local. In particular an empty list
+            // must not retain the last card's opaque image token in its module.
+            let modules: Table = self.lua.named_registry_value("riced.component_modules")?;
+            for module in modules.pairs::<Value, Table>() {
+                let (_, module) = module?;
+                module.get::<Table>("app")?.set("props", Value::Nil)?;
+            }
+            self.lua.gc_collect()?;
+            Ok(node)
+        })();
+        self.finish("view", result)
+    }
+
+    pub(crate) fn scene_action(
+        &mut self,
+        services: &crate::services::ServiceCtx<'_>,
+        output: &str,
+        action: &crate::ui::action::Action,
+    ) -> mlua::Result<Value> {
+        if !self.has_handler("on_action") {
+            return Ok(Value::Nil);
+        }
+        let result = (|| {
+            self.begin()?;
+            crate::services::publish_all(services, &self.lua)?;
+            crate::services::publish_bar(&self.lua, output)?;
+            let app = self.lua.registry_value(
+                self.app
+                    .as_ref()
+                    .ok_or_else(|| mlua::Error::RuntimeError("scene missing".into()))?,
+            )?;
+            super::entry::invoke(&self.lua, app, "on_action", action.arguments(&self.lua)?)
+        })();
+        self.finish("on_action", result)
+    }
+
+    pub(crate) fn scene_tick(
+        &mut self,
+        services: &crate::services::ServiceCtx<'_>,
+        output: &str,
+    ) -> mlua::Result<()> {
+        let result = (|| {
+            self.begin()?;
+            crate::services::publish_all(services, &self.lua)?;
+            crate::services::publish_bar(&self.lua, output)?;
+            let app = self.lua.registry_value(
+                self.app
+                    .as_ref()
+                    .ok_or_else(|| mlua::Error::RuntimeError("scene missing".into()))?,
+            )?;
+            super::entry::invoke(&self.lua, app, "on_tick", mlua::MultiValue::new())?;
+            Ok(())
+        })();
+        self.finish("on_tick", result)
     }
 
     /// Composable entry: Lua defaults < config overrides < host-owned state.

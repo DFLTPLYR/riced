@@ -52,7 +52,7 @@ pub(crate) const SEED_CONTEXT_MENU_ITEM: &str =
 pub(crate) const SEED_COMPONENT_CARD: &str = include_str!("../../scripts/components/10-card.lua");
 pub(crate) const SEED_COMPONENT_MENU: &str = include_str!("../../scripts/components/20-menu.lua");
 pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
-    include_str!("../../scripts/widgets/notifications.lua");
+    include_str!("../../scripts/components/notification_card.lua");
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str =
     include_str!("../../scripts/widgets/notifycenter.lua");
 pub(crate) const SEED_WORKSPACES_LUA: &str = include_str!("../../scripts/widgets/workspaces.lua");
@@ -69,7 +69,6 @@ pub(super) fn seed_widgets_in(dir: &Path) {
         ("workspaces.lua", SEED_WORKSPACES_LUA),
         ("clinepass.lua", SEED_CLINEPASS_LUA),
         ("system.lua", SEED_SYSTEM_LUA),
-        ("notifications.lua", SEED_NOTIFICATIONS_LUA),
         ("notifycenter.lua", SEED_NOTIFY_CENTER_LUA),
     ] {
         let path = dir.join(name);
@@ -141,6 +140,26 @@ impl super::WidgetsFile {
     fn seed_all() {
         initialize_scripts_in(&widgets_dir(), seed_widgets_in);
         seed_components();
+        let root = super::paths::config_path()
+            .parent()
+            .expect("config directory")
+            .to_path_buf();
+        let marker = root.join(".scenes-initialized");
+        if !marker.exists() {
+            seed_component(
+                &root,
+                "notifications.lua",
+                include_str!("../../scripts/notifications.lua"),
+            );
+            seed_component(
+                &components_dir(),
+                "notification_card.lua",
+                SEED_NOTIFICATIONS_LUA,
+            );
+            if let Err(error) = std::fs::write(marker, "") {
+                eprintln!("scenes: {error}");
+            }
+        }
     }
 
     /// Seed fresh installs once before discovery. Rescans and restarts do
@@ -230,7 +249,7 @@ mod tests {
         assert!(dir.join("workspaces.lua").is_file());
         assert!(dir.join("clinepass.lua").is_file());
         assert!(dir.join("system.lua").is_file());
-        assert!(dir.join("notifications.lua").is_file());
+        assert!(dir.join("notifycenter.lua").is_file());
         assert!(dir.join("ram.lua").is_file());
         assert!(dir.join("stats.lua").is_file());
         // A user script is never overwritten by a re-seed.

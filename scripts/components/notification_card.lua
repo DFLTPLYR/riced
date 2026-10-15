@@ -14,7 +14,7 @@ function app:view(n)
     if #(n.actions or {}) == 0 then return content end
     local actions = {}
     for _, action in ipairs(n.actions) do
-        actions[#actions + 1] = iced.button(action.label, action.key)
+        actions[#actions + 1] = iced.button(action.label, "invoke:" .. n.id .. ":" .. action.key)
     end
     return iced.column({ content, iced.row(actions) })
 end

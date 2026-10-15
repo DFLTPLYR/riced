@@ -10,7 +10,7 @@ pub(crate) enum PlotInfo {
     Background(OutputId),
     Top(OutputId),
     Popup(OutputId),
-    Notification(OutputId),
+    Overlay(OutputId),
 }
 
 #[derive(Debug, Default)]
@@ -23,7 +23,7 @@ pub(crate) struct WindowState {
     pub backgrounds: HashMap<OutputId, Background>,
     pub background_ids: HashMap<OutputId, window::Id>,
     pub output_infos: HashMap<OutputId, OutputInfo>,
-    pub notifications: HashMap<OutputId, window::Id>,
+    pub overlays: HashMap<OutputId, window::Id>,
 }
 
 impl WindowState {
@@ -56,7 +56,7 @@ impl WindowState {
             self.background_ids.remove(&output);
             self.backgrounds.remove(&output);
         }
-        self.notifications.retain(|_, window| *window != id);
+        self.overlays.retain(|_, window| *window != id);
         info
     }
 
@@ -67,7 +67,7 @@ impl WindowState {
                 PlotInfo::Background(owner)
                 | PlotInfo::Top(owner)
                 | PlotInfo::Popup(owner)
-                | PlotInfo::Notification(owner)
+                | PlotInfo::Overlay(owner)
                     if *owner == output =>
                 {
                     Some(*id)
@@ -110,7 +110,7 @@ mod tests {
             PlotInfo::Top(output),
             PlotInfo::Popup(output),
             PlotInfo::Background(output),
-            PlotInfo::Notification(output),
+            PlotInfo::Overlay(output),
         ]
         .map(|kind| {
             let id = window::Id::unique();

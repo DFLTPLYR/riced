@@ -10,7 +10,7 @@ pub(crate) fn parse_transitions(
     enter: &Transition,
     exit: &Transition,
     displaced: &Transition,
-) -> Result<(Transition, Transition, Transition, bool), String> {
+) -> Result<TransitionSpec, String> {
     let spec = match lua.named_registry_value::<Table>("riced.widget.app") {
         Ok(app) => match app
             .get::<Value>("transitions")

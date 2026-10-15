@@ -6,6 +6,7 @@ use std::{cell::RefCell, time::Instant};
 
 #[derive(Debug, Default)]
 pub(crate) struct DesktopState {
+    pub overlays: super::overlay::State,
     pub selection_rect: SelectionRect,
     pub composable_runtime: RefCell<ComposableRuntime>,
     pub fade_rect: Option<SelectionRect>,
