@@ -147,9 +147,9 @@ impl super::WidgetsFile {
         let marker = root.join(".scenes-initialized");
         if !marker.exists() {
             seed_component(
-                &root,
+                &components_dir(),
                 "notifications.lua",
-                include_str!("../../scripts/notifications.lua"),
+                include_str!("../../scripts/components/notifications.lua"),
             );
             seed_component(
                 &components_dir(),

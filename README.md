@@ -481,7 +481,8 @@ source = "notifications.lua"
 timeout_ms = 5000
 ```
 
-`source` resolves relative to `~/.config/riced/` (absolute paths also work).
+`source` resolves relative to `~/.config/riced/components/` (absolute paths also work),
+using the same resolver as composable `src` and `riced.component()`.
 It renders the **whole scene**, including the list, through the shared overlay
 host. Width, placement, spacing, card height, and transitions belong in Lua:
 
@@ -503,7 +504,7 @@ end
 return app
 ```
 
-The bundled `scripts/notifications.lua` additionally shows images and action
+The bundled `scripts/components/notifications.lua` additionally shows images and action
 buttons. `components/notification_card.lua` is the reusable per-card module.
 The scene receives `props.notifications` newest-first, filtered to its output,
 with `{ id, app, title, body, icon, urgency, actions, has_image, image }`.

@@ -1,3 +1,4 @@
+-- riced:composable
 -- A whole scene, rendered by the same overlay host as other Lua sources.
 local app = {}
 function app:view(props)

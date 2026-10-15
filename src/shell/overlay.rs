@@ -1,5 +1,6 @@
 //! Reusable fullscreen overlay host. Scenes own Lua/IR; services own policy.
 use super::{Plant, Plots, windows::PlotInfo};
+use crate::lua::composable::source_path;
 use crate::{
     config,
     lua::LuaRuntime,
@@ -76,17 +77,6 @@ struct Scene {
     frame: SharedFrame,
     regions: Vec<iced::Rectangle>,
     error: Option<String>,
-}
-fn source_path(source: &str) -> PathBuf {
-    let path = PathBuf::from(source);
-    if path.is_absolute() {
-        path
-    } else {
-        config::config_path()
-            .parent()
-            .expect("config parent")
-            .join(path)
-    }
 }
 impl Scene {
     fn commit(

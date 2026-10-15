@@ -156,7 +156,7 @@ fn default_notification_source() -> String {
 /// [notification]
 /// enabled = true
 /// output = "mouse"  # or an output name like "DP-1" to pin it
-/// source = "notifications.lua"  # relative to the riced config directory
+/// source = "notifications.lua"  # relative to components/, absolute paths allowed
 /// timeout_ms = 5000
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +187,7 @@ impl Default for NotificationConfig {
 #[serde(default)]
 pub struct OverlayConfig {
     pub id: String,
+    /// Relative to components/; absolute paths are used as-is.
     pub source: String,
     /// Empty means every output; otherwise an exact connector name.
     pub output: String,

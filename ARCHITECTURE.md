@@ -299,6 +299,12 @@ and dependency boundaries determine extraction scope.
 
 ## Verification
 
+Lua source paths share `lua::composable::source_path`: composable `src`,
+notification/overlay `source`, and `riced.component()` resolve relative names
+under `~/.config/riced/components/`; absolute paths pass through. There is no
+config-root fallback. The notification scene seed lives at
+`scripts/components/notifications.lua` and installs into that same directory.
+
 The iced Lua component schema lives in `ui/components.rs`: one declaration
 generates named owned Rust descriptions, the `WidgetNode` variants, conversions,
 and constructor/setter metadata. `ui/dsl.rs` installs the sole `iced` namespace;
