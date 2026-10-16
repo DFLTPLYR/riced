@@ -81,6 +81,37 @@ mod cache_tests {
     use super::*;
 
     #[test]
+    fn portion_heights_are_intrinsic_for_popup_measurement_but_widths_are_preserved() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let value = lua.load("return iced.column({iced.text('body'):height('fill:3'):on_press('body')}):width('fill:4'):height('fill:2')").eval().unwrap();
+        let node = crate::ui::decode::parse_node(&value).unwrap();
+        let measured = intrinsic_height(&node);
+        let WidgetNode::Column {
+            width,
+            height,
+            children,
+            ..
+        } = &measured
+        else {
+            panic!("column");
+        };
+        assert_eq!(*width, NodeLength::FillPortion(4));
+        assert_eq!(*height, NodeLength::Native);
+        let WidgetNode::Clickable { child, .. } = &children[0] else {
+            panic!("clickable");
+        };
+        assert!(matches!(
+            child.as_ref(),
+            WidgetNode::Text { height: None, .. }
+        ));
+        assert_eq!(
+            crate::ui::build::estimate_height(&node, 13.0),
+            crate::ui::build::estimate_height(&measured, 13.0)
+        );
+    }
+
+    #[test]
     fn popup_measurements_are_bounded_and_invalidate_on_layout_changes() {
         let mut cache = MeasurementCache::default();
         let key = measurement_key("Session", &[], None, 220, 13.0, 1080.0);
@@ -129,11 +160,14 @@ pub(super) fn intrinsic_height(node: &WidgetNode) -> WidgetNode {
 
 fn naturalize_height(node: &mut WidgetNode) {
     fn natural(height: &mut NodeLength) {
-        if *height == NodeLength::Fill {
+        if matches!(height, NodeLength::Fill | NodeLength::FillPortion(_)) {
             *height = NodeLength::Native;
         }
     }
     match node {
+        WidgetNode::Anchored { child, .. } | WidgetNode::Clickable { child, .. } => {
+            naturalize_height(child)
+        }
         WidgetNode::Container { child, height, .. }
         | WidgetNode::Scrollable { child, height, .. } => {
             natural(height);
@@ -159,11 +193,13 @@ fn naturalize_height(node: &mut WidgetNode) {
         WidgetNode::Text { height, .. }
         | WidgetNode::Button { height, .. }
         | WidgetNode::Progress { height, .. } => {
-            if *height == Some(NodeLength::Fill) {
+            if matches!(height, Some(NodeLength::Fill | NodeLength::FillPortion(_))) {
                 *height = None;
             }
         }
-        WidgetNode::Space { height, .. } | WidgetNode::Image { height, .. } => natural(height),
+        WidgetNode::Space { height, .. }
+        | WidgetNode::Image { height, .. }
+        | WidgetNode::Raster { height, .. } => natural(height),
         _ => {}
     }
 }

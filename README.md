@@ -264,6 +264,26 @@ strings `"fill"`, `"shrink"`, and `"auto"` remain supported. For example,
 `iced.container(iced.column({iced.text("Hello"), iced.text("World")})):padding(12)`
 needs no dimensions to fit its content.
 
+Weighted fill uses `"fill:n"` in either `:width()` or `:height()`. Plain
+`"fill"` (and `size.fill`) stays unchanged; `"fill:3"` gives a child three
+shares of the remaining space relative to its fill-sized siblings:
+
+```lua
+iced.row({
+    iced.text(label):width("fill:3"),
+    iced.button("{icon:x}", "dismiss:" .. item.id):width("fill:1"),
+}):width("fill")
+```
+
+This splits available width 3:1 after fixed-size children and spacing are
+accounted for. A fixed `:width(40)` button remains 40px; the sole fill-sized
+label takes the remaining width regardless of its weight. In a column, use
+`:height("fill:n")` for proportional heights. The parent must offer space.
+Portions must be positive decimal integers; zero, negatives, fractions, and
+malformed suffixes raise field-specific errors. Values above `65535` clamp to
+`65535`, matching iced's `u16` range. Case and surrounding whitespace are ignored.
+Encoding keeps plain `"fill"` distinct from `"fill:1"`.
+
 For `app:popup()`, omitting the returned table's `height` fits the native popup
 window to the renderer-measured content, including padding, wrapped text, and
 menu rows. The height updates when content changes and is bounded by the output.

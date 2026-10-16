@@ -685,6 +685,96 @@ mod tests {
     use mlua::{Lua, Value};
 
     #[test]
+    fn fill_portions_split_remaining_width_and_height_in_every_host() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = lua();
+        for (source, vertical, expected) in [
+            (
+                "iced.row({iced.space():width('fill:3'):height(20),iced.space():width('fill:1'):height(20)}):spacing(0):width(400)",
+                false,
+                [300.0, 100.0],
+            ),
+            (
+                "iced.column({iced.space():height('fill:3'):width(20),iced.space():height('fill:1'):width(20)}):spacing(0):height(400)",
+                true,
+                [300.0, 100.0],
+            ),
+            (
+                "iced.row({iced.space():width('fill:3'):height(20),iced.space():width(40):height(20)}):spacing(0):width(400)",
+                false,
+                [360.0, 40.0],
+            ),
+            (
+                "iced.row({iced.space():width('fill'):height(20),iced.space():width(40):height(20)}):spacing(0):width(400)",
+                false,
+                [360.0, 40.0],
+            ),
+            (
+                "iced.row({iced.space():width('fill'):height(20),iced.space():width('fill:3'):height(20)}):spacing(0):width(400)",
+                false,
+                [100.0, 300.0],
+            ),
+            (
+                "iced.row({iced.space():width('fill:3'):height(20),iced.space():width('fill:1'):height(20)}):spacing(20):width(400)",
+                false,
+                [285.0, 95.0],
+            ),
+        ] {
+            let node = parse_node(&lua.load(format!("return {source}")).eval().unwrap()).unwrap();
+            for host in ["native", "scene", "animated"] {
+                let mut element = match host {
+                    "scene" => crate::ui::scene::Lists::default()
+                        .build(
+                            &node,
+                            &crate::ui::anim::AnimRuntime::default(),
+                            std::sync::Arc::new(|_| Plant::Tend),
+                        )
+                        .unwrap(),
+                    "animated" => crate::shell::screens::top::build_with_lists(
+                        &node,
+                        "test",
+                        13.0,
+                        None,
+                        &crate::ui::anim::AnimRuntime::default(),
+                        &Default::default(),
+                    )
+                    .unwrap(),
+                    _ => build_node(&node, 13.0, None).unwrap(),
+                };
+                let mut tree = Tree::new(&element);
+                let layout = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, iced::Size::new(400.0, 400.0)),
+                );
+                let layout = if host == "scene" {
+                    &layout.children()[1]
+                } else {
+                    &layout
+                };
+                for (child, expected) in layout.children().iter().zip(expected) {
+                    let actual = if vertical {
+                        child.size().height
+                    } else {
+                        child.size().width
+                    };
+                    assert!(
+                        (actual - expected).abs() < 0.01,
+                        "{host}: {source}: {actual} != {expected}"
+                    );
+                }
+                assert_eq!(layout.children().len(), 2);
+            }
+        }
+    }
+
+    #[test]
     fn hidden_scrollbars_keep_wheel_scrolling_in_all_hosts() {
         use iced::advanced::{
             Layout, Shell, layout,

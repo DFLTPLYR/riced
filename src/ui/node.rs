@@ -22,6 +22,7 @@ pub(crate) enum NodeLength {
     /// No setter: use the native widget's content-derived sizing strategy.
     Native,
     Fill,
+    FillPortion(u16),
     Shrink,
     Fixed(f32),
 }
@@ -37,6 +38,7 @@ impl NodeLength {
     pub(crate) fn iced(self) -> iced::Length {
         match self {
             Self::Fill => iced::Length::Fill,
+            Self::FillPortion(portion) => iced::Length::FillPortion(portion),
             Self::Native | Self::Shrink => iced::Length::Shrink,
             Self::Fixed(px) => iced::Length::Fixed(px.max(1.0)),
         }

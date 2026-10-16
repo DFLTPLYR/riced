@@ -26,6 +26,9 @@ fn set_length(lua: &Lua, table: &Table, key: &str, size: Option<&NodeLength>) ->
         key,
         match size {
             Some(NodeLength::Fill) => Value::String(lua.create_string("fill")?),
+            Some(NodeLength::FillPortion(portion)) => {
+                Value::String(lua.create_string(format!("fill:{portion}"))?)
+            }
             Some(NodeLength::Shrink) => Value::String(lua.create_string("shrink")?),
             _ => length(size),
         },

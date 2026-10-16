@@ -174,6 +174,23 @@ fn native_scroll_measurements_clip_and_translate_live_regions() {
 }
 
 #[test]
+fn keyed_lists_infer_fill_portion_width_from_children() {
+    let renderer = renderer();
+    let lua = mlua::Lua::new();
+    crate::ui::dsl::inject_ui_base(&lua).unwrap();
+    let node = parse_node(&lua.load("return iced.listview({{id=1},{id=2}}):id('portions'):key('id'):delegate(function() return iced.container(iced.space():height(20)):width('fill:3') end):height(100)").eval().unwrap()).unwrap();
+    let lists = Lists::default();
+    let motion = AnimRuntime::default();
+    let frame = Arc::new(Mutex::new(Frame::default()));
+    let mut element = element(&lists, &node, &motion, frame.clone());
+    let mut tree = Tree::new(&element);
+    layout(&mut element, &mut tree, &renderer);
+    let measured = frame.lock().unwrap().last.clone().unwrap();
+    assert_eq!(measured.items[&item_id("portions", "1")].width, 800.0);
+    assert_eq!(measured.items[&item_id("portions", "2")].width, 800.0);
+}
+
+#[test]
 fn exits_draw_on_the_full_canvas_and_never_contribute_hit_regions() {
     let mut renderer = renderer();
     let old = node("top-right", &[80]);

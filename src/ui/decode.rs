@@ -108,17 +108,32 @@ pub(crate) fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<No
         Value::Number(n) => Ok(Some(NodeLength::Fixed(n as f32))),
         Value::String(s) => {
             let raw = s.to_string_lossy();
-            crate::shared::enums::lookup(LENGTH_NAMES, &raw)
-                .map(Some)
-                .ok_or_else(|| {
-                    format!(
-                        "{what} {field} must be a number, {}, got {raw:?}",
-                        crate::shared::enums::expected(LENGTH_NAMES)
-                    )
-                })
+            if let Some(length) = crate::shared::enums::lookup(LENGTH_NAMES, &raw) {
+                return Ok(Some(length));
+            }
+            if let Some((kind, portion)) = raw.trim().split_once(':')
+                && kind.trim().eq_ignore_ascii_case("fill")
+            {
+                let portion = portion.trim();
+                if !portion.is_empty() && portion.bytes().all(|digit| digit.is_ascii_digit()) {
+                    let portion = portion.bytes().fold(0_u16, |n, digit| {
+                        n.saturating_mul(10).saturating_add(u16::from(digit - b'0'))
+                    });
+                    if portion > 0 {
+                        return Ok(Some(NodeLength::FillPortion(portion)));
+                    }
+                }
+                return Err(format!(
+                    "{what} {field} fill:n requires a positive integer portion, got {raw:?}"
+                ));
+            }
+            Err(format!(
+                "{what} {field} must be a number, {}, or \"fill:n\" (positive integer n), got {raw:?}",
+                crate::shared::enums::expected(LENGTH_NAMES)
+            ))
         }
         other => Err(format!(
-            "{what} {field} must be a number, {}, got {}",
+            "{what} {field} must be a number, {}, or \"fill:n\" (positive integer n), got {}",
             crate::shared::enums::expected(LENGTH_NAMES),
             lua_value_kind(&other)
         )),
@@ -716,6 +731,73 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_portions_are_strict_clamped_and_roundtrip_without_changing_plain_fill() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        for (value, expected) in [
+            ("fill", NodeLength::Fill),
+            ("fill:1", NodeLength::FillPortion(1)),
+            (" FILL : 3 ", NodeLength::FillPortion(3)),
+            ("fill:65535", NodeLength::FillPortion(u16::MAX)),
+            (
+                "fill:999999999999999999999999999999",
+                NodeLength::FillPortion(u16::MAX),
+            ),
+        ] {
+            let node = parse_node(
+                &lua.load(format!(
+                    "return iced.space():width('{value}'):height('{value}')"
+                ))
+                .eval()
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                matches!(&node, WidgetNode::Space { width, height } if *width == expected && *height == expected)
+            );
+            let encoded = super::super::encode::to_table(&lua, &node).unwrap();
+            if expected == NodeLength::Fill {
+                assert_eq!(
+                    node_property(&encoded, "width")
+                        .unwrap()
+                        .as_string()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    "fill"
+                );
+            }
+            assert_eq!(parse_node(&Value::Table(encoded)).unwrap(), node);
+        }
+        let node = parse_node(
+            &lua.load("return iced.space():width('fill:2'):width('fill:3')")
+                .eval()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            node,
+            WidgetNode::Space {
+                width: NodeLength::FillPortion(3),
+                ..
+            }
+        ));
+        for axis in ["width", "height"] {
+            for bad in [
+                "fill:0", "fill:000", "fill:-1", "fill:1.5", "fill:x", "fill:", "fill:+2",
+                "fill:2:3", "shrink:2",
+            ] {
+                let value = lua
+                    .load(format!("return iced.space():{axis}('{bad}')"))
+                    .eval()
+                    .unwrap();
+                let error = parse_node(&value).unwrap_err();
+                assert!(error.contains(axis), "{error}");
+            }
+        }
+    }
 
     #[test]
     fn scrollbar_visibility_is_strict_repeatable_and_roundtrips() {

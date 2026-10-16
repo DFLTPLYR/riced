@@ -750,7 +750,7 @@ pub use paths::config_path;
 /// iced.button("go", "run"):width(120):height(36):padding(4)
 /// ```
 ///
-/// Sizes are numbers (px, backward-compat), `"fill"`, or `"shrink"`
+/// Sizes are numbers (px), `"fill"`, `"fill:n"` (positive integer weight), or `"shrink"`
 /// (any case). Unset sizes mean `Shrink` — except progress width,
 /// which stays `Fixed(120)` — so old scripts render identically.
 /// Note: `Fill` only expands when the parent offers space; inside the
