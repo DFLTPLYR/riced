@@ -716,7 +716,8 @@ pub use paths::config_path;
 ///   literal so typos stay visible.
 /// - `iced.row({...} [, spacing])` / `iced.column({...} [, spacing])`:
 ///   nest freely.
-/// - `iced.button(label, action)`: per-widget MouseArea — clicking calls
+/// - `iced.button(label, action)` or `iced.button(label):action(key)`:
+///   the last action setter wins over the constructor key. Clicking calls
 ///   that widget's `on_action(action)` directly (missing `on_action`
 ///   is a silent no-op), never the slot popup/`on_press` fallback.
 ///   `:background()` repaints the resting surface; hover/press stay

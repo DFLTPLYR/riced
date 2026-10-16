@@ -340,6 +340,18 @@ All accept `:width(...)`; the other supported setters are listed in
 `:height(number)`, and `:on_release(key)`. Text input supports
 `:secure(boolean)` and `:on_submit(key)`. Submit, release, and button actions
 send only the key. Controls without an interaction key stay inert.
+
+Buttons also support a chained `:action(key)` setter:
+
+```lua
+iced.button("{icon:x}"):action("dismiss:" .. item.id):width(40)
+```
+
+This sends the key to the owning app's `app:on_action(key)`, just like
+`iced.button("{icon:x}", "dismiss:" .. item.id)`. A later `:action()` overwrites
+the constructor key or any earlier action setter. It is button-only and does
+not change the separate `:on_press(key)` wrapper for arbitrary content.
+
 Slider ranges must be finite with `min < max` and a positive step. Values
 are clamped to the range. Pick-list options are unique strings; selection
 is either nil or one of those options. Radio values and selections are strings.

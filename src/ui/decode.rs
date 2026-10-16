@@ -492,7 +492,7 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
                 "iced.button() label",
             )?,
             action: coerce_text(
-                t.get::<Value>("action").map_err(|e| e.to_string())?,
+                node_property(t, "action").map_err(|e| e.to_string())?,
                 "iced.button() action",
             )?,
             width: opt_length(t, "width", "iced.button()")?,

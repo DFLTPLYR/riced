@@ -143,7 +143,7 @@ components! {
     Column => ColumnNode, "column", ["children", "spacing"], ["spacing", "width", "height"] {
         children: Vec<WidgetNode>, spacing: f32, width: NodeLength, height: NodeLength
     }
-    Button => ButtonNode, "button", ["label", "action"], ["width", "height", "padding", "radius", "background", "color"] {
+    Button => ButtonNode, "button", ["label", "action"], ["action", "width", "height", "padding", "radius", "background", "color"] {
         label: String, action: String, width: Option<NodeLength>, height: Option<NodeLength>,
         padding: Option<f32>, color: Option<iced::Color>, background: Option<iced::Color>, radius: Option<f32>
     }

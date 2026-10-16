@@ -225,6 +225,37 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn button_action_setter_overrides_constructor_and_roundtrips() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let decode = |source: &str| {
+            super::super::decode::parse_node(&lua.load(source).eval().unwrap()).unwrap()
+        };
+        let expected = decode("return iced.button('Dismiss', 'dismiss:42'):width(40)");
+        for source in [
+            "return iced.button('Dismiss'):action('dismiss:42'):width(40)",
+            "return iced.button('Dismiss', 'old'):width(40):action('dismiss:42')",
+            "return iced.button('Dismiss'):action('old'):width(40):action('dismiss:42')",
+        ] {
+            let node = decode(source);
+            assert_eq!(node, expected);
+            let encoded = super::super::encode::to_table(&lua, &node).unwrap();
+            assert_eq!(
+                super::super::decode::parse_node(&Value::Table(encoded)).unwrap(),
+                expected
+            );
+        }
+        assert!(
+            matches!(decode("return iced.button('No key')"), super::super::node::WidgetNode::Button { action, .. } if action.is_empty())
+        );
+        assert!(
+            lua.load("return iced.text('label'):action('dismiss:42')")
+                .eval::<Value>()
+                .is_err()
+        );
+    }
     use crate::ui::{
         decode::parse_node,
         listview::ListView,
