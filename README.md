@@ -274,6 +274,12 @@ Measured heights are reused across reopenings through a bounded 32-entry cache.
 Content, width, text size, and output-height changes invalidate the measurement;
 trees with image nodes are remeasured because their files can change size.
 
+Use `iced.scrollable(content):height(320):scrollbar("hidden")` to hide the
+scrollbar while retaining wheel/touchpad scrolling. `:scrollbar("visible")`
+restores the default bar. These are scrollable-only, case-insensitive values;
+unknown names and non-string values raise an error. Constrain the viewport's
+height so taller content can scroll.
+
 Other composition primitives are `iced.container(child)` (width, height,
 padding, background, radius), `iced.scrollable(child)`, `iced.space()`, and
 `iced.image(path)` (width and height). Text accepts `:wrap("none" | "word" |

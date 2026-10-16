@@ -641,10 +641,16 @@ pub(crate) fn build_with_lists(
             child,
             width,
             height,
+            scrollbar_hidden,
         } => {
-            let content = iced::widget::scrollable(build_with_lists(
+            let mut content = iced::widget::scrollable(build_with_lists(
                 child, widget, size, message, runtime, lists,
             )?);
+            if *scrollbar_hidden {
+                content = content.direction(iced::widget::scrollable::Direction::Vertical(
+                    iced::widget::scrollable::Scrollbar::hidden(),
+                ));
+            }
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
                 .width(width.resolve(hints.width))

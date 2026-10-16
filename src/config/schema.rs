@@ -727,6 +727,9 @@ pub use paths::config_path;
 ///   swap in cached data on later ticks (see clinepass seed).
 /// - `iced.separator()`: horizontal hairline, theme border color
 ///   unless `:color()` overrides. Always full-width.
+/// - `iced.scrollable(child)`: constrain `:height()` to scroll overflowing
+///   content; `:scrollbar("hidden")` hides the bar while keeping scrolling.
+///   `:scrollbar("visible")` restores the default scrollbar.
 /// - `iced.container(child)`: the styling base — `:background()`,
 ///   `:border()` (implies 1px; `:border_width()` adjusts, bare width
 ///   without a color paints nothing), `:radius()`, `:padding()`.

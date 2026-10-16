@@ -80,6 +80,27 @@ pub(crate) const LENGTH_NAMES: &[(&str, NodeLength)] = &[
     ("auto", NodeLength::Shrink),
 ];
 
+const SCROLLBAR_NAMES: &[(&str, bool)] = &[("visible", false), ("hidden", true)];
+fn scrollbar_hidden(t: &Table) -> Result<bool, String> {
+    let value = node_property(t, "scrollbar").map_err(|error| error.to_string())?;
+    if value == Value::Nil {
+        return Ok(false);
+    }
+    if let Value::String(name) = &value
+        && let Some(hidden) = crate::shared::enums::lookup(SCROLLBAR_NAMES, &name.to_string_lossy())
+    {
+        return Ok(hidden);
+    }
+    Err(format!(
+        "iced.scrollable() scrollbar must be {}, got {}",
+        crate::shared::enums::expected(SCROLLBAR_NAMES),
+        match &value {
+            Value::String(name) => format!("{:?}", name.to_string_lossy()),
+            other => lua_value_kind(other).into(),
+        }
+    ))
+}
+
 pub(crate) fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<NodeLength>, String> {
     match node_property(t, field).map_err(|e| e.to_string())? {
         Value::Nil | Value::Function(_) => Ok(None),
@@ -337,6 +358,7 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
             })
         }
         "scrollable" => Ok(WidgetNode::Scrollable {
+            scrollbar_hidden: scrollbar_hidden(t)?,
             child: Box::new(parse_node(
                 &t.get::<Value>("child").map_err(|e| e.to_string())?,
             )?),
@@ -694,6 +716,49 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbar_visibility_is_strict_repeatable_and_roundtrips() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        for (suffix, hidden) in [
+            ("", false),
+            (":scrollbar('hidden')", true),
+            (":scrollbar(' HIDDEN ')", true),
+            (":scrollbar('hidden'):scrollbar('visible')", false),
+        ] {
+            let value = lua
+                .load(format!("return iced.scrollable(iced.text('body')){suffix}"))
+                .eval()
+                .unwrap();
+            let node = parse_node(&value).unwrap();
+            assert!(
+                matches!(&node, WidgetNode::Scrollable { scrollbar_hidden, .. } if *scrollbar_hidden == hidden)
+            );
+            let encoded = super::super::encode::to_table(&lua, &node).unwrap();
+            assert_eq!(parse_node(&Value::Table(encoded)).unwrap(), node);
+        }
+        for invalid in ["'invisible'", "true", "42", "{}", "function() end"] {
+            let value = lua
+                .load(format!(
+                    "return iced.scrollable(iced.text('body')):scrollbar({invalid})"
+                ))
+                .eval()
+                .unwrap();
+            let error = parse_node(&value).unwrap_err();
+            assert!(
+                error.contains("scrollbar must be")
+                    && error.contains("visible")
+                    && error.contains("hidden"),
+                "{error}"
+            );
+        }
+        assert!(
+            lua.load("return iced.text('body'):scrollbar('hidden')")
+                .eval::<Value>()
+                .is_err()
+        );
+    }
 
     #[test]
     fn listview_delegate_accepts_mixed_nodes_and_components() {

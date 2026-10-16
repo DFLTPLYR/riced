@@ -150,8 +150,17 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 child,
                 width,
                 height,
+                scrollbar_hidden,
             } => {
                 table.set("child", to_table(lua, child)?)?;
+                table.set(
+                    "scrollbar",
+                    if *scrollbar_hidden {
+                        "hidden"
+                    } else {
+                        "visible"
+                    },
+                )?;
                 sizes!(Some(width), Some(height));
             }
             WidgetNode::Space { width, height } => {

@@ -423,9 +423,15 @@ impl Lists {
                 child,
                 width,
                 height,
+                scrollbar_hidden,
             } => {
-                let item =
+                let mut item =
                     iced::widget::scrollable(self.node(child, runtime, sender, active, opacity)?);
+                if *scrollbar_hidden {
+                    item = item.direction(iced::widget::scrollable::Direction::Vertical(
+                        iced::widget::scrollable::Scrollbar::hidden(),
+                    ));
+                }
                 let hints = iced::advanced::Widget::size(&item);
                 Ok(item
                     .width(width.resolve(hints.width))

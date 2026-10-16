@@ -125,8 +125,8 @@ components! {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,
         background: Option<iced::Color>, radius: f32, border: Option<iced::Color>, border_width: f32
     }
-    Scrollable => ScrollableNode, "scrollable", ["child"], ["width", "height"] {
-        child: Box<WidgetNode>, width: NodeLength, height: NodeLength
+    Scrollable => ScrollableNode, "scrollable", ["child"], ["width", "height", "scrollbar"] {
+        child: Box<WidgetNode>, width: NodeLength, height: NodeLength, scrollbar_hidden: bool
     }
     Space => SpaceNode, "space", [], ["width", "height"] { width: NodeLength, height: NodeLength }
     Image => ImageNode, "image", ["path"], ["width", "height"] { path: String, width: NodeLength, height: NodeLength }

@@ -191,9 +191,15 @@ pub(crate) fn realize<M: Clone + 'static>(
             child,
             width,
             height,
+            scrollbar_hidden,
         } => {
-            let content =
+            let mut content =
                 iced::widget::scrollable(realize(child, size, button_msg, interactive, opacity)?);
+            if *scrollbar_hidden {
+                content = content.direction(iced::widget::scrollable::Direction::Vertical(
+                    iced::widget::scrollable::Scrollbar::hidden(),
+                ));
+            }
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
                 .width(width.resolve(hints.width))
@@ -677,6 +683,97 @@ mod tests {
     use super::*;
     use crate::ui::decode::parse_node;
     use mlua::{Lua, Value};
+
+    #[test]
+    fn hidden_scrollbars_keep_wheel_scrolling_in_all_hosts() {
+        use iced::advanced::{
+            Layout, Shell, layout,
+            renderer::Headless,
+            widget::{Operation, Tree},
+        };
+        #[derive(Default)]
+        struct Offset(iced::Vector, iced::Size);
+        impl Operation for Offset {
+            fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                visit(self);
+            }
+            fn scrollable(
+                &mut self,
+                _: Option<&iced::advanced::widget::Id>,
+                bounds: iced::Rectangle,
+                _: iced::Rectangle,
+                translation: iced::Vector,
+                _: &mut dyn iced::advanced::widget::operation::Scrollable,
+            ) {
+                self.0 = translation;
+                self.1 = bounds.size();
+            }
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = lua();
+        for visibility in ["visible", "hidden"] {
+            let value = lua.load(format!("return iced.scrollable(iced.space():width(80):height(600)):width(100):height(100):scrollbar('{visibility}')")).eval().unwrap();
+            let node = parse_node(&value).unwrap();
+            for host in ["native", "scene", "animated"] {
+                let mut element = match host {
+                    "scene" => crate::ui::scene::Lists::default()
+                        .build(
+                            &node,
+                            &crate::ui::anim::AnimRuntime::default(),
+                            std::sync::Arc::new(|_| Plant::Tend),
+                        )
+                        .unwrap(),
+                    "animated" => crate::shell::screens::top::build_with_lists(
+                        &node,
+                        "test",
+                        13.0,
+                        None,
+                        &crate::ui::anim::AnimRuntime::default(),
+                        &Default::default(),
+                    )
+                    .unwrap(),
+                    _ => build_node(&node, 13.0, None).unwrap(),
+                };
+                let mut tree = Tree::new(&element);
+                let layout = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, iced::Size::new(200.0, 200.0)),
+                );
+                let mut messages = Vec::new();
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+                        delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+                    }),
+                    Layout::new(&layout),
+                    iced::mouse::Cursor::Available(iced::Point::new(50.0, 50.0)),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &iced::Rectangle::with_size(iced::Size::new(200.0, 200.0)),
+                );
+                let mut offset = Offset::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&layout),
+                    &renderer,
+                    &mut offset,
+                );
+                assert_eq!(offset.1, iced::Size::new(100.0, 100.0));
+                assert!(
+                    offset.0.y > 0.0,
+                    "{visibility}, host={host}: {:?}",
+                    offset.0
+                );
+            }
+        }
+    }
 
     #[test]
     fn text_wrap_word_folds_narrow_text_while_none_keeps_one_line() {
