@@ -990,6 +990,7 @@ mod tests {
         // A four-row menu tree reserves enough height for every button.
         let menu = PopupContent {
             tree: Some(WidgetNode::ListView {
+                callbacks: Vec::new(),
                 id: "session".to_string(),
                 items: (0..4)
                     .map(|i| {

@@ -24,6 +24,7 @@ pub(crate) fn call_widget_method(
     method: &str,
     args: mlua::MultiValue,
 ) -> Result<Value, String> {
+    lua.expire_registry_values();
     super::sandbox::reset_budget(lua).map_err(|error| error.to_string())?;
     let app: Table = lua
         .named_registry_value("riced.widget.app")
@@ -107,7 +108,8 @@ pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::
             )));
         }
     }
-    lua.set_named_registry_value("riced.widget.app", app)
+    lua.set_named_registry_value("riced.widget.app", app)?;
+    super::callbacks::new_epoch(lua)
 }
 use std::{
     collections::HashMap,

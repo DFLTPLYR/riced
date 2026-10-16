@@ -1,5 +1,6 @@
 //! Lua host, VM policy, property adapters, and shared description bindings.
 pub mod bridge;
+pub(crate) mod callbacks;
 pub mod composable;
 pub mod demo;
 pub(crate) mod entry;

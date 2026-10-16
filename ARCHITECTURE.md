@@ -299,6 +299,21 @@ and dependency boundaries determine extraction scope.
 
 ## Verification
 
+Notification records and popup visibility have separate lifetimes. Expiry hides
+the popup and closes its D-Bus lifetime once, while the metadata center retains
+the record until explicit dismissal, invocation, or peer close. IDs are shared
+between transport/internal notifications; replacement generations guard stale
+completions. `notification.dismiss(id)` / `dismissAll()` construct returned
+commands, handled identically in scene, widget, and popup actions.
+
+Explicit listview transitions can capture bounded completion callbacks through
+opaque registry tokens with weak VM ownership. Native motion sets collect
+completions, and the host dispatches them after sweeping, outside layout/draw.
+App epochs, item generations, interrupted motions, and surface teardown prevent
+stale callbacks; registry tokens and captured item references are released when
+their owners/ghosts are gone. Scene displacement callbacks follow measured
+bounds, without a second index-based completion.
+
 `config/format.rs` defines the human-facing TOML representation separately from
 resolved Rust layout fields. Bar slots group alignment and widget placements;
 monitor wallpapers are keyed by output; free-form images use `[x, y]` positions;

@@ -78,6 +78,17 @@ impl ListContext<'_> {
                 .lists
                 .entry(owner.clone())
                 .or_insert_with(|| ListView::new(*pitch));
+            for node in [before.get(&id).copied(), Some(node)].into_iter().flatten() {
+                if let WidgetNode::ListView {
+                    callbacks, items, ..
+                } = node
+                {
+                    for (key, _) in items {
+                        list.clear_callback_spec(&(owner.clone(), key.clone()));
+                    }
+                    list.set_callbacks(callbacks, |key| (owner.clone(), key.into()));
+                }
+            }
             list.set_pitch(*pitch);
             list.set_transitions(
                 transitions.0.clone(),

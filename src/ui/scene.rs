@@ -37,6 +37,8 @@ pub(crate) struct Lists {
     pub lists: HashMap<String, ListView<Key, WidgetNode>>,
     origins: HashMap<Key, Rectangle>,
     moves: HashMap<Key, Motion<ItemMotion>>,
+    move_callbacks: HashMap<Key, crate::lua::callbacks::Callback>,
+    completed: Vec<crate::lua::callbacks::Callback>,
     previous: BTreeMap<String, Rectangle>,
     pending: bool,
 }
@@ -127,6 +129,17 @@ impl Lists {
                 .lists
                 .entry(id.clone())
                 .or_insert_with(|| ListView::new(0.0));
+            for node in [old, new].into_iter().flatten() {
+                if let WidgetNode::ListView {
+                    callbacks, items, ..
+                } = node
+                {
+                    for (key, _) in items {
+                        list.clear_callback_spec(&(id.clone(), key.clone()));
+                    }
+                    list.set_callbacks(callbacks, |key| (id.clone(), key.into()));
+                }
+            }
             list.set_pitch(0.0); // Displacement/exit positions are measured, never index × fixed height.
             list.set_transitions(
                 transitions.0.clone(),
@@ -161,6 +174,11 @@ impl Lists {
                 &removed,
             );
         }
+        self.move_callbacks.retain(|(id, key), _| {
+            list_items(after.get(id).copied())
+                .iter()
+                .any(|(live, _)| live == key)
+        });
         Ok(())
     }
     pub(crate) fn layout(
@@ -196,6 +214,10 @@ impl Lists {
                     continue;
                 }
                 let key = (id.clone(), item.into());
+                self.move_callbacks.remove(&key);
+                if let Some(callback) = list.callback(&key, 2) {
+                    self.move_callbacks.insert(key.clone(), callback);
+                }
                 let current = self
                     .moves
                     .get(&key)
@@ -230,6 +252,7 @@ impl Lists {
             .sum();
         for list in self.lists.values_mut() {
             list.sweep(runtime);
+            self.completed.extend(list.take_completed());
         }
         self.lists.retain(|id, list| {
             if self.active.contains(id) || !list.ghosts_for(|_| true).is_empty() {
@@ -249,8 +272,11 @@ impl Lists {
             })
             .collect();
         self.origins.retain(|key, _| retained.contains(key));
-        self.moves.retain(|_, motion| {
+        self.moves.retain(|key, motion| {
             if motion.is_completed(runtime).unwrap_or(true) {
+                if let Some(callback) = self.move_callbacks.remove(key) {
+                    self.completed.push(callback);
+                }
                 let _ = runtime.remove(*motion);
                 false
             } else {
@@ -264,6 +290,14 @@ impl Lists {
                 .map(|list| list.ghosts_for(|_| true).len())
                 .sum::<usize>()
     }
+    pub(crate) fn take_completed(&mut self) -> Vec<crate::lua::callbacks::Callback> {
+        std::mem::take(&mut self.completed)
+    }
+    pub(crate) fn has_callbacks(&self) -> bool {
+        !self.completed.is_empty()
+            || !self.move_callbacks.is_empty()
+            || self.lists.values().any(ListView::has_callbacks)
+    }
     pub(crate) fn clear(&mut self, runtime: &mut AnimRuntime) {
         for list in self.lists.values_mut() {
             list.clear_all(runtime);
@@ -273,6 +307,8 @@ impl Lists {
         }
         self.lists.clear();
         self.moves.clear();
+        self.move_callbacks.clear();
+        self.completed.clear();
         self.origins.clear();
         self.previous.clear();
         self.active.clear();

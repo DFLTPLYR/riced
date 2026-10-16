@@ -1,5 +1,4 @@
-//! `notifications` service: the live queue snapshot. Moved verbatim
-//! from `publish_notification_list` (same global name, same shape).
+//! `notifications` service: retained history, including hidden/expired popups.
 
 use super::registry::ServiceCtx;
 
@@ -12,6 +11,9 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     for n in ctx.notifications.iter().rev() {
         let entry = lua.create_table()?;
         entry.set("id", n.id)?;
+        entry.set("_notification_generation", n.generation)?;
+        entry.set("popup_visible", n.popup_visible)?;
+        entry.set("closed", n.closed)?;
         entry.set("app", n.app.clone())?;
         entry.set("title", n.title.clone())?;
         entry.set("body", n.body.clone())?;

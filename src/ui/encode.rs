@@ -292,12 +292,29 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 width,
                 height,
                 transitions,
+                callbacks,
             } => {
                 let data = lua.create_table()?;
                 for (index, (key, node)) in items.iter().enumerate() {
                     let item = lua.create_table()?;
                     item.set("key", key.as_str())?;
                     item.set("node", to_table(lua, node)?)?;
+                    if let Some((_, callbacks)) = callbacks.iter().find(|(owner, _)| owner == key) {
+                        let encoded = lua.create_table()?;
+                        for (phase, callback) in
+                            ["add", "remove", "displaced"].into_iter().zip(callbacks)
+                        {
+                            if let Some(callback) = callback {
+                                if !callback.belongs_to(lua) {
+                                    return Err(mlua::Error::RuntimeError(
+                                        "transition callbacks cannot cross Lua runtimes".into(),
+                                    ));
+                                }
+                                encoded.set(phase, lua.create_userdata(callback.clone())?)?;
+                            }
+                        }
+                        item.set("_callbacks", encoded)?;
+                    }
                     data.set(index + 1, item)?;
                 }
                 fields!("data" => data, "id" => id.as_str(), "key" => "key", "axis" => if *horizontal { "horizontal" } else { "vertical" }, "pitch" => *pitch, "spacing" => *spacing);

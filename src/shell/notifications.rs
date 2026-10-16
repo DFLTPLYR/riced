@@ -5,13 +5,13 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub(crate) struct NotificationState {
     pub queue: VecDeque<Notification>,
-    pub next_id: u32,
+    next_generation: u64,
 }
 impl Default for NotificationState {
     fn default() -> Self {
         Self {
             queue: VecDeque::new(),
-            next_id: 1,
+            next_generation: 1,
         }
     }
 }
@@ -22,11 +22,24 @@ impl NotificationState {
             .any(|item| item.output == Some(output) && item.image.is_some())
     }
     pub(crate) fn forget_output(&mut self, output: OutputId) {
-        self.queue.retain(|item| item.output != Some(output));
+        for item in &mut self.queue {
+            if item.output == Some(output) {
+                item.popup_visible = false;
+                item.output = None;
+            }
+        }
+    }
+    pub(crate) fn has_deadlines(&self) -> bool {
+        self.queue
+            .iter()
+            .any(|item| item.popup_visible && !item.closed && item.timeout.is_some())
+    }
+    pub(crate) fn allocate_generation(&mut self) -> u64 {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        generation
     }
     pub(crate) fn allocate_id(&mut self) -> u32 {
-        let id = self.next_id.max(1);
-        self.next_id = id.wrapping_add(1);
-        id
+        crate::notify::allocate_id()
     }
 }

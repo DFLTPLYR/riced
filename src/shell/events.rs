@@ -232,18 +232,15 @@ pub enum BackgroundEvent {
 #[derive(Debug, Clone)]
 pub enum NotifyEvent {
     /// A notification arrived (D-Bus, internal event, or test source).
-    Arrived(crate::shell::screens::notification::Notification),
-    /// Dismiss one notification now (click, timeout sweep, D-Bus close,
-    /// or output removal). Unknown ids are ignored.
+    Arrived(Box<crate::shell::screens::notification::Notification>),
+    /// Explicitly dismiss one retained notification. Unknown ids are ignored.
     Dismissed(u32),
-    /// Peer asked to close (D-Bus `CloseNotification`): drop silently,
-    /// the `NotificationClosed` signal already went out on the bus.
+    /// Peer asked to close: remove and emit reason 3 only if still live.
     PeerClosed(u32),
     /// An action button fired: emit `ActionInvoked` for valid keys,
     /// then dismiss like a click. Unknown ids/keys are ignored.
     Invoke(u32, String),
-    /// 250ms expiry sweep tick, gated on a non-empty queue like
-    /// `WidgetEvent::Tick` (never repaints by itself).
+    /// Hide expired popups, retaining history. Only scheduled for live deadlines.
     Tick,
     /// D-Bus server is up (carries nothing — the subscription owns the
     /// connection; used for logging once).

@@ -26,6 +26,7 @@
 //! nudge) rather than corrupting it.
 
 use super::anim::{ENTER_OFFSET, ItemMotion};
+use crate::lua::callbacks::{Callback, ItemCallbacks};
 use aura_anim::core::{
     runtime::{Motion, MotionRuntime},
     timing::Timing,
@@ -111,6 +112,10 @@ pub(crate) struct ListView<K, C> {
     enter: Transition,
     exit: Transition,
     displaced: Transition,
+    callbacks: HashMap<K, [Option<Callback>; 3]>,
+    pending: HashMap<K, Callback>,
+    pending_displaced: HashMap<K, Callback>,
+    completed: Vec<(K, Callback)>,
 }
 
 impl<K, C> Default for ListView<K, C> {
@@ -121,7 +126,9 @@ impl<K, C> Default for ListView<K, C> {
 
 impl<K, C> ListView<K, C> {
     pub fn set_pitch(&mut self, pitch: f32) {
-        self.pitch = pitch.max(1.0);
+        // Measured scene lists use zero: their displacement is driven by
+        // actual layout bounds, not an additional index-based motion.
+        self.pitch = pitch.max(0.0);
     }
     /// Empty list with default slide-fade transitions and no duration
     /// override. Set the row pitch (px per item, displaced math) and
@@ -141,6 +148,10 @@ impl<K, C> ListView<K, C> {
                 to: ItemMotion::settled(),
                 duration: None,
             },
+            callbacks: HashMap::new(),
+            pending: HashMap::new(),
+            pending_displaced: HashMap::new(),
+            completed: Vec::new(),
         }
     }
 
@@ -210,6 +221,40 @@ impl<K, C> ListView<K, C> {
 }
 
 impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
+    pub(crate) fn set_callbacks(&mut self, callbacks: &ItemCallbacks, key: impl Fn(&str) -> K) {
+        for (id, callbacks) in callbacks {
+            self.callbacks.insert(key(id), callbacks.clone());
+        }
+    }
+    pub(crate) fn clear_callback_spec(&mut self, key: &K) {
+        self.callbacks.remove(key);
+    }
+    pub(crate) fn callback(&self, key: &K, phase: usize) -> Option<Callback> {
+        self.callbacks
+            .get(key)
+            .and_then(|callbacks| callbacks[phase].clone())
+    }
+    pub(crate) fn take_completed(&mut self) -> Vec<Callback> {
+        self.completed
+            .drain(..)
+            .map(|(_, callback)| callback)
+            .collect()
+    }
+    pub(crate) fn has_callbacks(&self) -> bool {
+        !self.pending.is_empty() || !self.pending_displaced.is_empty() || !self.completed.is_empty()
+    }
+    fn start_callback(&mut self, key: &K, phase: usize) {
+        let callback = self.callback(key, phase);
+        let pending = if phase == 2 {
+            &mut self.pending_displaced
+        } else {
+            &mut self.pending
+        };
+        pending.remove(key);
+        if let Some(callback) = callback {
+            pending.insert(key.clone(), callback);
+        }
+    }
     fn resolve(&self, slot: Option<Duration>, global: Duration) -> Timing {
         Timing::ease_out(slot.or(self.duration_override).unwrap_or(global))
     }
@@ -242,6 +287,8 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
         let displaced_timing = self.resolve(self.displaced.duration, global_duration);
         // Exits first: ghosts claim their index before survivors move.
         for (index, key, content) in removed {
+            self.pending_displaced.remove(key);
+            self.start_callback(key, 1);
             let exit = self.exit.to.clone();
             match self.motions.get(key) {
                 Some(m) => {
@@ -278,6 +325,7 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
                 continue;
             }
             let start = self.enter.from.clone();
+            self.start_callback(key, 0);
             let home = self.enter.to.clone();
             match self.motions.get(key) {
                 Some(m) => {
@@ -303,6 +351,10 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
                 continue;
             }
             let delta = (old_index as f32 - new_index as f32) * self.pitch;
+            if delta == 0.0 {
+                continue;
+            }
+            self.start_callback(key, 2);
             let (dx, dy) = match axis {
                 Axis::Vertical => (0.0, delta),
                 Axis::Horizontal => (delta, 0.0),
@@ -434,6 +486,10 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
     /// Instant-settle every key matching `pred` (first paints, shape
     /// flips, output removal).
     pub fn clear_scope(&mut self, runtime: &mut MotionRuntime, pred: impl Fn(&K) -> bool) {
+        self.completed.retain(|(key, _)| !pred(key));
+        self.callbacks.retain(|key, _| !pred(key));
+        self.pending.retain(|key, _| !pred(key));
+        self.pending_displaced.retain(|key, _| !pred(key));
         let dead: Vec<K> = self
             .motions
             .keys()
@@ -471,6 +527,12 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
             .map(|(k, _)| k.clone())
             .collect();
         for key in dead {
+            if let Some(callback) = self.pending.remove(&key) {
+                self.completed.push((key.clone(), callback));
+            }
+            if self.ghosts.iter().any(|ghost| ghost.key == key) {
+                self.callbacks.remove(&key);
+            }
             if let Some(m) = self.motions.remove(&key) {
                 let _ = runtime.remove(m);
             }
@@ -483,6 +545,9 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
             .map(|(key, _)| key.clone())
             .collect();
         for key in settled {
+            if let Some(callback) = self.pending_displaced.remove(&key) {
+                self.completed.push((key.clone(), callback));
+            }
             if let Some(m) = self.displacements.remove(&key) {
                 let _ = runtime.remove(m);
             }

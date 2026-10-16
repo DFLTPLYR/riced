@@ -119,7 +119,7 @@ components! {
     ListView => ListViewNode, "listview", ["data"], ["id", "key", "delegate", "axis", "pitch", "spacing", "width", "height"] {
         id: String, items: Vec<(String, WidgetNode)>, horizontal: bool,
         pitch: f32, spacing: f32, width: NodeLength, height: NodeLength,
-        transitions: Box<(Transition, Transition, Transition)>
+        transitions: Box<(Transition, Transition, Transition)>, callbacks: crate::lua::callbacks::ItemCallbacks
     }
     Container => ContainerNode, "container", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,

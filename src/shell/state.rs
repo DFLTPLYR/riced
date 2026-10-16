@@ -401,17 +401,22 @@ impl Plots {
 
         // List enter/exit transitions tick at 60fps only while a
         // motion is active (aura runtime idles to zero wakeups).
-        if self.animation.motion.has_active() {
+        if self.animation.motion.has_active()
+            || self
+                .animation
+                .widgets
+                .values()
+                .any(crate::ui::listview::ListView::has_callbacks)
+            || self.desktop.overlays.has_callbacks()
+        {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Anim))),
             );
         }
 
-        // Notification expiry sweep, gated on a non-empty queue like
-        // Widget(WidgetEvent::Tick) (repaint on expiry comes from
-        // Scope::All below).
-        if !self.notification.queue.is_empty() {
+        // Hidden history must not keep the popup deadline timer alive.
+        if self.notification.has_deadlines() {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::Notify(NotifyEvent::Tick)),
@@ -1195,7 +1200,7 @@ impl Plots {
                 }
             },
             Plant::TopPlot(TopEvent::Remove(id)) => Top::handle_remove(self, id),
-            Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, n),
+            Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, *n),
             Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
             Plant::Notify(NotifyEvent::PeerClosed(id)) => {
                 Notification::handle_peer_closed(self, id)
@@ -2020,6 +2025,9 @@ mod tests {
         plots.windows.ids.insert(id, PlotInfo::Overlay(output));
         plots.windows.overlays.insert(output, id);
         plots.notification.queue.push_back(Notification {
+            generation: 0,
+            popup_visible: true,
+            closed: false,
             id: 5,
             output: Some(output),
             app: "test".into(),

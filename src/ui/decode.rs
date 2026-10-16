@@ -209,6 +209,28 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
             };
             let data: Table = t.get("data").map_err(|e| e.to_string())?;
             let mut items = Vec::new();
+            let mut callbacks = Vec::new();
+            let specs: Option<Table> = t.get("transitions").map_err(|e| e.to_string())?;
+            let phase_spec = |phase: &str| -> Result<Value, String> {
+                specs
+                    .as_ref()
+                    .map(|specs| specs.get::<Value>(phase))
+                    .transpose()
+                    .map(|value| value.unwrap_or(Value::Nil))
+                    .map_err(|error| error.to_string())
+            };
+            for phase in ["add", "remove", "displaced"] {
+                if let Value::Table(spec) = phase_spec(phase)?
+                    && !matches!(
+                        spec.get::<Value>("callback").map_err(|e| e.to_string())?,
+                        Value::Nil | Value::Function(_)
+                    )
+                {
+                    return Err(format!(
+                        "listview {id:?} {phase}.callback must be a function"
+                    ));
+                }
+            }
             let mut seen = std::collections::HashSet::new();
             for item in data.sequence_values::<Table>() {
                 let item = item.map_err(|e| e.to_string())?;
@@ -222,6 +244,51 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
                 };
                 if !seen.insert(key.clone()) {
                     return Err(format!("listview {id:?} duplicate key {key:?}"));
+                }
+                let mut item_callbacks = [None, None, None];
+                for (index, phase) in ["add", "remove", "displaced"].into_iter().enumerate() {
+                    if let Value::Table(spec) = phase_spec(phase)? {
+                        match spec.get::<Value>("callback").map_err(|e| e.to_string())? {
+                            Value::Nil => {}
+                            Value::Function(function) => {
+                                let capture: mlua::Function =
+                                    t.get("_capture_callback").map_err(|e| e.to_string())?;
+                                let token: mlua::AnyUserData = capture
+                                    .call((function, item.clone()))
+                                    .map_err(|e| e.to_string())?;
+                                item_callbacks[index] = Some(
+                                    token
+                                        .borrow::<crate::lua::callbacks::Callback>()
+                                        .map_err(|e| e.to_string())?
+                                        .clone(),
+                                );
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "listview {id:?} {phase}.callback must be a function"
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Value::Table(encoded) =
+                    item.get::<Value>("_callbacks").map_err(|e| e.to_string())?
+                {
+                    for (index, phase) in ["add", "remove", "displaced"].into_iter().enumerate() {
+                        if let Value::UserData(token) =
+                            encoded.get::<Value>(phase).map_err(|e| e.to_string())?
+                        {
+                            item_callbacks[index] = Some(
+                                token
+                                    .borrow::<crate::lua::callbacks::Callback>()
+                                    .map_err(|e| e.to_string())?
+                                    .clone(),
+                            );
+                        }
+                    }
+                }
+                if item_callbacks.iter().any(Option::is_some) {
+                    callbacks.push((key.clone(), item_callbacks));
                 }
                 let value: Value = delegate.call(item).map_err(|e| e.to_string())?;
                 items.push((key, parse_node(&value)?));
@@ -247,6 +314,7 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
                 width: opt_length(t, "width", "iced.listview()")?.unwrap_or(NodeLength::Native),
                 height: opt_length(t, "height", "iced.listview()")?.unwrap_or(NodeLength::Native),
                 transitions: Box::new((enter, exit, displaced)),
+                callbacks,
             })
         }
         "container" => {

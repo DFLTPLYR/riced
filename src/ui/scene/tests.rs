@@ -405,6 +405,7 @@ fn image_pixels_survive_only_until_the_last_exit_owner_is_swept() {
     let defaults = ListView::<Key, WidgetNode>::default();
     let old = WidgetNode::ListView {
         id: "images".into(),
+        callbacks: Vec::new(),
         items: vec![("one".into(), image)],
         horizontal: false,
         pitch: 0.0,

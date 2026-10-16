@@ -193,6 +193,11 @@ impl Scene {
     }
 }
 impl State {
+    pub(crate) fn has_callbacks(&self) -> bool {
+        self.scenes
+            .values()
+            .any(|scene| scene.lists.has_callbacks())
+    }
     pub(crate) fn has_images(&self, output: OutputId) -> bool {
         self.scenes.iter().any(|((owner, _), scene)| {
             *owner == output
@@ -446,10 +451,15 @@ pub(crate) fn push_mask(plots: &mut Plots, output: OutputId) -> Task<Plant> {
     })
 }
 pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
+    let mut callbacks = Vec::new();
     for scene in plots.desktop.overlays.scenes.values_mut() {
         scene.lists.sweep(&mut plots.animation.motion);
+        callbacks.extend(scene.lists.take_completed());
     }
-    Task::none()
+    for list in plots.animation.widgets.values_mut() {
+        callbacks.extend(list.take_completed());
+    }
+    super::animation::complete(plots, callbacks)
 }
 pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {
     match event {

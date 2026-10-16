@@ -91,7 +91,13 @@ fn notify_center_seed_reads_queue_and_dismisses() {
     if let Some(tree) = &content.tree {
         button_actions(tree, &mut actions);
     }
-    assert_eq!(actions, ["dismiss:42"]);
+    assert_eq!(actions, ["dismiss:42", "dismiss-all"]);
+    assert_eq!(
+        crate::lua::notifications::notification_action(
+            &call_lua_named_action(&lua, "dismiss-all").unwrap()
+        ),
+        Some(crate::lua::notifications::NotificationAction::DismissAll)
+    );
     match call_lua_named_action(&lua, "dismiss:42").unwrap() {
         Value::Table(table) => assert_eq!(table.get::<u32>("dismiss").unwrap(), 42),
         other => panic!("{other:?}"),

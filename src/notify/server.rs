@@ -31,8 +31,20 @@ use std::sync::{
 use zbus::{interface, object_server::SignalEmitter};
 
 /// Hard ceiling for client-requested timeouts (5 minutes); larger
-/// values clamp. `<= 0` means server default.
+/// values clamp. Negative means server default; zero means never expire.
 const MAX_TIMEOUT_MS: u64 = 300_000;
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Shared by D-Bus and internal events; restarting the subscription must not
+/// reuse IDs belonging to retained history.
+pub(crate) fn allocate_id() -> u32 {
+    loop {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
+}
 
 /// Live bus connection for emitting `ActionInvoked` /
 /// `NotificationClosed` from message handlers (which can't await).
@@ -92,7 +104,6 @@ fn parse_actions(flat: Vec<String>) -> Vec<(String, String)> {
 
 struct Server {
     tx: mpsc::Sender<Plant>,
-    next_id: AtomicU32,
     default_ms: u64,
 }
 
@@ -122,10 +133,10 @@ impl Server {
             replaces_id
         } else {
             // IDs start at 1; 0 is reserved as "assign me" upstream.
-            self.next_id.fetch_add(1, Ordering::Relaxed).max(1)
+            allocate_id()
         };
-        let timeout_ms = (expire_timeout > 0).then(|| (expire_timeout as u64).min(MAX_TIMEOUT_MS));
-        let msg = Plant::Notify(NotifyEvent::Arrived(
+        let timeout_ms = (expire_timeout >= 0).then(|| (expire_timeout as u64).min(MAX_TIMEOUT_MS));
+        let msg = Plant::Notify(NotifyEvent::Arrived(Box::new(
             crate::shell::screens::notification::Notification::from_dbus(
                 crate::shell::screens::notification::Incoming {
                     id,
@@ -140,24 +151,18 @@ impl Server {
                 },
                 self.default_ms,
             ),
-        ));
+        )));
         // Channel full/closed: drop rather than stall the bus caller.
         let _ = self.tx.clone().try_send(msg);
         Ok(id)
     }
 
-    async fn close_notification(
-        &self,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-        id: u32,
-    ) -> zbus::fdo::Result<()> {
-        // Peer-initiated close: the signal below is the acknowledgment,
-        // so forward a silent drop (no second signal from the app).
+    async fn close_notification(&self, id: u32) -> zbus::fdo::Result<()> {
+        // The service emits the close signal once, only for a live record.
         let _ = self
             .tx
             .clone()
             .try_send(Plant::Notify(NotifyEvent::PeerClosed(id)));
-        emitter.notification_closed(id, 3).await?;
         Ok(())
     }
 
@@ -189,7 +194,6 @@ impl Server {
 pub async fn serve(mut tx: mpsc::Sender<Plant>, default_ms: u64) {
     let server = Server {
         tx: tx.clone(),
-        next_id: AtomicU32::new(1),
         default_ms,
     };
     let built = zbus::connection::Builder::session()

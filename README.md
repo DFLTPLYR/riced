@@ -581,6 +581,68 @@ with `{ id, app, title, body, icon, urgency, actions, has_image, image }`.
 pixels are never serialized through Lua. `actions` contains `{ key, label }`.
 Return `{ invoke = { id = id, key = key } }` to invoke a validated D-Bus action.
 
+### Popup timeout and retained notifications
+
+`timeout-ms` hides the popup; it does **not** delete its notification-center
+record. The popup scene receives visible records only. The `notifications`
+service array contains all retained records, so the center and badge include
+expired popups. Entries expose `popup_visible` and `closed` flags.
+History is in-memory for the current daemon session. Retained records own their
+image handles until dismissed; completing an exit releases only the visual
+ghost and its callback/item references.
+
+Use explicit commands from `app:on_action` or a completion callback:
+
+```lua
+function app:on_action(key)
+    if key == "dismiss-all" then
+        return notification.dismissAll() -- every output, including hidden history
+    end
+    local id = key:match("^dismiss:(%d+)$")
+    if id then return notification.dismiss(tonumber(id)) end
+end
+```
+
+These functions construct commands: **return** their result from the handler.
+Existing `{ dismiss = id }` and `{ invoke = { id = id, key = key } }` returns
+also work; `{ dismiss_all = true }` is the dismiss-all command. The bundled
+notification-center widget includes a Dismiss all button.
+
+Expiry emits D-Bus `NotificationClosed(id, 1)` once. Clearing already-expired
+history does not send another close signal. User dismissal of a live record
+emits reason `2`; peer close removes it with reason `3`. Actions are accepted
+only for live records and known action keys. A replacement re-shows its popup
+with a fresh generation. Removing an output hides its popups but keeps history.
+A client-requested timeout of zero means never expire; negative uses the
+configured default. Critical notifications do not expire automatically.
+
+### Optional listview completion callbacks
+
+`onEntered`, `onExit`, and `onDisplaced` accept an optional callback that
+receives the captured item when that transition completes:
+
+```lua
+:onExit({
+    x = { to = -200 },
+    opacity = { to = 0 },
+    duration = 250,
+    callback = function(item)
+        return notification.dismiss(tonumber(item.id))
+    end,
+})
+```
+
+Without a callback, exit completion only discards the visual ghost; the default
+notification scene keeps history. The example explicitly opts into deleting
+the retained record **after** its popup exits.
+
+Callbacks run once per completed transition in the host update phase, never
+during decoding, layout, or drawing. Re-entering cancels a pending exit callback;
+surface teardown and successful app replacement invalidate old callbacks.
+An old notification generation cannot dismiss its replacement. Zero-duration
+transitions complete on the next update. Callbacks share the bounded Lua
+execution rules, and callback errors do not apply a dismissal command.
+
 `[notification]` controls service delivery and expiry. `source = ""` keeps
 the service enabled without its default scene. The old `[notifications]`,
 `position`, `width`, and `max_visible` presentation fields are removed.
@@ -595,11 +657,11 @@ the service enabled without its default scene. The old `[notifications]`,
   scene files are not re-seeded on restart.
 - **Behavior**: one warm, passive layer window per output (kept mapped with
   an empty input region when the queue empties), covering the full output — the whole
-  stack shows newest-first and scrolls. Click a card to dismiss, expiries swept on a
-  250ms tick that only runs while the queue is non-empty. Actions are
+  stack shows newest-first and scrolls. Click a card to dismiss; popup deadlines are swept on a
+  250ms tick that only runs while a visible popup has a deadline. Actions are
   live: the built-in card renders one button per action, and button
   clicks emit `ActionInvoked` back over D-Bus (then dismiss with
-  reason "invoked"); capability `actions` is claimed alongside `body`.
+  reason `2`); capability `actions` is claimed alongside `body`.
   App images render too: `image-data` pixbufs first, then the
   `image-path` hint, then `app_icon` as a file path — a 36px thumbnail
   left of the card body (themed icon names still render text-only).

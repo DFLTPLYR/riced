@@ -20,6 +20,7 @@ pub(crate) fn actions_table(lua: &Lua, actions: &[(String, String)]) -> Result<T
 #[derive(Debug, PartialEq)]
 pub(crate) enum NotificationAction {
     Dismiss(u32),
+    DismissAll,
     Invoke(u32, String),
 }
 pub(crate) fn notification_action(value: &Value) -> Option<NotificationAction> {
@@ -29,11 +30,36 @@ pub(crate) fn notification_action(value: &Value) -> Option<NotificationAction> {
     if let Ok(id) = table.get::<u32>("dismiss") {
         return Some(NotificationAction::Dismiss(id));
     }
+    if matches!(table.get::<Value>("dismiss_all"), Ok(Value::Boolean(true))) {
+        return Some(NotificationAction::DismissAll);
+    }
     let inner = table.get::<Table>("invoke").ok()?;
     Some(NotificationAction::Invoke(
         inner.get("id").ok()?,
         inner.get("key").ok()?,
     ))
+}
+
+/// Command constructors: callers return these from handlers or completion callbacks.
+pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
+    let api = lua.create_table()?;
+    api.set(
+        "dismiss",
+        lua.create_function(|lua, id: u32| {
+            let command = lua.create_table()?;
+            command.set("dismiss", id)?;
+            Ok(command)
+        })?,
+    )?;
+    api.set(
+        "dismissAll",
+        lua.create_function(|lua, ()| {
+            let command = lua.create_table()?;
+            command.set("dismiss_all", true)?;
+            Ok(command)
+        })?,
+    )?;
+    lua.globals().set("notification", api)
 }
 #[cfg(test)]
 mod tests {
@@ -62,7 +88,16 @@ mod tests {
             ),
             Some(NotificationAction::Invoke(42, "open:details".into()))
         );
-        for source in ["nil", "42", "{}", "{invoke={id='oops'}}", "{dismiss=-1}"] {
+        for source in [
+            "nil",
+            "42",
+            "{}",
+            "{invoke={id='oops'}}",
+            "{dismiss=-1}",
+            "{dismiss_all='yes'}",
+            "{dismiss_all=0}",
+            "{dismiss_all=false}",
+        ] {
             assert!(
                 notification_action(&lua.load(format!("return {source}")).eval().unwrap())
                     .is_none()

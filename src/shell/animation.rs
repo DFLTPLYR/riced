@@ -39,3 +39,44 @@ impl AnimationState {
         }
     }
 }
+
+/// Dispatch completions from the update loop, after all motion sets are swept.
+pub(crate) fn complete(
+    plots: &mut super::Plots,
+    callbacks: Vec<crate::lua::callbacks::Callback>,
+) -> iced::Task<super::Plant> {
+    if callbacks.is_empty() {
+        return iced::Task::none();
+    }
+    let mut commands = Vec::new();
+    let mut ran = false;
+    for callback in callbacks {
+        let result = callback.invoke(
+            &crate::services::ServiceCtx::from_plots(plots, None),
+            |item| {
+                super::screens::notification::callback_is_current(item, &plots.notification.queue)
+            },
+        );
+        match result {
+            Ok(Some(value)) => {
+                ran = true;
+                commands.push(super::screens::notification::command_from_action(
+                    &value, plots,
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                ran = true;
+                eprintln!("transition callback: {error}");
+            }
+        }
+    }
+    if !ran {
+        return iced::Task::none();
+    }
+    plots.placements.last_run.clear();
+    commands.push(super::screens::top::Top::handle_widget_tick(plots));
+    commands.push(super::screens::popup::Popup::refresh_bodies(plots));
+    commands.push(super::overlay::refresh(plots, true));
+    iced::Task::batch(commands)
+}

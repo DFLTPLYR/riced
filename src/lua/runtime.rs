@@ -156,6 +156,7 @@ impl LuaRuntime {
     }
 
     fn begin(&self) -> mlua::Result<()> {
+        self.lua.expire_registry_values();
         sandbox::reset_budget(&self.lua)?;
         self.lua
             .set_named_registry_value("riced.effects", self.lua.create_table()?)
@@ -202,6 +203,7 @@ impl LuaRuntime {
         if let Some(previous) = self.app.replace(key) {
             self.lua.remove_registry_value(previous)?;
         }
+        super::callbacks::new_epoch(&self.lua)?;
         self.version = self.version.wrapping_add(1);
         Ok(())
     }

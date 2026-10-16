@@ -134,6 +134,7 @@ fn default_notification_source() -> String {
 }
 
 /// Notification service (`[notification]`) and its Lua scene source.
+/// Timeout hides the popup; history remains until explicitly cleared.
 /// Presentation is ordinary iced content in the shared overlay host.
 /// ```toml
 /// [notification]

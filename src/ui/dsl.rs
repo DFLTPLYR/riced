@@ -44,10 +44,18 @@ pub(super) fn node(
         table.raw_set(field, Value::Nil)?;
     }
     table.raw_set("_properties", properties)?;
+    if kind == "listview" {
+        table.raw_set(
+            "_capture_callback",
+            lua.named_registry_value::<Function>("riced.capture_callback")?,
+        )?;
+    }
     table.set_metatable(Some(mt))?;
     Ok(table)
 }
 pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
+    crate::lua::notifications::install(lua)?;
+    crate::lua::callbacks::install(lua)?;
     let iced = lua.create_table()?;
     let mts = lua.create_table()?;
     let schemas = lua.create_table()?;
@@ -674,6 +682,7 @@ mod tests {
             ),
             WidgetNode::ListView {
                 id: "test".into(),
+                callbacks: Vec::new(),
                 items: vec![("1".into(), text("1"))],
                 horizontal: false,
                 pitch: 32.0,
