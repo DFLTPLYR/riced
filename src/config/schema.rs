@@ -599,6 +599,7 @@ pub use paths::config_path;
 /// Discovery runs at startup and whenever the directory changes; new
 /// files appear in the Settings pool automatically, deleted files
 /// render blank (with a warning) until removed from their slots.
+/// Complete Lua function reference: `docs/lua-api.md`.
 ///
 /// ## Lifecycle
 ///

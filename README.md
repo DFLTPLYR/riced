@@ -145,6 +145,8 @@ of silently overriding one another. Saved configs use only the new structure.
 
 ## Widgets (Lua)
 
+Complete function reference: `docs/lua-api.md`.
+
 Bar cells are Lua scripts in `~/.config/riced/widgets/` — each file
 is one widget named by its stem, placed by name from `[[bar]]`
 `widgets` entries. First run seeds clock plus commented
