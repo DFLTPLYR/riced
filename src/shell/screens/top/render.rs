@@ -19,7 +19,7 @@ pub(super) struct BarViewContext<'a> {
 
 fn render_slot_widgets(
     bar: window::Id,
-    slot: usize,
+    _slot: usize,
     placements: &[crate::config::WidgetPlacement],
     gap: f32,
     horizontal: bool,
@@ -37,17 +37,16 @@ fn render_slot_widgets(
         }
         let id = placement.id.clone();
         let area = |element: Element<'static, Plant>| -> Element<'static, Plant> {
+            let target = id.clone();
+            let sender: crate::ui::action::Sender = std::sync::Arc::new(move |events| {
+                Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(
+                    bar,
+                    target.clone(),
+                    events,
+                )))
+            });
+            let element = crate::ui::widgets::input::input(element, sender);
             mouse_area(element)
-                .on_press(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Pressed(
-                    bar,
-                    slot,
-                    id.clone(),
-                ))))
-                .on_release(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Released(
-                    bar,
-                    slot,
-                    id.clone(),
-                ))))
                 .on_enter(Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellHover(
                     bar,
                     id.clone(),

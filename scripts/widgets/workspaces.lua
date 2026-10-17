@@ -46,7 +46,9 @@ function app:view()
         :onDisplaced({ duration = 250 })
 end
 
-function app:on_action(id)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local id = events.key
     if id then
         os.execute("hyprctl dispatch 'hl.dsp.focus({workspace = " .. id .. "})' >/dev/null 2>&1")
     end

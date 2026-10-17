@@ -120,7 +120,14 @@ impl Demo {
                 );
             }
             if let Some(node) = runtime.cached_view(MAIN_WINDOW) {
-                match realize(node, 14.0, std::sync::Arc::new(Message::Action), true, 1.0) {
+                match realize(node, 14.0, std::sync::Arc::new(Message::Action), true, 1.0).map(
+                    |element| {
+                        crate::ui::widgets::input::input(
+                            element,
+                            std::sync::Arc::new(Message::Action),
+                        )
+                    },
+                ) {
                     Ok(element) => content = content.push(element),
                     Err(error) => content = content.push(text(format!("IR error: {error}"))),
                 }

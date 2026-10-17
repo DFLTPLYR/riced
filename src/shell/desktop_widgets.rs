@@ -28,7 +28,6 @@ pub(crate) struct State {
     widgets: WidgetState,
     entries: HashMap<String, Cached>,
     library: Option<SystemTime>,
-    pressed: Option<String>,
 }
 
 #[derive(Debug)]
@@ -42,9 +41,6 @@ struct Cached {
 
 impl State {
     fn forget(&mut self, id: &str) {
-        if self.pressed.as_deref() == Some(id) {
-            self.pressed = None;
-        }
         self.entries.remove(id);
         self.widgets.instances.remove(id);
         self.widgets.hosts.remove(id);
@@ -138,6 +134,10 @@ pub enum DesktopEvent {
         settings: window::Id,
         widget: String,
     },
+    Reposition {
+        settings: window::Id,
+        placement: String,
+    },
     Move {
         surface: window::Id,
         output: OutputId,
@@ -154,11 +154,6 @@ pub enum DesktopEvent {
         instance: String,
         entered: bool,
     },
-    Click {
-        instance: String,
-        output: OutputId,
-        pressed: bool,
-    },
     Action {
         instance: String,
         output: OutputId,
@@ -170,12 +165,28 @@ pub enum DesktopEvent {
 pub(crate) struct DragSession {
     pub source: window::Id,
     pub widget: String,
+    pub placement: Option<String>,
     pub cursor: Option<(OutputId, Point)>,
+}
+
+fn drag_widget(config: &crate::config::Config, drag: &DragSession) -> Option<DesktopWidget> {
+    match &drag.placement {
+        Some(id) => config
+            .desktop
+            .iter()
+            .find(|widget| widget.id == *id)
+            .cloned(),
+        None => Some(DesktopWidget {
+            widget: drag.widget.clone(),
+            ..Default::default()
+        }),
+    }
 }
 
 /// Capture points are already output-local logical coordinates: compositor
 /// output offsets and physical pixel density must not be added a second time.
 fn placement(
+    config: &crate::config::Config,
     drag: &DragSession,
     output: OutputId,
     name: &str,
@@ -193,14 +204,14 @@ fn placement(
     {
         return None;
     }
-    Some(DesktopWidget {
-        id: crate::config::fresh_placement_id(),
-        widget: drag.widget.clone(),
-        output: name.into(),
-        x: point.x,
-        y: point.y,
-        ..Default::default()
-    })
+    let mut widget = drag_widget(config, drag)?;
+    if drag.placement.is_none() {
+        widget.id = crate::config::fresh_placement_id();
+    }
+    widget.output = name.into();
+    widget.x = point.x;
+    widget.y = point.y;
+    Some(widget)
 }
 
 fn source(name: &str) -> Option<std::path::PathBuf> {
@@ -321,24 +332,15 @@ fn app_view(
         .and_then(serde_json::Value::as_f64)
         .filter(|size| size.is_finite() && *size > 0.0)
         .unwrap_or(13.0) as f32;
-    let content = crate::ui::build::build_node(&rendered.node, size, sender).ok()?;
+    let content = crate::ui::build::build_node(&rendered.node, size, sender.clone()).ok()?;
     let content: Element<'static, Plant> = container(content)
         .width(width)
         .height(height)
         .clip(true)
         .into();
     let content = if interactive {
+        let content = crate::ui::widgets::input::input(content, sender?);
         mouse_area(content)
-            .on_press(Plant::Desktop(DesktopEvent::Click {
-                instance: id.clone(),
-                output,
-                pressed: true,
-            }))
-            .on_release(Plant::Desktop(DesktopEvent::Click {
-                instance: id.clone(),
-                output,
-                pressed: false,
-            }))
             .on_enter(Plant::Desktop(DesktopEvent::Hover {
                 instance: id.clone(),
                 entered: true,
@@ -376,6 +378,15 @@ pub(crate) fn views(
         .desktop
         .iter()
         .filter(|widget| matches_output(plots, output, widget))
+        .filter(|widget| {
+            interactive
+                || plots
+                    .desktop
+                    .drag
+                    .as_ref()
+                    .and_then(|drag| drag.placement.as_deref())
+                    != Some(widget.id.as_str())
+        })
         .collect();
     widgets.sort_by_key(|widget| widget.z);
     widgets
@@ -437,6 +448,10 @@ pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant>
                     widget.y
                 ))
                 .width(Length::Fill),
+                button("Reposition").on_press(Plant::Desktop(DesktopEvent::Reposition {
+                    settings: id,
+                    placement: widget.id.clone()
+                })),
                 button("Remove").on_press(patch(ConfigPatch::RemoveDesktopWidget { index })),
             ]
             .spacing(8),
@@ -522,7 +537,6 @@ pub(crate) fn finish(plots: &mut Plots) -> Task<Plant> {
     plots.desktop.drag = None;
     plots.desktop.widgets.borrow_mut().forget("drag-preview");
     plots.desktop.widgets.borrow_mut().widgets.hovered.clear();
-    plots.desktop.widgets.borrow_mut().pressed = None;
     plots
         .desktop
         .composable_runtime
@@ -587,57 +601,32 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
             }
         }
         DesktopEvent::Pick { settings, widget } => {
-            if !plots.windows.settings.contains_key(&settings)
-                || plots.windows.output_infos.is_empty()
-            {
+            if !plots.windows.settings.contains_key(&settings) {
                 return Task::none();
             }
-            let Some(output) = plots.windows.output_infos.keys().next().copied() else {
-                return Task::none();
-            };
             let preview = DesktopWidget {
-                widget: widget.clone(),
+                widget,
                 ..Default::default()
             };
-            // A broken app never opens a full-screen capture session.
-            plots.desktop.widgets.borrow_mut().forget("drag-preview");
-            if render(plots, output, &preview, "drag-preview").is_none() {
+            start(plots, settings, preview, None)
+        }
+        DesktopEvent::Reposition {
+            settings,
+            placement,
+        } => {
+            if !plots.windows.settings.contains_key(&settings) {
                 return Task::none();
             }
-            let cleanup = finish(plots);
-            plots.desktop.drag = Some(DragSession {
-                source: settings,
-                widget,
-                cursor: None,
-            });
-            let mut tasks = vec![cleanup];
-            for output in plots
-                .windows
-                .output_infos
-                .keys()
-                .copied()
-                .collect::<Vec<_>>()
-            {
-                let id = window::Id::unique();
-                plots.windows.drags.insert(output, id);
-                plots.windows.ids.insert(id, PlotInfo::Drag(output));
-                tasks.push(Task::done(Plant::NewLayerShell {
-                    id,
-                    settings: NewLayerShellSettings {
-                        anchor: Anchor::all(),
-                        layer: Layer::Overlay,
-                        exclusive_zone: Some(-1),
-                        size: LayerSize::FILL,
-                        output_option: OutputOption::GlobalName(output.0),
-                        namespace: Some("Riced - Desktop Placement".into()),
-                        keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                        events_transparent: false,
-                        blur_option: BlurOption::None,
-                        ..Default::default()
-                    },
-                }));
-            }
-            Task::batch(tasks)
+            let Some(preview) = plots
+                .config
+                .desktop
+                .iter()
+                .find(|widget| widget.id == placement)
+                .cloned()
+            else {
+                return Task::none();
+            };
+            start(plots, settings, preview, Some(placement))
         }
         DesktopEvent::Move {
             surface,
@@ -660,7 +649,7 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
             let Some(drag) = plots.desktop.drag.as_ref() else {
                 return Task::none();
             };
-            if !plots.windows.settings.contains_key(&drag.source) {
+            if !plots.windows.ids.contains_key(&drag.source) {
                 return finish(plots);
             }
             let Some((owner, _)) = drag.cursor else {
@@ -676,8 +665,20 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
                 return finish(plots);
             };
             let (_, _, width, height) = super::screens::Background::output_geometry(info);
-            let Some(widget) = placement(drag, output, &name, iced::Size::new(width, height))
-            else {
+            if drag
+                .placement
+                .as_ref()
+                .is_some_and(|id| !plots.config.desktop.iter().any(|widget| widget.id == *id))
+            {
+                return finish(plots);
+            }
+            let Some(widget) = placement(
+                &plots.config,
+                drag,
+                output,
+                &name,
+                iced::Size::new(width, height),
+            ) else {
                 return Task::none();
             };
             // New placements have no last-good runtime: validate the saved
@@ -686,12 +687,19 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
             if render(plots, output, &widget, "drag-preview").is_none() {
                 return Task::none();
             }
+            let patch = match &drag.placement {
+                Some(id) => ConfigPatch::RepositionDesktopWidget {
+                    id: id.clone(),
+                    output: widget.output,
+                    x: widget.x,
+                    y: widget.y,
+                },
+                None => ConfigPatch::AddDesktopWidget(widget),
+            };
             let cleanup = finish(plots);
             Task::batch([
                 cleanup,
-                Task::done(Plant::Config(super::ConfigEvent::Patch(
-                    ConfigPatch::AddDesktopWidget(widget),
-                ))),
+                Task::done(Plant::Config(super::ConfigEvent::Patch(patch))),
             ])
         }
         DesktopEvent::Hover { instance, entered } => {
@@ -711,40 +719,77 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
             }
             Task::none()
         }
-        DesktopEvent::Click {
-            instance,
-            output,
-            pressed,
-        } => {
-            if !plots.config.desktop.iter().any(|widget| {
-                matches_output(plots, output, widget) && self::instance(output, widget) == instance
-            }) {
-                return Task::none();
-            }
-            let mut state = plots.desktop.widgets.borrow_mut();
-            if pressed {
-                state.pressed = Some(instance);
-                return Task::none();
-            }
-            if state.pressed.take().as_deref() != Some(instance.as_str()) {
-                return Task::none();
-            }
-            drop(state);
-            widget_action(plots, &instance, output, None)
-        }
         DesktopEvent::Action {
             instance,
             output,
             action,
-        } => widget_action(plots, &instance, output, Some(&action)),
+        } => widget_action(plots, &instance, output, &action),
     }
+}
+
+fn start(
+    plots: &mut Plots,
+    source: window::Id,
+    preview: DesktopWidget,
+    placement: Option<String>,
+) -> Task<Plant> {
+    let Some(output) = plots
+        .windows
+        .output_infos
+        .keys()
+        .copied()
+        .find(|output| matches_output(plots, *output, &preview))
+        .or_else(|| plots.windows.output_infos.keys().next().copied())
+    else {
+        return Task::none();
+    };
+    // Validate before opening capture surfaces; failed reloads retain the session.
+    plots.desktop.widgets.borrow_mut().forget("drag-preview");
+    if render(plots, output, &preview, "drag-preview").is_none() {
+        return Task::none();
+    }
+    let cleanup = finish(plots);
+    plots.desktop.drag = Some(DragSession {
+        source,
+        widget: preview.widget,
+        placement,
+        cursor: None,
+    });
+    let mut tasks = vec![cleanup];
+    for output in plots
+        .windows
+        .output_infos
+        .keys()
+        .copied()
+        .collect::<Vec<_>>()
+    {
+        let id = window::Id::unique();
+        plots.windows.drags.insert(output, id);
+        plots.windows.ids.insert(id, PlotInfo::Drag(output));
+        tasks.push(Task::done(Plant::NewLayerShell {
+            id,
+            settings: NewLayerShellSettings {
+                anchor: Anchor::all(),
+                layer: Layer::Overlay,
+                exclusive_zone: Some(-1),
+                size: LayerSize::FILL,
+                output_option: OutputOption::GlobalName(output.0),
+                namespace: Some("Riced - Desktop Placement".into()),
+                keyboard_interactivity: KeyboardInteractivity::Exclusive,
+                events_transparent: false,
+                blur_option: BlurOption::None,
+                ..Default::default()
+            },
+        }));
+    }
+    Task::batch(tasks)
 }
 
 fn widget_action(
     plots: &mut Plots,
     instance: &str,
     output: OutputId,
-    action: Option<&Action>,
+    action: &Action,
 ) -> Task<Plant> {
     if !plots.config.desktop.iter().any(|widget| {
         matches_output(plots, output, widget) && self::instance(output, widget) == instance
@@ -792,20 +837,31 @@ fn widget_action(
         if let Some(entry) = state.entries.get_mut(instance) {
             entry.input = serde_json::Value::Null;
         }
-        if let Some(action) = action {
-            state.widgets.ui_action(&resolved, &context, action)
-        } else if crate::lua::widgets::lua_has_func(&state.widgets.instances, instance, "on_press")
-        {
-            state
-                .widgets
-                .press(&resolved, &context)
-                .map(|result| result.map(|_| mlua::Value::Nil))
-        } else {
-            None
-        }
+        state.widgets.ui_action(&resolved, &context, action)
     };
     match result {
-        Some(Ok(value)) => super::screens::notification::command_from_action(&value, plots),
+        Some(Ok(value)) => {
+            let command = super::screens::notification::command_from_action(&value, plots);
+            let reposition = matches!(&value, mlua::Value::Table(table) if table.get::<bool>("reposition").unwrap_or(false));
+            let reposition = if reposition {
+                let preview = plots
+                    .config
+                    .desktop
+                    .iter()
+                    .find(|widget| self::instance(output, widget) == instance)
+                    .cloned();
+                match (preview, plots.windows.background_ids.get(&output).copied()) {
+                    (Some(preview), Some(source)) => {
+                        let placement = preview.id.clone();
+                        start(plots, source, preview, Some(placement))
+                    }
+                    _ => Task::none(),
+                }
+            } else {
+                Task::none()
+            };
+            Task::batch([command, reposition])
+        }
         Some(Err(error)) => {
             eprintln!("desktop action: {error}");
             Task::none()
@@ -842,14 +898,12 @@ pub(crate) fn view(
         && let Some((owner, point)) = drag.cursor
         && owner == output
     {
-        let widget = DesktopWidget {
-            widget: drag.widget.clone(),
-            x: point.x,
-            y: point.y,
-            ..Default::default()
-        };
-        if let Some(ghost) = app_view(plots, output, &widget, "drag-preview".into(), false) {
-            layers.push(ghost);
+        if let Some(mut widget) = drag_widget(&plots.config, drag) {
+            widget.x = point.x;
+            widget.y = point.y;
+            if let Some(ghost) = app_view(plots, output, &widget, "drag-preview".into(), false) {
+                layers.push(ghost);
+            }
         }
         layers.push(
             container(Space::new())
@@ -1018,26 +1072,108 @@ mod tests {
     }
 
     #[test]
+    fn reposition_preserves_identity_dimensions_props_and_order_until_drop() {
+        let original = DesktopWidget {
+            id: "existing".into(),
+            widget: "rectangle".into(),
+            output: "DP-1".into(),
+            x: 10.0,
+            y: 20.0,
+            width: 320.0,
+            height: 180.0,
+            z: 3,
+            props: HashMap::from([(
+                "color".into(),
+                crate::config::PropValue::Text("#123456".into()),
+            )]),
+        };
+        let mut config = crate::config::Config {
+            desktop: vec![original.clone(), DesktopWidget::default()],
+            ..Default::default()
+        };
+        let drag = DragSession {
+            source: window::Id::unique(),
+            widget: original.widget.clone(),
+            placement: Some(original.id.clone()),
+            cursor: Some((OutputId(2), Point::new(70.0, 90.0))),
+        };
+        let moved = placement(
+            &config,
+            &drag,
+            OutputId(2),
+            "DP-2",
+            iced::Size::new(1080.0, 1920.0),
+        )
+        .unwrap();
+        assert_eq!(
+            moved,
+            DesktopWidget {
+                output: "DP-2".into(),
+                x: 70.0,
+                y: 90.0,
+                ..original.clone()
+            }
+        );
+        assert_eq!(config.desktop[0], original);
+        config.desktop.swap(0, 1);
+        config.apply(ConfigPatch::RepositionDesktopWidget {
+            id: original.id.clone(),
+            output: moved.output,
+            x: moved.x,
+            y: moved.y,
+        });
+        assert_eq!(
+            config.desktop[1],
+            DesktopWidget {
+                output: "DP-2".into(),
+                x: 70.0,
+                y: 90.0,
+                ..original.clone()
+            }
+        );
+        config.desktop.remove(1);
+        assert!(
+            placement(
+                &config,
+                &drag,
+                OutputId(2),
+                "DP-2",
+                iced::Size::new(1080.0, 1920.0)
+            )
+            .is_none()
+        );
+        config.apply(ConfigPatch::RepositionDesktopWidget {
+            id: original.id,
+            output: "DP-1".into(),
+            x: 0.0,
+            y: 0.0,
+        });
+        assert_eq!(config.desktop.len(), 1);
+    }
+
+    #[test]
     fn drop_uses_logical_local_coordinates_and_rejects_stale_outputs() {
+        let config = crate::config::Config::default();
         let mut drag = DragSession {
             source: window::Id::unique(),
             widget: "rectangle".into(),
+            placement: None,
             cursor: Some((OutputId(2), Point::new(40.0, 60.0))),
         };
         let size = iced::Size::new(1080.0, 1920.0);
-        let widget = placement(&drag, OutputId(2), "DP-2", size).unwrap();
+        let widget = placement(&config, &drag, OutputId(2), "DP-2", size).unwrap();
         assert_eq!((widget.x, widget.y), (40.0, 60.0));
         assert_eq!(widget.output, "DP-2");
         assert!(!widget.id.is_empty());
-        assert!(placement(&drag, OutputId(1), "DP-1", size).is_none());
-        assert!(placement(&drag, OutputId(2), "", size).is_none());
+        assert!(placement(&config, &drag, OutputId(1), "DP-1", size).is_none());
+        assert!(placement(&config, &drag, OutputId(2), "", size).is_none());
         for point in [
             Point::new(-1.0, 1.0),
             Point::new(1080.0, 0.0),
             Point::new(f32::NAN, 2.0),
         ] {
             drag.cursor = Some((OutputId(2), point));
-            assert!(placement(&drag, OutputId(2), "DP-2", size).is_none());
+            assert!(placement(&config, &drag, OutputId(2), "DP-2", size).is_none());
         }
     }
 

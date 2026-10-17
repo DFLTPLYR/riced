@@ -1622,6 +1622,7 @@ mod tests {
         plots.desktop.drag = Some(DragSession {
             source,
             widget: "rectangle".into(),
+            placement: None,
             cursor: None,
         });
         let stale = iced::window::Id::unique();
@@ -1670,6 +1671,7 @@ mod tests {
         plots.desktop.drag = Some(DragSession {
             source,
             widget: "rectangle".into(),
+            placement: None,
             cursor: None,
         });
         let _ = plots.update(Plant::Wayland(LandEvent::Closed(captures[0].1)));

@@ -17,7 +17,9 @@ function app:view()
     }):spacing(12):width(size.fill)
 end
 
-function app:on_action(key, value)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local key, value = events.key, events.value
     if key == "reset" then
         self.enabled, self.volume, self.query, self.choice = false, 25, "", "one"
         self.status = "Reset"

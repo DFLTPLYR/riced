@@ -56,17 +56,35 @@ pub(crate) fn call_lua_action(
         .named_registry_value("riced.widget.app")
         .map_err(|error| error.to_string())?;
     if matches!(
-        app.get::<Value>("on_action")
+        app.get::<Value>("actions")
             .map_err(|error| error.to_string())?,
         Value::Nil
     ) {
         return Ok(Value::Nil);
     }
-    call_widget_method(
-        lua,
-        "on_action",
-        action.arguments(lua).map_err(|error| error.to_string())?,
-    )
+    lua.set_named_registry_value("riced.reposition.requested", false)
+        .map_err(|e| e.to_string())?;
+    let arguments = action.arguments(lua).map_err(|e| e.to_string())?;
+    lua.set_named_registry_value("riced.in_actions", true)
+        .map_err(|e| e.to_string())?;
+    let result = call_widget_method(lua, "actions", arguments);
+    lua.set_named_registry_value("riced.in_actions", false)
+        .map_err(|e| e.to_string())?;
+    let value = result?;
+    if lua
+        .named_registry_value::<bool>("riced.reposition.requested")
+        .unwrap_or(false)
+    {
+        let command = match value {
+            Value::Nil => lua.create_table().map_err(|e| e.to_string())?,
+            Value::Table(table) => table,
+            _ => return Err("actions host commands require a table or nil return".into()),
+        };
+        command.set("reposition", true).map_err(|e| e.to_string())?;
+        Ok(Value::Table(command))
+    } else {
+        Ok(value)
+    }
 }
 
 impl ResolvedWidget {
@@ -101,15 +119,62 @@ pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::
     let _: Function = app.get("view").map_err(|_| {
         mlua::Error::RuntimeError(format!("{label}: returned app table needs a view method"))
     })?;
-    for method in ["view", "popup", "on_action", "on_press", "transitions"] {
+    validate_actions(&app)?;
+    for method in ["view", "popup", "actions", "transitions"] {
         if !matches!(app.get::<Value>(method)?, Value::Function(_) | Value::Nil) {
             return Err(mlua::Error::RuntimeError(format!(
                 "{label}: app.{method} must be a function"
             )));
         }
     }
+    if app.raw_get::<Value>("reposition")? != Value::Nil {
+        return Err(mlua::Error::RuntimeError(
+            "app.reposition is reserved for the host".into(),
+        ));
+    }
+    app.set(
+        "reposition",
+        lua.create_function(|lua, _: mlua::MultiValue| {
+            if !lua
+                .named_registry_value::<bool>("riced.reposition.available")
+                .unwrap_or(false)
+            {
+                return Err(mlua::Error::RuntimeError(
+                    "self.reposition() requires a desktop placement".into(),
+                ));
+            }
+            if !lua
+                .named_registry_value::<bool>("riced.in_actions")
+                .unwrap_or(false)
+            {
+                return Err(mlua::Error::RuntimeError(
+                    "self.reposition() is only available inside actions".into(),
+                ));
+            }
+            lua.set_named_registry_value("riced.reposition.requested", true)
+        })?,
+    )?;
     lua.set_named_registry_value("riced.widget.app", app)?;
     super::callbacks::new_epoch(lua)
+}
+
+pub(crate) fn validate_actions(app: &Table) -> mlua::Result<()> {
+    for removed in ["on_action", "on_press", "handler"] {
+        if app.raw_get::<Value>(removed)? != Value::Nil {
+            return Err(mlua::Error::RuntimeError(format!(
+                "app.{removed} was removed; use app:actions(events)"
+            )));
+        }
+    }
+    if !matches!(
+        app.raw_get::<Value>("actions")?,
+        Value::Nil | Value::Function(_)
+    ) {
+        return Err(mlua::Error::RuntimeError(
+            "app.actions must be a function".into(),
+        ));
+    }
+    Ok(())
 }
 use std::{
     collections::{HashMap, HashSet},
@@ -178,6 +243,7 @@ impl WidgetState {
             .named_registry_value("riced.widget.app")
             .map_err(|error| error.to_string())?;
         let result = (|| -> mlua::Result<Table> {
+            lua.set_named_registry_value("riced.reposition.available", host.is_some())?;
             let overrides: Table = app.get("props")?;
             if let Value::Table(defaults) = app.get::<Value>("defaults")?
                 && let Value::Table(props) = defaults.get::<Value>("props")?
@@ -294,6 +360,7 @@ impl WidgetState {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn press(
         &self,
         resolved: &ResolvedWidget,
@@ -308,7 +375,7 @@ impl WidgetState {
                 hovered,
                 self.hosts.get(&resolved.id),
             )?;
-            call_lua_value(lua, "on_press").map(|_| ())
+            call_lua_action(lua, &crate::ui::action::Action::click()).map(|_| ())
         })
     }
 
@@ -341,6 +408,43 @@ mod tests {
     use mlua::Table;
 
     #[test]
+    fn actions_contract_rejects_legacy_callbacks_and_nonfunctions() {
+        for source in [
+            "return {view=function() end, on_action=function() end}",
+            "return {view=function() end, on_press=function() end}",
+            "return {view=function() end, handler=function() end}",
+            "return {view=function() end, actions=true}",
+            "return {view=function() end, reposition=function() end}",
+        ] {
+            assert!(load_widget_script(&new_widget_lua().unwrap(), "invalid", source).is_err());
+        }
+    }
+
+    #[test]
+    fn reposition_is_desktop_only_scoped_to_actions_and_preserves_other_commands() {
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(&lua, "move", "return {view=function(self) self.reposition() end, actions=function(self,events) if events.key=='fail' then self.reposition(); error('failed') end; if events.key=='move' then self:reposition(); return {dismiss=42} end end}").unwrap();
+        assert!(
+            call_lua_named_action(&lua, "move")
+                .unwrap_err()
+                .contains("desktop placement")
+        );
+        lua.set_named_registry_value("riced.reposition.available", true)
+            .unwrap();
+        assert!(call_lua_named_action(&lua, "fail").is_err());
+        assert!(
+            call_lua_value(&lua, "view")
+                .unwrap_err()
+                .contains("inside actions")
+        );
+        assert_eq!(call_lua_named_action(&lua, "noop").unwrap(), Value::Nil);
+        let command = call_lua_named_action(&lua, "move").unwrap();
+        let command = command.as_table().unwrap();
+        assert!(command.get::<bool>("reposition").unwrap());
+        assert_eq!(command.get::<u32>("dismiss").unwrap(), 42);
+    }
+
+    #[test]
     fn lua_popup_and_press_contract() {
         let lua = new_widget_lua().unwrap();
         load_widget_script(
@@ -354,8 +458,8 @@ mod tests {
                 .unwrap(),
             "menu"
         );
-        load_widget_script(&lua, "test", "return {flag=false, view=function(self) return self.flag and 1 or 0 end, on_press=function(self) self.flag=true end}").unwrap();
-        call_lua_value(&lua, "on_press").unwrap();
+        load_widget_script(&lua, "test", "return {flag=false, view=function(self) return self.flag and 1 or 0 end, actions=function(self,events) assert(events.type=='click'); self.flag=true end}").unwrap();
+        call_lua_action(&lua, &crate::ui::action::Action::click()).unwrap();
         assert_eq!(
             super::super::value::coerce_text(call_lua_value(&lua, "view").unwrap(), "view()")
                 .unwrap(),
@@ -365,9 +469,9 @@ mod tests {
         states.insert("w".into(), new_widget_lua().unwrap());
         load_widget_script(&states["w"], "w", "return {view=function() return 'x' end}").unwrap();
         assert!(!lua_has_func(&states, "w", "popup"));
-        assert!(!lua_has_func(&states, "w", "on_press"));
+        assert!(!lua_has_func(&states, "w", "actions"));
         assert!(!lua_has_func(&states, "missing", "view"));
-        assert!(call_lua_value(&states["w"], "on_press").is_err());
+        assert!(call_lua_value(&states["w"], "actions").is_err());
     }
 
     #[test]
@@ -419,9 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn lua_on_action_receives_the_item_key() {
+    fn lua_actions_receives_the_event_table() {
         let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "test", "seen={}; return {view=function() return '' end, on_action=function(self,name) seen[#seen+1]=name end}").unwrap();
+        load_widget_script(&lua, "test", "seen={}; return {view=function() return '' end, actions=function(self,events) assert(events.type=='action'); seen[#seen+1]=events.key end}").unwrap();
         call_lua_named_action(&lua, "toggle").unwrap();
         assert_eq!(
             lua.load("return seen[1]").eval::<String>().unwrap(),
@@ -477,11 +581,11 @@ mod tests {
     #[test]
     fn module_methods_bind_self_without_exporting_globals() {
         let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "module", "return {count=0, view=function(self) return iced.text(tostring(self.count)) end, on_press=function(self) self.count=self.count+1 end, on_action=function(self,key) return {dismiss=self.count, key=key} end}").unwrap();
-        for name in ["render", "view", "on_press", "on_action"] {
+        load_widget_script(&lua, "module", "return {count=0, view=function(self) return iced.text(tostring(self.count)) end, actions=function(self,events) if events.type=='click' then self.count=self.count+1 else return {dismiss=self.count, key=events.key} end end}").unwrap();
+        for name in ["render", "view", "actions"] {
             assert_eq!(lua.globals().get::<Value>(name).unwrap(), Value::Nil);
         }
-        call_lua_value(&lua, "on_press").unwrap();
+        call_lua_action(&lua, &crate::ui::action::Action::click()).unwrap();
         assert_eq!(
             crate::ui::decode::parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap(),
             WidgetNode::Text {
@@ -544,7 +648,7 @@ mod tests {
     #[test]
     fn entries_publish_fresh_output_and_props_and_ignore_stale_actions() {
         let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "entry", "return {view=function(self) return bar.output..self.props.label end, on_action=function(self,key,value) self.value=value; return bar.output..self.props.label..key end, on_press=function(self) self.last=bar.output..self.props.label end}").unwrap();
+        load_widget_script(&lua, "entry", "return {view=function(self) return bar.output..self.props.label end, actions=function(self,events) if events.type=='click' then self.last=bar.output..self.props.label else self.value=events.value; return bar.output..self.props.label..events.key end end}").unwrap();
         let mut state = WidgetState::default();
         state.instances.insert("placement".into(), lua);
         let mut resolved = ResolvedWidget {

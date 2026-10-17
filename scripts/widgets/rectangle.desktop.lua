@@ -10,4 +10,10 @@ function app:view(props)
         :background(props.color or (self.hovered and theme.primary or theme.surface))
 end
 
+function app:actions(events)
+    if events.type == "hold" or (events.type == "click" and events.button == "right") then
+        self.reposition()
+    end
+end
+
 return app

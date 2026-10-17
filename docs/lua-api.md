@@ -19,12 +19,11 @@ return app
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `app:view(props)`             | Required. Returns text (numbers/booleans coerce, `nil` is empty) or an `iced.*` tree. Widgets, scenes, and composables receive the resolved `props` table, also available as `self.props`.               |
 | `app:popup()`                 | Optional (widgets). Returns a popup descriptor: `{ text }`, `{ text, width, height }`, `{ items = {{label, action}} }`, and/or `{ ui = <tree>, width, height }`. No text, tree, or items means no popup. |
-| `app:on_action(key[, value])` | Optional. Receives action keys from buttons, popup rows, and `on_press` targets.                                                                                                                         |
-| `app:on_press()`              | Optional (widgets). Bare click action when no `popup()` opens.                                                                                                                                           |
+| `app:actions(events)`          | Optional. Receives one owned event table per invocation: control actions, pointer gestures, and delivered keyboard events. |
 | `app:transitions()`           | Optional. `{ add, remove, displaced }` motion overrides; see Transitions.                                                                                                                                |
 
 `app.defaults` declares `interval`, `size`, and custom `props` (see Widget properties).
-Before every `view()`/`popup()`/`on_action()`, the engine sets `self.props` to the
+Before every `view()`/`popup()`/`actions()`, the engine sets `self.props` to the
 resolved table — read per-instance values there, never from `app.defaults` directly.
 It also sets `self.hovered` (`true` while the pointer is over that placement or
 component, else `false`); see Hover state.
@@ -54,7 +53,7 @@ logical origin, logical width/height). Coordinates are **output-local logical
 pixels**, independent of monitor scale. Optional width/height must resolve to
 finite, positive numbers at most 32768; absent dimensions use intrinsic sizing.
 Lua owns styling and default dimensions. `self.hovered`, bare-click
-`app:on_press()`, and `app:on_action(key[, value])` work on the placed widget.
+`app:actions(events)` works on the placed widget.
 Like dock/bar widgets, desktop widgets re-run `view(props)` on
 `app.defaults.interval` (default 1 second, minimum 0.25 seconds), as well as on
 placement, theme, source, hover, or action changes. Return `os.date(...)` from
@@ -76,8 +75,10 @@ Open **Settings → Desktop → Place rectangle**, move to the desired display,
 then click to place. Right-click or Escape cancels. Capture surfaces show the
 desktop above ordinary windows while positioning; Settings stays intact below.
 Successful drops save one `[[desktop]]` entry pinned to the clicked display.
-Its top-left corner follows the cursor. Removing or moving placements is
-available in the same Settings page. Unknown placement fields and invalid
+Its top-left corner follows the cursor. **Reposition** on the same Settings
+page picks up an existing placement; the next click saves its output and position
+while preserving identity, dimensions, props, and stacking order. Escape or
+right-click cancels without changing the saved placement. Unknown placement fields and invalid
 coordinates/dimensions fail configuration parsing. Disconnected-output entries
 are retained and resume displaying when that output returns.
 
@@ -138,10 +139,50 @@ iced.button("{icon:x}", "dismiss:" .. item.id):width(40)
 iced.button("{icon:x}"):action("dismiss:" .. item.id):width(40)
 ```
 
-Clicking calls the owning placement's `app:on_action(key)` directly; a missing
-`on_action` is a silent no-op. Action keys are opaque strings — Lua functions
+Clicking calls the owning placement's `app:actions({type="action", key=key})` directly; a missing
+`actions` method is a silent no-op. Action keys are opaque strings — Lua functions
 cannot cross the VM boundary (trees are owned data; functions are discarded at
 decode). A button without a key is inert.
+
+### Events and repositioning
+
+`app:actions(events)` receives **one event table**, not a batch:
+
+| `events.type` | Fields |
+| --- | --- |
+| `action` | `key`, optional `value` (boolean, number, or string) from a control or popup row |
+| `press`, `release`, `click`, `hold` | `button` (`left`, `right`, `middle`, or another button name), `x`, `y` when available |
+| `move`, `enter`, `exit` | `x`, `y` when available |
+| `key` | `key` (character or named key), `state` (`pressed`/`released`), `modifiers = {shift, control, alt, super}` |
+
+Pointer coordinates are placement-local logical pixels. A hold fires once after
+500ms and suppresses the click. Leaving the placement cancels its pending gesture.
+Child controls consume their own input; a button sends its control event without
+a second bare click. A bare left click opens `app:popup()` when defined, retaining
+the native popup behavior. Other unconsumed gestures go to `actions`.
+Keyboard events require a host that receives keyboard input and a pointer over
+the placement; passive bar/desktop surfaces do not request keyboard focus.
+The native Lua demo supports delivered keyboard events.
+
+Inside a desktop widget's `actions` callback, `self.reposition()` (or
+`self:reposition()`) picks up that placement using the same two-click capture flow
+as Settings. It queues a host request; no return is required. It errors outside
+a desktop callback, and the `reposition` method is reserved for the host.
+
+```lua
+function app:actions(events)
+    if events.type == "hold" or
+       (events.type == "click" and events.button == "right") then
+        self.reposition()
+    elseif events.type == "action" and events.key == "enabled" then
+        self.enabled = events.value
+    end
+end
+```
+
+`app:on_action()`, `app:on_press()`, and `app:handler()` are rejected at load.
+Migrate installed scripts explicitly; seeds never overwrite user-owned files.
+Tree setters such as `:on_press(key)` remain valid action bindings.
 
 ### Scrollable
 
@@ -165,7 +206,7 @@ iced.listview(items):id("list"):key("id")
 
 - `pitch` is the estimated row size plus spacing along the list axis (displaced math).
 - `transitions()` returns `{ add, remove, displaced }` in the same shape; partial specs compose with defaults.
-- Optional per-item `callback` in any slot runs once when that transition completes, receiving the captured item; its return value flows through the action parser like `on_action`. No callback means silent ghost cleanup. Re-entering cancels a pending exit; reloads and teardown invalidate old callbacks.
+- Optional per-item `callback` in any slot runs once when that transition completes, receiving the captured item; its return value flows through the command parser like `actions`. No callback means silent ghost cleanup. Re-entering cancels a pending exit; reloads and teardown invalidate old callbacks.
 
 ### Components
 
@@ -227,7 +268,7 @@ styling stays as the default; read the flag only to style surrounding content.
 
 ## `notification.*` (scenes, widgets, popups, callbacks)
 
-Command constructors — **return** their result from `on_action` or a transition
+Command constructors — **return** their result from `actions` or a transition
 callback. Calling without returning does nothing.
 
 | Function                    | Returns                  | Effect                                                                         |

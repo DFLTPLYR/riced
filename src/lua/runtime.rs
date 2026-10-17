@@ -206,6 +206,7 @@ impl LuaRuntime {
                 .set_environment(env)
                 .eval()?;
             let _: Function = app.get("view")?;
+            super::widgets::validate_actions(&app)?;
             self.lua.create_registry_value(app)
         })();
         let key = self.finish("load", result)?;
@@ -228,7 +229,7 @@ impl LuaRuntime {
     pub fn update(&mut self, message: &Message) -> mlua::Result<Vec<Effect>> {
         let handler = match message {
             Message::LuaEvent { handler, .. } => handler.as_str(),
-            Message::Action(_) if self.has_handler("on_action") => "on_action",
+            Message::Action(_) if self.has_handler("actions") => "actions",
             _ => return Ok(Vec::new()),
         };
         let result = (|| {
@@ -343,7 +344,7 @@ impl LuaRuntime {
         output: &str,
         action: &crate::ui::action::Action,
     ) -> mlua::Result<Value> {
-        if !self.has_handler("on_action") {
+        if !self.has_handler("actions") {
             return Ok(Value::Nil);
         }
         let result = (|| {
@@ -355,9 +356,9 @@ impl LuaRuntime {
                     .as_ref()
                     .ok_or_else(|| mlua::Error::RuntimeError("scene missing".into()))?,
             )?;
-            super::entry::invoke(&self.lua, app, "on_action", action.arguments(&self.lua)?)
+            super::entry::invoke(&self.lua, app, "actions", action.arguments(&self.lua)?)
         })();
-        self.finish("on_action", result)
+        self.finish("actions", result)
     }
 
     pub(crate) fn scene_tick(
@@ -453,7 +454,7 @@ mod tests {
     fn control_actions_update_owned_app_state_and_invalidate_cached_views() {
         use crate::ui::action::{Action, ActionValue};
         let mut runtime = super::LuaRuntime::new().unwrap();
-        runtime.load("return {value=0, view=function(self) return iced.slider(0,100,self.value):on_change('volume') end, on_action=function(self,key,value) assert(key=='volume'); self.value=value end}").unwrap();
+        runtime.load("return {value=0, view=function(self) return iced.slider(0,100,self.value):on_change('volume') end, actions=function(self,events) assert(events.type=='action' and events.key=='volume'); self.value=events.value end}").unwrap();
         let window = super::WindowId(1);
         runtime.view(window).unwrap();
         runtime

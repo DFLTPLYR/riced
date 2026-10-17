@@ -20,7 +20,9 @@ function app:popup()
     return { ui = iced.card({ title = "Notifications", icon = "bell", body = body }), width = 320 }
 end
 
-function app:on_action(key)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local key = events.key
     if key == "dismiss-all" then return notification.dismissAll() end
     local id = key:match("^dismiss:(%d+)$")
     if id then return { dismiss = tonumber(id) } end

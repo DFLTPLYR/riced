@@ -463,7 +463,7 @@ fn default_notification_scene_composes_scoped_data_and_routes_structured_actions
 fn typed_control_actions_mutate_only_the_owning_scene() {
     let dir = directory("action");
     let path = dir.join("scene.lua");
-    std::fs::write(&path,"return {value=0,view=function(self)return iced.slider(0,100,self.value):on_change('value')end,on_action=function(self,key,value)self.value=value end}").unwrap();
+    std::fs::write(&path,"return {value=0,view=function(self)return iced.slider(0,100,self.value):on_change('value')end,actions=function(self,events)if events.type=='action' then self.value=events.value end end}").unwrap();
     let spec = Spec {
         id: "test".into(),
         source: path.display().to_string(),

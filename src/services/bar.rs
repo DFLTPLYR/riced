@@ -2,7 +2,7 @@
 //!
 //! Unlike the snapshot services, this is per render call, not per
 //! tick: each bar publishes its own output before `view()`/`popup()`/
-//! `on_action()`, so one shared widget state still renders per-bar
+//! `actions()`, so one shared widget state still renders per-bar
 //! output. Notification cards have no bar — `bar` stays nil there.
 
 /// Publish `bar = { output = "<connector>" }`, nil when the output is

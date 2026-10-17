@@ -21,7 +21,9 @@ function app:popup()
     }
 end
 
-function app:on_action(key)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local key = events.key
     if allowed[key] then os.execute("systemctl " .. key) end
 end
 

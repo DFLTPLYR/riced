@@ -202,9 +202,11 @@ return app
   components from `components/*.lua` (seeded `spacer`,
   `card`, `menu`); component edits rebuild all states like a
   widgets-dir rescan.
-- **Clicks**: `app:popup()` toggles a menu (`text`/`width`/`height`/
-  `items`/`ui`); else `app:on_press()` runs. Cell `iced.button`s call
-  that app's `app:on_action(key)` directly; popup rows do the same.
+- **Events**: `app:actions(events)` receives one table per control, pointer,
+  or delivered keyboard event. A bare left click still toggles `app:popup()`
+  (`text`/`width`/`height`/`items`/`ui`) when defined. Buttons and popup rows send
+  `{type="action", key=key, value=value}` to the same app. Desktop callbacks may
+  call `self.reposition()`; Settings also has a Reposition button.
 - **Slow fetches**: return `iced.spinner()` first, keep cached data on
   the app instance, then show cached rows (see `clinepass.lua`).
 - **List transitions**: top-level row/column `iced.button`s animate on
@@ -215,7 +217,7 @@ return app
   (QML `Transition` subset: `x`/`y`/`opacity` `{from, to}` + `duration`).
 - **Notification center**: the `notifications` global (newest-first
   `{id, app, title, body, urgency, has_image}`) is republished before
-  every view; `app:on_action` may return `{ dismiss = id }` or
+  every view; `app:actions` may return `{ dismiss = id }` or
   `{ invoke = { id, key } }` to act on the queue (see `notifycenter.lua`).
 
 Full contract with shapes and edge cases lives on `WidgetDef` in
@@ -349,7 +351,7 @@ Buttons also support a chained `:action(key)` setter:
 iced.button("{icon:x}"):action("dismiss:" .. item.id):width(40)
 ```
 
-This sends the key to the owning app's `app:on_action(key)`, just like
+This sends `{type="action", key=key}` to the owning app's `app:actions(events)`, just like
 `iced.button("{icon:x}", "dismiss:" .. item.id)`. A later `:action()` overwrites
 the constructor key or any earlier action setter. It is button-only and does
 not change the separate `:on_press(key)` wrapper for arbitrary content.
@@ -359,8 +361,8 @@ are clamped to the range. Pick-list options are unique strings; selection
 is either nil or one of those options. Radio values and selections are strings.
 
 State is owned by Lua and fed back into each view. Widget placements and the
-plain-window demo dispatch changes to `app:on_action(key, value)`; existing
-one-argument handlers continue working. Popup changes refresh the content
+plain-window demo dispatch changes to `app:actions({type="action", key=key, value=value})`.
+Popup changes refresh the content
 without dismissing the popup. Keyboard input requires a keyboard-capable host;
 passive bar/background/notification surfaces do not acquire keyboard focus.
 Notification and built-in context-menu actions keep their key-only protocols.
@@ -370,8 +372,8 @@ local app = { volume = 25 }
 function app:view()
     return iced.slider(0, 100, self.volume):on_change("volume")
 end
-function app:on_action(key, value)
-    if key == "volume" then self.volume = value end
+function app:actions(events)
+    if events.type == "action" and events.key == "volume" then self.volume = events.value end
 end
 return app
 ```
@@ -606,7 +608,9 @@ function app:view(props)
         end)
         :width(360):anchor("right"):margin(16)
 end
-function app:on_action(key)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local key = events.key
     local id = key:match("^dismiss:(%d+)$")
     if id then return { dismiss = tonumber(id) } end
 end
@@ -631,10 +635,12 @@ History is in-memory for the current daemon session. Retained records own their
 image handles until dismissed; completing an exit releases only the visual
 ghost and its callback/item references.
 
-Use explicit commands from `app:on_action` or a completion callback:
+Use explicit commands from `app:actions` or a completion callback:
 
 ```lua
-function app:on_action(key)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local key = events.key
     if key == "dismiss-all" then
         return notification.dismissAll() -- every output, including hidden history
     end
@@ -725,7 +731,7 @@ Each output/scene has independent Lua state. `app:view(props)` receives
 configured properties, `props.output = { name, x, y, width, height }`, and
 output-local `props.notifications`. Existing services (`system`, `theme`,
 `wayland`, and metadata-only global `notifications`) are published before entries.
-`app:on_action(key, value)` updates state; optional `app:on_tick()` opts into
+`app:actions(events)` updates state; optional `app:on_tick()` opts into
 250ms periodic updates. Static scenes only re-run for input/config/service
 changes or source reloads. Notification commands can be returned from any scene.
 

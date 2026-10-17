@@ -607,6 +607,12 @@ pub enum ConfigPatch {
         x: f32,
         y: f32,
     },
+    RepositionDesktopWidget {
+        id: String,
+        output: String,
+        x: f32,
+        y: f32,
+    },
     SetDesktopWidgetSize {
         index: usize,
         width: f32,
@@ -684,7 +690,7 @@ pub use paths::config_path;
 /// from the last tick, the bar repaints. Editing the `.lua` file
 /// reloads it live (mtime watch) — including `app:popup()`/
 ///
-/// `app:on_action()`: opening a menu always uses the saved file, and
+/// `app:actions()`: opening a menu always uses the saved file, and
 /// an open menu refreshes within a tick of saving (broken edits keep
 /// the last good menu and log once). Errors log once per message,
 /// never per tick.
@@ -772,7 +778,7 @@ pub use paths::config_path;
 /// slots = [{ widgets = [{ name = "clock", size = 16.0, props = { show_seconds = true } }] }]
 /// ```
 ///
-/// Before every `view()`/`popup()`/`on_action()`, the engine sets
+/// Before every `view()`/`popup()`/`actions()`, the engine sets
 /// `self.props` to the resolved table (definition defaults overlaid
 /// with placement overrides) — read per-instance values from there,
 /// never from `app.defaults` directly. `property_schema` is optional
@@ -791,8 +797,8 @@ pub use paths::config_path;
 ///   nest freely.
 /// - `iced.button(label, action)` or `iced.button(label):action(key)`:
 ///   the last action setter wins over the constructor key. Clicking calls
-///   that widget's `on_action(action)` directly (missing `on_action`
-///   is a silent no-op), never the slot popup/`on_press` fallback.
+///   that widget's `actions({type="action",key=key})` directly (missing
+///   `actions` is a silent no-op), never the slot popup/click fallback.
 ///   `:background()` repaints the resting surface; hover/press stay
 ///   themed so clicks still read.
 /// - `iced.progress(0.0-1.0 [, width])`: bar, clamped, 120px default.
@@ -884,14 +890,16 @@ pub use paths::config_path;
 ///
 /// ## Notification queue: the `notifications` global
 ///
-/// Republished before every `render()`/`popup()`/`on_action` call
+/// Republished before every `render()`/`popup()`/`actions` call
 /// (newest-first): `notifications = { {id, app, title, body, urgency,
 /// has_image}, ... }` — metadata only, no image handles or actions.
 /// Build a notification center from this (see the `notifycenter`
-/// seed) and dismiss with the `on_action` return convention:
+/// seed) and dismiss with the `actions` return convention:
 ///
 /// ```lua
-/// function app:on_action(key)
+/// function app:actions(events)
+///     if events.type ~= "action" then return end
+///     local key = events.key
 ///     local id = key:match("^dismiss:(%d+)$")
 ///     if id then return { dismiss = tonumber(id) } end
 /// end
@@ -947,25 +955,27 @@ pub use paths::config_path;
 /// constructor use is legacy (still fully supported — nothing was
 /// removed, new widgets should just reach for components first).
 ///
-/// ## Clicks: `popup()` / `on_press()` / `on_action(action)`
+/// ## Events: `popup()` / `actions(events)`
 ///
 /// Clicking a slot runs widget Lua: `popup()` (when defined) toggles a
 /// menu with its return — either body text or a table with `text`,
 /// `width`/`height`, clickable `items` (`{ label, action }` rows
-/// calling `on_action(action)`), and a composed `ui` body (any `ui.*`
+/// calling `actions({type="action",key=action})`), and a composed `ui` body (any `iced.*`
 /// tree, rendered above the items). `iced.button`s inside the body work
-/// exactly like `items` rows (same `on_action` key); `items` remains
+/// exactly like `items` rows (same event key); `items` remains
 /// the shorthand for uniform full-width menu rows. Otherwise
-/// `on_press()` runs as a
+/// `actions(events)` receives a `click` event as a
 /// bare click action and the cell re-renders after it. A popup with no
 /// text, tree, or items never opens. Size without items is just
 /// `{ text = os.date("%A"), width = 300, height = 200 }`. Clicks are
 /// hit-tested per widget (each cell widget owns a mouse area), so
-/// every widget in a slot gets its own popup/`on_press` calls.
+/// every widget in a slot gets its own popup/click calls.
 /// Presses record their target and only the matching release acts,
 /// which also keeps inner `iced.button` clicks from double-firing the
 /// widget. Gap clicks fall back to the slot (first popup, else first
-/// `on_press`).
+/// `actions` callback). Other unconsumed pointer events, holds (500ms), and
+/// delivered keys use the same callback. Desktop callbacks can call
+/// `self.reposition()`; see `docs/lua-api.md` for event fields and restrictions.
 ///
 /// ```lua
 /// local app = { details = false }
@@ -975,8 +985,8 @@ pub use paths::config_path;
 ///              width = 300, height = 200 }
 /// end
 ///
-/// function app:on_action(name)  -- popup items + cell buttons land here
-///     if name == "toggle" then self.details = not self.details end
+/// function app:actions(events)  -- popup items + cell buttons land here
+///     if events.type == "action" and events.key == "toggle" then self.details = not self.details end
 /// end
 /// return app
 /// ```
@@ -1265,7 +1275,7 @@ pub(crate) use seed::SEED_GPU_LUA;
 
 /// Seed session menu: power-icon cell, popup with suspend /
 /// poweroff / hibernate / reboot rows dispatching `systemctl`.
-/// `on_action` whitelists the four keys (never interpolates a raw
+/// `actions` whitelists the four keys (never interpolates a raw
 /// key into shell). Place it in a bar slot to use it.
 /// to use it.
 #[cfg(test)]
@@ -1277,7 +1287,7 @@ pub(crate) use seed::{SEED_CONTEXT_MENU, SEED_CONTEXT_MENU_ITEM, SEED_SELECTION_
 /// Seed notification-center widget: a bell cell counting the live
 /// queue, with a popup listing the newest notifications and a dismiss
 /// button per row. Reads the `notifications` global (republished
-/// before every render) and dismisses via the `on_action` return
+/// before every render) and dismisses via the `actions` return
 /// convention (`{ dismiss = id }`). Uncomment its `[[widget]]` entry
 /// in a bar slot to use it.
 #[cfg(test)]
@@ -1341,6 +1351,19 @@ impl Config {
                     && y.is_finite()
                     && let Some(widget) = self.desktop.get_mut(index)
                 {
+                    widget.x = x;
+                    widget.y = y;
+                }
+            }
+            ConfigPatch::RepositionDesktopWidget { id, output, x, y } => {
+                if !output.is_empty()
+                    && x.is_finite()
+                    && y.is_finite()
+                    && x.abs() <= 32768.0
+                    && y.abs() <= 32768.0
+                    && let Some(widget) = self.desktop.iter_mut().find(|widget| widget.id == id)
+                {
+                    widget.output = output;
                     widget.x = x;
                     widget.y = y;
                 }

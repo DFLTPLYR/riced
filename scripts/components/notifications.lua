@@ -16,7 +16,9 @@ function app:view(props)
         :onDisplaced({ duration = 250 })
         :width(360):anchor("top-right"):margin(16)
 end
-function app:on_action(key)
+function app:actions(events)
+    if events.type ~= "action" then return end
+    local key = events.key
     local id = key:match("^dismiss:(%d+)$")
     if id then return { dismiss = tonumber(id) } end
     local target, action = key:match("^invoke:(%d+):(.*)$")
