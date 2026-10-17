@@ -26,6 +26,8 @@ return app
 `app.defaults` declares `interval`, `size`, and custom `props` (see Widget properties).
 Before every `view()`/`popup()`/`on_action()`, the engine sets `self.props` to the
 resolved table — read per-instance values there, never from `app.defaults` directly.
+It also sets `self.hovered` (`true` while the pointer is over that placement or
+component, else `false`); see Hover state.
 
 ## `iced.*` constructors
 
@@ -122,6 +124,42 @@ containing `-` must use `iced.use("name", props)` or `iced["name"](props)` —
 `iced.my-name` parses as subtraction. Unknown component names and non-node
 returns error naming the component. `iced.to_table(node)` exports a description
 table; `iced.components.<name>` exposes `{ rust_type, arguments, setters }`.
+
+## Hover state
+
+Host-owned booleans, re-published before `view()` whenever they change. Lua holds
+no live references: the engine derives the flags from iced enter/exit reports and
+re-runs only the affected view. Moving within the same row never re-executes Lua.
+
+| Flag | Scope | Meaning |
+|---|---|---|
+| `self.hovered` | widget placements, composable apps | pointer is over this placement/instance |
+| `item.hovered` | every `listview` delegate invocation | pointer is over this row's `(list id, key)` |
+
+```lua
+:delegate(function(n)
+    local card = riced.component("notification_card.lua", n)
+    if n.hovered then card = card:background(theme.hover) end
+    return card
+end)
+```
+
+Row hover flows into nested components: `riced.component("card.lua", item)` forwards
+`item.hovered` into the card's `self.hovered`, so cards stay self-contained:
+
+```lua
+function app:view(props)
+    return iced.container(iced.text(props.title))
+        :background(self.hovered and theme.primary or theme.surface)
+end
+```
+
+Rules: absent means unhovered (an untracked list decodes `hovered` as `false`, so
+`item.hovered` is always a safe boolean test). Exit ghosts are inert and never
+hovered. Entering one row clears the rest of its surface (single pointer), which
+also heals flags left stale by a closed window. No hover while untouched by the
+pointer (touch/no-pointer yields all-`false`). Native button hover/pressed
+styling stays as the default; read the flag only to style surrounding content.
 
 ## `riced.*`
 

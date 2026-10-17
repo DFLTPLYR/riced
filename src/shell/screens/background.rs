@@ -53,7 +53,7 @@ mod tests {
             .join("scripts/components/context_menu_item.lua");
         let item = path.to_string_lossy();
         let (node, props) = runtime
-            .component_view(&overrides, &context_menu_host(&item), &theme)
+            .component_view(&overrides, &context_menu_host(&item), &theme, false)
             .unwrap();
         assert_eq!(
             props["width"],
@@ -708,6 +708,29 @@ impl Background {
         }
     }
 
+    /// Pointer entered or left one composable instance: republish
+    /// `self.hovered` for it. The flag rides the render revision, so the
+    /// changed instance re-runs Lua on the next frame without touching
+    /// other instances. Never invokes Lua.
+    pub(crate) fn handle_hover(
+        plots: &mut Plots,
+        _window: window::Id,
+        instance: String,
+        hovered: bool,
+    ) -> Command<Plant> {
+        let mut runtime = plots.desktop.composable_runtime.borrow_mut();
+        if hovered {
+            // Single pointer: entering one instance clears the rest.
+            // This also heals flags left stale by a closed window.
+            runtime.hovered.retain(|key, _| key == &instance);
+            runtime.hovered.insert(instance, true);
+        } else {
+            runtime.hovered.remove(&instance);
+        }
+        runtime.hovered.retain(|_, flag| *flag);
+        Command::none()
+    }
+
     // ------------------------------------------------------------------
     // View — selection + context menu overlays, clipped to *this*
     // Background's available rect (not the full output).
@@ -891,6 +914,7 @@ impl Background {
 
     fn context_menu_overlay(
         plots: &Plots,
+        id: window::Id,
         output: OutputId,
         avail: (f32, f32, f32, f32),
     ) -> Element<'_, Plant> {
@@ -912,6 +936,19 @@ impl Background {
         });
         let content =
             crate::ui::build::build_node(&node, 12.0, Some(message)).expect("validated menu tree");
+        // Instance-level hover for the menu composable. Rows keep their
+        // native button feedback; the frame reads `self.hovered`.
+        let instance = format!("context-menu/{output:?}");
+        let content = iced::widget::mouse_area(content)
+            .on_enter(Plant::BackgroundPlot(BackgroundEvent::Hover(
+                id,
+                instance.clone(),
+                true,
+            )))
+            .on_exit(Plant::BackgroundPlot(BackgroundEvent::Hover(
+                id, instance, false,
+            )))
+            .into();
         crate::ui::widgets::anchored::anchored(
             content,
             Point::new(lx, ly),
@@ -927,7 +964,7 @@ impl Background {
         // the debug label, selection, and menu overlays on top.
         let mut layers = Self::wallpaper_views(plots, output);
         layers.push(Self::selection_overlay(plots, output, avail));
-        layers.push(Self::context_menu_overlay(plots, output, avail));
+        layers.push(Self::context_menu_overlay(plots, id, output, avail));
 
         // Content lives in the helpers above; the panel owns Fill + events.
         background_window(id).content(stack(layers)).into()

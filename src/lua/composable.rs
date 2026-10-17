@@ -18,6 +18,7 @@ struct Revision {
     length: Option<u64>,
     library: Option<SystemTime>,
     dependencies: Value,
+    hovered: bool,
 }
 
 #[derive(Default)]
@@ -32,6 +33,10 @@ struct Instance {
 #[derive(Default)]
 pub(crate) struct ComposableRuntime {
     instances: HashMap<String, Instance>,
+    /// Instance-level hover flags. Set from iced enter/exit reports;
+    /// published as `self.hovered` and folded into the revision so a
+    /// change re-renders that instance only.
+    pub hovered: HashMap<String, bool>,
 }
 
 impl std::fmt::Debug for ComposableRuntime {
@@ -75,6 +80,7 @@ impl ComposableRuntime {
         let path = source_path(src);
         let metadata = std::fs::metadata(&path).ok();
         let overrides = serde_json::json!({});
+        let hovered = self.hovered.get(instance).copied().unwrap_or(false);
         let revision = Revision {
             path: path.clone(),
             modified: metadata.as_ref().and_then(|m| m.modified().ok()),
@@ -84,6 +90,7 @@ impl ComposableRuntime {
                 "item_component": host.get("item_component"),
                 "item_revision": host.get("_item_revision"),
             }),
+            hovered,
         };
         let input = serde_json::json!({
             "host": host,
@@ -101,7 +108,7 @@ impl ComposableRuntime {
                 let mut runtime = LuaRuntime::with_components(crate::config::component_files())?;
                 runtime.publish_theme(theme)?;
                 runtime.load_named(&source, &path.display().to_string())?;
-                let (node, props) = runtime.component_view(&overrides, &host, theme)?;
+                let (node, props) = runtime.component_view(&overrides, &host, theme, hovered)?;
                 let rendered = Rendered { node, props };
                 validate(&rendered).map_err(mlua::Error::RuntimeError)?;
                 Ok((runtime, rendered))
@@ -120,7 +127,7 @@ impl ComposableRuntime {
         // A rejected replacement must not freeze a drag at its old size:
         // invoke the old app with the new host geometry and current theme.
         if let Some(runtime) = &mut state.runtime {
-            match runtime.component_view(&overrides, &host, theme) {
+            match runtime.component_view(&overrides, &host, theme, hovered) {
                 Ok((node, props)) => {
                     let rendered = Rendered { node, props };
                     match validate(&rendered) {
@@ -291,7 +298,9 @@ mod tests {
         runtime.publish_theme(&theme).unwrap();
         runtime.load(crate::config::SEED_SELECTION_RECT).unwrap();
         let host = json!({"width": 140, "height": 60, "opacity": 0.4});
-        let (node, props) = runtime.component_view(&json!({}), &host, &theme).unwrap();
+        let (node, props) = runtime
+            .component_view(&json!({}), &host, &theme, false)
+            .unwrap();
         assert_eq!(props["radius"], 0);
         assert_eq!(props["border_width"], 1);
         assert_eq!(props["fill_alpha"], 0.5);
@@ -313,8 +322,46 @@ mod tests {
         }
         crate::ui::build::build_node_opacity(&node, 13.0, None, 0.4).unwrap();
         theme.darkmode = !theme.darkmode;
-        let (updated, _) = runtime.component_view(&json!({}), &host, &theme).unwrap();
+        let (updated, _) = runtime
+            .component_view(&json!({}), &host, &theme, false)
+            .unwrap();
         assert_ne!(node, updated);
+    }
+
+    #[test]
+    fn hovered_joins_the_revision_and_republishes_to_self() {
+        let dir = std::env::temp_dir().join(format!("riced-chrome-hover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.lua");
+        std::fs::write(
+            &path,
+            "return {view=function(self) return iced.text(self.hovered and 'hot' or 'cold') end}",
+        )
+        .unwrap();
+        let config = path.to_string_lossy();
+        let mut engine = ComposableRuntime::default();
+        let theme = ThemeConfig::default();
+        let text = |rendered: &super::Rendered| match &rendered.node {
+            WidgetNode::Text { content, .. } => content.clone(),
+            other => panic!("text, got {other:?}"),
+        };
+        let cold = engine
+            .render("one", &config, json!({}), &theme, None)
+            .unwrap();
+        assert_eq!(text(&cold), "cold");
+        // Same source and host: only the hover flag re-renders.
+        engine.hovered.insert("one".into(), true);
+        let hot = engine
+            .render("one", &config, json!({}), &theme, None)
+            .unwrap();
+        assert_eq!(text(&hot), "hot");
+        assert_ne!(cold.node, hot.node);
+        engine.hovered.remove("one");
+        let cold_again = engine
+            .render("one", &config, json!({}), &theme, None)
+            .unwrap();
+        assert_eq!(text(&cold_again), "cold");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

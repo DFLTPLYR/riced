@@ -74,9 +74,11 @@ fn notify_center_seed_reads_queue_and_dismisses() {
         None,
     )
     .unwrap();
-    let _ =
-        crate::shell::screens::Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap())
-            .unwrap();
+    let _ = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
     lua.load("notifications={{id=42,app='mako',title='hi',body='b',urgency=1,has_image=false}}")
         .exec()
         .unwrap();
@@ -84,9 +86,11 @@ fn notify_center_seed_reads_queue_and_dismisses() {
         parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap(),
         WidgetNode::Row { .. }
     ));
-    let content =
-        crate::shell::screens::Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap())
-            .unwrap();
+    let content = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
     let mut actions = Vec::new();
     if let Some(tree) = &content.tree {
         button_actions(tree, &mut actions);
@@ -182,16 +186,20 @@ fn seed_scripts_parse_and_build() {
     load_seed_components(&lua);
     load_widget_script(&lua, "clinepass", SEED_CLINEPASS_LUA).unwrap();
     publish_test_services(&lua, &system, None);
-    let content =
-        crate::shell::screens::Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap())
-            .unwrap();
+    let content = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
     assert!(content.tree.is_some());
     let lua = new_widget_lua().unwrap();
     load_seed_components(&lua);
     load_widget_script(&lua, "system", SEED_SYSTEM_LUA).unwrap();
-    let content =
-        crate::shell::screens::Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap())
-            .unwrap();
+    let content = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
     assert!(content.items.is_empty());
     let mut actions = Vec::new();
     if let Some(tree) = &content.tree {
@@ -258,18 +266,22 @@ fn clinepass_popup_parses_real_usage_shape() {
         &SEED_CLINEPASS_LUA.replace(r#"local API_KEY = """#, r#"local API_KEY = "x""#),
     )
     .unwrap();
-    let content =
-        crate::shell::screens::Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap())
-            .unwrap();
+    let content = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
     assert!(
         matches!(content.tree.unwrap(), WidgetNode::Column {children, ..} if children.len() == 3)
     );
     call_lua_value(&lua, "view").unwrap();
-    let tree =
-        crate::shell::screens::Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap())
-            .unwrap()
-            .tree
-            .unwrap();
+    let tree = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap()
+    .tree
+    .unwrap();
     let _ = build_node(&tree, 13.0, None).unwrap();
     match tree {
         WidgetNode::Column { children, .. } => {

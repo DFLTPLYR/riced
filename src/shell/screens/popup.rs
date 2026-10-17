@@ -6,7 +6,7 @@ use crate::lua::widgets::lua_has_func;
 use crate::shell::state::Plots;
 use crate::shell::{Plant, TopEvent, WidgetEvent};
 use crate::theme;
-use crate::ui::decode::parse_node;
+use crate::ui::decode::parse_node_hovered;
 use crate::ui::icons::rich_text;
 use crate::ui::node::WidgetNode;
 use iced::window;
@@ -43,6 +43,9 @@ pub struct Popup {
     pub items: Vec<PopupItem>,
     /// Last rendered composed body (`ui` field).
     pub tree: Option<WidgetNode>,
+    /// Listview rows hovered in this popup, keyed `(list id, item key)`.
+    /// Re-parsed into `item.hovered` on change; dropped with the popup.
+    pub hovered: crate::ui::hover::HoverSet,
     /// Text size, from the widget def at open time.
     pub size: f32,
     /// Box size in px.
@@ -138,7 +141,10 @@ impl Popup {
     /// body text, a table carries `text`/`width`/`height`/`items` plus
     /// an optional `ui` tree (any `ui.*` constructor result) rendered
     /// above the items.
-    pub(crate) fn parse_popup_content(value: mlua::Value) -> Result<PopupContent, String> {
+    pub(crate) fn parse_popup_content(
+        value: mlua::Value,
+        hover: &crate::ui::hover::HoverSet,
+    ) -> Result<PopupContent, String> {
         use mlua::Value;
         match value {
             Value::Table(t) => {
@@ -161,7 +167,7 @@ impl Popup {
                 let height = number("height")?;
                 let tree = match t.get::<Value>("ui").map_err(|e| e.to_string())? {
                     Value::Nil => None,
-                    other => Some(parse_node(&other)?),
+                    other => Some(parse_node_hovered(&other, hover)?),
                 };
                 let mut items = Vec::new();
                 match t.get::<Value>("items").map_err(|e| e.to_string())? {
@@ -381,7 +387,7 @@ impl Popup {
         let body = match plots
             .placements
             .popup(&resolved, &entry)?
-            .and_then(Self::parse_popup_content)
+            .and_then(|value| Self::parse_popup_content(value, &Default::default()))
         {
             Ok(content) => content,
             Err(error) => {
@@ -471,6 +477,12 @@ impl Popup {
             let msg: crate::ui::action::Sender = std::sync::Arc::new(move |action| {
                 Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(win_id, action)))
             });
+            let hover: crate::ui::action::HoverSender =
+                std::sync::Arc::new(move |list, key, entered| {
+                    Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupHover(
+                        win_id, list, key, entered,
+                    )))
+                });
             if let Ok(node) = super::top::build_with_lists(
                 tree,
                 &format!("popup:{win_id:?}"),
@@ -478,6 +490,7 @@ impl Popup {
                 Some(msg),
                 &plots.animation.motion,
                 &plots.animation.widgets,
+                Some(hover),
             ) {
                 content = content.push(node);
             }
@@ -587,8 +600,16 @@ impl Popup {
                         services: crate::services::ServiceCtx::from_plots(plots, gpu),
                         output: &output,
                     };
+                    let hover = plots
+                        .windows
+                        .popups
+                        .get(&pid)
+                        .map(|popup| popup.hovered.clone())
+                        .unwrap_or_default();
                     match plots.placements.popup(&resolved, &entry) {
-                        Some(result) => match result.and_then(Self::parse_popup_content) {
+                        Some(result) => match result
+                            .and_then(|value| Self::parse_popup_content(value, &hover))
+                        {
                             Ok(content) => Some(content),
                             Err(error) => {
                                 Top::note_widget_error(plots, &label, error);
@@ -612,6 +633,44 @@ impl Popup {
             Command::none()
         } else {
             Command::batch(cmds)
+        }
+    }
+
+    /// Pointer entered or left one popup listview row: re-parse that popup
+    /// with the row's `item.hovered` set. Unknown popups and unchanged
+    /// flags are ignored. Never invokes Lua.
+    pub(crate) fn handle_hover(
+        plots: &mut Plots,
+        id: window::Id,
+        list: String,
+        key: String,
+        hovered: bool,
+    ) -> Command<Plant> {
+        let Some(popup) = plots.windows.popups.get_mut(&id) else {
+            return Command::none();
+        };
+        let owned = (list, key);
+        let mut changed = false;
+        if hovered {
+            // Single pointer: entering one row clears the rest of the popup.
+            for other in popup
+                .hovered
+                .iter()
+                .filter(|entry| **entry != owned)
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                popup.hovered.remove(&other);
+                changed = true;
+            }
+            changed |= popup.hovered.insert(owned);
+        } else {
+            changed = popup.hovered.remove(&owned);
+        }
+        if changed {
+            Self::refresh_bodies(plots)
+        } else {
+            Command::none()
         }
     }
 
@@ -688,24 +747,128 @@ mod tests {
     use crate::ui::node::NodeLength;
 
     #[test]
+    fn popup_hover_reparses_with_item_hovered_and_ignores_stale_popups() {
+        use crate::config::{WidgetDefinition, WidgetPlacement};
+        let dir = std::env::temp_dir().join(format!("riced-popup-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("hover.lua");
+        std::fs::write(
+            &script,
+            "return {view=function() return 'x' end, popup=function() return { ui = iced.listview({{id=1},{id=2}}):id('rows'):key('id'):delegate(function(n) return iced.text(n.hovered and 'hot' or 'cold') end) } end}",
+        )
+        .unwrap();
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = crate::shell::state::Plots::new(receiver);
+        let bar = window::Id::unique();
+        let mut top = Top::new();
+        top.local.widgets = vec![vec![WidgetPlacement {
+            id: "whover".into(),
+            name: "hoverpop".into(),
+            file: Some(script.to_string_lossy().into()),
+            ..Default::default()
+        }]];
+        plots.windows.tops.insert(bar, top);
+        plots.catalog.definitions.push(WidgetDefinition {
+            name: "hoverpop".into(),
+            file: script.clone(),
+            defaults: Default::default(),
+            schema: Default::default(),
+        });
+        let pid = window::Id::unique();
+        plots.windows.popups.insert(
+            pid,
+            Popup {
+                win_id: pid,
+                bar_id: bar,
+                slot: 0,
+                placement: "whover".into(),
+                body: String::new(),
+                items: Vec::new(),
+                tree: None,
+                hovered: Default::default(),
+                size: 13.0,
+                w: 220,
+                h: 137,
+                auto_height: true,
+                max_height: 1080.0,
+                sizing_revision: 0,
+                measured_revision: None,
+                positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                    window::Id::unique(),
+                    iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),
+                    (0, 0),
+                ),
+            },
+        );
+        let labels = |plots: &crate::shell::state::Plots| {
+            let WidgetNode::ListView { items, .. } =
+                plots.windows.popups[&pid].tree.as_ref().unwrap()
+            else {
+                panic!("list");
+            };
+            items
+                .iter()
+                .map(|(_, node)| match node {
+                    WidgetNode::Text { content, .. } => content.clone(),
+                    other => panic!("text, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // Stale popups are ignored without touching Lua.
+        let _ = Popup::handle_hover(
+            &mut plots,
+            window::Id::unique(),
+            "rows".into(),
+            "2".into(),
+            true,
+        );
+        assert!(plots.windows.popups[&pid].hovered.is_empty());
+        let _ = Popup::handle_hover(&mut plots, pid, "rows".into(), "2".into(), true);
+        assert!(
+            plots.windows.popups[&pid]
+                .hovered
+                .contains(&("rows".to_string(), "2".to_string()))
+        );
+        assert_eq!(labels(&plots), ["cold", "hot"]);
+        // Entering the sibling clears the first; repeats and exits settle.
+        let _ = Popup::handle_hover(&mut plots, pid, "rows".into(), "1".into(), true);
+        assert_eq!(labels(&plots), ["hot", "cold"]);
+        let _ = Popup::handle_hover(&mut plots, pid, "rows".into(), "1".into(), true);
+        let _ = Popup::handle_hover(&mut plots, pid, "rows".into(), "1".into(), false);
+        assert!(plots.windows.popups[&pid].hovered.is_empty());
+        assert_eq!(labels(&plots), ["cold", "cold"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn lua_popup_content_parses_string_and_table_forms() {
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
-        let content = Popup::parse_popup_content(lua.load("return 'hi'").eval().unwrap()).unwrap();
+        let content = Popup::parse_popup_content(
+            lua.load("return 'hi'").eval().unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(content.text, "hi");
         assert!(content.width.is_none() && content.items.is_empty());
-        let content = Popup::parse_popup_content(lua.load("return {text='head',width=300,height=200,items={{label='a',action='go'},{label=7,action='n'}}}").eval().unwrap()).unwrap();
+        let content = Popup::parse_popup_content(lua.load("return {text='head',width=300,height=200,items={{label='a',action='go'},{label=7,action='n'}}}").eval().unwrap(), &Default::default()).unwrap();
         assert_eq!(content.text, "head");
         assert_eq!((content.width, content.height), (Some(300.0), Some(200.0)));
         assert_eq!(content.items.len(), 2);
         assert_eq!(content.items[0].action, "go");
         assert_eq!(content.items[1].label, "7");
         assert!(
-            Popup::parse_popup_content(lua.load("return {items='nope'}").eval().unwrap()).is_err()
+            Popup::parse_popup_content(
+                lua.load("return {items='nope'}").eval().unwrap(),
+                &Default::default()
+            )
+            .is_err()
         );
         let content = Popup::parse_popup_content(
             lua.load("return {ui=iced.row({iced.icon('cpu'),iced.text('x')})}")
                 .eval()
                 .unwrap(),
+            &Default::default(),
         )
         .unwrap();
         assert!(content.text.is_empty() && content.items.is_empty());
@@ -714,6 +877,7 @@ mod tests {
             lua.load("return {ui=iced.button('Reboot','reboot')}")
                 .eval()
                 .unwrap(),
+            &Default::default(),
         )
         .unwrap();
         assert!(
@@ -735,6 +899,7 @@ mod tests {
                 body: "before".into(),
                 items: vec![],
                 tree: None,
+                hovered: Default::default(),
                 size: 13.0,
                 w: 220,
                 h: 137,
@@ -787,7 +952,9 @@ mod tests {
         let lua = new_widget_lua().unwrap();
         load_seed_components(&lua);
         load_widget_script(&lua, "system", crate::config::SEED_SYSTEM_LUA).unwrap();
-        let content = Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap()).unwrap();
+        let content =
+            Popup::parse_popup_content(call_lua_value(&lua, "popup").unwrap(), &Default::default())
+                .unwrap();
         let (_, height) = Popup::content_size(1920.0, 1080.0, &content);
         let needed = crate::ui::build::estimate_height(content.tree.as_ref().unwrap(), 13.0);
         assert!(height as f32 >= needed, "popup {height}px clips {needed}px");
@@ -804,9 +971,11 @@ mod tests {
         }
         crate::lua::widgets::load_widget_script(&lua, "system", crate::config::SEED_SYSTEM_LUA)
             .unwrap();
-        let content =
-            Popup::parse_popup_content(crate::lua::widgets::call_lua_value(&lua, "popup").unwrap())
-                .unwrap();
+        let content = Popup::parse_popup_content(
+            crate::lua::widgets::call_lua_value(&lua, "popup").unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
         let tree = content.tree.unwrap();
         let runtime = aura_anim::core::runtime::MotionRuntime::new();
         let mut lists = HashMap::new();
@@ -815,8 +984,16 @@ mod tests {
         let handler: crate::ui::action::Sender = std::sync::Arc::new(move |key| {
             Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(popup_id, key)))
         });
-        let mut element =
-            top::build_with_lists(&tree, "session", 13.0, Some(handler), &runtime, &lists).unwrap();
+        let mut element = top::build_with_lists(
+            &tree,
+            "session",
+            13.0,
+            Some(handler),
+            &runtime,
+            &lists,
+            None,
+        )
+        .unwrap();
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             iced::Font::DEFAULT,
             iced::Pixels(13.0),

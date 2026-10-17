@@ -45,3 +45,9 @@ impl From<&str> for Action {
 }
 
 pub(crate) type Sender<M = crate::shell::Plant> = std::sync::Arc<dyn Fn(Action) -> M + Send + Sync>;
+
+/// Hover enter/exit reports: `(list id, item key, entered)`. Unlike [`Sender`],
+/// these never invoke Lua `on_action` — hosts update their hover sets and
+/// re-render the affected view with the new flags.
+pub(crate) type HoverSender<M = crate::shell::Plant> =
+    std::sync::Arc<dyn Fn(String, String, bool) -> M + Send + Sync>;

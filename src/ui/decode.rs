@@ -184,7 +184,16 @@ fn opt_axis(t: &Table) -> Result<bool, String> {
 }
 
 pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
-    let node = parse_component(value)?;
+    parse_node_hovered(value, &super::hover::HoverSet::new())
+}
+
+/// Decode with host-owned hover state: every listview delegate observes
+/// `item.hovered` for its own `(list id, key)`. Absence means unhovered.
+pub(crate) fn parse_node_hovered(
+    value: &Value,
+    hover: &super::hover::HoverSet,
+) -> Result<WidgetNode, String> {
+    let node = parse_component(value, hover)?;
     let Value::Table(table) = value else {
         return Ok(node);
     };
@@ -204,7 +213,7 @@ pub(crate) fn parse_node(value: &Value) -> Result<WidgetNode, String> {
     .wrap(node))
 }
 
-fn parse_component(value: &Value) -> Result<WidgetNode, String> {
+fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<WidgetNode, String> {
     let Value::Table(t) = value else {
         return Ok(WidgetNode::Text {
             content: coerce_text(value.clone(), "ui node")?,
@@ -326,8 +335,10 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
                 if item_callbacks.iter().any(Option::is_some) {
                     callbacks.push((key.clone(), item_callbacks));
                 }
+                item.set("hovered", hover.contains(&(id.clone(), key.clone())))
+                    .map_err(|e| e.to_string())?;
                 let value: Value = delegate.call(item).map_err(|e| e.to_string())?;
-                items.push((key, parse_node(&value)?));
+                items.push((key, parse_node_hovered(&value, hover)?));
             }
             let defaults: super::listview::ListView<String, WidgetNode> =
                 super::listview::ListView::default();
@@ -360,8 +371,9 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
                 .map(|w| w.max(0.0))
                 .unwrap_or(if border.is_some() { 1.0 } else { 0.0 });
             Ok(WidgetNode::Container {
-                child: Box::new(parse_node(
+                child: Box::new(parse_node_hovered(
                     &t.get::<Value>("child").map_err(|e| e.to_string())?,
+                    hover,
                 )?),
                 width: opt_length(t, "width", "iced.container()")?.unwrap_or(NodeLength::Native),
                 height: opt_length(t, "height", "iced.container()")?.unwrap_or(NodeLength::Native),
@@ -374,8 +386,9 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
         }
         "scrollable" => Ok(WidgetNode::Scrollable {
             scrollbar_hidden: scrollbar_hidden(t)?,
-            child: Box::new(parse_node(
+            child: Box::new(parse_node_hovered(
                 &t.get::<Value>("child").map_err(|e| e.to_string())?,
+                hover,
             )?),
             width: opt_length(t, "width", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
             height: opt_length(t, "height", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
@@ -439,7 +452,7 @@ fn parse_component(value: &Value) -> Result<WidgetNode, String> {
                     .map(|child| {
                         child
                             .map_err(|e| e.to_string())
-                            .and_then(|child| parse_node(&child))
+                            .and_then(|child| parse_node_hovered(&child, hover))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 Value::Nil => Vec::new(),
@@ -862,6 +875,31 @@ mod tests {
             }
             other => panic!("expected listview, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delegate_items_observe_hovered_from_decode_context() {
+        use std::collections::HashSet;
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let source = "return iced.listview({{id=1},{id=2}}):id('rows'):key('id'):delegate(function(item) return iced.text(item.hovered and 'hot' or 'cold') end)";
+        // Absent context means unhovered: delegates stay total without hosts.
+        let plain = parse_node(&lua.load(source).eval().unwrap()).unwrap();
+        let WidgetNode::ListView { items, .. } = &plain else {
+            panic!("listview");
+        };
+        assert!(items.iter().all(
+            |(_, node)| matches!(node, WidgetNode::Text { content, .. } if content == "cold")
+        ));
+        // Host hover sets surface per (list id, item key); other lists and
+        // keys are unaffected, and nested trees inherit the context.
+        let hovered = HashSet::from([("rows".to_string(), "2".to_string())]);
+        let node = parse_node_hovered(&lua.load(source).eval().unwrap(), &hovered).unwrap();
+        let WidgetNode::ListView { items, .. } = &node else {
+            panic!("listview");
+        };
+        assert!(matches!(&items[0].1, WidgetNode::Text { content, .. } if content == "cold"));
+        assert!(matches!(&items[1].1, WidgetNode::Text { content, .. } if content == "hot"));
     }
 
     #[test]

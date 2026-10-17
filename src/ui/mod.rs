@@ -7,6 +7,7 @@ pub(crate) mod components;
 pub mod decode;
 pub mod dsl;
 pub(crate) mod encode;
+pub mod hover;
 pub mod icons;
 pub(crate) mod image_value;
 pub(crate) mod layout_props;

@@ -48,6 +48,16 @@ fn render_slot_widgets(
                     slot,
                     id.clone(),
                 ))))
+                .on_enter(Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellHover(
+                    bar,
+                    id.clone(),
+                    true,
+                ))))
+                .on_exit(Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellHover(
+                    bar,
+                    id.clone(),
+                    false,
+                ))))
                 .into()
         };
         if let Some(node) = context.placements.trees.get(&(bar, id.clone())) {
@@ -97,6 +107,7 @@ fn render_slot_widgets(
                     Some(message),
                     context.motion,
                     context.lists,
+                    None,
                 ),
             };
             if let Ok(element) = built {

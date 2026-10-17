@@ -165,7 +165,7 @@ mod tests {
             .synchronize("widget", None, &node)
             .unwrap();
             let mut built =
-                super::super::build_with_lists(&node, "widget", 13.0, None, &motion, &lists)
+                super::super::build_with_lists(&node, "widget", 13.0, None, &motion, &lists, None)
                     .unwrap();
             let mut list =
                 iced::widget::column![iced::widget::Space::new().width(Length::Fill).height(20)]
@@ -234,7 +234,7 @@ mod tests {
         let mut motion = aura_anim::core::runtime::MotionRuntime::new();
         let mut lists = WidgetLists::new();
         lists.insert("clock/center".into(), ListView::new(108.0));
-        super::super::build_with_lists(&tree, "clock", 13.0, None, &motion, &lists).unwrap();
+        super::super::build_with_lists(&tree, "clock", 13.0, None, &motion, &lists, None).unwrap();
         for list in lists.values_mut() {
             list.clear_all(&mut motion);
         }

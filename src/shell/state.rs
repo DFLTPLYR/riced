@@ -845,6 +845,9 @@ impl Plots {
             Plant::BackgroundPlot(BackgroundEvent::Released(id, button)) => {
                 Background::handle_panel_button(self, id, button, false)
             }
+            Plant::BackgroundPlot(BackgroundEvent::Hover(id, instance, hovered)) => {
+                Background::handle_hover(self, id, instance, hovered)
+            }
             Plant::Config(ConfigEvent::ConfigTick) => {
                 // mtime check only; the reload itself redraws via ConfigReloaded
                 if let Some((cfg, mtime)) = Config::poll(&self.config_mtime) {
@@ -1150,6 +1153,12 @@ impl Plots {
                 WidgetEvent::CellAction(bar, placement, action) => {
                     Top::handle_cell_action(self, bar, placement, action)
                 }
+                WidgetEvent::CellHover(_bar, placement, hovered) => {
+                    Top::handle_cell_hover(self, placement, hovered)
+                }
+                WidgetEvent::PopupHover(id, list, key, hovered) => {
+                    Popup::handle_hover(self, id, list, key, hovered)
+                }
             },
             Plant::TopPlot(TopEvent::Bar(event)) => match event {
                 BarEvent::Length(id, value) => Top::handle_set_length(self, id, value),
@@ -1413,6 +1422,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         Plant::BackgroundPlot(BackgroundEvent::Pressed(..))
         | Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(..))
         | Plant::BackgroundPlot(BackgroundEvent::Released(..))
+        | Plant::BackgroundPlot(BackgroundEvent::Hover(..))
         // Accept re-emits as a Patch (already Scope::All); cancel is silent.
         | Plant::BackgroundPlot(BackgroundEvent::WallpaperPicked(Some(_))) => Scope::All,
         Plant::BackgroundPlot(BackgroundEvent::PickWallpaper)
@@ -1538,7 +1548,7 @@ mod tests {
             {label='Suspend',action='suspend'}, {label='Hibernate',action='hibernate'},
             {label='Reboot',action='reboot'}, {label='Power off',action='poweroff'}
         }})}):height('fill')}"#).eval().unwrap();
-        let content = Popup::parse_popup_content(value).unwrap();
+        let content = Popup::parse_popup_content(value, &Default::default()).unwrap();
         let mut plots = wallpaper_test_plots();
         let id = iced::window::Id::unique();
         plots.windows.popups.insert(
@@ -1551,6 +1561,7 @@ mod tests {
                 body: content.text,
                 items: content.items,
                 tree: content.tree,
+                hovered: Default::default(),
                 size: 13.0,
                 w: 220,
                 h: 64,
@@ -1979,6 +1990,7 @@ mod tests {
             body: String::new(),
             items: Vec::new(),
             tree,
+            hovered: Default::default(),
             size: 13.0,
             w: 100,
             h: 100,
@@ -2310,6 +2322,7 @@ mod tests {
                 body: String::new(),
                 items: Vec::new(),
                 tree: None,
+                hovered: Default::default(),
                 size: 13.0,
                 w: 100,
                 h: 100,
@@ -2373,6 +2386,65 @@ mod tests {
         assert_eq!(plots.placements.outputs.len(), 1);
         let _ = plots.update(Plant::Uproot(bar));
         assert!(plots.windows.tops.contains_key(&other));
+    }
+
+    #[test]
+    fn cell_hover_republishes_and_rerenders_only_the_entered_placement() {
+        use crate::config::{WidgetDefinition, WidgetPlacement};
+        let dir = std::env::temp_dir().join(format!("riced-cell-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("hover.lua");
+        std::fs::write(
+            &script,
+            "return {view=function(self) return self.hovered and 'hot' or 'cold' end}",
+        )
+        .unwrap();
+        let placement = |id: &str| WidgetPlacement {
+            id: id.into(),
+            name: "hovercell".into(),
+            file: Some(script.to_string_lossy().into()),
+            ..Default::default()
+        };
+        let mut plots = wallpaper_test_plots();
+        let bar = iced::window::Id::unique();
+        let mut top = Top::new();
+        top.local.widgets = vec![vec![placement("whover"), placement("whover2")]];
+        plots.windows.tops.insert(bar, top);
+        plots.catalog.definitions.push(WidgetDefinition {
+            name: "hovercell".into(),
+            file: script.clone(),
+            defaults: Default::default(),
+            schema: Default::default(),
+        });
+        let text = |plots: &Plots, id: &str| {
+            plots
+                .placements
+                .outputs
+                .get(&(bar, id.to_string()))
+                .cloned()
+        };
+        // Stale placement: ignored without touching Lua or the map.
+        let _ = Top::handle_cell_hover(&mut plots, "gone".into(), true);
+        assert!(plots.placements.hovered.is_empty());
+        assert!(plots.placements.outputs.is_empty());
+        let _ = Top::handle_cell_hover(&mut plots, "whover".into(), true);
+        assert_eq!(plots.placements.hovered.get("whover"), Some(&true));
+        assert_eq!(text(&plots, "whover").as_deref(), Some("hot"));
+        assert_eq!(text(&plots, "whover2"), None);
+        // Entering the sibling clears the first (single pointer) and
+        // re-renders both; repeats are no-ops.
+        let _ = Top::handle_cell_hover(&mut plots, "whover2".into(), true);
+        assert!(!plots.placements.hovered.contains_key("whover"));
+        assert_eq!(plots.placements.hovered.get("whover2"), Some(&true));
+        assert_eq!(text(&plots, "whover").as_deref(), Some("cold"));
+        assert_eq!(text(&plots, "whover2").as_deref(), Some("hot"));
+        let _ = Top::handle_cell_hover(&mut plots, "whover2".into(), true);
+        assert_eq!(plots.placements.hovered.len(), 1);
+        let _ = Top::handle_cell_hover(&mut plots, "whover2".into(), false);
+        assert!(plots.placements.hovered.is_empty());
+        assert_eq!(text(&plots, "whover2").as_deref(), Some("cold"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -327,8 +327,9 @@ impl Lists {
         node: &WidgetNode,
         runtime: &AnimRuntime,
         sender: Sender,
+        hover: Option<super::action::HoverSender>,
     ) -> Result<Element<'static, Plant>, String> {
-        let live = self.node(node, runtime, sender, true, 1.0)?;
+        let live = self.node(node, runtime, sender, hover, true, 1.0)?;
         let mut layer = iced::widget::stack![
             iced::widget::Space::new()
                 .width(Length::Fill)
@@ -363,6 +364,7 @@ impl Lists {
         node: &WidgetNode,
         runtime: &AnimRuntime,
         sender: Sender,
+        hover: Option<super::action::HoverSender>,
         active: bool,
         opacity: f32,
     ) -> Result<Element<'static, Plant>, String> {
@@ -372,12 +374,19 @@ impl Lists {
                 placement,
                 margin,
             } => Ok(super::widgets::anchored::placed(
-                self.node(child, runtime, sender, active, opacity)?,
+                self.node(child, runtime, sender, hover.clone(), active, opacity)?,
                 *placement,
                 *margin,
             )),
             WidgetNode::Clickable { child, action } => {
-                let body = self.node(child, runtime, sender.clone(), active, opacity)?;
+                let body = self.node(
+                    child,
+                    runtime,
+                    sender.clone(),
+                    hover.clone(),
+                    active,
+                    opacity,
+                )?;
                 let element = iced::widget::mouse_area(body)
                     .on_press(sender(action.clone().into()))
                     .into();
@@ -401,8 +410,14 @@ impl Lists {
                 let border = *border;
                 let radius = *radius;
                 let border_width = *border_width;
-                let element =
-                    iced::widget::container(self.node(child, runtime, sender, active, opacity)?);
+                let element = iced::widget::container(self.node(
+                    child,
+                    runtime,
+                    sender,
+                    hover.clone(),
+                    active,
+                    opacity,
+                )?);
                 let hints = iced::advanced::Widget::size(&element);
                 Ok(element
                     .width(width.resolve(hints.width))
@@ -425,8 +440,14 @@ impl Lists {
                 height,
                 scrollbar_hidden,
             } => {
-                let mut item =
-                    iced::widget::scrollable(self.node(child, runtime, sender, active, opacity)?);
+                let mut item = iced::widget::scrollable(self.node(
+                    child,
+                    runtime,
+                    sender,
+                    hover.clone(),
+                    active,
+                    opacity,
+                )?);
                 if *scrollbar_hidden {
                     item = item.direction(iced::widget::scrollable::Direction::Vertical(
                         iced::widget::scrollable::Scrollbar::hidden(),
@@ -452,7 +473,16 @@ impl Lists {
             } => {
                 let children = children
                     .iter()
-                    .map(|child| self.node(child, runtime, sender.clone(), active, opacity))
+                    .map(|child| {
+                        self.node(
+                            child,
+                            runtime,
+                            sender.clone(),
+                            hover.clone(),
+                            active,
+                            opacity,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 if matches!(node, WidgetNode::Row { .. }) {
                     let item = iced::widget::Row::with_children(children).spacing(*spacing);
@@ -500,10 +530,25 @@ impl Lists {
                         child,
                         runtime,
                         sender.clone(),
+                        hover.clone(),
                         active,
                         opacity * motion.opacity,
                     )?;
                     let child = measured::marked(child, Marker::Item(item_id(id, key)));
+                    // Live rows report hover so the host can re-parse with
+                    // `item.hovered` set. Ghosts stay inert and silent.
+                    let child = match &hover {
+                        Some(hover) => {
+                            let report = hover.clone();
+                            let list = id.clone();
+                            let item = key.clone();
+                            iced::widget::mouse_area(child)
+                                .on_enter(report(list.clone(), item.clone(), true))
+                                .on_exit(report(list, item, false))
+                                .into()
+                        }
+                        None => child,
+                    };
                     use std::hash::{Hash, Hasher};
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
                     key.hash(&mut hash);

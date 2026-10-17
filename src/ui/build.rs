@@ -734,6 +734,7 @@ mod tests {
                             &node,
                             &crate::ui::anim::AnimRuntime::default(),
                             std::sync::Arc::new(|_| Plant::Tend),
+                            None,
                         )
                         .unwrap(),
                     "animated" => crate::shell::screens::top::build_with_lists(
@@ -743,6 +744,7 @@ mod tests {
                         None,
                         &crate::ui::anim::AnimRuntime::default(),
                         &Default::default(),
+                        None,
                     )
                     .unwrap(),
                     _ => build_node(&node, 13.0, None).unwrap(),
@@ -816,6 +818,7 @@ mod tests {
                             &node,
                             &crate::ui::anim::AnimRuntime::default(),
                             std::sync::Arc::new(|_| Plant::Tend),
+                            None,
                         )
                         .unwrap(),
                     "animated" => crate::shell::screens::top::build_with_lists(
@@ -825,6 +828,7 @@ mod tests {
                         None,
                         &crate::ui::anim::AnimRuntime::default(),
                         &Default::default(),
+                        None,
                     )
                     .unwrap(),
                     _ => build_node(&node, 13.0, None).unwrap(),

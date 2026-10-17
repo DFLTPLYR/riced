@@ -48,6 +48,14 @@ pub enum OverlayEvent {
         revision: u64,
         data: Measurement,
     },
+    Hover {
+        surface: window::Id,
+        output: OutputId,
+        scene: String,
+        list: String,
+        key: String,
+        entered: bool,
+    },
 }
 
 #[cfg(test)]
@@ -77,6 +85,10 @@ struct Scene {
     frame: SharedFrame,
     regions: Vec<iced::Rectangle>,
     error: Option<String>,
+    /// Listview rows hovered in this scene, keyed `(list id, item key)`.
+    /// Decoded into `item.hovered`; dropped with the scene.
+    hovered: crate::ui::hover::HoverSet,
+    rendered_hovered: crate::ui::hover::HoverSet,
 }
 impl Scene {
     fn commit(
@@ -113,6 +125,9 @@ impl Scene {
         motion: &mut crate::ui::anim::AnimRuntime,
         force: bool,
     ) -> bool {
+        // Hover changes re-decode the view with new `item.hovered` flags,
+        // without invalidating the runtime or its cached Lua state.
+        let hover_changed = self.hovered != self.rendered_hovered;
         let result = (|| -> Result<bool, String> {
             let path = source_path(&spec.source);
             let source = std::fs::read_to_string(&path)
@@ -130,7 +145,7 @@ impl Scene {
                     .scene_tick(services, output)
                     .map_err(|error| error.to_string())?;
                 let node = runtime
-                    .scene_view(services, output, |lua| (spec.input)(lua))
+                    .scene_view(services, output, |lua| (spec.input)(lua), &self.hovered)
                     .map_err(|error| error.to_string())?;
                 return self.commit(node, motion, false);
             }
@@ -140,7 +155,7 @@ impl Scene {
                     .runtime
                     .as_ref()
                     .is_some_and(|runtime| runtime.has_handler("on_tick"));
-            if !changed && !force && !ticking {
+            if !changed && !force && !ticking && !hover_changed {
                 return Ok(false);
             }
             let mut candidate = if changed {
@@ -167,13 +182,14 @@ impl Scene {
                     .map_err(|error| error.to_string())?;
             }
             let node = runtime
-                .scene_view(services, output, |lua| (spec.input)(lua))
+                .scene_view(services, output, |lua| (spec.input)(lua), &self.hovered)
                 .map_err(|error| error.to_string())?;
             let modified = self.commit(node, motion, changed)?;
             if let Some(candidate) = candidate {
                 self.runtime = Some(candidate);
             }
             self.code = Some(signature);
+            self.rendered_hovered = self.hovered.clone();
             self.error = None;
             Ok(modified)
         })();
@@ -183,7 +199,8 @@ impl Scene {
                 crate::lua::error::report_once(&mut self.error, "overlay: ", error);
                 if force
                     && let Some(runtime) = self.runtime.as_mut()
-                    && let Ok(node) = runtime.scene_view(services, output, |lua| (spec.input)(lua))
+                    && let Ok(node) =
+                        runtime.scene_view(services, output, |lua| (spec.input)(lua), &self.hovered)
                 {
                     return self.commit(node, motion, false).unwrap_or(false);
                 }
@@ -392,7 +409,21 @@ pub(crate) fn view(plots: &Plots, output: OutputId) -> Element<'static, Plant> {
                 action,
             })
         });
-        if let Ok(element) = scene.lists.build(node, &plots.animation.motion, sender) {
+        let hover_name = id.clone();
+        let hover: crate::ui::action::HoverSender = Arc::new(move |list, key, entered| {
+            Plant::Overlay(OverlayEvent::Hover {
+                surface,
+                output,
+                scene: hover_name.clone(),
+                list,
+                key,
+                entered,
+            })
+        });
+        if let Ok(element) = scene
+            .lists
+            .build(node, &plots.animation.motion, sender, Some(hover))
+        {
             let name = id.clone();
             let revision = scene.revision;
             layer = layer.push(measured::root(
@@ -492,6 +523,44 @@ pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {
                 Task::batch([mask, Task::done(Plant::Overlay(OverlayEvent::Changed))])
             } else {
                 mask
+            }
+        }
+        OverlayEvent::Hover {
+            surface,
+            output,
+            scene,
+            list,
+            key,
+            entered,
+        } => {
+            if plots.windows.overlays.get(&output) != Some(&surface) {
+                return Task::none();
+            }
+            let Some(scene) = plots.desktop.overlays.scenes.get_mut(&(output, scene)) else {
+                return Task::none();
+            };
+            let owned = (list, key);
+            let mut changed = false;
+            if entered {
+                // Single pointer: entering one row clears the rest of the scene.
+                for other in scene
+                    .hovered
+                    .iter()
+                    .filter(|entry| **entry != owned)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    scene.hovered.remove(&other);
+                    changed = true;
+                }
+                changed |= scene.hovered.insert(owned);
+            } else {
+                changed = scene.hovered.remove(&owned);
+            }
+            if changed {
+                refresh(plots, false)
+            } else {
+                Task::none()
             }
         }
         OverlayEvent::Action {

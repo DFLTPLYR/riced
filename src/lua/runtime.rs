@@ -8,13 +8,22 @@ use super::{bridge, composable, sandbox};
 
 use super::props::component_props;
 use crate::ui::dsl::inject_ui_base;
-use crate::ui::{decode::parse_node, node::WidgetNode as Node};
+use crate::ui::{
+    decode::{parse_node, parse_node_hovered},
+    node::WidgetNode as Node,
+};
 use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua::Result<Value> {
     let props = component_props(lua, app, overrides, host)?;
     app.set("props", props.clone())?;
+    // Forward row hover into nested components so a delegate can render
+    // `riced.component("card.lua", item)` while the card reads `self.hovered`.
+    let hovered = props
+        .get::<Value>("hovered")
+        .is_ok_and(|value| value == Value::Boolean(true));
+    app.set("hovered", hovered)?;
     let result = (|| {
         let node = super::entry::invoke(
             lua,
@@ -290,6 +299,7 @@ impl LuaRuntime {
         services: &crate::services::ServiceCtx<'_>,
         output: &str,
         props: impl FnOnce(&Lua) -> mlua::Result<Table>,
+        hover: &crate::ui::hover::HoverSet,
     ) -> mlua::Result<Node> {
         let result = (|| {
             self.begin()?;
@@ -313,7 +323,7 @@ impl LuaRuntime {
                 "view",
                 mlua::MultiValue::from_vec(vec![Value::Table(props)]),
             )?;
-            let node = parse_node(&value).map_err(mlua::Error::RuntimeError)?;
+            let node = parse_node_hovered(&value, hover).map_err(mlua::Error::RuntimeError)?;
             // Child module props are entry-local. In particular an empty list
             // must not retain the last card's opaque image token in its module.
             let modules: Table = self.lua.named_registry_value("riced.component_modules")?;
@@ -377,6 +387,7 @@ impl LuaRuntime {
         overrides: &serde_json::Value,
         host: &serde_json::Value,
         theme: &crate::config::ThemeConfig,
+        hovered: bool,
     ) -> mlua::Result<(Node, serde_json::Value)> {
         let result = (|| {
             self.begin()?;
@@ -398,6 +409,7 @@ impl LuaRuntime {
             }
             let resolved = serde_json::Value::Object(resolved);
             app.set("props", props.clone())?;
+            app.set("hovered", hovered)?;
             let returned = super::entry::invoke(
                 &self.lua,
                 app,
@@ -456,6 +468,30 @@ mod tests {
         ));
     }
     use super::*;
+
+    #[test]
+    fn nested_components_observe_forwarded_hovered() {
+        let root = std::env::temp_dir().join(format!("riced-nested-hover-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let child = root.join("card.lua");
+        std::fs::write(
+            &child,
+            "return {view=function(self) return iced.text(self.hovered and 'hot' or 'cold') end}",
+        )
+        .unwrap();
+        let mut runtime = LuaRuntime::new().unwrap();
+        runtime.load(&format!("local app={{}}; function app:view() return riced.component({:?}, {{hovered=true}}) end; return app", child.to_string_lossy())).unwrap();
+        assert!(matches!(
+            runtime.view(WindowId(1)).unwrap(),
+            crate::ui::node::WidgetNode::Text { content, .. } if content == "hot"
+        ));
+        runtime.load(&format!("local app={{}}; function app:view() return riced.component({:?}, {{}}) end; return app", child.to_string_lossy())).unwrap();
+        assert!(matches!(
+            runtime.view(WindowId(2)).unwrap(),
+            crate::ui::node::WidgetNode::Text { content, .. } if content == "cold"
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn nested_components_cannot_reset_the_outer_entry_budget() {

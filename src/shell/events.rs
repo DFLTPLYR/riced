@@ -123,6 +123,12 @@ pub enum WidgetEvent {
     /// re-render that widget (a toggle flips its next output). Carries
     /// the origin bar so `on_action` sees that bar's `bar.output`.
     CellAction(Id, String, crate::ui::action::Action),
+    /// Pointer entered or left one widget placement: republish
+    /// `self.hovered` and re-render that placement only. Never invokes Lua.
+    CellHover(Id, String, bool),
+    /// Pointer entered or left one popup listview row: re-parse that popup
+    /// with the row's `item.hovered` set. Never invokes Lua.
+    PopupHover(Id, String, String, bool),
 }
 
 /// Bar/layout configuration events: geometry and per-slot layout,
@@ -219,6 +225,9 @@ pub enum BackgroundEvent {
     Repaint,
     Pressed(Id, Button),
     Released(Id, Button),
+    /// Pointer entered or left one composable instance: republish
+    /// `self.hovered` for that instance. Never invokes Lua.
+    Hover(Id, String, bool),
     /// Open a native file dialog for a new wallpaper. The async result
     /// comes back as `WallpaperPicked`: `Some(path)` on accept, `None`
     /// when the dialog is cancelled — which is a no-op by design.

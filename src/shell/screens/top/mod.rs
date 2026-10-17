@@ -359,6 +359,7 @@ fn build_anim_list(
             Some(button_msg.clone()),
             anim_runtime,
             lists,
+            None,
         )?;
         match child {
             WidgetNode::Button { action, .. } => {
@@ -464,6 +465,7 @@ pub(crate) fn build_with_lists(
     message: Option<crate::ui::action::Sender>,
     runtime: &aura_anim::core::runtime::MotionRuntime,
     lists: &WidgetLists,
+    hover: Option<crate::ui::action::HoverSender>,
 ) -> Result<Element<'static, Plant>, String> {
     match node {
         WidgetNode::Anchored {
@@ -471,12 +473,13 @@ pub(crate) fn build_with_lists(
             placement,
             margin,
         } => Ok(crate::ui::widgets::anchored::placed(
-            build_with_lists(child, widget, size, message, runtime, lists)?,
+            build_with_lists(child, widget, size, message, runtime, lists, hover)?,
             *placement,
             *margin,
         )),
         WidgetNode::Clickable { child, action } => {
-            let element = build_with_lists(child, widget, size, message.clone(), runtime, lists)?;
+            let element =
+                build_with_lists(child, widget, size, message.clone(), runtime, lists, hover)?;
             let mut area = iced::widget::mouse_area(element);
             if let Some(sender) = message {
                 area = area.on_press(sender(action.clone().into()));
@@ -503,11 +506,11 @@ pub(crate) fn build_with_lists(
                     .find(|(k, _)| k == &key.1)
                     .map(|(_, c)| c.clone())
             };
-            let render = |_: &(String, String),
+            let render = |key: &(String, String),
                           child: WidgetNode,
                           motion: crate::ui::anim::ItemMotion,
                           live: bool| {
-                if motion.opacity < 1.0 || !live {
+                let mut element = if motion.opacity < 1.0 || !live {
                     build_node_opacity(
                         &child,
                         size,
@@ -515,9 +518,29 @@ pub(crate) fn build_with_lists(
                         motion.opacity,
                     )
                 } else {
-                    build_with_lists(&child, widget, size, message.clone(), runtime, lists)
+                    build_with_lists(
+                        &child,
+                        widget,
+                        size,
+                        message.clone(),
+                        runtime,
+                        lists,
+                        hover.clone(),
+                    )
                 }
-                .unwrap_or_else(|error| text(error).into())
+                .unwrap_or_else(|error| text(error).into());
+                // Inert ghosts never report hover; live rows do, so the
+                // host can re-parse with `item.hovered` set.
+                if live && let Some(hover) = &hover {
+                    let report = hover.clone();
+                    let list = key.0.clone();
+                    let item = key.1.clone();
+                    element = iced::widget::mouse_area(element)
+                        .on_enter(report(list.clone(), item.clone(), true))
+                        .on_exit(report(list, item, false))
+                        .into();
+                }
+                element
             };
             let elements = if let Some(list) = lists.get(&owner) {
                 // Widget lists are already scoped per owner: no ghost filter.
@@ -525,8 +548,28 @@ pub(crate) fn build_with_lists(
             } else {
                 items
                     .iter()
-                    .map(|(_, c)| {
-                        build_with_lists(c, widget, size, message.clone(), runtime, lists)
+                    .map(|(key, c)| {
+                        let mut element = build_with_lists(
+                            c,
+                            widget,
+                            size,
+                            message.clone(),
+                            runtime,
+                            lists,
+                            hover.clone(),
+                        )?;
+                        // Lists without animation state still report hover
+                        // for their live rows.
+                        if let Some(hover) = &hover {
+                            let report = hover.clone();
+                            let list = id.clone();
+                            let item = key.clone();
+                            element = iced::widget::mouse_area(element)
+                                .on_enter(report(list.clone(), item.clone(), true))
+                                .on_exit(report(list, item, false))
+                                .into();
+                        }
+                        Ok::<_, String>(element)
                     })
                     .collect::<Result<Vec<_>, _>>()?
             };
@@ -576,7 +619,17 @@ pub(crate) fn build_with_lists(
         } => {
             let elements = children
                 .iter()
-                .map(|c| build_with_lists(c, widget, size, message.clone(), runtime, lists))
+                .map(|c| {
+                    build_with_lists(
+                        c,
+                        widget,
+                        size,
+                        message.clone(),
+                        runtime,
+                        lists,
+                        hover.clone(),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let content = iced::widget::Row::new().spacing(*spacing).extend(elements);
             let hints = iced::advanced::Widget::size(&content);
@@ -593,7 +646,17 @@ pub(crate) fn build_with_lists(
         } => {
             let elements = children
                 .iter()
-                .map(|c| build_with_lists(c, widget, size, message.clone(), runtime, lists))
+                .map(|c| {
+                    build_with_lists(
+                        c,
+                        widget,
+                        size,
+                        message.clone(),
+                        runtime,
+                        lists,
+                        hover.clone(),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let content = iced::widget::Column::new()
                 .spacing(*spacing)
@@ -619,7 +682,7 @@ pub(crate) fn build_with_lists(
             let border = *border;
             let border_width = *border_width;
             let content = container(build_with_lists(
-                child, widget, size, message, runtime, lists,
+                child, widget, size, message, runtime, lists, hover,
             )?);
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
@@ -644,7 +707,7 @@ pub(crate) fn build_with_lists(
             scrollbar_hidden,
         } => {
             let mut content = iced::widget::scrollable(build_with_lists(
-                child, widget, size, message, runtime, lists,
+                child, widget, size, message, runtime, lists, hover,
             )?);
             if *scrollbar_hidden {
                 content = content.direction(iced::widget::scrollable::Direction::Vertical(
@@ -1604,6 +1667,57 @@ impl Top {
             None => {}
         }
         Command::none()
+    }
+
+    /// Pointer entered or left one placement: republish `self.hovered` and
+    /// re-render changed placements only. Never invokes Lua. Placement ids
+    /// are process-unique, and the pointer is single, so entering one
+    /// placement clears the rest — this also heals flags left stale by a
+    /// closed window that never sent its exit.
+    pub(crate) fn handle_cell_hover(
+        plots: &mut Plots,
+        placement: String,
+        hovered: bool,
+    ) -> Command<Plant> {
+        if Self::resolve_placement_id(plots, &placement).is_none() {
+            return Command::none();
+        }
+        // Drop flags for removed placements; ids are never reused.
+        let live: std::collections::HashSet<String> = plots
+            .windows
+            .tops
+            .values()
+            .flat_map(|top| top.local.widgets.iter().flatten())
+            .map(|placement| placement.id.clone())
+            .collect();
+        plots.placements.retain_hovered(&live);
+        let mut dirty = Vec::new();
+        if hovered {
+            for (id, flag) in plots.placements.hovered.iter_mut() {
+                if *flag && id != &placement {
+                    *flag = false;
+                    dirty.push(id.clone());
+                }
+            }
+        }
+        match plots.placements.hovered.get(&placement).copied() {
+            Some(current) if current == hovered => {}
+            _ => {
+                plots.placements.hovered.insert(placement.clone(), hovered);
+                dirty.push(placement);
+            }
+        }
+        plots.placements.hovered.retain(|_, flag| *flag);
+        let gpu = Popup::gpu_usage_percent();
+        let mut repaint = false;
+        for id in dirty {
+            repaint |= Self::refresh_widget(plots, &id, gpu);
+        }
+        if repaint {
+            Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed)))
+        } else {
+            Command::none()
+        }
     }
 
     pub(crate) fn handle_set_opacity(

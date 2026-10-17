@@ -112,7 +112,7 @@ pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::
     super::callbacks::new_epoch(lua)
 }
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     time::{Instant, SystemTime},
 };
@@ -125,12 +125,21 @@ pub(crate) struct WidgetState {
     pub last_run: HashMap<String, Instant>,
     pub errors: HashMap<String, String>,
     pub revisions: HashMap<PathBuf, SystemTime>,
+    /// Placement-level hover flags by placement id. Placement ids are
+    /// process-unique, so one map covers every bar.
+    pub hovered: HashMap<String, bool>,
 }
 
 impl WidgetState {
     pub(crate) fn forget_window(&mut self, window: window::Id) {
         self.outputs.retain(|(owner, _), _| *owner != window);
         self.trees.retain(|(owner, _), _| *owner != window);
+    }
+
+    /// Drop hover flags for placements that no longer exist anywhere.
+    /// Placement ids are never reused, so this only runs on hover edits.
+    pub(crate) fn retain_hovered(&mut self, live: &HashSet<String>) {
+        self.hovered.retain(|id, _| live.contains(id));
     }
 
     /// Invalidate every instance using a changed path. Unreadable paths retain
@@ -157,10 +166,16 @@ impl WidgetState {
         lua: &Lua,
         resolved: &ResolvedWidget,
         context: &EntryContext<'_>,
+        hovered: bool,
     ) -> Result<(), String> {
         crate::services::publish_all(&context.services, lua).map_err(|error| error.to_string())?;
         crate::services::publish_bar(lua, context.output).map_err(|error| error.to_string())?;
-        super::props::publish_props(lua, &resolved.props).map_err(|error| error.to_string())
+        super::props::publish_props(lua, &resolved.props).map_err(|error| error.to_string())?;
+        let app: Table = lua
+            .named_registry_value("riced.widget.app")
+            .map_err(|error| error.to_string())?;
+        app.set("hovered", hovered)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn render(
@@ -169,8 +184,9 @@ impl WidgetState {
         context: &EntryContext<'_>,
     ) -> Result<Value, String> {
         self.ensure_instance(resolved)?;
+        let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         let lua = &self.instances[&resolved.id];
-        Self::publish_entry(lua, resolved, context)?;
+        Self::publish_entry(lua, resolved, context, hovered)?;
         call_lua_value(lua, "view")
     }
 
@@ -191,8 +207,9 @@ impl WidgetState {
         context: &EntryContext<'_>,
         action: &crate::ui::action::Action,
     ) -> Option<Result<Value, String>> {
+        let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         self.instances.get(&resolved.id).map(|lua| {
-            Self::publish_entry(lua, resolved, context)?;
+            Self::publish_entry(lua, resolved, context, hovered)?;
             call_lua_action(lua, action)
         })
     }
@@ -202,8 +219,9 @@ impl WidgetState {
         resolved: &ResolvedWidget,
         context: &EntryContext<'_>,
     ) -> Option<Result<Value, String>> {
+        let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         self.instances.get(&resolved.id).map(|lua| {
-            Self::publish_entry(lua, resolved, context)?;
+            Self::publish_entry(lua, resolved, context, hovered)?;
             call_lua_value(lua, "popup")
         })
     }
@@ -213,8 +231,9 @@ impl WidgetState {
         resolved: &ResolvedWidget,
         context: &EntryContext<'_>,
     ) -> Option<Result<(), String>> {
+        let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         self.instances.get(&resolved.id).map(|lua| {
-            Self::publish_entry(lua, resolved, context)?;
+            Self::publish_entry(lua, resolved, context, hovered)?;
             call_lua_value(lua, "on_press").map(|_| ())
         })
     }
@@ -274,6 +293,54 @@ mod tests {
         assert!(!lua_has_func(&states, "w", "on_press"));
         assert!(!lua_has_func(&states, "missing", "view"));
         assert!(call_lua_value(&states["w"], "on_press").is_err());
+    }
+
+    #[test]
+    fn published_hovered_reaches_self_without_touching_props() {
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(
+            &lua,
+            "test",
+            "return {view=function(self) return self.hovered and 'hot' or 'cold' end}",
+        )
+        .unwrap();
+        let system = sysinfo::System::new();
+        let outputs = Default::default();
+        let queue = Default::default();
+        let toplevels = Default::default();
+        let workspaces = Default::default();
+        let context = EntryContext {
+            services: crate::services::ServiceCtx {
+                sys: &system,
+                gpu: None,
+                theme: &crate::config::ThemeConfig::default(),
+                outputs: &outputs,
+                notifications: &queue,
+                toplevels: &toplevels,
+                workspaces: &workspaces,
+            },
+            output: "DP-1",
+        };
+        let resolved = ResolvedWidget {
+            id: "w1".into(),
+            name: "test".into(),
+            path: "test.lua".into(),
+            interval: 1.0,
+            size: 13.0,
+            props: HashMap::new(),
+        };
+        super::WidgetState::publish_entry(&lua, &resolved, &context, false).unwrap();
+        assert_eq!(
+            super::super::value::coerce_text(call_lua_value(&lua, "view").unwrap(), "view()")
+                .unwrap(),
+            "cold"
+        );
+        super::WidgetState::publish_entry(&lua, &resolved, &context, true).unwrap();
+        assert_eq!(
+            super::super::value::coerce_text(call_lua_value(&lua, "view").unwrap(), "view()")
+                .unwrap(),
+            "hot"
+        );
     }
 
     #[test]

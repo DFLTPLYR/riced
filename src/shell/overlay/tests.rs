@@ -218,6 +218,117 @@ fn sources_reload_only_after_successful_decode_and_keep_last_good_state() {
 }
 
 #[test]
+fn hover_rerenders_only_on_flag_changes_and_ignores_stale_events() {
+    let dir = directory("hover");
+    let path = dir.join("scene.lua");
+    std::fs::write(
+        &path,
+        "return {view=function(self, props) return iced.listview(props.notifications):id('rows'):key('id'):delegate(function(n) return iced.text(n.hovered and 'hot' or 'cold') end) end}",
+    )
+    .unwrap();
+    let input: Input = Arc::new(move |lua| {
+        let props = lua.create_table()?;
+        let items = lua.create_table()?;
+        for (index, id) in [7u32, 9].iter().enumerate() {
+            let item = lua.create_table()?;
+            item.set("id", *id)?;
+            items.set(index + 1, item)?;
+        }
+        props.set("notifications", items)?;
+        Ok(props)
+    });
+    let spec = Spec {
+        id: "test".into(),
+        source: path.display().to_string(),
+        input,
+    };
+    let mut scene = Scene::default();
+    let mut motion = crate::ui::anim::AnimRuntime::default();
+    assert!(render(&mut scene, &spec, &mut motion, true));
+    let hot = |scene: &Scene| {
+        let WidgetNode::ListView { items, .. } = scene.node.as_ref().unwrap() else {
+            panic!("list");
+        };
+        items
+            .iter()
+            .map(|(_, node)| match node {
+                WidgetNode::Text { content, .. } => content.clone(),
+                other => panic!("text, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hot(&scene), ["cold", "cold"]);
+    // Hover flags re-decode without touching the source or runtime.
+    scene.hovered.insert(("rows".into(), "9".into()));
+    assert!(render(&mut scene, &spec, &mut motion, false));
+    assert_eq!(hot(&scene), ["cold", "hot"]);
+    assert_eq!(scene.rendered_hovered, scene.hovered);
+    assert!(!render(&mut scene, &spec, &mut motion, false));
+    scene.hovered.clear();
+    assert!(render(&mut scene, &spec, &mut motion, false));
+    assert_eq!(hot(&scene), ["cold", "cold"]);
+    // Event routing updates the set with per-scene exclusivity and
+    // rejects unknown scenes and surfaces without touching Lua.
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let output = OutputId(9);
+    let surface = window::Id::unique();
+    plots.windows.overlays.insert(output, surface);
+    plots
+        .desktop
+        .overlays
+        .scenes
+        .insert((output, "test".into()), Scene::default());
+    let hover = |list: &str, key: &str, entered: bool| OverlayEvent::Hover {
+        surface,
+        output,
+        scene: "test".into(),
+        list: list.into(),
+        key: key.into(),
+        entered,
+    };
+    let set = |plots: &Plots| {
+        plots.desktop.overlays.scenes[&(output, "test".to_string())]
+            .hovered
+            .clone()
+    };
+    let _ = update(&mut plots, hover("rows", "9", true));
+    let _ = update(&mut plots, hover("rows", "7", true));
+    assert_eq!(set(&plots), [("rows".to_string(), "7".to_string())].into());
+    let _ = update(&mut plots, hover("rows", "7", true));
+    let _ = update(&mut plots, hover("rows", "7", false));
+    assert!(set(&plots).is_empty());
+    // Wrong surfaces and unknown scenes are ignored without touching Lua.
+    let _ = update(
+        &mut plots,
+        OverlayEvent::Hover {
+            surface: window::Id::unique(),
+            output,
+            scene: "test".into(),
+            list: "rows".into(),
+            key: "9".into(),
+            entered: true,
+        },
+    );
+    assert!(set(&plots).is_empty());
+    let _ = update(&mut plots, hover("rows", "9", true));
+    assert_eq!(set(&plots), [("rows".to_string(), "9".to_string())].into());
+    let _ = update(
+        &mut plots,
+        OverlayEvent::Hover {
+            surface,
+            output,
+            scene: "missing".into(),
+            list: "rows".into(),
+            key: "7".into(),
+            entered: true,
+        },
+    );
+    assert_eq!(set(&plots), [("rows".to_string(), "9".to_string())].into());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn independent_scene_vms_and_opt_in_ticks_do_not_share_state() {
     let dir = directory("ticks");
     let path = dir.join("scene.lua");
@@ -291,6 +402,7 @@ fn default_notification_scene_composes_scoped_data_and_routes_structured_actions
             scene.node.as_ref().unwrap(),
             &motion,
             Arc::new(|_| Plant::Tend),
+            None,
         )
         .unwrap();
     let mut body = measured::root(

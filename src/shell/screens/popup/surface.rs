@@ -120,6 +120,7 @@ impl SurfaceContext<'_> {
                 body: body.text,
                 items: body.items,
                 tree: body.tree,
+                hovered: Default::default(),
                 size: resolved.size.max(1.0),
                 w,
                 h,
