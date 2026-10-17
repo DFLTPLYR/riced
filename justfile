@@ -1,28 +1,40 @@
+nix := "nix develop --command"
+
 # Default: list recipes
 default:
     @just --list
 
 # Required checks for structural changes (uses the same system libraries as build).
 check:
-    nix develop --command cargo fmt --all -- --check
-    nix develop --command cargo test
-    nix develop --command cargo clippy --all-targets
+    {{nix}} cargo fmt --all -- --check
+    {{nix}} cargo test
+    {{nix}} cargo clippy --all-targets
     git diff --check
 
-# Build the release binary (inside the flake dev shell:
-# system libs like xkbcommon only resolve via its pkg-config).
-# Also embeds the nix store lib dirs as rpath: wayland-client dlopens
-# libwayland-client at runtime, and wgpu dlopens libvulkan, so the installed
-# binary must find both without LD_LIBRARY_PATH from the dev shell.
-# (Without libvulkan no adapter is found and iced falls back to CPU
-# tiny-skia/softbuffer, whose XRGB buffers strip alpha entirely.)
+# Build release inside the flake dev shell with runtime library paths.
 build:
-    nix develop --command bash -c 'export RUSTFLAGS="-C link-args=-Wl,-rpath,$(pkg-config --variable=libdir wayland-client),-rpath,$(pkg-config --variable=libdir xkbcommon),-rpath,$(pkg-config --variable=libdir vulkan)"; cargo build --release'
+    #!/usr/bin/env bash
+    {{nix}} bash <<'BUILD'
+        set -euo pipefail
+
+        # Embed Nix library paths for runtime loading outside the dev shell.
+        # Missing Vulkan forces iced's CPU fallback, which strips alpha.
+        rpath() {
+            pkg-config --variable=libdir "$1"
+        }
+
+        rpaths="-Wl,-rpath,$(rpath wayland-client)"
+        rpaths+=",-rpath,$(rpath xkbcommon)"
+        rpaths+=",-rpath,$(rpath vulkan)"
+
+        export RUSTFLAGS="-C link-args=$rpaths"
+        cargo build --release
+    BUILD
 
 # Build release and install to ~/.local/bin (already on PATH)
 install: build
     install -Dm755 "target/release/riced" "{{ home_directory() }}/.local/bin/riced"
-    pkill riced
+    -pkill riced
     riced > /dev/null 2>&1 & disown
 
 # Remove the installed binary
