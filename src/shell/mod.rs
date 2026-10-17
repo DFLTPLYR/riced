@@ -3,6 +3,7 @@ mod animation;
 mod catalog;
 mod context;
 mod desktop;
+mod desktop_widgets;
 pub mod events;
 mod input;
 mod jobs;

@@ -46,6 +46,15 @@ fn throttled_graft(
     ) {
         return Some(Plant::Graft(id, event));
     }
+    if matches!(
+        event,
+        Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            ..
+        })
+    ) {
+        return Some(Plant::Graft(id, event));
+    }
     None
 }
 
@@ -399,6 +408,13 @@ impl Plots {
             iced::time::every(Duration::from_millis(250)).map(|_| Plant::IpcPoll),
         ];
 
+        if !self.config.desktop.is_empty() || self.desktop.drag.is_some() {
+            subs.push(
+                iced::time::every(Duration::from_millis(250))
+                    .map(|_| Plant::Desktop(super::desktop_widgets::DesktopEvent::Tick)),
+            );
+        }
+
         // List enter/exit transitions tick at 60fps only while a
         // motion is active (aura runtime idles to zero wakeups).
         if self.animation.motion.has_active()
@@ -488,6 +504,7 @@ impl Plots {
             return setting.view(id, self);
         }
         match self.id_info(id) {
+            Some(PlotInfo::Drag(output)) => super::desktop_widgets::view(self, id, output),
             Some(PlotInfo::Background(output)) => Background::view(self, id, output),
             Some(PlotInfo::Top(_output)) => self
                 .windows
@@ -617,7 +634,32 @@ impl Plots {
     }
 
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
+        let cancel_drag = self
+            .desktop
+            .drag
+            .as_ref()
+            .is_some_and(|drag| match &message {
+                Plant::Uproot(id) | Plant::Wayland(LandEvent::Closed(id)) => {
+                    *id == drag.source || self.windows.drags.values().any(|surface| surface == id)
+                }
+                Plant::Sprout
+                | Plant::Wayland(
+                    LandEvent::OutputAdded(_)
+                    | LandEvent::OutputUpdated(_)
+                    | LandEvent::OutputRemoved(_),
+                )
+                | Plant::Config(ConfigEvent::ConfigReloaded(_)) => true,
+                _ => false,
+            });
+        if cancel_drag {
+            if let Plant::Wayland(LandEvent::Closed(id)) = &message {
+                self.windows.drags.retain(|_, surface| surface != id);
+            }
+            let cleanup = super::desktop_widgets::finish(self);
+            return Command::batch([cleanup, self.update(message)]);
+        }
         match message {
+            Plant::Desktop(event) => super::desktop_widgets::update(self, event),
             Plant::Overlay(event) => super::overlay::update(self, event),
             Plant::Uproot(id) => self.close_surface(id, true),
             Plant::Tend => Command::none(),
@@ -628,7 +670,10 @@ impl Plots {
             Plant::IpcPoll => {
                 // CLI client queued a request (`riced open-settings`).
                 match crate::cli::take_queued_command() {
-                    Some(crate::cli::QueuedCommand::OpenSettings) => Setting::handle_toggle(self),
+                    Some(crate::cli::QueuedCommand::OpenSettings) => {
+                        let cleanup = super::desktop_widgets::finish(self);
+                        Command::batch([cleanup, Setting::handle_toggle(self)])
+                    }
                     None => Command::none(),
                 }
             }
@@ -766,6 +811,7 @@ impl Plots {
                     }
                 }
                 self.windows.output_infos.remove(&output_id);
+                super::desktop_widgets::retain(self);
                 self.desktop.wallpaper.applied.remove(&output_id);
                 cmds.push(self.refresh_wallpapers());
                 // clear global selection if it was on removed output (will hide via intersect check)
@@ -804,6 +850,17 @@ impl Plots {
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
             Plant::Graft(id, event) => {
+                if self.desktop.drag.is_some()
+                    && matches!(
+                        &event,
+                        Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                            ..
+                        })
+                    )
+                {
+                    return super::desktop_widgets::finish(self);
+                }
                 if matches!(
                     event,
                     Event::Mouse(iced::mouse::Event::ButtonReleased(
@@ -901,7 +958,14 @@ impl Plots {
                 }
                 self.notify_parse_error()
             }
-            Plant::Config(ConfigEvent::ConfigReloaded(cfg)) => {
+            Plant::Config(ConfigEvent::ConfigReloaded(mut cfg)) => {
+                if serde_json::to_value(&cfg.desktop).ok()
+                    == serde_json::to_value(&self.config.desktop).ok()
+                {
+                    for (next, current) in cfg.desktop.iter_mut().zip(&self.config.desktop) {
+                        next.id.clone_from(&current.id);
+                    }
+                }
                 let bars_changed = match (
                     serde_json::to_value(&cfg.bar),
                     serde_json::to_value(&self.config.bar),
@@ -1412,6 +1476,7 @@ impl Plots {
 
 pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
+        Plant::Desktop(super::desktop_widgets::DesktopEvent::Tick) => Scope::None,
         // Background selection tick is throttled drag update — must redraw all outputs
         Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => Scope::All,
         // Post-creation heal (see `repaint_burst`): full redraw; the handler
@@ -1530,6 +1595,144 @@ mod tests {
             theme_jobs: Default::default(),
             notification: Default::default(),
         }
+    }
+
+    #[test]
+    fn desktop_capture_cancel_is_idempotent_and_stale_surface_events_are_ignored() {
+        use super::super::desktop_widgets::{DesktopEvent, DragSession};
+        use iced::futures::StreamExt;
+        let mut plots = wallpaper_test_plots();
+        let source = iced::window::Id::unique();
+        plots.windows.settings.insert(source, Setting::default());
+        plots.windows.ids.insert(source, PlotInfo::Setting);
+        let captures = [
+            (
+                iced_wayland_subscriber::OutputId(1),
+                iced::window::Id::unique(),
+            ),
+            (
+                iced_wayland_subscriber::OutputId(2),
+                iced::window::Id::unique(),
+            ),
+        ];
+        for (output, surface) in captures {
+            plots.windows.drags.insert(output, surface);
+            plots.windows.ids.insert(surface, PlotInfo::Drag(output));
+        }
+        plots.desktop.drag = Some(DragSession {
+            source,
+            widget: "rectangle".into(),
+            cursor: None,
+        });
+        let stale = iced::window::Id::unique();
+        let _ = plots.update(Plant::Desktop(DesktopEvent::Move {
+            surface: stale,
+            output: captures[0].0,
+            position: Point::new(20.0, 30.0),
+        }));
+        assert!(plots.desktop.drag.as_ref().unwrap().cursor.is_none());
+        let _ = plots.update(Plant::Desktop(DesktopEvent::Cancel { surface: stale }));
+        assert!(plots.desktop.drag.is_some());
+        let _ = plots.update(Plant::Desktop(DesktopEvent::Move {
+            surface: captures[0].1,
+            output: captures[0].0,
+            position: Point::new(20.0, 30.0),
+        }));
+        assert_eq!(
+            plots.desktop.drag.as_ref().unwrap().cursor.unwrap().1,
+            Point::new(20.0, 30.0)
+        );
+        let task = plots.update(Plant::Desktop(DesktopEvent::Cancel {
+            surface: captures[0].1,
+        }));
+        assert!(plots.desktop.drag.is_none());
+        assert!(plots.windows.drags.is_empty());
+        assert!(plots.windows.settings.contains_key(&source));
+        let actions = iced::futures::executor::block_on(
+            iced_runtime::task::into_stream(task)
+                .unwrap()
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, Action::Window(WindowAction::Close(_))))
+                .count(),
+            2
+        );
+        assert!(
+            iced_runtime::task::into_stream(plots.update(Plant::Desktop(DesktopEvent::Cancel {
+                surface: captures[0].1
+            })))
+            .is_none()
+        );
+        // A native close from the old session must not cancel a newer one.
+        plots.desktop.drag = Some(DragSession {
+            source,
+            widget: "rectangle".into(),
+            cursor: None,
+        });
+        let _ = plots.update(Plant::Wayland(LandEvent::Closed(captures[0].1)));
+        assert!(plots.desktop.drag.is_some());
+        let _ = plots.update(Plant::Wayland(LandEvent::Closed(source)));
+        assert!(plots.desktop.drag.is_none());
+        assert!(!plots.windows.settings.contains_key(&source));
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(DesktopEvent::Tick)),
+            Scope::None
+        );
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(DesktopEvent::Changed)),
+            Scope::All
+        );
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(DesktopEvent::Cancel { surface: stale })),
+            Scope::All
+        );
+    }
+
+    #[test]
+    fn desktop_capture_routes_motion_and_drop_in_surface_coordinates() {
+        use super::super::desktop_widgets::{self, DesktopEvent};
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        let plots = wallpaper_test_plots();
+        let surface = iced::window::Id::unique();
+        let output = iced_wayland_subscriber::OutputId(2);
+        let mut element = desktop_widgets::view(&plots, surface, output);
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut tree = Tree::new(&element);
+        let size = iced::Size::new(1080.0, 1920.0);
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, size),
+        );
+        let position = Point::new(300.0, 500.0);
+        let mut messages = Vec::new();
+        for event in [
+            iced::mouse::Event::CursorMoved { position },
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(event),
+                iced::advanced::Layout::new(&layout),
+                iced::mouse::Cursor::Available(position),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &iced::Rectangle::with_size(size),
+            );
+        }
+        assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Move { surface:target, output:owner, position:point }) if *target==surface && *owner==output && *point==position)));
+        assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Drop { surface:target, output:owner }) if *target==surface && *owner==output)));
+        assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Cancel { surface:target }) if *target==surface)));
     }
 
     #[test]

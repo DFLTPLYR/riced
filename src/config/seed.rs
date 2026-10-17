@@ -60,6 +60,10 @@ pub(crate) const SEED_CLINEPASS_LUA: &str = include_str!("../../scripts/widgets/
 
 pub(super) fn seed_widgets_in(dir: &Path) {
     for (name, content) in [
+        (
+            "rectangle.desktop.lua",
+            include_str!("../../scripts/widgets/rectangle.desktop.lua"),
+        ),
         ("clock.lua", SEED_CLOCK_LUA),
         ("hello.lua", SEED_HELLO_LUA),
         ("stats.lua", SEED_STATS_LUA),
@@ -158,6 +162,17 @@ impl super::WidgetsFile {
             );
             if let Err(error) = std::fs::write(marker, "") {
                 eprintln!("scenes: {error}");
+            }
+        }
+        let marker = root.join(".desktop-widgets-initialized");
+        if !marker.exists() {
+            seed_component(
+                &widgets_dir(),
+                "rectangle.desktop.lua",
+                include_str!("../../scripts/widgets/rectangle.desktop.lua"),
+            );
+            if let Err(error) = std::fs::write(marker, "") {
+                eprintln!("desktop widgets: {error}");
             }
         }
     }

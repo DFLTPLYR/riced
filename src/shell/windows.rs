@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PlotInfo {
+    Drag(OutputId),
     Setting,
     Background(OutputId),
     Top(OutputId),
@@ -15,6 +16,7 @@ pub(crate) enum PlotInfo {
 
 #[derive(Debug, Default)]
 pub(crate) struct WindowState {
+    pub drags: HashMap<OutputId, window::Id>,
     pub ids: HashMap<window::Id, PlotInfo>,
     pub tops: HashMap<window::Id, Top>,
     pub popups: HashMap<window::Id, Popup>,
@@ -57,6 +59,7 @@ impl WindowState {
             self.backgrounds.remove(&output);
         }
         self.overlays.retain(|_, window| *window != id);
+        self.drags.retain(|_, window| *window != id);
         info
     }
 
@@ -65,6 +68,7 @@ impl WindowState {
             .iter()
             .filter_map(|(id, info)| match info {
                 PlotInfo::Background(owner)
+                | PlotInfo::Drag(owner)
                 | PlotInfo::Top(owner)
                 | PlotInfo::Popup(owner)
                 | PlotInfo::Overlay(owner)
@@ -107,6 +111,7 @@ mod tests {
         let output = OutputId(1);
         let mut state = WindowState::default();
         let owned = [
+            PlotInfo::Drag(output),
             PlotInfo::Top(output),
             PlotInfo::Popup(output),
             PlotInfo::Background(output),

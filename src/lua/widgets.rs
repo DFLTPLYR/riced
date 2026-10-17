@@ -2,7 +2,7 @@
 use crate::config::PropValue;
 use crate::ui::node::WidgetNode;
 use iced::window;
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
 pub(crate) struct ResolvedWidget {
     pub id: String,
@@ -119,6 +119,8 @@ use std::{
 
 #[derive(Debug, Default)]
 pub(crate) struct WidgetState {
+    /// Host geometry is presentation context, not a different widget contract.
+    pub hosts: HashMap<String, serde_json::Value>,
     pub instances: HashMap<String, Lua>,
     pub outputs: HashMap<(window::Id, String), String>,
     pub trees: HashMap<(window::Id, String), WidgetNode>,
@@ -167,15 +169,40 @@ impl WidgetState {
         resolved: &ResolvedWidget,
         context: &EntryContext<'_>,
         hovered: bool,
-    ) -> Result<(), String> {
+        host: Option<&serde_json::Value>,
+    ) -> Result<Table, String> {
         crate::services::publish_all(&context.services, lua).map_err(|error| error.to_string())?;
         crate::services::publish_bar(lua, context.output).map_err(|error| error.to_string())?;
         super::props::publish_props(lua, &resolved.props).map_err(|error| error.to_string())?;
         let app: Table = lua
             .named_registry_value("riced.widget.app")
             .map_err(|error| error.to_string())?;
-        app.set("hovered", hovered)
-            .map_err(|error| error.to_string())
+        let result = (|| -> mlua::Result<Table> {
+            let overrides: Table = app.get("props")?;
+            if let Value::Table(defaults) = app.get::<Value>("defaults")?
+                && let Value::Table(props) = defaults.get::<Value>("props")?
+            {
+                for pair in props.pairs::<String, Value>() {
+                    let (key, value) = pair?;
+                    if !overrides.contains_key(key.as_str())? {
+                        overrides.set(key, value)?;
+                    }
+                }
+            }
+            let props = super::props::component_props(
+                lua,
+                &app,
+                Value::Table(overrides),
+                match host {
+                    Some(host) => lua.to_value(host)?,
+                    None => Value::Nil,
+                },
+            )?;
+            app.set("props", props.clone())?;
+            app.set("hovered", hovered)?;
+            Ok(props)
+        })();
+        result.map_err(|error| error.to_string())
     }
 
     pub(crate) fn render(
@@ -186,8 +213,37 @@ impl WidgetState {
         self.ensure_instance(resolved)?;
         let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         let lua = &self.instances[&resolved.id];
-        Self::publish_entry(lua, resolved, context, hovered)?;
-        call_lua_value(lua, "view")
+        let props = Self::publish_entry(
+            lua,
+            resolved,
+            context,
+            hovered,
+            self.hosts.get(&resolved.id),
+        )?;
+        call_widget_method(
+            lua,
+            "view",
+            mlua::MultiValue::from_vec(vec![Value::Table(props)]),
+        )
+    }
+
+    pub(crate) fn render_with_host(
+        &mut self,
+        resolved: &ResolvedWidget,
+        context: &EntryContext<'_>,
+        host: serde_json::Value,
+    ) -> Result<Value, String> {
+        self.hosts.insert(resolved.id.clone(), host);
+        self.render(resolved, context)
+    }
+
+    pub(crate) fn published_props(&self, id: &str) -> Result<serde_json::Value, String> {
+        let lua = self.instances.get(id).ok_or("widget instance missing")?;
+        let app: Table = lua
+            .named_registry_value("riced.widget.app")
+            .map_err(|error| error.to_string())?;
+        lua.from_value(app.get("props").map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())
     }
 
     /// Missing instances are stale host messages and are ignored. Actions do
@@ -209,7 +265,13 @@ impl WidgetState {
     ) -> Option<Result<Value, String>> {
         let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         self.instances.get(&resolved.id).map(|lua| {
-            Self::publish_entry(lua, resolved, context, hovered)?;
+            Self::publish_entry(
+                lua,
+                resolved,
+                context,
+                hovered,
+                self.hosts.get(&resolved.id),
+            )?;
             call_lua_action(lua, action)
         })
     }
@@ -221,7 +283,13 @@ impl WidgetState {
     ) -> Option<Result<Value, String>> {
         let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         self.instances.get(&resolved.id).map(|lua| {
-            Self::publish_entry(lua, resolved, context, hovered)?;
+            Self::publish_entry(
+                lua,
+                resolved,
+                context,
+                hovered,
+                self.hosts.get(&resolved.id),
+            )?;
             call_lua_value(lua, "popup")
         })
     }
@@ -233,7 +301,13 @@ impl WidgetState {
     ) -> Option<Result<(), String>> {
         let hovered = self.hovered.get(&resolved.id).copied().unwrap_or(false);
         self.instances.get(&resolved.id).map(|lua| {
-            Self::publish_entry(lua, resolved, context, hovered)?;
+            Self::publish_entry(
+                lua,
+                resolved,
+                context,
+                hovered,
+                self.hosts.get(&resolved.id),
+            )?;
             call_lua_value(lua, "on_press").map(|_| ())
         })
     }
@@ -251,6 +325,7 @@ impl WidgetState {
         Ok(())
     }
     pub(crate) fn reset(&mut self) {
+        self.hosts.clear();
         self.instances.clear();
         self.outputs.clear();
         self.trees.clear();
@@ -329,13 +404,13 @@ mod tests {
             size: 13.0,
             props: HashMap::new(),
         };
-        super::WidgetState::publish_entry(&lua, &resolved, &context, false).unwrap();
+        super::WidgetState::publish_entry(&lua, &resolved, &context, false, None).unwrap();
         assert_eq!(
             super::super::value::coerce_text(call_lua_value(&lua, "view").unwrap(), "view()")
                 .unwrap(),
             "cold"
         );
-        super::WidgetState::publish_entry(&lua, &resolved, &context, true).unwrap();
+        super::WidgetState::publish_entry(&lua, &resolved, &context, true, None).unwrap();
         assert_eq!(
             super::super::value::coerce_text(call_lua_value(&lua, "view").unwrap(), "view()")
                 .unwrap(),

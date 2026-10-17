@@ -47,7 +47,7 @@ pub(crate) fn component_props(
             }
             _ => {
                 return Err(mlua::Error::RuntimeError(
-                    "composable props and defaults must be tables".into(),
+                    "props and defaults must be tables".into(),
                 ));
             }
         }

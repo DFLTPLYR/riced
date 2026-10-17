@@ -47,6 +47,7 @@ pub struct Setting {
 /// own selection (like `Top` config lives on its own bar).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingPage {
+    Desktop,
     #[default]
     ContextMenu,
     Panel,
@@ -56,8 +57,9 @@ pub enum SettingPage {
 }
 
 impl SettingPage {
-    fn all() -> [Self; 5] {
+    fn all() -> [Self; 6] {
         [
+            Self::Desktop,
             Self::ContextMenu,
             Self::Panel,
             Self::Wallpaper,
@@ -68,6 +70,7 @@ impl SettingPage {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Desktop => "Desktop",
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
             Self::Wallpaper => "Wallpaper",
@@ -78,6 +81,9 @@ impl SettingPage {
 
     fn description(self) -> &'static str {
         match self {
+            Self::Desktop => {
+                "Pick a desktop widget, then click the desktop to place it. Right-click or Escape cancels."
+            }
             Self::Panel => "Choose a bar, arrange its widgets, and fine-tune its appearance.",
             Self::ContextMenu => "Customize the menu opened by right-clicking the wallpaper.",
             Self::Wallpaper => "Arrange images across your displays and adjust their placement.",
@@ -167,6 +173,7 @@ impl Setting {
     /// publishes a desktop snapshot only after Apply completes.
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
+            SettingPage::Desktop => crate::shell::desktop_widgets::settings(id, plots),
             SettingPage::Panel => self.panel_content(id, panel::PanelContext::from(plots)),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),

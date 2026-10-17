@@ -963,6 +963,8 @@ impl Background {
         // Bottom of the stack is wallpaper images (QML `Background`), then
         // the debug label, selection, and menu overlays on top.
         let mut layers = Self::wallpaper_views(plots, output);
+        crate::shell::desktop_widgets::retain(plots);
+        layers.extend(crate::shell::desktop_widgets::views(plots, output, true));
         layers.push(Self::selection_overlay(plots, output, avail));
         layers.push(Self::context_menu_overlay(plots, id, output, avail));
 

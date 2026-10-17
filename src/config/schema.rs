@@ -69,6 +69,8 @@ pub(crate) use util::decode_handle;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop: Vec<DesktopWidget>,
     #[serde(skip_serializing_if = "ComposableConfig::is_default")]
     pub composable: ComposableConfig,
     pub background: BackgroundConfig,
@@ -84,6 +86,57 @@ pub struct Config {
     /// Legacy `[top.<name>]` tables: read for migration, never written.
     #[serde(default, skip_serializing)]
     pub top: HashMap<String, TopConfig>,
+}
+
+/// One output-local desktop app placement. Appearance defaults stay in Lua.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct DesktopWidget {
+    #[serde(skip, default = "fresh_placement_id")]
+    pub id: String,
+    pub widget: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    #[serde(deserialize_with = "desktop_coordinate")]
+    pub x: f32,
+    #[serde(deserialize_with = "desktop_coordinate")]
+    pub y: f32,
+    #[serde(skip_serializing_if = "desktop_zero")]
+    #[serde(deserialize_with = "desktop_dimension")]
+    pub width: f32,
+    #[serde(skip_serializing_if = "desktop_zero")]
+    #[serde(deserialize_with = "desktop_dimension")]
+    pub height: f32,
+    #[serde(skip_serializing_if = "desktop_zero_z")]
+    pub z: i32,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub props: HashMap<String, PropValue>,
+}
+fn desktop_zero(value: &f32) -> bool {
+    *value == 0.0
+}
+fn desktop_zero_z(value: &i32) -> bool {
+    *value == 0
+}
+fn desktop_coordinate<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = f32::deserialize(deserializer)?;
+    if value.is_finite() && value.abs() <= 32768.0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "desktop coordinate must be finite and within -32768..=32768",
+        ))
+    }
+}
+fn desktop_dimension<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = desktop_coordinate(deserializer)?;
+    if value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "desktop dimension must be non-negative",
+        ))
+    }
 }
 
 /// Generates serde default fns from a single list, e.g.
@@ -540,6 +593,25 @@ impl Default for BackgroundImage {
 /// subscription registry needed; iced views are pure functions of state.
 #[derive(Debug, Clone)]
 pub enum ConfigPatch {
+    AddDesktopWidget(DesktopWidget),
+    SetDesktopWidgetProp {
+        index: usize,
+        key: String,
+        value: Option<PropValue>,
+    },
+    RemoveDesktopWidget {
+        index: usize,
+    },
+    MoveDesktopWidget {
+        index: usize,
+        x: f32,
+        y: f32,
+    },
+    SetDesktopWidgetSize {
+        index: usize,
+        width: f32,
+        height: f32,
+    },
     WallpaperMode(WallpaperMode),
     MonitorWallpaper(MonitorWallpaper),
     ComposableSource(ComposableKind, String),
@@ -1244,6 +1316,48 @@ impl Config {
         let c = &mut self.composable;
         let images = &mut self.background.image;
         match patch {
+            ConfigPatch::AddDesktopWidget(mut widget) => {
+                if widget.id.is_empty() || self.desktop.iter().any(|entry| entry.id == widget.id) {
+                    widget.id = fresh_placement_id();
+                }
+                self.desktop.push(widget);
+            }
+            ConfigPatch::SetDesktopWidgetProp { index, key, value } => {
+                if let Some(widget) = self.desktop.get_mut(index) {
+                    if let Some(value) = value {
+                        widget.props.insert(key, value);
+                    } else {
+                        widget.props.remove(&key);
+                    }
+                }
+            }
+            ConfigPatch::RemoveDesktopWidget { index } => {
+                if index < self.desktop.len() {
+                    self.desktop.remove(index);
+                }
+            }
+            ConfigPatch::MoveDesktopWidget { index, x, y } => {
+                if x.is_finite()
+                    && y.is_finite()
+                    && let Some(widget) = self.desktop.get_mut(index)
+                {
+                    widget.x = x;
+                    widget.y = y;
+                }
+            }
+            ConfigPatch::SetDesktopWidgetSize {
+                index,
+                width,
+                height,
+            } => {
+                if width.is_finite()
+                    && height.is_finite()
+                    && let Some(widget) = self.desktop.get_mut(index)
+                {
+                    widget.width = width.max(0.0);
+                    widget.height = height.max(0.0);
+                }
+            }
             ConfigPatch::WallpaperMode(mode) => self.background.mode = mode,
             ConfigPatch::MonitorWallpaper(wallpaper) => {
                 if let Some(existing) = self
@@ -1308,6 +1422,51 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_placements_are_sparse_strict_and_get_independent_runtime_ids() {
+        let mut config: Config = toml::from_str("[[desktop]]\nwidget='rectangle'\noutput='DP-1'\nx=40\ny=80\nprops={color='#123456'}\n[[desktop]]\nwidget='rectangle'\nx=0\ny=0\n").unwrap();
+        assert_ne!(config.desktop[0].id, config.desktop[1].id);
+        assert!(!config.desktop[0].id.is_empty());
+        let id = config.desktop[0].id.clone();
+        config.apply(ConfigPatch::MoveDesktopWidget {
+            index: 0,
+            x: 100.0,
+            y: 200.0,
+        });
+        config.apply(ConfigPatch::SetDesktopWidgetSize {
+            index: 0,
+            width: 300.0,
+            height: 150.0,
+        });
+        config.apply(ConfigPatch::SetDesktopWidgetProp {
+            index: 0,
+            key: "radius".into(),
+            value: Some(PropValue::Number(8.0)),
+        });
+        let text = crate::config::format::to_string(&config).unwrap();
+        assert!(!text.contains("id ="));
+        let restored: Config = toml::from_str(&text).unwrap();
+        assert_eq!(restored.desktop[0].x, 100.0);
+        assert_eq!(restored.desktop[0].width, 300.0);
+        assert_eq!(restored.desktop[0].props, config.desktop[0].props);
+        assert_eq!(config.desktop[0].id, id);
+        assert_ne!(restored.desktop[0].id, id);
+        config.apply(ConfigPatch::RemoveDesktopWidget { index: 0 });
+        assert_eq!(config.desktop.len(), 1);
+        for extra in ["widht=5", "width=-1", "x=nan", "height=inf"] {
+            assert!(
+                toml::from_str::<Config>(&format!("[[desktop]]\nwidget='rectangle'\n{extra}\n"))
+                    .is_err(),
+                "{extra}"
+            );
+        }
+        assert!(
+            !crate::config::format::to_string(&Config::default())
+                .unwrap()
+                .contains("[[desktop]]")
+        );
+    }
 
     #[test]
     fn slot_entries_read_names_and_tables() {

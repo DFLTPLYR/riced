@@ -46,7 +46,9 @@ pub(crate) fn discover_widget_files_in(dir: &std::path::Path) -> Vec<(String, Pa
         if stem.is_empty() || stem.starts_with('.') {
             continue;
         }
-        out.push((stem.to_string(), path));
+        if !stem.ends_with(".desktop") {
+            out.push((stem.to_string(), path));
+        }
     }
     out.sort();
     out
@@ -59,6 +61,26 @@ pub fn widgets_dir_mtime() -> Option<SystemTime> {
     std::fs::metadata(widgets_dir())
         .and_then(|m| m.modified())
         .ok()
+}
+
+/// Desktop apps are deliberately excluded from the bar-widget catalog.
+pub(crate) fn discover_desktop_widget_files() -> Vec<(String, PathBuf)> {
+    discover_desktop_widget_files_in(&widgets_dir())
+}
+
+fn discover_desktop_widget_files_in(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let mut files: Vec<_> = lua_files_sorted(dir)
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.strip_suffix(".desktop.lua")?;
+            if name.is_empty() || name.starts_with('.') || !path.is_file() {
+                return None;
+            }
+            Some((name.to_owned(), path))
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 /// Concatenated `components/*.lua` source (sorted by filename, tagged
@@ -202,6 +224,37 @@ fn components_source_in(dir: &std::path::Path) -> Option<String> {
 mod tests {
     use super::super::seed::seed_components_in;
     use super::*;
+
+    #[test]
+    fn desktop_suffix_classifies_apps_without_polluting_the_bar_pool() {
+        let dir =
+            std::env::temp_dir().join(format!("riced-desktop-discovery-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "clock.lua",
+            "rectangle.desktop.lua",
+            ".hidden.desktop.lua",
+            "notes.desktop.txt",
+        ] {
+            std::fs::write(dir.join(name), "-- test").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("folder.desktop.lua")).unwrap();
+        let desktops = discover_desktop_widget_files_in(&dir);
+        assert_eq!(
+            desktops,
+            vec![("rectangle".into(), dir.join("rectangle.desktop.lua"))]
+        );
+        assert_eq!(
+            discover_widget_files_in(&dir)
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["clock"]
+        );
+        std::fs::remove_file(dir.join("rectangle.desktop.lua")).unwrap();
+        assert!(discover_desktop_widget_files_in(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn widget_script_path_defaults_to_name_lua() {
