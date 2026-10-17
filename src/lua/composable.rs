@@ -18,7 +18,6 @@ struct Revision {
     length: Option<u64>,
     library: Option<SystemTime>,
     dependencies: Value,
-    hovered: bool,
 }
 
 #[derive(Default)]
@@ -34,8 +33,8 @@ struct Instance {
 pub(crate) struct ComposableRuntime {
     instances: HashMap<String, Instance>,
     /// Instance-level hover flags. Set from iced enter/exit reports;
-    /// published as `self.hovered` and folded into the revision so a
-    /// change re-renders that instance only.
+    /// published as `self.hovered` and included in render inputs so a
+    /// change re-renders that instance without replacing its VM.
     pub hovered: HashMap<String, bool>,
 }
 
@@ -90,11 +89,11 @@ impl ComposableRuntime {
                 "item_component": host.get("item_component"),
                 "item_revision": host.get("_item_revision"),
             }),
-            hovered,
         };
         let input = serde_json::json!({
             "host": host,
             "theme": crate::theme::lua_palette(theme),
+            "hovered": hovered,
         });
         let state = self.instances.entry(instance.into()).or_default();
         let changed = state.attempted.as_ref() != Some(&revision);
@@ -335,7 +334,7 @@ mod tests {
         let path = dir.join("app.lua");
         std::fs::write(
             &path,
-            "return {view=function(self) return iced.text(self.hovered and 'hot' or 'cold') end}",
+            "return {count=0, view=function(self) self.count=self.count+1; return iced.text((self.hovered and 'hot' or 'cold')..self.count) end}",
         )
         .unwrap();
         let config = path.to_string_lossy();
@@ -348,19 +347,19 @@ mod tests {
         let cold = engine
             .render("one", &config, json!({}), &theme, None)
             .unwrap();
-        assert_eq!(text(&cold), "cold");
+        assert_eq!(text(&cold), "cold1");
         // Same source and host: only the hover flag re-renders.
         engine.hovered.insert("one".into(), true);
         let hot = engine
             .render("one", &config, json!({}), &theme, None)
             .unwrap();
-        assert_eq!(text(&hot), "hot");
+        assert_eq!(text(&hot), "hot2");
         assert_ne!(cold.node, hot.node);
         engine.hovered.remove("one");
         let cold_again = engine
             .render("one", &config, json!({}), &theme, None)
             .unwrap();
-        assert_eq!(text(&cold_again), "cold");
+        assert_eq!(text(&cold_again), "cold3");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
