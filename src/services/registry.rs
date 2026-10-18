@@ -13,6 +13,9 @@ use std::collections::{HashMap, VecDeque};
 pub struct ServiceCtx<'a> {
     pub sys: &'a sysinfo::System,
     pub gpu: Option<f32>,
+    /// Monotonic seconds at the most recent sample. `system.sampled` exposes
+    /// this so time-series widgets advance on their own clock.
+    pub sampled: f64,
     pub theme: &'a crate::config::ThemeConfig,
     pub outputs:
         &'a HashMap<iced_wayland_subscriber::OutputId, iced_wayland_subscriber::OutputInfo>,

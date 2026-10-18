@@ -2,7 +2,8 @@
 use super::paths::{components_dir, widgets_dir};
 use super::seed::seed_marker;
 use super::seed::{
-    SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_MENU, SEED_COMPONENT_STYLED,
+    SEED_COMPONENT_CARD, SEED_COMPONENT_DEFINE, SEED_COMPONENT_GRAPH, SEED_COMPONENT_MENU,
+    SEED_COMPONENT_STYLED,
 };
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -142,6 +143,7 @@ pub(crate) fn builtin_component_files() -> Vec<(PathBuf, String)> {
         ("05-styled.lua", SEED_COMPONENT_STYLED),
         ("10-card.lua", SEED_COMPONENT_CARD),
         ("20-menu.lua", SEED_COMPONENT_MENU),
+        ("30-graph.lua", SEED_COMPONENT_GRAPH),
     ]
     .into_iter()
     .map(|(name, source)| {
@@ -321,21 +323,22 @@ mod tests {
             std::fs::write(dir.join(alias), "-- user component").unwrap();
         }
         seed_components_in(&dir);
-        assert_eq!(lua_files_sorted(&dir).len(), 7);
+        assert_eq!(lua_files_sorted(&dir).len(), 8);
         // An earlier release may already have seeded the numbered copies.
         for (seed, _) in component_seed_aliases() {
             std::fs::write(dir.join(seed), "-- seed component").unwrap();
         }
         let paths = installed_component_paths(&dir);
-        assert_eq!(paths.len(), 7);
-        assert!(paths.iter().all(|path| {
-            !path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(|c: char| c.is_ascii_digit())
-        }));
-        assert_eq!(lua_files_sorted(&dir).len(), 11);
+        assert_eq!(paths.len(), 8);
+        // Numbered seeds are skipped only where an unnumbered override exists.
+        for (seed, alias) in component_seed_aliases() {
+            assert!(
+                !paths.contains(&dir.join(seed)),
+                "{seed} shadowed by {alias}"
+            );
+            assert!(paths.contains(&dir.join(alias)));
+        }
+        assert_eq!(lua_files_sorted(&dir).len(), 12);
         // Removing an override makes its seed available again.
         std::fs::remove_file(dir.join("styled.lua")).unwrap();
         assert!(installed_component_paths(&dir).contains(&dir.join("05-styled.lua")));

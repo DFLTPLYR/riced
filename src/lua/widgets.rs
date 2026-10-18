@@ -562,6 +562,7 @@ mod tests {
             services: crate::services::ServiceCtx {
                 sys: &system,
                 gpu: None,
+                sampled: 0.0,
                 theme: &crate::config::ThemeConfig::default(),
                 outputs: &outputs,
                 notifications: &queue,
@@ -739,6 +740,7 @@ mod tests {
             services: crate::services::ServiceCtx {
                 sys: &system,
                 gpu: None,
+                sampled: 0.0,
                 theme: &theme,
                 outputs: &outputs,
                 notifications: &notifications,

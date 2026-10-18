@@ -444,6 +444,7 @@ mod tests {
         let ctx = crate::services::ServiceCtx {
             sys: &sys,
             gpu: None,
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,

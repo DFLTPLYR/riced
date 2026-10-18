@@ -4,8 +4,10 @@
 use super::registry::ServiceCtx;
 
 /// Publish `system = { cpu_usage, cpu_count, mem_used, mem_total,
-/// mem_usage, gpu_usage }`. `gpu_usage` is nil when the GPU exposes
-/// nothing readable (same degrade stance as before).
+/// mem_usage, gpu_usage, sampled }`. `gpu_usage` is nil when the GPU exposes
+/// nothing readable (same degrade stance as before). `sampled` is monotonic
+/// seconds at the host's most recent reading, so time-series widgets append
+/// one point per step regardless of how often the host re-renders them.
 pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     let sys = ctx.sys;
     let table = lua.create_table()?;
@@ -26,6 +28,7 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
         Some(usage) => table.set("gpu_usage", usage)?,
         None => table.set("gpu_usage", mlua::Value::Nil)?,
     }
+    table.set("sampled", ctx.sampled)?;
     lua.globals().set("system", table)
 }
 
@@ -71,6 +74,7 @@ mod tests {
         let ctx = ServiceCtx {
             sys: &sys,
             gpu: Some(42.0),
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,

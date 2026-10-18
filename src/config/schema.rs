@@ -1355,6 +1355,12 @@ pub(crate) use seed::{SEED_CONTEXT_MENU, SEED_CONTEXT_MENU_ITEM, SEED_SELECTION_
 #[cfg(test)]
 pub(crate) use seed::SEED_NOTIFY_CENTER_LUA;
 
+/// Seed CPU/RAM/GPU line-graph widget: compact sparkline in a bar
+/// slot and a detailed graph with legend in its popup. Its desktop
+/// counterpart lives in `usage.desktop.lua`.
+#[cfg(test)]
+pub(crate) use seed::{SEED_USAGE_DESKTOP_LUA, SEED_USAGE_LUA};
+
 /// Numbered horizontal workspace buttons filtered by `bar.output`.
 /// Native ext-workspace supplies metadata; clicks dispatch
 /// `hl.dsp.focus` through hyprctl using the actual workspace name.

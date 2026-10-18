@@ -34,18 +34,21 @@ fn set_length(lua: &Lua, table: &Table, key: &str, size: Option<&NodeLength>) ->
         },
     )
 }
+fn color_table(lua: &Lua, color: &iced::Color) -> mlua::Result<Table> {
+    let rgb = lua.create_table()?;
+    for (key, value) in [
+        ("r", color.r),
+        ("g", color.g),
+        ("b", color.b),
+        ("a", color.a),
+    ] {
+        rgb.set(key, value)?;
+    }
+    Ok(rgb)
+}
 fn set_color(lua: &Lua, table: &Table, key: &str, color: &Option<iced::Color>) -> mlua::Result<()> {
     if let Some(color) = color {
-        let rgb = lua.create_table()?;
-        for (key, value) in [
-            ("r", color.r),
-            ("g", color.g),
-            ("b", color.b),
-            ("a", color.a),
-        ] {
-            rgb.set(key, value)?;
-        }
-        table.set(key, rgb)?;
+        table.set(key, color_table(lua, color)?)?;
     }
     Ok(())
 }
@@ -207,6 +210,46 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
             WidgetNode::Separator { height, color } => {
                 table.set("height", *height)?;
                 set_color(lua, table, "color", color)?;
+            }
+            WidgetNode::Canvas {
+                drawing,
+                width,
+                height,
+            } => {
+                let spec = lua.create_table()?;
+                let rects = lua.create_table()?;
+                for (index, rect) in drawing.rects.iter().enumerate() {
+                    let item = lua.create_table()?;
+                    for (key, value) in [
+                        ("x", rect.x),
+                        ("y", rect.y),
+                        ("width", rect.width),
+                        ("height", rect.height),
+                    ] {
+                        item.set(key, value)?;
+                    }
+                    item.set("color", color_table(lua, &rect.color)?)?;
+                    rects.set(index + 1, item)?;
+                }
+                spec.set("rects", rects)?;
+                let lines = lua.create_table()?;
+                for (index, line) in drawing.lines.iter().enumerate() {
+                    let item = lua.create_table()?;
+                    let points = lua.create_table()?;
+                    for (point, (x, y)) in line.points.iter().enumerate() {
+                        let pair = lua.create_table()?;
+                        pair.set("x", *x)?;
+                        pair.set("y", *y)?;
+                        points.set(point + 1, pair)?;
+                    }
+                    item.set("points", points)?;
+                    item.set("color", color_table(lua, &line.color)?)?;
+                    item.set("width", line.width)?;
+                    lines.set(index + 1, item)?;
+                }
+                spec.set("lines", lines)?;
+                table.set("drawing", spec)?;
+                sizes!(Some(width), Some(height));
             }
             WidgetNode::Spinner => {}
             WidgetNode::Anchored { .. } | WidgetNode::Clickable { .. } => {

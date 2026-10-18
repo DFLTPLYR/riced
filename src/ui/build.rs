@@ -34,6 +34,10 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         WidgetNode::Separator { height, .. } => height.max(1.0),
         WidgetNode::Button { padding, .. } => base * 1.4 + 2.0 * padding.unwrap_or(6.0).max(0.0),
         WidgetNode::Progress { height, .. } => height.as_ref().map(px).unwrap_or(12.0),
+        WidgetNode::Canvas { height, .. } => match height {
+            NodeLength::Fixed(px) => *px,
+            _ => base,
+        },
         WidgetNode::Space { height, .. } => px(height),
         WidgetNode::Image { height, .. } => px(height).max(base),
         WidgetNode::Row { children, .. } => children
@@ -657,6 +661,26 @@ pub(crate) fn realize<M: Clone + 'static>(
                 style
             });
             Ok(bar.into())
+        }
+        WidgetNode::Canvas {
+            drawing,
+            width,
+            height,
+        } => {
+            let program = super::canvas::Shape {
+                drawing: drawing.clone(),
+            };
+            let canvas: iced::widget::Canvas<super::canvas::Shape, M> =
+                iced::widget::Canvas::new(program);
+            let width = match width {
+                NodeLength::Native => iced::Length::Fill,
+                other => other.clone().iced(),
+            };
+            let height = match height {
+                NodeLength::Native => iced::Length::Fill,
+                other => other.clone().iced(),
+            };
+            Ok(canvas.width(width).height(height).into())
         }
         WidgetNode::Spinner => Ok(lucide_iced::ThemedIcon::new(
             iced::advanced::svg::Handle::from_memory(lucide_iced::bytes::LOADER_CIRCLE),

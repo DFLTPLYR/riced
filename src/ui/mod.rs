@@ -3,6 +3,7 @@ pub mod action;
 pub mod anim;
 pub(crate) mod assets;
 pub mod build;
+pub(crate) mod canvas;
 pub(crate) mod components;
 pub mod decode;
 pub mod dsl;

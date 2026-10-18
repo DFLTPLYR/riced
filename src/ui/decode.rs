@@ -536,6 +536,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                 background: opt_color(t, "background", "iced.progress()")?,
             })
         }
+        "canvas" => parse_canvas(t),
         "spinner" => Ok(WidgetNode::Spinner),
         "separator" => Ok(WidgetNode::Separator {
             height: opt_number(t, "height", "iced.separator()")?
@@ -738,6 +739,132 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
         }
         .into()),
         _ => Err(format!("unknown iced control {kind}")),
+    }
+}
+
+fn parse_canvas(t: &Table) -> Result<WidgetNode, String> {
+    const WHAT: &str = "iced.canvas()";
+    let drawing = match node_property(t, "drawing").map_err(|error| error.to_string())? {
+        Value::Nil | Value::Function(_) => super::canvas::CanvasDrawing::default(),
+        Value::Table(spec) => parse_canvas_drawing(&spec)?,
+        other => {
+            return Err(format!(
+                "{WHAT} drawing must be a table, got {}",
+                lua_value_kind(&other)
+            ));
+        }
+    };
+    Ok(WidgetNode::Canvas {
+        drawing,
+        width: opt_length(t, "width", WHAT)?.unwrap_or(NodeLength::Native),
+        height: opt_length(t, "height", WHAT)?.unwrap_or(NodeLength::Native),
+    })
+}
+
+fn parse_canvas_drawing(spec: &Table) -> Result<super::canvas::CanvasDrawing, String> {
+    const WHAT: &str = "iced.canvas()";
+    let mut drawing = super::canvas::CanvasDrawing::default();
+    match spec.raw_get::<Value>("rects").map_err(|e| e.to_string())? {
+        Value::Nil => {}
+        Value::Table(list) => {
+            for item in list.sequence_values::<Table>() {
+                let item = item.map_err(|e| e.to_string())?;
+                let rect = "iced.canvas() rect";
+                let width = canvas_number(&item, "width", rect)?;
+                let height = canvas_number(&item, "height", rect)?;
+                if width < 0.0 || height < 0.0 {
+                    return Err(format!("{rect} width/height must be non-negative"));
+                }
+                drawing.rects.push(super::canvas::CanvasRect {
+                    x: canvas_number(&item, "x", rect)?,
+                    y: canvas_number(&item, "y", rect)?,
+                    width,
+                    height,
+                    color: canvas_color(&item, rect)?,
+                });
+            }
+        }
+        other => {
+            return Err(format!(
+                "{WHAT} drawing.rects must be an array, got {}",
+                lua_value_kind(&other)
+            ));
+        }
+    }
+    match spec.raw_get::<Value>("lines").map_err(|e| e.to_string())? {
+        Value::Nil => {}
+        Value::Table(list) => {
+            for item in list.sequence_values::<Table>() {
+                let item = item.map_err(|e| e.to_string())?;
+                let line = "iced.canvas() line";
+                let points = match item.raw_get::<Value>("points").map_err(|e| e.to_string())? {
+                    Value::Table(points) => points
+                        .sequence_values::<Value>()
+                        .map(|point| canvas_point(&point.map_err(|e| e.to_string())?))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Value::Nil => return Err(format!("{line} needs a points array")),
+                    other => {
+                        return Err(format!(
+                            "{line} points must be an array, got {}",
+                            lua_value_kind(&other)
+                        ));
+                    }
+                };
+                let width = match opt_number(&item, "width", line)? {
+                    Some(width) if width.is_finite() && width >= 0.0 => width,
+                    Some(_) => {
+                        return Err(format!("{line} width must be a non-negative number"));
+                    }
+                    None => 1.0,
+                };
+                drawing.lines.push(super::canvas::CanvasLine {
+                    points,
+                    color: canvas_color(&item, line)?,
+                    width,
+                });
+            }
+        }
+        other => {
+            return Err(format!(
+                "{WHAT} drawing.lines must be an array, got {}",
+                lua_value_kind(&other)
+            ));
+        }
+    }
+    Ok(drawing)
+}
+
+fn canvas_number(t: &Table, field: &str, what: &str) -> Result<f32, String> {
+    opt_number(t, field, what)?
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| format!("{what} {field} must be a finite number"))
+}
+
+fn canvas_color(t: &Table, what: &str) -> Result<iced::Color, String> {
+    opt_color(t, "color", what)?.ok_or_else(|| format!("{what} needs a color"))
+}
+
+fn canvas_point(value: &Value) -> Result<(f32, f32), String> {
+    let Value::Table(t) = value else {
+        return Err(format!(
+            "iced.canvas() line point must be a table with x and y, got {}",
+            lua_value_kind(value)
+        ));
+    };
+    let num = |value: Value| match value {
+        Value::Integer(n) => Some(n as f32),
+        Value::Number(n) => Some(n as f32),
+        _ => None,
+    };
+    let coordinate = |key: &str, index: i32| {
+        t.raw_get::<Value>(key)
+            .ok()
+            .and_then(num)
+            .or_else(|| t.raw_get::<Value>(index).ok().and_then(num))
+    };
+    match (coordinate("x", 1), coordinate("y", 2)) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Ok((x, y)),
+        _ => Err("iced.canvas() line point needs finite x and y".into()),
     }
 }
 

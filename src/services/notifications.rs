@@ -56,6 +56,7 @@ mod tests {
         let ctx = ServiceCtx {
             sys: &sys,
             gpu: None,
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: &queue,

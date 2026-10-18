@@ -39,6 +39,9 @@ pub(crate) const SEED_CPU_LUA: &str = include_str!("../../scripts/widgets/cpu.lu
 pub(crate) const SEED_RAM_LUA: &str = include_str!("../../scripts/widgets/ram.lua");
 pub(crate) const SEED_GPU_LUA: &str = include_str!("../../scripts/widgets/gpu.lua");
 pub(crate) const SEED_SYSTEM_LUA: &str = include_str!("../../scripts/widgets/system.lua");
+pub(crate) const SEED_USAGE_LUA: &str = include_str!("../../scripts/widgets/usage.lua");
+pub(crate) const SEED_USAGE_DESKTOP_LUA: &str =
+    include_str!("../../scripts/widgets/usage.desktop.lua");
 pub(crate) const SEED_COMPONENT_DEFINE: &str =
     include_str!("../../scripts/components/00-define.lua");
 pub(crate) const SEED_COMPONENT_STYLED: &str =
@@ -51,6 +54,7 @@ pub(crate) const SEED_CONTEXT_MENU_ITEM: &str =
     include_str!("../../scripts/components/context_menu_item.lua");
 pub(crate) const SEED_COMPONENT_CARD: &str = include_str!("../../scripts/components/10-card.lua");
 pub(crate) const SEED_COMPONENT_MENU: &str = include_str!("../../scripts/components/20-menu.lua");
+pub(crate) const SEED_COMPONENT_GRAPH: &str = include_str!("../../scripts/components/30-graph.lua");
 pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
     include_str!("../../scripts/components/notification_card.lua");
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str =
@@ -74,6 +78,8 @@ pub(super) fn seed_widgets_in(dir: &Path) {
         ("clinepass.lua", SEED_CLINEPASS_LUA),
         ("system.lua", SEED_SYSTEM_LUA),
         ("notifycenter.lua", SEED_NOTIFY_CENTER_LUA),
+        ("usage.lua", SEED_USAGE_LUA),
+        ("usage.desktop.lua", SEED_USAGE_DESKTOP_LUA),
     ] {
         let path = dir.join(name);
         if path.exists() {
@@ -109,6 +115,7 @@ pub(super) fn seed_components_in(dir: &std::path::Path) {
         ("05-styled.lua", SEED_COMPONENT_STYLED),
         ("10-card.lua", SEED_COMPONENT_CARD),
         ("20-menu.lua", SEED_COMPONENT_MENU),
+        ("30-graph.lua", SEED_COMPONENT_GRAPH),
         ("selection_rect.lua", SEED_SELECTION_RECT),
         ("context_menu.lua", SEED_CONTEXT_MENU),
         ("context_menu_item.lua", SEED_CONTEXT_MENU_ITEM),
@@ -173,6 +180,17 @@ impl super::WidgetsFile {
             );
             if let Err(error) = std::fs::write(marker, "") {
                 eprintln!("desktop widgets: {error}");
+            }
+        }
+        // The graph component and usage widgets arrived after fresh installs;
+        // deliver them once without resurrecting files a user has removed.
+        let marker = root.join(".usage-initialized");
+        if !marker.exists() {
+            seed_component(&components_dir(), "30-graph.lua", SEED_COMPONENT_GRAPH);
+            seed_component(&widgets_dir(), "usage.lua", SEED_USAGE_LUA);
+            seed_component(&widgets_dir(), "usage.desktop.lua", SEED_USAGE_DESKTOP_LUA);
+            if let Err(error) = std::fs::write(marker, "") {
+                eprintln!("usage widgets: {error}");
             }
         }
     }

@@ -17,6 +17,7 @@ pub(crate) fn publish_test_services(lua: &Lua, system: &sysinfo::System, gpu: Op
         &crate::services::ServiceCtx {
             sys: system,
             gpu,
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: &notifications,

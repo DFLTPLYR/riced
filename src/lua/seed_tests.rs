@@ -135,6 +135,49 @@ fn button_actions(node: &WidgetNode, out: &mut Vec<String>) {
     }
 }
 
+fn node_has_canvas(node: &WidgetNode) -> bool {
+    match node {
+        WidgetNode::Canvas { .. } => true,
+        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+            children.iter().any(node_has_canvas)
+        }
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. } => node_has_canvas(child),
+        _ => false,
+    }
+}
+
+#[test]
+fn usage_widget_draws_graph_in_view_and_popup() {
+    use crate::config::{SEED_USAGE_DESKTOP_LUA, SEED_USAGE_LUA};
+    let mut system = sysinfo::System::new();
+    system.refresh_cpu_usage();
+    system.refresh_memory();
+    for source in [SEED_USAGE_LUA, SEED_USAGE_DESKTOP_LUA] {
+        let lua = new_widget_lua().unwrap();
+        load_seed_components(&lua);
+        load_widget_script(&lua, "usage", source).unwrap();
+        publish_test_services(&lua, &system, Some(37.0));
+        publish_props(&lua, &HashMap::new()).unwrap();
+        let node = parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap();
+        assert!(node_has_canvas(&node), "view must draw a canvas");
+        build_node(&node, 13.0, None).unwrap();
+    }
+    let lua = new_widget_lua().unwrap();
+    load_seed_components(&lua);
+    load_widget_script(&lua, "usage", SEED_USAGE_LUA).unwrap();
+    publish_test_services(&lua, &system, Some(37.0));
+    let content = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    let tree = content.tree.expect("usage popup has a tree");
+    assert!(node_has_canvas(&tree), "popup must draw a canvas");
+}
+
 #[test]
 fn seed_usage_scripts_render_icon_free_text() {
     use crate::config::{SEED_CPU_LUA, SEED_GPU_LUA, SEED_RAM_LUA};
@@ -155,7 +198,8 @@ fn seed_usage_scripts_render_icon_free_text() {
 fn seed_scripts_parse_and_build() {
     use crate::config::{
         SEED_CLINEPASS_LUA, SEED_CLOCK_LUA, SEED_CPU_LUA, SEED_GPU_LUA, SEED_HELLO_LUA,
-        SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA, SEED_WORKSPACES_LUA,
+        SEED_RAM_LUA, SEED_STATS_LUA, SEED_SYSTEM_LUA, SEED_USAGE_DESKTOP_LUA, SEED_USAGE_LUA,
+        SEED_WORKSPACES_LUA,
     };
     let mut system = sysinfo::System::new();
     system.refresh_cpu_usage();
@@ -170,8 +214,11 @@ fn seed_scripts_parse_and_build() {
         SEED_WORKSPACES_LUA,
         SEED_CLINEPASS_LUA,
         SEED_SYSTEM_LUA,
+        SEED_USAGE_LUA,
+        SEED_USAGE_DESKTOP_LUA,
     ] {
         let lua = new_widget_lua().unwrap();
+        load_seed_components(&lua);
         load_widget_script(&lua, "seed", source).unwrap();
         publish_test_services(&lua, &system, None);
         publish_props(&lua, &HashMap::new()).unwrap();
@@ -340,6 +387,7 @@ fn workspaces_seed_filters_bar_output_and_dispatches_actual_name() {
         &crate::services::ServiceCtx {
             sys: &system,
             gpu: None,
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: &notifications,

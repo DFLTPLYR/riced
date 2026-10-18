@@ -43,6 +43,7 @@ fn render(
         &ServiceCtx {
             sys: &system,
             gpu: None,
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: &notifications,
@@ -69,6 +70,7 @@ fn action(scene: &mut Scene, action: &Action) -> mlua::Value {
             &ServiceCtx {
                 sys: &system,
                 gpu: None,
+                sampled: 0.0,
                 theme: &theme,
                 outputs: &outputs,
                 notifications: &notifications,

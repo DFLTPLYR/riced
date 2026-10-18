@@ -29,6 +29,7 @@ const EXAMPLES: &[&str] = &[
     "iced.text_input('Search','hello'):on_input('query'):on_submit('search'):secure(false)",
     "iced.pick_list({'one','two'},'two'):on_select('pick'):placeholder('Choose')",
     "iced.radio('Two','two','one'):on_select('radio'):spacing(12)",
+    "iced.canvas({lines={{points={{x=0,y=0},{x=8,y=8}},color='#aabbcc',width=1.5}},rects={{x=0,y=0,width=4,height=4,color='#112233'}}}):width(16):height(16)",
 ];
 
 fn lua() -> Lua {
@@ -93,6 +94,32 @@ fn every_schema_constructs_round_trips_and_has_native_layout() {
             .eval::<bool>()
             .unwrap()
     );
+}
+
+#[test]
+fn canvas_drawings_are_strict_and_blank_by_default() {
+    let lua = lua();
+    let parse = |source: &str| {
+        let value: Value = lua.load(source).eval().unwrap();
+        parse_node(&value)
+    };
+    assert!(matches!(
+        parse("return iced.canvas()").unwrap(),
+        super::node::WidgetNode::Canvas { drawing, width, height }
+            if drawing.lines.is_empty()
+                && drawing.rects.is_empty()
+                && width == super::node::NodeLength::Native
+                && height == super::node::NodeLength::Native
+    ));
+    for source in [
+        "return iced.canvas({lines='nope'})",
+        "return iced.canvas({lines={{points={{x=0,y=0}}}}})",
+        "return iced.canvas({lines={{points={{x=0,y=1/0},{x=1,y=1}},color='#fff'}}})",
+        "return iced.canvas({rects={{x=0,y=0,width=-1,height=2,color='#fff'}}})",
+        "return iced.canvas({rects={{x=0,y=0,width=2,height=2}}})",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+    }
 }
 
 #[test]

@@ -68,6 +68,7 @@ fn invoke_with_queue(
         &crate::services::ServiceCtx {
             sys: &system,
             gpu: None,
+            sampled: 0.0,
             theme: &theme,
             outputs: &outputs,
             notifications: queue,

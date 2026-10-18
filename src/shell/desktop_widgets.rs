@@ -449,7 +449,8 @@ fn render(
     let context = EntryContext {
         services: crate::services::ServiceCtx {
             sys: &plots.services.system,
-            gpu: None,
+            gpu: plots.services.gpu(),
+            sampled: plots.services.sampled(),
             theme: &plots.config.theme,
             outputs: &plots.windows.output_infos,
             notifications: &plots.notification.queue,
@@ -971,6 +972,7 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
         DesktopEvent::Changed => Task::none(),
         DesktopEvent::Tick => {
             retain(plots);
+            plots.services.refresh_system();
             let mut changed = false;
             for output in plots.windows.output_infos.keys().copied() {
                 for widget in plots
@@ -1355,7 +1357,8 @@ fn widget_action(
     }
     let services = crate::services::ServiceCtx {
         sys: &plots.services.system,
-        gpu: None,
+        gpu: plots.services.gpu(),
+        sampled: plots.services.sampled(),
         theme: &plots.config.theme,
         outputs: &plots.windows.output_infos,
         notifications: &plots.notification.queue,
@@ -1809,6 +1812,7 @@ mod tests {
             services: crate::services::ServiceCtx {
                 sys: &system,
                 gpu: None,
+                sampled: 0.0,
                 theme: &theme,
                 outputs: &outputs,
                 notifications: &notifications,

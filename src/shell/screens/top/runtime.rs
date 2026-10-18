@@ -60,6 +60,7 @@ impl RuntimeContext<'_> {
                 services: ServiceCtx {
                     sys: self.services.sys,
                     gpu: self.services.gpu,
+                    sampled: self.services.sampled,
                     theme: self.services.theme,
                     outputs: self.services.outputs,
                     notifications: self.services.notifications,
@@ -272,6 +273,7 @@ mod tests {
             services: ServiceCtx {
                 sys: &system,
                 gpu: None,
+                sampled: 0.0,
                 theme: &theme,
                 outputs: &outputs,
                 notifications: &notifications,

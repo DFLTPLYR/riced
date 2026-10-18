@@ -342,7 +342,8 @@ pub(crate) fn refresh(plots: &mut Plots, force: bool) -> Task<Plant> {
             };
             let services = ServiceCtx {
                 sys: &plots.services.system,
-                gpu: None,
+                gpu: plots.services.gpu(),
+                sampled: plots.services.sampled(),
                 theme: &plots.config.theme,
                 outputs: &plots.windows.output_infos,
                 notifications: &plots.notification.queue,
@@ -575,7 +576,8 @@ pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {
             let reload = refresh(plots, false);
             let services = ServiceCtx {
                 sys: &plots.services.system,
-                gpu: None,
+                gpu: plots.services.gpu(),
+                sampled: plots.services.sampled(),
                 theme: &plots.config.theme,
                 outputs: &plots.windows.output_infos,
                 notifications: &plots.notification.queue,

@@ -121,8 +121,24 @@ at decode with the field named.
 | `iced.text_input(placeholder, value)`                          | —                                                                                                          | `value`, `on_input`, `on_submit`, `width`, `size`, `padding`, `secure`                                                                            |
 | `iced.pick_list(options, selected)`                            | unique-string options; selected nil or member                                                              | `selected`, `on_select`, `width`, `placeholder`, `padding`, `size`                                                                                |
 | `iced.radio(label, value, selected)`                           | string value/selection                                                                                     | `selected`, `on_select`, `width`, `size`, `spacing`                                                                                               |
+| `iced.canvas(drawing)`                                         | inert drawing table (see below)                                                                            | `width`, `height`                                                                                                                                 |
 
 Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
+
+### Canvas
+
+`iced.canvas(drawing)` paints an inert, click-through drawing in canvas-local
+logical pixels. `drawing` is `{ rects = {...}, lines = {...} }`: rectangles fill
+first (backgrounds, grids, bands), then lines stroke on top. Each rect is
+`{ x, y, width, height, color }` (width/height non-negative); each line is
+`{ points = {{x, y}, ...}, color[, width = 1] }` (needs ≥ 1 point; two or more
+paint). Colors take `"#rgb"` / `"#rrggbb"` / `"#rrggbbaa"` or `{r, g, b[, a]}`
+0–1 tables. Coordinates are not scaled: the canvas clips, so give graphs an
+explicit `:width(n):height(n)` rather than `"fill"`.
+
+The bundled `30-graph.lua` component wraps this into `iced.graph{ series = {...} }`
+(`series = {{ values = {…0–100…}, color, width }, ...}` plus `window`, `grid`,
+`grid_color`); the `usage` / `usage.desktop` widgets use it for CPU/RAM/GPU.
 
 ### Sizes
 
@@ -320,11 +336,15 @@ also work. Malformed commands are ignored.
 
 | Global          | Fields                                                                                                                                        |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `system`        | `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total` (bytes), `mem_usage` (%), `gpu_usage` (% or nil)                                         |
+| `system`        | `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total` (bytes), `mem_usage` (%), `gpu_usage` (% or nil), `sampled` (host-clock seconds)          |
 | `theme`         | Live palette hex pairs: `primary`, `on_primary`, `secondary`, `surface`, `background`, `success`, `warning`, `error`, plus `on_*` text colors |
 | `notifications` | Retained history, newest-first: `{ id, app, title, body, urgency, has_image, popup_visible, closed }` — metadata only                         |
 | `wayland`       | `outputs` (`name`, `x`, `y`, `w`, `h`), `workspaces` (`name`, `monitor`, `active`), `toplevels` (`app_id`, `title`); empty where unsupported  |
 | `bar`           | `bar.output` connector name (nil while unknown; nil in notification scenes)                                                                   |
+
+`system.sampled` is the host-clock time (seconds) of the last reading. Gate
+sample history on it rather than on render count: open popups redraw several
+times per reading, so the `usage` graph appends one point per elapsed step.
 
 Scene popup props (`props.notifications`, newest-first, output-filtered) carry
 richer items: `{ id, app, title, body, icon, urgency, actions = {{key, label}}, has_image, image }`.

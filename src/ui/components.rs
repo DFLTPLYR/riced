@@ -169,6 +169,9 @@ components! {
     Radio => RadioNode, "radio", ["label", "value", "selected"], ["selected", "on_select", "width", "size", "spacing"] {
         label: String, value: String, selected: Option<String>, on_select: Option<String>, width: Option<NodeLength>, size: Option<f32>, spacing: f32
     }
+    Canvas => CanvasNode, "canvas", ["drawing"], ["width", "height"] {
+        drawing: super::canvas::CanvasDrawing, width: NodeLength, height: NodeLength
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

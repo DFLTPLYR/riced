@@ -1368,6 +1368,7 @@ impl Top {
             services: crate::services::ServiceCtx {
                 sys: &plots.services.system,
                 gpu,
+                sampled: plots.services.sampled(),
                 theme: &plots.config.theme,
                 outputs: &plots.windows.output_infos,
                 notifications: &plots.notification.queue,
