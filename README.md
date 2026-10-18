@@ -206,7 +206,10 @@ return app
   or delivered keyboard event. A bare left click still toggles `app:popup()`
   (`text`/`width`/`height`/`items`/`ui`) when defined. Buttons and popup rows send
   `{type="action", key=key, value=value}` to the same app. Desktop callbacks may
-  call `self.reposition()`; Settings also has a Reposition button.
+  handle `drag` with `self.drag()` and `drop` with `self.drop()`: hold, move with
+  the button pressed, then release to save. The grab point stays under the mouse.
+  Settings → Desktop configures hold timing (Fast/Medium/Slow/custom ms) and shows real, scaled widget
+  previews that can be picked up at the clicked point, plus a Reposition button.
 - **Slow fetches**: return `iced.spinner()` first, keep cached data on
   the app instance, then show cached rows (see `clinepass.lua`).
 - **List transitions**: top-level row/column `iced.button`s animate on

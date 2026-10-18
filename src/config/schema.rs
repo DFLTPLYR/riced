@@ -76,6 +76,7 @@ pub struct Config {
     pub background: BackgroundConfig,
     pub theme: ThemeConfig,
     pub animation: AnimationConfig,
+    pub interaction: InteractionConfig,
     #[serde(rename = "notification")]
     pub notifications: NotificationConfig,
     #[serde(rename = "overlay", skip_serializing_if = "Vec::is_empty")]
@@ -111,6 +112,66 @@ pub struct DesktopWidget {
     pub z: i32,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub props: HashMap<String, PropValue>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HoldSpeed {
+    Fast,
+    #[default]
+    Medium,
+    Slow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum HoldDuration {
+    Preset(HoldSpeed),
+    Custom(u32),
+}
+
+impl Default for HoldDuration {
+    fn default() -> Self {
+        Self::Preset(HoldSpeed::Medium)
+    }
+}
+
+impl HoldDuration {
+    pub fn milliseconds(self) -> u32 {
+        match self {
+            Self::Preset(HoldSpeed::Fast) => 250,
+            Self::Preset(HoldSpeed::Medium) => 500,
+            Self::Preset(HoldSpeed::Slow) => 1000,
+            Self::Custom(ms) => ms.clamp(1, 60_000),
+        }
+    }
+    pub fn duration(self) -> Duration {
+        Duration::from_millis(self.milliseconds().into())
+    }
+}
+
+impl<'de> Deserialize<'de> for HoldDuration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Preset(HoldSpeed),
+            Custom(u32),
+        }
+        match Value::deserialize(deserializer)? {
+            Value::Preset(speed) => Ok(Self::Preset(speed)),
+            Value::Custom(ms @ 1..=60_000) => Ok(Self::Custom(ms)),
+            Value::Custom(_) => Err(serde::de::Error::custom(
+                "hold duration must be 1..=60000 milliseconds",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InteractionConfig {
+    pub hold: HoldDuration,
 }
 fn desktop_zero(value: &f32) -> bool {
     *value == 0.0
@@ -625,6 +686,7 @@ pub enum ConfigPatch {
     ThemeDarkmode(bool),
     ThemeVariant(String),
     AnimationSpeed(AnimationSpeed),
+    HoldDuration(HoldDuration),
     AddImage(BackgroundImage),
     MoveImage {
         index: usize,
@@ -973,9 +1035,9 @@ pub use paths::config_path;
 /// Presses record their target and only the matching release acts,
 /// which also keeps inner `iced.button` clicks from double-firing the
 /// widget. Gap clicks fall back to the slot (first popup, else first
-/// `actions` callback). Other unconsumed pointer events, holds (500ms), and
+/// `actions` callback). Other unconsumed pointer events, configurable holds, and
 /// delivered keys use the same callback. Desktop callbacks can call
-/// `self.reposition()`; see `docs/lua-api.md` for event fields and restrictions.
+/// `self.drag()`/`self.drop()`; see `docs/lua-api.md` for event fields and restrictions.
 ///
 /// ```lua
 /// local app = { details = false }
@@ -1399,6 +1461,7 @@ impl Config {
             ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
             ConfigPatch::ThemeVariant(variant) => self.theme.variant = variant,
             ConfigPatch::AnimationSpeed(speed) => self.animation.speed = speed,
+            ConfigPatch::HoldDuration(duration) => self.interaction.hold = duration,
             ConfigPatch::AddImage(img) => images.push(img),
             ConfigPatch::MoveImage { index, x, y } => {
                 if let Some(img) = images.get_mut(index) {
@@ -1995,6 +2058,37 @@ mod tests {
         assert_eq!(
             AnimationSpeed::Medium.duration(),
             Duration::from_millis(150)
+        );
+    }
+
+    #[test]
+    fn hold_timing_presets_custom_values_and_strict_validation_roundtrip() {
+        assert_eq!(
+            Config::default().interaction.hold.duration(),
+            Duration::from_millis(500)
+        );
+        for (value, milliseconds) in [
+            ("\"fast\"", 250),
+            ("\"medium\"", 500),
+            ("\"slow\"", 1000),
+            ("725", 725),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[interaction]\nhold = {value}\n")).unwrap();
+            assert_eq!(config.interaction.hold.milliseconds(), milliseconds);
+            let serialized = toml::to_string(&config).unwrap();
+            let restored: Config = toml::from_str(&serialized).unwrap();
+            assert_eq!(restored.interaction.hold, config.interaction.hold);
+        }
+        for value in ["0", "-1", "60001", "1.5", "\"custom\"", "\"fas t\""] {
+            assert!(toml::from_str::<Config>(&format!("[interaction]\nhold = {value}\n")).is_err());
+        }
+        assert!(toml::from_str::<Config>("[interaction]\nunknown = 1\n").is_err());
+        let mut config = Config::default();
+        config.apply(ConfigPatch::HoldDuration(HoldDuration::Custom(850)));
+        assert_eq!(
+            config.interaction.hold.duration(),
+            Duration::from_millis(850)
         );
     }
 

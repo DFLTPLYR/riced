@@ -10,17 +10,30 @@ pub(crate) fn input<M: Clone + 'static>(
     content: Element<'static, M>,
     sender: Sender<M>,
 ) -> Element<'static, M> {
-    Element::new(Input { content, sender })
+    with_hold(content, sender, HOLD)
+}
+
+pub(crate) fn with_hold<M: Clone + 'static>(
+    content: Element<'static, M>,
+    sender: Sender<M>,
+    hold: Duration,
+) -> Element<'static, M> {
+    Element::new(Input {
+        content,
+        sender,
+        hold,
+    })
 }
 
 struct Input<M> {
     content: Element<'static, M>,
     sender: Sender<M>,
+    hold: Duration,
 }
 
 #[derive(Default)]
 struct State {
-    pressed: Option<(mouse::Button, Instant)>,
+    pressed: Option<(mouse::Button, Instant, iced::Point)>,
     held: bool,
     inside: bool,
 }
@@ -80,23 +93,26 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
         let position = cursor.position().map(|point| {
             iced::Point::new(point.x - layout.bounds().x, point.y - layout.bounds().y)
         });
-        let pointer = |kind: &str, button: Option<mouse::Button>| Action {
-            key: String::new(),
-            value: None,
-            event: InputEvent::Mouse {
-                state: kind.into(),
-                button: button.map(|button| match button {
-                    mouse::Button::Left => "left".into(),
-                    mouse::Button::Right => "right".into(),
-                    mouse::Button::Middle => "middle".into(),
-                    other => format!("{other:?}").to_lowercase(),
-                }),
-                position,
-            },
-        };
+        let pointer =
+            |kind: &str, button: Option<mouse::Button>, origin: Option<iced::Point>| Action {
+                key: String::new(),
+                value: None,
+                event: InputEvent::Mouse {
+                    state: kind.into(),
+                    button: button.map(|button| match button {
+                        mouse::Button::Left => "left".into(),
+                        mouse::Button::Right => "right".into(),
+                        mouse::Button::Middle => "middle".into(),
+                        other => format!("{other:?}").to_lowercase(),
+                    }),
+                    position,
+                    origin,
+                },
+            };
         if inside != state.inside {
             shell.publish((self.sender)(pointer(
                 if inside { "enter" } else { "exit" },
+                None,
                 None,
             )));
             state.inside = inside;
@@ -110,43 +126,48 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
         }
         match event {
             Event::Mouse(mouse::Event::CursorMoved { .. }) if inside => {
-                shell.publish((self.sender)(pointer("move", None)))
+                shell.publish((self.sender)(pointer("move", None, None)))
             }
             Event::Mouse(mouse::Event::ButtonPressed(button)) if inside => {
+                if state
+                    .pressed
+                    .is_some_and(|(pressed, _, _)| pressed != *button)
+                {
+                    shell.publish((self.sender)(pointer("press", Some(*button), position)));
+                    shell.capture_event();
+                    return;
+                }
                 let now = Instant::now();
-                state.pressed = Some((*button, now));
+                state.pressed = Some((*button, now, position.unwrap_or(iced::Point::ORIGIN)));
                 state.held = false;
-                shell.request_redraw_at(now + HOLD);
-                shell.publish((self.sender)(pointer("press", Some(*button))));
+                shell.request_redraw_at(now + self.hold);
+                shell.publish((self.sender)(pointer("press", Some(*button), position)));
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonReleased(button)) => {
                 if inside {
-                    shell.publish((self.sender)(pointer("release", Some(*button))));
+                    shell.publish((self.sender)(pointer(
+                        "release",
+                        Some(*button),
+                        state.pressed.map(|(_, _, origin)| origin),
+                    )));
                 }
-                if let Some((pressed, time)) = state.pressed.take()
+                if let Some((pressed, time, origin)) = state.pressed.take()
                     && inside
                     && pressed == *button
                 {
-                    if !state.held {
-                        shell.publish((self.sender)(pointer(
-                            if time.elapsed() >= HOLD {
-                                "hold"
-                            } else {
-                                "click"
-                            },
-                            Some(*button),
-                        )));
+                    if !state.held && time.elapsed() < self.hold {
+                        shell.publish((self.sender)(pointer("click", Some(*button), Some(origin))));
                     }
                     shell.capture_event();
                 }
             }
             Event::Window(iced::window::Event::RedrawRequested(_)) if inside && !state.held => {
-                if let Some((button, started)) = state.pressed {
-                    let deadline = started + HOLD;
+                if let Some((button, started, origin)) = state.pressed {
+                    let deadline = started + self.hold;
                     if Instant::now() >= deadline {
                         state.held = true;
-                        shell.publish((self.sender)(pointer("hold", Some(button))));
+                        shell.publish((self.sender)(pointer("hold", Some(button), Some(origin))));
                     } else {
                         shell.request_redraw_at(deadline);
                     }
@@ -343,9 +364,11 @@ mod tests {
             Some("tiny-skia"),
         ))
         .unwrap();
-        let mut element = input(
+        let hold = Duration::from_secs(5);
+        let mut element = with_hold(
             iced::widget::Space::new().width(100).height(50).into(),
             std::sync::Arc::new(|events| events),
+            hold,
         );
         let mut tree = widget::Tree::new(&element);
         let size = Size::new(100.0, 50.0);
@@ -354,9 +377,33 @@ mod tests {
             &renderer,
             &layout::Limits::new(Size::ZERO, size),
         );
-        tree.state.downcast_mut::<State>().pressed =
-            Some((mouse::Button::Left, Instant::now() - HOLD));
+        tree.state.downcast_mut::<State>().pressed = Some((
+            mouse::Button::Left,
+            Instant::now() - HOLD,
+            iced::Point::new(7.0, 8.0),
+        ));
         let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            Layout::new(&layout),
+            mouse::Cursor::Available(iced::Point::new(10.0, 10.0)),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &Rectangle::with_size(size),
+        );
+        assert!(
+            !messages.iter().any(
+                |event| matches!(&event.event, InputEvent::Mouse {state,..} if state == "hold")
+            )
+        );
+        tree.state
+            .downcast_mut::<State>()
+            .pressed
+            .as_mut()
+            .unwrap()
+            .1 = Instant::now() - hold;
         for event in [
             Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
             Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
@@ -383,6 +430,31 @@ mod tests {
             })
             .collect();
         assert_eq!(gestures, ["hold"]);
+        assert!(messages.iter().any(|event| matches!(&event.event,
+            InputEvent::Mouse { state, origin: Some(origin), position: Some(position), .. }
+            if state == "hold" && *origin == iced::Point::new(7.0, 8.0) && *position == iced::Point::new(10.0, 10.0)
+        )));
+
+        // A delayed redraw must not begin a drag after the button is already up.
+        messages.clear();
+        let state = tree.state.downcast_mut::<State>();
+        state.held = false;
+        state.pressed = Some((
+            mouse::Button::Left,
+            Instant::now() - hold,
+            iced::Point::new(7.0, 8.0),
+        ));
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            Layout::new(&layout),
+            mouse::Cursor::Available(iced::Point::new(10.0, 10.0)),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &Rectangle::with_size(size),
+        );
+        assert!(!messages.iter().any(|event| matches!(&event.event, InputEvent::Mouse {state,..} if state == "hold" || state == "click")));
 
         let button = iced::widget::button(iced::widget::Space::new().width(80).height(30))
             .on_press(Action::from("owned"));

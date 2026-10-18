@@ -62,7 +62,15 @@ pub(crate) fn call_lua_action(
     ) {
         return Ok(Value::Nil);
     }
-    lua.set_named_registry_value("riced.reposition.requested", false)
+    lua.set_named_registry_value("riced.drag.requested", false)
+        .map_err(|e| e.to_string())?;
+    lua.set_named_registry_value("riced.drop.requested", false)
+        .map_err(|e| e.to_string())?;
+    let event = match &action.event {
+        crate::ui::action::Event::Mouse { state, .. } => state.as_str(),
+        _ => "action",
+    };
+    lua.set_named_registry_value("riced.gesture", event)
         .map_err(|e| e.to_string())?;
     let arguments = action.arguments(lua).map_err(|e| e.to_string())?;
     lua.set_named_registry_value("riced.in_actions", true)
@@ -71,16 +79,21 @@ pub(crate) fn call_lua_action(
     lua.set_named_registry_value("riced.in_actions", false)
         .map_err(|e| e.to_string())?;
     let value = result?;
-    if lua
-        .named_registry_value::<bool>("riced.reposition.requested")
-        .unwrap_or(false)
-    {
+    let drag = lua
+        .named_registry_value::<bool>("riced.drag.requested")
+        .unwrap_or(false);
+    let drop = lua
+        .named_registry_value::<bool>("riced.drop.requested")
+        .unwrap_or(false);
+    if drag || drop {
         let command = match value {
             Value::Nil => lua.create_table().map_err(|e| e.to_string())?,
             Value::Table(table) => table,
             _ => return Err("actions host commands require a table or nil return".into()),
         };
-        command.set("reposition", true).map_err(|e| e.to_string())?;
+        command
+            .set(if drag { "drag" } else { "drop" }, true)
+            .map_err(|e| e.to_string())?;
         Ok(Value::Table(command))
     } else {
         Ok(value)
@@ -127,39 +140,49 @@ pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::
             )));
         }
     }
-    if app.raw_get::<Value>("reposition")? != Value::Nil {
-        return Err(mlua::Error::RuntimeError(
-            "app.reposition is reserved for the host".into(),
-        ));
+    for (method, requested) in [
+        ("drag", "riced.drag.requested"),
+        ("drop", "riced.drop.requested"),
+    ] {
+        if app.raw_get::<Value>(method)? != Value::Nil {
+            return Err(mlua::Error::RuntimeError(format!(
+                "app.{method} is reserved for the host"
+            )));
+        }
+        app.set(
+            method,
+            lua.create_function(move |lua, _: mlua::MultiValue| {
+                if !lua
+                    .named_registry_value::<bool>("riced.drag.available")
+                    .unwrap_or(false)
+                {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "self.{method}() requires a desktop placement"
+                    )));
+                }
+                if !lua
+                    .named_registry_value::<bool>("riced.in_actions")
+                    .unwrap_or(false)
+                {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "self.{method}() is only available inside actions"
+                    )));
+                }
+                if lua.named_registry_value::<String>("riced.gesture")? != method {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "self.{method}() requires a {method} event"
+                    )));
+                }
+                lua.set_named_registry_value(requested, true)
+            })?,
+        )?;
     }
-    app.set(
-        "reposition",
-        lua.create_function(|lua, _: mlua::MultiValue| {
-            if !lua
-                .named_registry_value::<bool>("riced.reposition.available")
-                .unwrap_or(false)
-            {
-                return Err(mlua::Error::RuntimeError(
-                    "self.reposition() requires a desktop placement".into(),
-                ));
-            }
-            if !lua
-                .named_registry_value::<bool>("riced.in_actions")
-                .unwrap_or(false)
-            {
-                return Err(mlua::Error::RuntimeError(
-                    "self.reposition() is only available inside actions".into(),
-                ));
-            }
-            lua.set_named_registry_value("riced.reposition.requested", true)
-        })?,
-    )?;
     lua.set_named_registry_value("riced.widget.app", app)?;
     super::callbacks::new_epoch(lua)
 }
 
 pub(crate) fn validate_actions(app: &Table) -> mlua::Result<()> {
-    for removed in ["on_action", "on_press", "handler"] {
+    for removed in ["on_action", "on_press", "handler", "reposition"] {
         if app.raw_get::<Value>(removed)? != Value::Nil {
             return Err(mlua::Error::RuntimeError(format!(
                 "app.{removed} was removed; use app:actions(events)"
@@ -243,7 +266,7 @@ impl WidgetState {
             .named_registry_value("riced.widget.app")
             .map_err(|error| error.to_string())?;
         let result = (|| -> mlua::Result<Table> {
-            lua.set_named_registry_value("riced.reposition.available", host.is_some())?;
+            lua.set_named_registry_value("riced.drag.available", host.is_some())?;
             let overrides: Table = app.get("props")?;
             if let Value::Table(defaults) = app.get::<Value>("defaults")?
                 && let Value::Table(props) = defaults.get::<Value>("props")?
@@ -415,33 +438,80 @@ mod tests {
             "return {view=function() end, handler=function() end}",
             "return {view=function() end, actions=true}",
             "return {view=function() end, reposition=function() end}",
+            "return {view=function() end, drag=function() end}",
+            "return {view=function() end, drop=function() end}",
         ] {
             assert!(load_widget_script(&new_widget_lua().unwrap(), "invalid", source).is_err());
         }
     }
 
     #[test]
-    fn reposition_is_desktop_only_scoped_to_actions_and_preserves_other_commands() {
+    fn drag_and_drop_are_desktop_only_event_scoped_and_preserve_other_commands() {
         let lua = new_widget_lua().unwrap();
-        load_widget_script(&lua, "move", "return {view=function(self) self.reposition() end, actions=function(self,events) if events.key=='fail' then self.reposition(); error('failed') end; if events.key=='move' then self:reposition(); return {dismiss=42} end end}").unwrap();
+        load_widget_script(
+            &lua,
+            "move",
+            r#"return {
+            view=function(self) self.drag() end,
+            actions=function(self,events)
+                if events.key=='fail' then self.drag(); error('failed') end
+                if events.key=='invaliddrop' then self.drop() end
+                if events.key=='move' then self:drag(); self.grabbed=true; return {dismiss=42} end
+                if events.type=='drop' then assert(self.grabbed); self.drop() end
+            end
+        }"#,
+        )
+        .unwrap();
         assert!(
             call_lua_named_action(&lua, "move")
                 .unwrap_err()
                 .contains("desktop placement")
         );
-        lua.set_named_registry_value("riced.reposition.available", true)
+        lua.set_named_registry_value("riced.drag.available", true)
             .unwrap();
         assert!(call_lua_named_action(&lua, "fail").is_err());
+        assert!(
+            call_lua_named_action(&lua, "invaliddrop")
+                .unwrap_err()
+                .contains("drop event")
+        );
         assert!(
             call_lua_value(&lua, "view")
                 .unwrap_err()
                 .contains("inside actions")
         );
         assert_eq!(call_lua_named_action(&lua, "noop").unwrap(), Value::Nil);
-        let command = call_lua_named_action(&lua, "move").unwrap();
+        assert!(
+            call_lua_named_action(&lua, "move")
+                .unwrap_err()
+                .contains("drag event")
+        );
+        let mut action = crate::ui::action::Action::click();
+        action.key = "move".into();
+        action.event = crate::ui::action::Event::Mouse {
+            state: "drag".into(),
+            button: Some("left".into()),
+            position: None,
+            origin: None,
+        };
+        action.key = "fail".into();
+        assert!(
+            call_lua_action(&lua, &action)
+                .unwrap_err()
+                .contains("failed")
+        );
+        assert_eq!(call_lua_named_action(&lua, "noop").unwrap(), Value::Nil);
+        action.key = "move".into();
+        let command = call_lua_action(&lua, &action).unwrap();
         let command = command.as_table().unwrap();
-        assert!(command.get::<bool>("reposition").unwrap());
+        assert!(command.get::<bool>("drag").unwrap());
         assert_eq!(command.get::<u32>("dismiss").unwrap(), 42);
+        action.key.clear();
+        if let crate::ui::action::Event::Mouse { state, .. } = &mut action.event {
+            *state = "drop".into();
+        }
+        let command = call_lua_action(&lua, &action).unwrap();
+        assert!(command.as_table().unwrap().get::<bool>("drop").unwrap());
     }
 
     #[test]

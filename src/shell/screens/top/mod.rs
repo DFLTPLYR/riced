@@ -884,11 +884,13 @@ impl Top {
             String,
             crate::ui::listview::ListView<(String, String), WidgetNode>,
         >,
+        hold: Duration,
     ) -> Element<'_, Plant> {
         render::view(
             self,
             id,
             render::BarViewContext {
+                hold,
                 catalog: widgets,
                 placements,
                 motion: anim_runtime,

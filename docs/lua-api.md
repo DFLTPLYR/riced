@@ -71,11 +71,19 @@ y = 300
 props = { radius = 16 }
 ```
 
-Open **Settings → Desktop → Place rectangle**, move to the desired display,
-then click to place. Right-click or Escape cancels. Capture surfaces show the
+Open **Settings → Desktop** and click inside a widget preview, move to the desired
+display, then click to place. The page renders each discovered desktop widget's
+actual Lua tree with its defaults; placed widgets use their saved props and size
+overrides. The preview-display selector supplies output context to unpinned
+widgets. Preview instances are isolated from live desktop instances, and embedded
+controls do not execute actions. Right-click or Escape cancels. Capture surfaces show the
 desktop above ordinary windows while positioning; Settings stays intact below.
 Successful drops save one `[[desktop]]` entry pinned to the clicked display.
-Its top-left corner follows the cursor. **Reposition** on the same Settings
+The point originally pressed inside the widget stays attached to the cursor;
+scaled previews map that point back into native logical pixels, excluding card
+padding and letterboxing. The ghost and saved origin both use `cursor - grab`.
+Explicit **Place** and **Reposition** buttons use the top-left corner as their
+fallback anchor. **Reposition** on the same Settings
 page picks up an existing placement; the next click saves its output and position
 while preserving identity, dimensions, props, and stacking order. Escape or
 right-click cancels without changing the saved placement. Unknown placement fields and invalid
@@ -152,11 +160,12 @@ decode). A button without a key is inert.
 | --- | --- |
 | `action` | `key`, optional `value` (boolean, number, or string) from a control or popup row |
 | `press`, `release`, `click`, `hold` | `button` (`left`, `right`, `middle`, or another button name), `x`, `y` when available |
+| `drag`, `drop` | Desktop left-hold pickup and release; `button`, `x`, `y` when available |
 | `move`, `enter`, `exit` | `x`, `y` when available |
 | `key` | `key` (character or named key), `state` (`pressed`/`released`), `modifiers = {shift, control, alt, super}` |
 
 Pointer coordinates are placement-local logical pixels. A hold fires once after
-500ms and suppresses the click. Leaving the placement cancels its pending gesture.
+the configured duration and suppresses the click. Leaving the placement cancels its pending gesture.
 Child controls consume their own input; a button sends its control event without
 a second bare click. A bare left click opens `app:popup()` when defined, retaining
 the native popup behavior. Other unconsumed gestures go to `actions`.
@@ -164,16 +173,42 @@ Keyboard events require a host that receives keyboard input and a pointer over
 the placement; passive bar/desktop surfaces do not request keyboard focus.
 The native Lua demo supports delivered keyboard events.
 
-Inside a desktop widget's `actions` callback, `self.reposition()` (or
-`self:reposition()`) picks up that placement using the same two-click capture flow
-as Settings. It queues a host request; no return is required. It errors outside
-a desktop callback, and the `reposition` method is reserved for the host.
+On desktop placements, a left-button hold emits `drag` instead of `hold`.
+Calling `self.drag()` from that event picks up the placement at the original
+press point. Move with the button held, then release: the originating Lua instance
+receives `drop`, even outside the widget or on another output. Call `self.drop()`
+to save the position. Declining the drop or raising an error cancels it. Both
+events carry `button="left"` and widget-local coordinates; drop coordinates refer
+to the grab point on the moving snapshot. These host methods also accept colon
+syntax, require their corresponding event, and are reserved for desktop instances.
+Right-click cancels without changing the saved placement. Escape also cancels
+when the source receives keyboard input. Held-drag previews neither take pointer
+input nor request keyboard focus: the original surface keeps the button grab
+until its matching release. Preview-surface, other-button, and stale-session
+releases cannot end that gesture.
+
+The ghost retains the source layout and grab point across outputs. Motion from
+the initiating Wayland surface is mapped through logical output geometry during
+the implicit grab. Reloaded/removed sources, changed placements, and disconnected
+outputs invalidate stale drops. Settings previews and explicit Place/Reposition
+buttons retain their click-to-pick-up, click-to-place interaction.
+
+Configure hold timing in **Settings → Desktop → Hold duration**, or in `config.toml`:
+
+```toml
+[interaction]
+hold = "medium" # fast = 250ms, medium = 500ms (default), slow = 1000ms
+# hold = 750    # custom milliseconds, integer 1..=60000
+```
+
+The setting applies to widget holds on both desktop placements and bars.
 
 ```lua
 function app:actions(events)
-    if events.type == "hold" or
-       (events.type == "click" and events.button == "right") then
-        self.reposition()
+    if events.type == "drag" then
+        self.drag()
+    elseif events.type == "drop" then
+        self.drop()
     elseif events.type == "action" and events.key == "enabled" then
         self.enabled = events.value
     end
@@ -182,6 +217,7 @@ end
 
 `app:on_action()`, `app:on_press()`, and `app:handler()` are rejected at load.
 Migrate installed scripts explicitly; seeds never overwrite user-owned files.
+`self.reposition()` was removed; use the `drag`/`drop` lifecycle above.
 Tree setters such as `:on_press(key)` remain valid action bindings.
 
 ### Scrollable

@@ -25,7 +25,10 @@ fn throttled_graft(
     _status: iced::event::Status,
     id: iced::window::Id,
 ) -> Option<Plant> {
-    if let Event::Mouse(iced::mouse::Event::CursorMoved { .. }) = &event {
+    if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = &event {
+        if let Ok(mut cursors) = super::screens::background::LAST_CURSOR_GLOBAL.lock() {
+            cursors.insert(id, *position);
+        }
         // always update global last cursor (throttled to 60fps) so press is accurate
         let now = Instant::now();
         let mut last = LAST_MOUSE_MOVE.lock().unwrap();
@@ -119,6 +122,7 @@ impl Plots {
     /// Detach surface resources; native close commands and saved-bar changes
     /// remain host operations so compositor removal does not delete config.
     pub(crate) fn forget_window(&mut self, id: iced::window::Id) -> Option<PlotInfo> {
+        super::desktop_widgets::forget_settings(self, id);
         if let Some(PlotInfo::Overlay(output)) = self.windows.ids.get(&id).copied()
             && self.windows.overlays.get(&output) == Some(&id)
         {
@@ -127,6 +131,9 @@ impl Plots {
                 .forget(output, &mut self.animation.motion);
         }
         self.input.cursors.remove(&id);
+        if let Ok(mut cursors) = super::screens::background::LAST_CURSOR_GLOBAL.lock() {
+            cursors.remove(&id);
+        }
         self.input.presses.remove(&id);
         self.placements.forget_window(id);
         self.animation.forget_window(id);
@@ -517,6 +524,7 @@ impl Plots {
                         &self.placements,
                         &self.animation.motion,
                         &self.animation.widgets,
+                        self.config.interaction.hold.duration(),
                     )
                 })
                 .unwrap_or_else(|| Space::new().into()),
@@ -562,12 +570,15 @@ impl Plots {
         // owned decoded images need the full-redraw reclaim; the rest stay
         // host-only (their renderers die with the window anyway).
         let owned_images = match info {
-            Some(PlotInfo::Setting) => self.windows.settings.get(&id).is_some_and(|setting| {
-                setting
-                    .wallpaper_draft
-                    .as_ref()
-                    .is_some_and(|draft| !draft.sources.is_empty())
-            }),
+            Some(PlotInfo::Setting) => {
+                super::desktop_widgets::settings_have_images(self, id)
+                    || self.windows.settings.get(&id).is_some_and(|setting| {
+                        setting
+                            .wallpaper_draft
+                            .as_ref()
+                            .is_some_and(|draft| !draft.sources.is_empty())
+                    })
+            }
             Some(PlotInfo::Popup(..)) => self.windows.popups.get(&id).is_some_and(|popup| {
                 popup
                     .tree
@@ -856,10 +867,19 @@ impl Plots {
                         Event::Keyboard(iced::keyboard::Event::KeyPressed {
                             key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                             ..
-                        })
+                        }) | Event::Mouse(iced::mouse::Event::ButtonPressed(
+                            iced::mouse::Button::Right
+                        ))
                     )
                 {
                     return super::desktop_widgets::finish(self);
+                }
+                if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = &event
+                    && super::desktop_widgets::source_motion(self, id, *position)
+                {
+                    return Command::done(Plant::Desktop(
+                        super::desktop_widgets::DesktopEvent::Changed,
+                    ));
                 }
                 if matches!(
                     event,
@@ -867,6 +887,12 @@ impl Plots {
                         iced::mouse::Button::Left
                     ))
                 ) {
+                    if let Some(task) =
+                        super::desktop_widgets::request_release(self, id, iced::mouse::Button::Left)
+                    {
+                        self.input.presses.remove(&id);
+                        return task;
+                    }
                     let _ = Background::handle_left_release(self);
                     self.input.presses.remove(&id);
                     return Command::none();
@@ -1624,6 +1650,7 @@ mod tests {
             widget: "rectangle".into(),
             placement: None,
             cursor: None,
+            pickup: Default::default(),
         });
         let stale = iced::window::Id::unique();
         let _ = plots.update(Plant::Desktop(DesktopEvent::Move {
@@ -1673,6 +1700,7 @@ mod tests {
             widget: "rectangle".into(),
             placement: None,
             cursor: None,
+            pickup: Default::default(),
         });
         let _ = plots.update(Plant::Wayland(LandEvent::Closed(captures[0].1)));
         assert!(plots.desktop.drag.is_some());
@@ -1733,7 +1761,7 @@ mod tests {
             );
         }
         assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Move { surface:target, output:owner, position:point }) if *target==surface && *owner==output && *point==position)));
-        assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Drop { surface:target, output:owner }) if *target==surface && *owner==output)));
+        assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Drop { surface:target, output:owner, position:point, session: None }) if *target==surface && *owner==output && *point==position)));
         assert!(messages.iter().any(|message| matches!(message, Plant::Desktop(DesktopEvent::Cancel { surface:target }) if *target==surface)));
     }
 

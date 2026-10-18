@@ -7,3 +7,4 @@ pub mod panel;
 pub mod panel_preview;
 pub mod panel_window;
 pub mod spin_box;
+pub(crate) mod widget_preview;

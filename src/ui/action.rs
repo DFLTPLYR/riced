@@ -21,6 +21,8 @@ pub enum Event {
         state: String,
         button: Option<String>,
         position: Option<iced::Point>,
+        /// Original widget-local press point, retained for host pickup geometry.
+        origin: Option<iced::Point>,
     },
     Key {
         state: String,
@@ -92,6 +94,7 @@ impl Action {
                 state: "click".into(),
                 button: Some("left".into()),
                 position: None,
+                origin: None,
             },
         }
     }

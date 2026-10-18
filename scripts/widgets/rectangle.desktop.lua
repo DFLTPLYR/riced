@@ -11,8 +11,10 @@ function app:view(props)
 end
 
 function app:actions(events)
-    if events.type == "hold" or (events.type == "click" and events.button == "right") then
-        self.reposition()
+    if events.type == "drag" then
+        self.drag()
+    elseif events.type == "drop" then
+        self.drop()
     end
 end
 

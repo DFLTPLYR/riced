@@ -15,6 +15,7 @@ pub fn shifted<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         offset: Vector::new(x, y),
         clickable,
         detached: false,
+        native_limit: None,
     })
 }
 
@@ -28,6 +29,22 @@ pub fn ghost<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         offset: Vector::new(x, y),
         clickable: false,
         detached: true,
+        native_limit: None,
+    })
+}
+
+/// Freeze a picked-up widget's source layout while moving across output sizes.
+pub(crate) fn snapshot<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
+    content: Element<'a, M, T, R>,
+    position: iced::Point,
+    native_limit: Size,
+) -> Element<'a, M, T, R> {
+    Element::new(Motion {
+        content,
+        offset: Vector::new(position.x, position.y),
+        clickable: false,
+        detached: true,
+        native_limit: Some(native_limit),
     })
 }
 
@@ -36,6 +53,7 @@ struct Motion<'a, M, T, R> {
     offset: Vector,
     clickable: bool,
     detached: bool,
+    native_limit: Option<Size>,
 }
 
 impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
@@ -69,6 +87,13 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
         renderer: &R,
         limits: &layout::Limits,
     ) -> layout::Node {
+        let native;
+        let limits = if let Some(size) = self.native_limit {
+            native = layout::Limits::new(Size::ZERO, size);
+            &native
+        } else {
+            limits
+        };
         let child = self.content.as_widget_mut().layout(tree, renderer, limits);
         if self.detached {
             layout::Node::with_children(Size::ZERO, vec![child])
@@ -201,6 +226,52 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picked_up_snapshot_keeps_source_size_on_a_smaller_output_and_is_inert() {
+        use iced::advanced::renderer::Headless;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let content: Element<'static, &'static str> =
+            iced::widget::button(iced::widget::Space::new())
+                .width(640)
+                .height(360)
+                .on_press("clicked")
+                .into();
+        let mut element = snapshot(
+            content,
+            iced::Point::new(-60.0, -20.0),
+            Size::new(1920.0, 1080.0),
+        );
+        let mut tree = widget::Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(200.0, 100.0)),
+        );
+        assert_eq!(node.children()[0].size(), Size::new(640.0, 360.0));
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(event),
+                Layout::new(&node),
+                mouse::Cursor::Available(iced::Point::new(10.0, 5.0)),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(200.0, 100.0)),
+            );
+        }
+        assert!(messages.is_empty());
+    }
 
     #[test]
     fn list_buttons_request_first_hover_frame_and_render_each_status() {

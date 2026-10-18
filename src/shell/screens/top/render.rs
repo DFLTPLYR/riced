@@ -11,6 +11,7 @@ use iced::{
 };
 
 pub(super) struct BarViewContext<'a> {
+    pub hold: std::time::Duration,
     pub catalog: &'a [WidgetDefinition],
     pub placements: &'a WidgetState,
     pub motion: &'a aura_anim::core::runtime::MotionRuntime,
@@ -45,7 +46,7 @@ fn render_slot_widgets(
                     events,
                 )))
             });
-            let element = crate::ui::widgets::input::input(element, sender);
+            let element = crate::ui::widgets::input::with_hold(element, sender, context.hold);
             mouse_area(element)
                 .on_enter(Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellHover(
                     bar,

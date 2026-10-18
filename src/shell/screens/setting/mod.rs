@@ -82,7 +82,7 @@ impl SettingPage {
     fn description(self) -> &'static str {
         match self {
             Self::Desktop => {
-                "Pick a desktop widget, then click the desktop to place it. Right-click or Escape cancels."
+                "Click inside a widget preview, then click the desktop to place it. Hold and drag a desktop widget; release to drop. Right-click or Escape cancels."
             }
             Self::Panel => "Choose a bar, arrange its widgets, and fine-tune its appearance.",
             Self::ContextMenu => "Customize the menu opened by right-clicking the wallpaper.",

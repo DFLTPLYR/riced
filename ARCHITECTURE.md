@@ -344,9 +344,25 @@ views. Native input/layout tests cover controls, disabled behavior, exports,
 and cross-VM ownership in addition to the seed contracts.
 
 The placement input shell delivers unconsumed pointer gestures and keyboard
-events after native controls. Desktop `self.reposition()` requests are scoped
-to `actions`, then routed by placement identity to the Settings capture flow.
+events after native controls. Desktop left holds become `drag` events; `self.drag()`
+starts capture by placement identity. Held-drag previews are pointer-transparent
+and never request keyboard focus; the initiating background surface retains the
+implicit pointer grab. Only its matching button release, tagged with the current
+gesture identity and release-time pointer position, sends
+`drop` back to the initiating VM, where `self.drop()` commits the position. Declined
+or failed drops cancel; stale sessions and preview-surface releases are ignored.
+Settings uses a separate, input-taking two-click placement interaction.
+Both host methods are scoped to their matching event in `actions`. Hold duration
+is configured globally in `[interaction].hold` (preset or custom milliseconds).
 Repositioning commits only output/x/y and preserves the placement's appearance.
+The input shell retains the press origin separately from current pointer coords.
+Capture previews and drops share `cursor - grab_offset`, including negative
+origins at output edges. Motion from the initiating Wayland surface is translated
+through logical output geometry until its implicit pointer grab ends. Settings
+renders isolated per-window/widget/output previews, measured at native layout
+size and scaled for display. Preview hit testing inversely maps only the visible
+widget rectangle, and press-time revision tokens reject stale picks. Drag ghosts
+retain the accepted source tree; closing Settings drops its preview VMs/caches.
 
 Run `just check` for formatting, the complete test suite, clippy, and diff
 whitespace checks in the Nix development environment. Test behavior at
