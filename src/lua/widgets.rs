@@ -36,6 +36,13 @@ pub(crate) fn call_lua_value(lua: &Lua, method: &str) -> Result<Value, String> {
     call_widget_method(lua, method, mlua::MultiValue::new())
 }
 
+/// Whether an `actions(events)` return asks the host to open the
+/// placement's popup (`self:popup()` set the `popup` host command).
+pub(crate) fn command_requests_popup(value: &Value) -> bool {
+    matches!(value, Value::Table(table) if table.get::<bool>("popup").unwrap_or(false))
+}
+
+#[cfg(test)]
 pub(crate) fn lua_has_func(states: &HashMap<String, Lua>, id: &str, method: &str) -> bool {
     states.get(id).is_some_and(|lua| {
         lua.named_registry_value::<Table>("riced.widget.app")
@@ -66,6 +73,8 @@ pub(crate) fn call_lua_action(
         .map_err(|e| e.to_string())?;
     lua.set_named_registry_value("riced.drop.requested", false)
         .map_err(|e| e.to_string())?;
+    lua.set_named_registry_value("riced.popup.requested", false)
+        .map_err(|e| e.to_string())?;
     let event = match &action.event {
         crate::ui::action::Event::Mouse { state, .. } => state.as_str(),
         _ => "action",
@@ -85,15 +94,24 @@ pub(crate) fn call_lua_action(
     let drop = lua
         .named_registry_value::<bool>("riced.drop.requested")
         .unwrap_or(false);
-    if drag || drop {
+    let popup = lua
+        .named_registry_value::<bool>("riced.popup.requested")
+        .unwrap_or(false);
+    if drag || drop || popup {
         let command = match value {
             Value::Nil => lua.create_table().map_err(|e| e.to_string())?,
             Value::Table(table) => table,
             _ => return Err("actions host commands require a table or nil return".into()),
         };
-        command
-            .set(if drag { "drag" } else { "drop" }, true)
-            .map_err(|e| e.to_string())?;
+        if drag {
+            command.set("drag", true).map_err(|e| e.to_string())?;
+        }
+        if drop {
+            command.set("drop", true).map_err(|e| e.to_string())?;
+        }
+        if popup {
+            command.set("popup", true).map_err(|e| e.to_string())?;
+        }
         Ok(Value::Table(command))
     } else {
         Ok(value)
@@ -174,6 +192,32 @@ pub(crate) fn load_widget_script(lua: &Lua, label: &str, source: &str) -> mlua::
                     )));
                 }
                 lua.set_named_registry_value(requested, true)
+            })?,
+        )?;
+    }
+    // `app.popup()` stays the content builder. Inside `actions` it becomes a
+    // request to open the popup anchored to the reporting widget's bounds;
+    // the host calls it directly (outside actions) to render the body.
+    if let Value::Function(original) = app.get::<Value>("popup")? {
+        app.set(
+            "popup",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                if lua
+                    .named_registry_value::<bool>("riced.in_actions")
+                    .unwrap_or(false)
+                {
+                    if !lua
+                        .named_registry_value::<bool>("riced.popup.available")
+                        .unwrap_or(false)
+                    {
+                        return Err(mlua::Error::RuntimeError(
+                            "self.popup() requires a bar placement".into(),
+                        ));
+                    }
+                    lua.set_named_registry_value("riced.popup.requested", true)?;
+                    return Ok(Value::Nil);
+                }
+                original.call::<Value>(args)
             })?,
         )?;
     }
@@ -267,6 +311,7 @@ impl WidgetState {
             .map_err(|error| error.to_string())?;
         let result = (|| -> mlua::Result<Table> {
             lua.set_named_registry_value("riced.drag.available", host.is_some())?;
+            lua.set_named_registry_value("riced.popup.available", host.is_none())?;
             let overrides: Table = app.get("props")?;
             if let Value::Table(defaults) = app.get::<Value>("defaults")?
                 && let Value::Table(props) = defaults.get::<Value>("props")?
@@ -493,6 +538,7 @@ mod tests {
             button: Some("left".into()),
             position: None,
             origin: None,
+            bounds: None,
         };
         action.key = "fail".into();
         assert!(
@@ -512,6 +558,64 @@ mod tests {
         }
         let command = call_lua_action(&lua, &action).unwrap();
         assert!(command.as_table().unwrap().get::<bool>("drop").unwrap());
+    }
+
+    #[test]
+    fn popup_requests_preserve_content_state_and_reset_after_errors() {
+        let lua = new_widget_lua().unwrap();
+        load_widget_script(
+            &lua,
+            "popup",
+            r#"return {
+            count=0,
+            view=function() return 'view' end,
+            popup=function(self) self.count=self.count+1; return tostring(self.count) end,
+            actions=function(self,events)
+                if events.key=='noop' then return end
+                self:popup()
+                if events.key=='fail' then error('failed') end
+                return {dismiss=42}
+            end,
+        }"#,
+        )
+        .unwrap();
+        assert!(
+            call_lua_action(&lua, &crate::ui::action::Action::click())
+                .unwrap_err()
+                .contains("bar placement")
+        );
+        lua.set_named_registry_value("riced.popup.available", true)
+            .unwrap();
+        let command = call_lua_action(&lua, &crate::ui::action::Action::click()).unwrap();
+        assert!(command_requests_popup(&command));
+        assert_eq!(
+            command.as_table().unwrap().get::<u32>("dismiss").unwrap(),
+            42
+        );
+        assert_eq!(
+            call_lua_value(&lua, "popup")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1"
+        );
+        assert!(
+            call_lua_named_action(&lua, "fail")
+                .unwrap_err()
+                .contains("failed")
+        );
+        assert_eq!(call_lua_named_action(&lua, "noop").unwrap(), Value::Nil);
+        assert_eq!(
+            call_lua_value(&lua, "popup")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2"
+        );
     }
 
     #[test]

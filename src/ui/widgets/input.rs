@@ -107,6 +107,7 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
                     }),
                     position,
                     origin,
+                    bounds: Some(layout.bounds()),
                 },
             };
         if inside != state.inside {
@@ -316,6 +317,10 @@ mod tests {
                 &Rectangle::with_size(size),
             );
         }
+        assert!(messages.iter().any(|action| matches!(&action.event,
+            InputEvent::Mouse { state, bounds: Some(bounds), .. }
+            if state == "click" && *bounds == Rectangle { x: 80.0, y: 60.0, width: 100.0, height: 50.0 }
+        )));
         let lua = mlua::Lua::new();
         let tables: Vec<_> = messages
             .iter()

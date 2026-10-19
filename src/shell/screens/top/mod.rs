@@ -240,7 +240,7 @@ impl TopLocal {
 /// Fully-resolved render inputs for one placement: definition
 /// defaults overlaid with placement overrides, script path included.
 /// Built fresh per render so edits apply without restarts.
-use crate::lua::widgets::{ResolvedWidget, load_widget_script, lua_has_func, new_widget_lua};
+use crate::lua::widgets::{ResolvedWidget, load_widget_script, new_widget_lua};
 
 impl From<&crate::config::TopConfig> for TopLocal {
     fn from(c: &crate::config::TopConfig) -> Self {
@@ -744,9 +744,6 @@ use crate::ui::build::{build_node, build_node_opacity};
 use crate::ui::node::{NodeLength, WidgetNode};
 
 impl Top {
-    /// Hold threshold: press held >= this on release counts as hold.
-    const HOLD_THRESHOLD: Duration = input::HOLD_THRESHOLD;
-
     pub fn new() -> Self {
         Self {
             anchor: Anchor::Top,
@@ -900,10 +897,9 @@ impl Top {
     }
 
     // ------------------------------------------------------------------
-    // Event handling — press/release arrive via PanelWindow (mouse_area);
-    // CursorMoved still arrives via Plant::Graft for cursor bookkeeping.
-    // Measures press duration for hold detection: press stores Instant,
-    // release compares against HOLD_THRESHOLD and clears the entry.
+    // Event handling — widget clicks arrive via each placement's `Input`
+    // widget; the outer PanelWindow press/release only clears stale
+    // bookkeeping. CursorMoved still arrives via Plant::Graft.
     // ------------------------------------------------------------------
 
     fn handle_cursor_moved(plots: &mut Plots, id: window::Id, position: Point) -> Command<Plant> {
@@ -914,13 +910,11 @@ impl Top {
     pub(crate) fn handle_press(
         plots: &mut Plots,
         id: window::Id,
-        button: Button,
+        _button: Button,
     ) -> Command<Plant> {
-        input::InputContext {
-            windows: &plots.windows,
-            input: &mut plots.input,
+        if matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
+            plots.input.presses.remove(&id);
         }
-        .press(id, button, Instant::now());
         Command::none()
     }
 
@@ -1625,35 +1619,16 @@ impl Top {
 
     /// Dispatch an event to the owning placement's `actions(events)`
     /// (the view closure stamps the placement id, so the key routes to
-    /// its own Lua state — control events bypass slot-wide popup fallback), then
-    /// re-render that placement like the click path does. `actions`
-    /// sees the clicking bar's `bar.output` and the placement's
-    /// resolved `self.props`.
+    /// its own Lua state), then re-render that placement. A `self:popup()`
+    /// call inside `actions` opens the placement's `popup()` anchored to
+    /// the reporting widget's bounds. `actions` sees the clicking bar's
+    /// `bar.output` and the placement's resolved `self.props`.
     pub(crate) fn handle_cell_action(
         plots: &mut Plots,
         bar: window::Id,
         placement_id: String,
         action: crate::ui::action::Action,
     ) -> Command<Plant> {
-        // Bare left clicks retain the native popup/slot fallback path. Control
-        // events have their own keys and must never toggle the placement popup.
-        if matches!(&action.event, crate::ui::action::Event::Mouse { state, button: Some(button), .. } if state == "click" && button == "left")
-        {
-            let slot = plots.windows.tops.get(&bar).and_then(|top| {
-                top.local
-                    .widgets
-                    .iter()
-                    .position(|placements| placements.iter().any(|p| p.id == placement_id))
-            });
-            if let Some(slot) = slot {
-                let has_popup = lua_has_func(&plots.placements.instances, &placement_id, "popup");
-                let has_actions =
-                    lua_has_func(&plots.placements.instances, &placement_id, "actions");
-                if has_popup || !has_actions {
-                    return Self::handle_widget_click(plots, bar, slot, &placement_id);
-                }
-            }
-        }
         let gpu = Popup::gpu_usage_percent();
         let resolved = Self::resolve_placement_id(plots, &placement_id);
         let outcome = resolved.as_ref().and_then(|resolved| {
@@ -1670,25 +1645,80 @@ impl Top {
         match outcome {
             Some(Ok(value)) => {
                 plots.placements.errors.remove(&placement_id);
-                let notif = super::notification::command_from_action(&value, plots);
-                if Self::refresh_widget(plots, &placement_id, gpu) {
-                    return Command::batch(vec![
-                        Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed))),
-                        notif,
-                    ]);
+                let mut cmds = Vec::new();
+                if crate::lua::widgets::command_requests_popup(&value) {
+                    let bounds = match &action.event {
+                        crate::ui::action::Event::Mouse {
+                            bounds: Some(bounds),
+                            ..
+                        } => Some((bounds.x, bounds.y, bounds.width, bounds.height)),
+                        _ => None,
+                    };
+                    cmds.push(Self::toggle_placement_popup(
+                        plots,
+                        bar,
+                        &placement_id,
+                        bounds,
+                    ));
                 }
-                return notif;
+                cmds.push(super::notification::command_from_action(&value, plots));
+                if Self::refresh_widget(plots, &placement_id, gpu) {
+                    cmds.push(Command::done(Plant::TopPlot(TopEvent::Widget(
+                        WidgetEvent::Changed,
+                    ))));
+                }
+                return Command::batch(cmds);
             }
             Some(Err(e)) => {
                 let label = resolved
                     .map(|r| r.label())
                     .unwrap_or_else(|| placement_id.clone());
-                Self::note_widget_error(plots, &label, e)
+                Self::note_widget_error(plots, &label, e);
             }
             // Unknown placement: ignore (stale message after hot-reload).
             None => {}
         }
         Command::none()
+    }
+
+    /// Open the placement's popup anchored to its measured bounds, or
+    /// dismiss it when the same placement is already open (toggle).
+    fn toggle_placement_popup(
+        plots: &mut Plots,
+        bar_id: window::Id,
+        placement_id: &str,
+        bounds: Option<(f32, f32, f32, f32)>,
+    ) -> Command<Plant> {
+        let output = match plots.windows.ids.get(&bar_id).copied() {
+            Some(PlotInfo::Top(output)) => output,
+            _ => return Command::none(),
+        };
+        let mut cmds = Vec::new();
+        if let Some(pid) = plots
+            .windows
+            .popups
+            .iter()
+            .find(|(_, popup)| popup.bar_id == bar_id)
+            .map(|(id, _)| *id)
+        {
+            let same = plots
+                .windows
+                .popups
+                .get(&pid)
+                .is_some_and(|popup| popup.placement == placement_id);
+            cmds.push(Popup::handle_dismiss(plots, pid));
+            if same {
+                return Command::batch(cmds);
+            }
+        }
+        if let Some(cmd) = Popup::open_for(plots, bar_id, output, placement_id, bounds) {
+            cmds.push(cmd);
+        }
+        if cmds.is_empty() {
+            Command::none()
+        } else {
+            Command::batch(cmds)
+        }
     }
 
     /// Pointer entered or left one placement: republish `self.hovered` and
@@ -1961,32 +1991,21 @@ impl Top {
     pub(crate) fn handle_release(
         plots: &mut Plots,
         id: window::Id,
-        button: Button,
+        _button: Button,
     ) -> Command<Plant> {
         if !matches!(plots.id_info(id), Some(PlotInfo::Top(_))) {
             return Command::none();
         }
-        // Outer releases bubble up from everywhere, including widget
-        // areas that already dispatched their own click: only a
-        // recorded *gap* target acts here (the slot fallback below).
-        // Anything else is either a widget click (handled) or stale.
-        let target = plots.input.presses.remove(&id);
-        // Silent: the global Graft release safety net in update can
-        // clear the press first when release lands on another window,
-        // and a same-window release fires both PanelWindow and Graft
-        // paths. Only matched gap clicks act.
-        let gap_clicked = button == Button::Left
-            && matches!(target, Some((_, None, t)) if Instant::now().duration_since(t) < Self::HOLD_THRESHOLD);
-        if gap_clicked {
-            return Self::handle_slot_click(plots, id);
-        }
+        // Widget clicks arrive through the placement `Input` widget, so the
+        // outer PanelWindow press/release only drops its own bookkeeping.
+        plots.input.presses.remove(&id);
         Command::none()
     }
 
     /// Release on one widget's own mouse area: clicks only when the
-    /// press target matches (same slot/widget, under hold). A press
-    /// captured by an inner `iced.button` records no target, so cell
-    /// buttons never also trigger the widget click.
+    /// press target matches (same slot/widget, under hold). Retained for
+    /// the `Widget(Pressed/Released)` path; ordinary clicks dispatch
+    /// through the placement `Input` widget.
     pub(crate) fn handle_widget_release(
         plots: &mut Plots,
         bar_id: window::Id,
@@ -2004,235 +2023,12 @@ impl Top {
             Button::Left,
             Instant::now(),
         ) {
-            return Self::handle_widget_click(plots, bar_id, pos, &placement_id);
-        }
-        Command::none()
-    }
-
-    /// Left-click on a bar under the hold threshold: resolve the slot
-    /// under the cursor and either toggle its widget popup or run its
-    /// `actions()` callback. A slot holding both prefers the popup.
-    pub(crate) fn handle_slot_click(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        let (output, top) = match plots.windows.ids.get(&bar_id).copied() {
-            Some(PlotInfo::Top(o)) => match plots.windows.tops.get(&bar_id).cloned() {
-                Some(t) => (o, t),
-                None => return Command::none(),
-            },
-            _ => return Command::none(),
-        };
-        let Some((_, _, sw, sh)) = Background::available_rect(output, &plots.windows.output_infos)
-        else {
-            return Command::none();
-        };
-        let horizontal = top.is_horizontal();
-        let (bw, bh) = top.local.px_size(sw, sh, horizontal);
-        // Content rect: floating margins inset the painted cells. Cursor
-        // positions are bar-local, so no output translation is needed.
-        let (pl, pt, pr, pb) = if top.local.floating {
-            let m = top.local.margins;
-            (
-                m.left.max(0) as f32,
-                m.top.max(0) as f32,
-                m.right.max(0) as f32,
-                m.bottom.max(0) as f32,
-            )
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
-        let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        let n = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        let cursor = plots.input.cursors.get(&bar_id).copied();
-        let pos = cursor
-            .and_then(|p| {
-                Popup::slot_at_point(
-                    (pl, pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
-                    n,
-                    gap,
-                    horizontal,
-                    p,
-                )
-            })
-            .or_else(|| {
-                // No cursor (or gap click): first slot holding a popup widget.
-                (0..n).find(|pos| {
-                    top.local
-                        .widgets_at(*pos)
-                        .iter()
-                        .any(|p| lua_has_func(&plots.placements.instances, &p.id, "popup"))
-                })
-            });
-        let Some(pos) = pos else {
-            return Command::none();
-        };
-        // Toggle: a popup already open for this bar closes first; same
-        // slot means it was just a close (per-widget clicks handle
-        // their own toggles via `handle_widget_click`).
-        let mut cmds = Vec::new();
-        if let Some(pid) = plots
-            .windows
-            .popups
-            .iter()
-            .find(|(_, p)| p.bar_id == bar_id)
-            .map(|(id, _)| *id)
-        {
-            let same = plots
-                .windows
-                .popups
-                .get(&pid)
-                .is_some_and(|p| p.slot == pos);
-            cmds.push(Popup::handle_dismiss(plots, pid));
-            if same {
-                return Command::batch(cmds);
-            }
-        }
-        let names = top.local.widgets_at(pos).to_vec();
-        cmds.push(Self::handle_slot_fallback(
-            plots,
-            bar_id,
-            output,
-            pos,
-            &names,
-            cursor.map(|p| (p.x, p.y)),
-        ));
-        if cmds.is_empty() {
-            return Command::none();
-        }
-        Command::batch(cmds)
-    }
-
-    /// Click on one placement's own mouse area (renderer hit-tested,
-    /// so every placement in a slot gets its own calls): toggle its
-    /// popup, run its `actions()`, or fall back to the slot when it
-    /// defines neither. A popup open for another placement is replaced.
-    pub(crate) fn handle_widget_click(
-        plots: &mut Plots,
-        bar_id: window::Id,
-        pos: usize,
-        placement_id: &str,
-    ) -> Command<Plant> {
-        let output = match plots.windows.ids.get(&bar_id).copied() {
-            Some(PlotInfo::Top(o)) => o,
-            _ => return Command::none(),
-        };
-        let cursor = plots
-            .input
-            .cursors
-            .get(&bar_id)
-            .copied()
-            .map(|p| (p.x, p.y));
-        let mut cmds = Vec::new();
-        if let Some(pid) = plots
-            .windows
-            .popups
-            .iter()
-            .find(|(_, p)| p.bar_id == bar_id)
-            .map(|(id, _)| *id)
-        {
-            let same_placement = plots
-                .windows
-                .popups
-                .get(&pid)
-                .is_some_and(|p| p.placement == placement_id);
-            cmds.push(Popup::handle_dismiss(plots, pid));
-            if same_placement {
-                return Command::batch(cmds);
-            }
-        }
-        if lua_has_func(&plots.placements.instances, placement_id, "popup") {
-            if let Some(cmd) =
-                Popup::open_for(plots, bar_id, output, pos, cursor, Some(placement_id))
-            {
-                cmds.push(cmd);
-            }
-        } else if lua_has_func(&plots.placements.instances, placement_id, "actions") {
-            cmds.push(Self::run_on_press(plots, bar_id, placement_id));
-        } else {
-            let placements = plots
-                .windows
-                .tops
-                .get(&bar_id)
-                .map(|t| t.local.widgets_at(pos).to_vec())
-                .unwrap_or_default();
-            cmds.push(Self::handle_slot_fallback(
+            return Self::handle_cell_action(
                 plots,
                 bar_id,
-                output,
-                pos,
-                &placements,
-                cursor,
-            ));
-        }
-        if cmds.is_empty() {
-            return Command::none();
-        }
-        Command::batch(cmds)
-    }
-
-    /// Slot fallback for gap clicks and action-less placements: open the
-    /// first popup in the slot, else run the first click callback.
-    fn handle_slot_fallback(
-        plots: &mut Plots,
-        bar_id: window::Id,
-        output: OutputId,
-        pos: usize,
-        placements: &[crate::config::WidgetPlacement],
-        cursor: Option<(f32, f32)>,
-    ) -> Command<Plant> {
-        if placements
-            .iter()
-            .any(|p| lua_has_func(&plots.placements.instances, &p.id, "popup"))
-        {
-            if let Some(cmd) = Popup::open_for(plots, bar_id, output, pos, cursor, None) {
-                return cmd;
-            }
-            return Command::none();
-        }
-        // No menu: run the first click callback in the slot, then
-        // re-render that placement (a toggle flips its next output).
-        if let Some(placement) = placements
-            .iter()
-            .find(|p| lua_has_func(&plots.placements.instances, &p.id, "actions"))
-        {
-            return Self::run_on_press(plots, bar_id, &placement.id.clone());
-        }
-        Command::none()
-    }
-
-    /// Run one widget's `actions()` click callback, then re-render it
-    /// (a toggle flips its next output). Errors log once-per-message.
-    /// `actions` sees the clicking bar's `bar.output`.
-    fn run_on_press(plots: &mut Plots, bar: window::Id, placement_id: &str) -> Command<Plant> {
-        let gpu = Popup::gpu_usage_percent();
-        let resolved = Self::resolve_placement_id(plots, placement_id);
-        let outcome = resolved.as_ref().and_then(|resolved| {
-            let output = Self::output_name(plots, bar);
-            plots.placements.ui_action(
-                resolved,
-                &crate::lua::widgets::EntryContext {
-                    services: crate::services::ServiceCtx::from_plots(plots, gpu),
-                    output: &output,
-                },
-                &crate::ui::action::Action::click(),
-            )
-        });
-        match outcome {
-            Some(Ok(value)) => {
-                let command = super::notification::command_from_action(&value, plots);
-                if Self::refresh_widget(plots, placement_id, gpu) {
-                    return Command::batch([
-                        command,
-                        Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed))),
-                    ]);
-                }
-                return command;
-            }
-            Some(Err(e)) => {
-                let label = resolved
-                    .map(|r| r.label())
-                    .unwrap_or_else(|| placement_id.to_string());
-                Self::note_widget_error(plots, &label, e)
-            }
-            None => {}
+                placement_id,
+                crate::ui::action::Action::click(),
+            );
         }
         Command::none()
     }
@@ -2452,7 +2248,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_widget_click_uses_native_popup_but_control_events_reach_actions() {
+    fn widget_click_reaches_actions_and_popup_requires_an_explicit_request() {
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
         let mut plots = Plots::new(receiver);
         let bar = window::Id::unique();
@@ -2462,7 +2258,7 @@ mod tests {
         plots.windows.ids.insert(bar, PlotInfo::Top(OutputId(1)));
         plots.catalog.definitions.push(lua_widget_def("test-popup"));
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
-        crate::lua::widgets::load_widget_script(&lua, "test-popup", "return {seen={}, view=function() return 'menu' end, popup=function(self) self.opened=true; return 'body' end, actions=function(self,events) self.seen[#self.seen+1]=events end}").unwrap();
+        crate::lua::widgets::load_widget_script(&lua, "test-popup", "return {seen={}, view=function() return 'menu' end, popup=function(self) self.opened=true; return 'body' end, actions=function(self,events) self.seen[#self.seen+1]=events; if self.request and events.type=='click' and events.button=='left' then self:popup() end end}").unwrap();
         plots.placements.instances.insert("test-popup".into(), lua);
         let _ = Top::handle_cell_action(
             &mut plots,
@@ -2473,8 +2269,19 @@ mod tests {
         let app: mlua::Table = plots.placements.instances["test-popup"]
             .named_registry_value("riced.widget.app")
             .unwrap();
+        assert!(matches!(
+            app.get::<mlua::Value>("opened").unwrap(),
+            mlua::Value::Nil
+        ));
+        assert_eq!(app.get::<mlua::Table>("seen").unwrap().raw_len(), 1);
+        app.set("request", true).unwrap();
+        let _ = Top::handle_cell_action(
+            &mut plots,
+            bar,
+            "test-popup".into(),
+            crate::ui::action::Action::click(),
+        );
         assert!(app.get::<bool>("opened").unwrap());
-        assert_eq!(app.get::<mlua::Table>("seen").unwrap().raw_len(), 0);
         let _ = Top::handle_cell_action(
             &mut plots,
             bar,
@@ -2485,7 +2292,7 @@ mod tests {
             ),
         );
         let seen = app.get::<mlua::Table>("seen").unwrap();
-        let events: mlua::Table = seen.get(1).unwrap();
+        let events: mlua::Table = seen.get(3).unwrap();
         assert_eq!(events.get::<String>("type").unwrap(), "action");
         assert_eq!(events.get::<String>("key").unwrap(), "value");
         assert_eq!(events.get::<f32>("value").unwrap(), 42.0);

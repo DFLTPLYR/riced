@@ -1,8 +1,7 @@
 mod sizing;
 mod surface;
-use super::top::{Top, TopLocal};
+use super::top::Top;
 use crate::lua::value::{coerce_text, lua_value_kind};
-use crate::lua::widgets::lua_has_func;
 use crate::shell::state::Plots;
 use crate::shell::{Plant, TopEvent, WidgetEvent};
 use crate::theme;
@@ -10,7 +9,7 @@ use crate::ui::decode::parse_node_hovered;
 use crate::ui::icons::rich_text;
 use crate::ui::node::WidgetNode;
 use iced::window;
-use iced::{Element, Length, Point, Task as Command};
+use iced::{Element, Length, Task as Command};
 use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::OutputId;
@@ -18,14 +17,15 @@ pub(crate) use sizing::MeasurementCache;
 #[cfg(test)]
 use std::collections::HashMap;
 
-/// QML-`Menu`-style popup for widget slots, backed by a native
+/// QML-`Menu`-style popup for widget placements, backed by a native
 /// `xdg_popup` (`Plant::NewPopUp`): an exactly-sized surface anchored
-/// to the clicked slot, with the compositor flipping/sliding it into
-/// view on overflow. No fullscreen overlay, no cursor math.
+/// to the reporting widget's measured bounds, with the compositor
+/// flipping/sliding it into view on overflow. No fullscreen overlay, no
+/// cursor math.
 ///
-/// Opened by clicking a slot whose widget defines `popup()` in
-/// `widget.lua`; the box renders that text (icons included). Clicking
-/// the same slot toggles it; the compositor dismisses on outside
+/// Opened from `actions(events)` by calling `self:popup()` on a click;
+/// the box renders whatever `popup()` returns (icons included). Clicking
+/// the same placement toggles it; the compositor dismisses on outside
 /// clicks (menu-grab semantics).
 #[derive(Debug, Clone)]
 pub struct Popup {
@@ -33,8 +33,6 @@ pub struct Popup {
     pub win_id: window::Id,
     /// Bar that spawned this popup (toggle handling).
     pub bar_id: window::Id,
-    /// Slot index on that bar.
-    pub slot: usize,
     /// Placement id whose `popup()` renders the body.
     pub placement: String,
     /// Last rendered `popup()` body text.
@@ -210,77 +208,6 @@ impl Popup {
         }
     }
 
-    /// Slot cell rect in bar-local px: `content` is the bar rect minus
-    /// floating margins, `n` the slot count, `gap` the inter-cell
-    /// spacing. Used as the popup anchor rect.
-    pub(crate) fn slot_rect(
-        content: (f32, f32, f32, f32),
-        n: usize,
-        gap: f32,
-        horizontal: bool,
-        pos: usize,
-    ) -> (i32, i32, u32, u32) {
-        let (ox, oy, ow, oh) = content;
-        if n == 0 {
-            return (ox as i32, oy as i32, 1, 1);
-        }
-        let gap = gap.max(0.0);
-        let pos = pos.min(n - 1) as f32;
-        if horizontal {
-            let cell = ((ow - gap * (n as f32 - 1.0)) / n as f32).max(1.0);
-            (
-                (ox + pos * (cell + gap)).round() as i32,
-                oy.round() as i32,
-                cell.round().max(1.0) as u32,
-                oh.round().max(1.0) as u32,
-            )
-        } else {
-            let cell = ((oh - gap * (n as f32 - 1.0)) / n as f32).max(1.0);
-            (
-                ox.round() as i32,
-                (oy + pos * (cell + gap)).round() as i32,
-                ow.round().max(1.0) as u32,
-                cell.round().max(1.0) as u32,
-            )
-        }
-    }
-
-    /// Slot index under a point, or `None` in gaps/outside. `content`
-    /// is the bar rect minus floating margins, `n` the slot count,
-    /// `gap` the inter-cell spacing. The point is bar-local (cursor
-    /// positions already are).
-    pub(crate) fn slot_at_point(
-        content: (f32, f32, f32, f32),
-        n: usize,
-        gap: f32,
-        horizontal: bool,
-        p: Point,
-    ) -> Option<usize> {
-        let (ox, oy, ow, oh) = content;
-        if n == 0 {
-            return None;
-        }
-        let gap = gap.max(0.0);
-        let (u, len) = if horizontal {
-            (p.x - ox, ow)
-        } else {
-            (p.y - oy, oh)
-        };
-        if u < 0.0 || u >= len {
-            return None;
-        }
-        let cell = (len - gap * (n as f32 - 1.0)) / n as f32;
-        if cell <= 0.0 {
-            return None;
-        }
-        let idx = (u / (cell + gap)).floor() as usize;
-        if idx >= n {
-            return None;
-        }
-        let within = u - idx as f32 * (cell + gap);
-        if within <= cell { Some(idx) } else { None }
-    }
-
     /// GPU busy % from DRM sysfs (AMD + Intel expose `gpu_busy_percent`
     /// per card; NVIDIA needs NVML and reads as unavailable). Busiest
     /// card wins on multi-GPU setups.
@@ -293,21 +220,19 @@ impl Popup {
         crate::services::gpu::gpu_usage_in(drm)
     }
 
-    /// Anchor point (bar-local px) for the popup: centered on the
-    /// cursor along the bar axis and pinned to the bar's outer edge on
-    /// the cross axis, so the menu grows off the edge under the pointer.
-    /// Without a cursor, falls back to the slot center (edge-pinned the
-    /// same way). The compositor slides the box into the output.
+    /// Anchor point (bar-local px) for the popup: the center of the
+    /// reporting widget along the bar axis, pinned to the bar's outer
+    /// edge on the cross axis, so the menu grows off the edge from the
+    /// widget. The compositor flips/slides the box into the output.
     pub(crate) fn popup_anchor(
         bar: (f32, f32),
         horizontal: bool,
         first_side: bool,
-        slot: (i32, i32, u32, u32),
-        cursor: Option<(f32, f32)>,
+        rect: (i32, i32, u32, u32),
     ) -> (i32, i32) {
         let (bw, bh) = bar;
-        let (rx, ry, rw, rh) = slot;
-        let (cx, cy) = cursor.unwrap_or((rx as f32 + rw as f32 / 2.0, ry as f32 + rh as f32 / 2.0));
+        let (rx, ry, rw, rh) = rect;
+        let (cx, cy) = (rx as f32 + rw as f32 / 2.0, ry as f32 + rh as f32 / 2.0);
         if horizontal {
             let x = cx.clamp(0.0, (bw - 1.0).max(0.0)).round() as i32;
             let y = if first_side { bh as i32 - 1 } else { 0 };
@@ -319,61 +244,30 @@ impl Popup {
         }
     }
 
-    /// Open a popup for a slot's `popup()`-capable placement, anchored
-    /// to the slot rect with the menu growing off the bar edge
-    /// (flipped/slid into view by the compositor on overflow).
-    /// `prefer` selects which placement when the caller hit-tested one
-    /// (per-placement mouse areas); otherwise the first capable
-    /// placement wins. Returns `None` when nothing in the slot can pop up.
+    /// Open a popup for one placement's `popup()` body, anchored to the
+    /// widget rect (bar-local px) reported by the opening click. Falls
+    /// back to the cursor when a caller has no bounds. Returns `None`
+    /// when the placement cannot pop up or renders nothing.
     pub(crate) fn open_for(
         plots: &mut Plots,
         bar_id: window::Id,
         output: OutputId,
-        pos: usize,
-        cursor: Option<(f32, f32)>,
-        prefer: Option<&str>,
+        placement_id: &str,
+        bounds: Option<(f32, f32, f32, f32)>,
     ) -> Option<Command<Plant>> {
-        let top = plots.windows.tops.get(&bar_id)?.clone();
-        let placements: Vec<crate::config::WidgetPlacement> = top.local.widgets_at(pos).to_vec();
-        let mut capable: Vec<String> = placements
-            .iter()
-            .filter(|p| {
-                !p.id.is_empty() && lua_has_func(&plots.placements.instances, &p.id, "popup")
-            })
-            .map(|p| p.id.clone())
-            .collect();
-        // Slow path: the file may have changed since the cached state
-        // was built (popup paths don't tick like `view()` does) —
-        // sync candidate placements and re-check, so a newly added
-        // `popup()` opens on the first click after saving.
-        if capable.is_empty() || prefer.is_some_and(|p| !capable.iter().any(|id| id == p)) {
-            for placement in &placements {
-                if placement.id.is_empty() {
-                    continue;
-                }
-                if let Some(resolved) = Top::resolve_placement_id(plots, &placement.id) {
-                    Top::sync_script_state(plots, &resolved);
-                    // Errors surface below when the chosen placement fails
-                    // to load; other candidates just stay unusable.
-                    let _ = Top::ensure_widget_lua(plots, &resolved);
-                }
-            }
-            capable = placements
-                .iter()
-                .filter(|p| {
-                    !p.id.is_empty() && lua_has_func(&plots.placements.instances, &p.id, "popup")
-                })
-                .map(|p| p.id.clone())
-                .collect();
-        }
-        let id = prefer
-            .filter(|p| capable.iter().any(|id| id == p))
-            .map(str::to_string)
-            .or_else(|| capable.into_iter().next())?;
-        // Fresh state for the chosen placement: edits apply on open, not
-        // on the placement's next (maybe 60s) render tick.
-        let resolved = Top::resolve_placement_id(plots, &id)?;
+        // Fresh state for the placement: edits apply on open, not on the
+        // placement's next (maybe 60s) render tick.
+        let resolved = Top::resolve_placement_id(plots, placement_id)?;
         Top::sync_script_state(plots, &resolved);
+        // A caller without measured bounds (e.g. a synthetic click) still
+        // opens at the last cursor position rather than a stale slot.
+        let bounds = bounds.or_else(|| {
+            plots
+                .input
+                .cursors
+                .get(&bar_id)
+                .map(|p| (p.x, p.y, 1.0, 1.0))
+        });
         if let Err(e) = Top::ensure_widget_lua(plots, &resolved) {
             Top::note_widget_error(plots, &resolved.label(), e);
             return None;
@@ -403,8 +297,7 @@ impl Popup {
             surface::OpenRequest {
                 bar: bar_id,
                 output,
-                slot: pos,
-                cursor,
+                anchor: bounds,
             },
             &resolved,
             body,
@@ -781,7 +674,6 @@ mod tests {
             Popup {
                 win_id: pid,
                 bar_id: bar,
-                slot: 0,
                 placement: "whover".into(),
                 body: String::new(),
                 items: Vec::new(),
@@ -894,7 +786,6 @@ mod tests {
             Popup {
                 win_id: id,
                 bar_id: window::Id::unique(),
-                slot: 0,
                 placement: "session".into(),
                 body: "before".into(),
                 items: vec![],
@@ -1018,7 +909,7 @@ mod tests {
         let mut messages = Vec::new();
         let viewport = iced::Rectangle::with_size(iced::Size::new(220.0, 300.0));
         for child in menu.children() {
-            let point = Point::new(
+            let point = iced::Point::new(
                 menu.bounds().x + child.bounds().x + child.size().width / 2.0,
                 menu.bounds().y + child.bounds().y + child.size().height / 2.0,
             );
@@ -1055,61 +946,6 @@ mod tests {
                 .map(|action| action.key.as_str())
                 .collect::<Vec<_>>(),
             ["suspend", "hibernate", "reboot", "poweroff"]
-        );
-    }
-
-    #[test]
-    fn slot_at_point_maps_cells_and_gaps() {
-        // 3 cells across 300px with 4px gaps: cells are ~97.33px.
-        let at = |x: f32| {
-            Popup::slot_at_point((0.0, 0.0, 300.0, 50.0), 3, 4.0, true, Point::new(x, 25.0))
-        };
-        assert_eq!(at(0.0), Some(0));
-        assert_eq!(at(50.0), Some(0));
-        // Gap between cell 0 and 1 starts at ~97.33.
-        assert_eq!(at(97.0), Some(0));
-        assert_eq!(at(98.0), None);
-        assert_eq!(at(102.0), Some(1));
-        assert_eq!(at(299.0), Some(2));
-        assert_eq!(at(300.0), None);
-        assert_eq!(at(-1.0), None);
-        // Vertical bars read y instead.
-        let at_y = |y: f32| {
-            Popup::slot_at_point((0.0, 0.0, 50.0, 300.0), 3, 4.0, false, Point::new(25.0, y))
-        };
-        assert_eq!(at_y(10.0), Some(0));
-        assert_eq!(at_y(150.0), Some(1));
-        assert_eq!(at_y(290.0), Some(2));
-        // Zero slots never match.
-        assert_eq!(
-            Popup::slot_at_point(
-                (0.0, 0.0, 300.0, 50.0),
-                0,
-                4.0,
-                true,
-                Point::new(10.0, 10.0)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn slot_rect_matches_slot_at_point() {
-        // Anchor rects tile the content exactly like hit-testing.
-        let content = (0.0, 0.0, 300.0, 50.0);
-        for pos in 0..3 {
-            let (x, y, w, h) = Popup::slot_rect(content, 3, 4.0, true, pos);
-            assert_eq!((y, h), (0, 50));
-            let center = Point::new(x as f32 + w as f32 / 2.0, 25.0);
-            assert_eq!(
-                Popup::slot_at_point(content, 3, 4.0, true, center),
-                Some(pos)
-            );
-        }
-        // First cell starts at the content origin with the even share.
-        assert_eq!(
-            Popup::slot_rect((8.0, 6.0, 300.0, 50.0), 3, 4.0, true, 0),
-            (8, 6, 97, 50)
         );
     }
 
@@ -1208,55 +1044,26 @@ mod tests {
     }
 
     #[test]
-    fn popup_anchor_centers_on_cursor_at_bar_edge() {
-        // Top bar: x follows the cursor, y pins to the bottom edge.
+    fn popup_anchor_centers_on_widget_at_bar_edge() {
+        // Top bar: x is the widget center, y pins to the bottom edge.
         assert_eq!(
-            Popup::popup_anchor(
-                (1920.0, 50.0),
-                true,
-                true,
-                (0, 0, 100, 50),
-                Some((100.2, 20.0))
-            ),
+            Popup::popup_anchor((1920.0, 50.0), true, true, (50, 0, 100, 50)),
             (100, 49)
         );
         // Bottom bar: pins to the top edge instead.
         assert_eq!(
-            Popup::popup_anchor(
-                (1920.0, 50.0),
-                true,
-                false,
-                (0, 0, 100, 50),
-                Some((100.0, 20.0))
-            ),
+            Popup::popup_anchor((1920.0, 50.0), true, false, (50, 0, 100, 50)),
             (100, 0)
         );
-        // Left bar: y follows the cursor, x pins to the right edge.
+        // Left bar: y is the widget center, x pins to the right edge.
         assert_eq!(
-            Popup::popup_anchor(
-                (50.0, 1080.0),
-                false,
-                true,
-                (0, 0, 50, 100),
-                Some((20.0, 100.0))
-            ),
+            Popup::popup_anchor((50.0, 1080.0), false, true, (0, 50, 50, 100)),
             (49, 100)
         );
-        // Cursor clamps into the bar; missing cursor falls back to the
-        // slot center, edge-pinned the same way.
+        // The anchor clamps into the bar along the bar axis.
         assert_eq!(
-            Popup::popup_anchor(
-                (1920.0, 50.0),
-                true,
-                true,
-                (0, 0, 100, 50),
-                Some((-5.0, 20.0))
-            ),
+            Popup::popup_anchor((1920.0, 50.0), true, true, (-100, 0, 1, 50)),
             (0, 49)
-        );
-        assert_eq!(
-            Popup::popup_anchor((1920.0, 50.0), true, true, (0, 0, 100, 50), None),
-            (50, 49)
         );
     }
 

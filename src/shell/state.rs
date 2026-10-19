@@ -1890,7 +1890,6 @@ mod tests {
             Popup {
                 win_id: id,
                 bar_id: iced::window::Id::unique(),
-                slot: 0,
                 placement: "session".into(),
                 body: content.text,
                 items: content.items,
@@ -2319,7 +2318,6 @@ mod tests {
         let popup = |tree: Option<WidgetNode>| Popup {
             win_id: iced::window::Id::unique(),
             bar_id: iced::window::Id::unique(),
-            slot: 0,
             placement: "clock".into(),
             body: String::new(),
             items: Vec::new(),
@@ -2651,7 +2649,6 @@ mod tests {
             Popup {
                 win_id: popup,
                 bar_id: bar,
-                slot: 0,
                 placement: "clock".into(),
                 body: String::new(),
                 items: Vec::new(),

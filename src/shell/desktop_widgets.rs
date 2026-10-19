@@ -1580,6 +1580,7 @@ fn release(
             button: Some("left".into()),
             position: Some(grab),
             origin: Some(grab),
+            bounds: None,
         },
     };
     let result = widget_action(plots, &owner.instance, owner.output, &action, Some(session));

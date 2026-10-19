@@ -1,5 +1,5 @@
 //! Popup geometry, list synchronization, and registration over narrow owners.
-use super::{Popup, PopupContent, TopLocal};
+use super::{Popup, PopupContent};
 use crate::{
     lua::widgets::ResolvedWidget,
     shell::{
@@ -23,8 +23,9 @@ pub(super) struct SurfaceContext<'a> {
 pub(super) struct OpenRequest {
     pub bar: window::Id,
     pub output: OutputId,
-    pub slot: usize,
-    pub cursor: Option<(f32, f32)>,
+    /// Reporting widget rect in bar-local px; the popup anchors to its
+    /// center. `None` falls back to the bar center.
+    pub anchor: Option<(f32, f32, f32, f32)>,
 }
 
 impl SurfaceContext<'_> {
@@ -37,8 +38,7 @@ impl SurfaceContext<'_> {
         let OpenRequest {
             bar,
             output,
-            slot,
-            cursor,
+            anchor,
         } = request;
         let Some(top) = self.windows.tops.get(&bar) else {
             return Ok(None);
@@ -49,26 +49,16 @@ impl SurfaceContext<'_> {
         };
         let horizontal = top.is_horizontal();
         let (bw, bh) = top.local.px_size(sw, sh, horizontal);
-        let (pl, pt, pr, pb) = if top.local.floating {
-            let margins = top.local.margins;
-            (
-                margins.left.max(0) as f32,
-                margins.top.max(0) as f32,
-                margins.right.max(0) as f32,
-                margins.bottom.max(0) as f32,
-            )
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
-        let gap = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-        let count = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
-        let rect = Popup::slot_rect(
-            (pl, pt, bw as f32 - pl - pr, bh as f32 - pt - pb),
-            count,
-            gap,
-            horizontal,
-            slot,
-        );
+        let rect = anchor
+            .map(|(x, y, w, h)| {
+                (
+                    x.round() as i32,
+                    y.round() as i32,
+                    w.round().max(1.0) as u32,
+                    h.round().max(1.0) as u32,
+                )
+            })
+            .unwrap_or((bw as i32 / 2, bh as i32 / 2, 1, 1));
         let (w, h) = Popup::initial_size(
             &mut self.windows.popup_heights,
             sw,
@@ -80,8 +70,7 @@ impl SurfaceContext<'_> {
             return Ok(None);
         };
         let first_side = top.anchor() == Anchor::Top || top.anchor() == Anchor::Left;
-        let anchor_at =
-            Popup::popup_anchor((bw as f32, bh as f32), horizontal, first_side, rect, cursor);
+        let anchor_at = Popup::popup_anchor((bw as f32, bh as f32), horizontal, first_side, rect);
         let Some(anchor_size) = PixelSize::try_px(1, 1) else {
             return Ok(None);
         };
@@ -115,7 +104,6 @@ impl SurfaceContext<'_> {
             Popup {
                 win_id: id,
                 bar_id: bar,
-                slot,
                 placement: resolved.id.clone(),
                 body: body.text,
                 items: body.items,

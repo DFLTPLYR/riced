@@ -23,6 +23,9 @@ pub enum Event {
         position: Option<iced::Point>,
         /// Original widget-local press point, retained for host pickup geometry.
         origin: Option<iced::Point>,
+        /// Placement rect in window-local px, so hosts can anchor popups to
+        /// the widget that reported the event (not the slot index).
+        bounds: Option<iced::Rectangle>,
     },
     Key {
         state: String,
@@ -95,6 +98,7 @@ impl Action {
                 button: Some("left".into()),
                 position: None,
                 origin: None,
+                bounds: None,
             },
         }
     }

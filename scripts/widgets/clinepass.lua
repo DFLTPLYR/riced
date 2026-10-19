@@ -44,4 +44,10 @@ function app:popup()
     return { ui = iced.card({ title = "Cline Pass", icon = "bot", color = theme.primary, body = iced.column(rows) }), width = 300 }
 end
 
+function app:actions(events)
+    if events.type == "click" and events.button == "left" then
+        self:popup()
+    end
+end
+
 return app

@@ -24,6 +24,10 @@ function app:popup()
 end
 
 function app:actions(events)
+    if events.type == "click" and events.button == "left" then
+        self:popup()
+        return
+    end
     if events.type ~= "action" then return end
     local key = events.key
     if key == "toggle" then self.details = not self.details end

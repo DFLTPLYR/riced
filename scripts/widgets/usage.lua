@@ -89,4 +89,10 @@ function app:popup()
     }
 end
 
+function app:actions(events)
+    if events.type == "click" and events.button == "left" then
+        self:popup()
+    end
+end
+
 return app

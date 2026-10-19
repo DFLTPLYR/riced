@@ -183,8 +183,22 @@ decode). A button without a key is inert.
 Pointer coordinates are placement-local logical pixels. A hold fires once after
 the configured duration and suppresses the click. Leaving the placement cancels its pending gesture.
 Child controls consume their own input; a button sends its control event without
-a second bare click. A bare left click opens `app:popup()` when defined, retaining
-the native popup behavior. Other unconsumed gestures go to `actions`.
+a second bare click. Unconsumed gestures go to `actions`. Defining `popup()`
+provides its content; request opening explicitly from `actions`:
+
+```lua
+function app:actions(events)
+    if events.type == "click" and events.button == "left" then
+        self:popup()
+    end
+end
+```
+
+Inside `actions`, `self:popup()` requests the bar popup; outside `actions`,
+the host calls the same method to build its content. The popup is centered on
+the reporting widget's measured bounds along the bar, at the bar edge.
+Requesting it again toggles that placement's popup closed; requesting another
+placement replaces the open popup. Desktop placements have no popup-window host.
 Keyboard events require a host that receives keyboard input and a pointer over
 the placement; passive bar/desktop surfaces do not request keyboard focus.
 The native Lua demo supports delivered keyboard events.
