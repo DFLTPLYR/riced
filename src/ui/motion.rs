@@ -16,6 +16,7 @@ pub fn shifted<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         clickable,
         detached: false,
         native_limit: None,
+        visible: true,
     })
 }
 
@@ -30,6 +31,7 @@ pub fn ghost<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         clickable: false,
         detached: true,
         native_limit: None,
+        visible: true,
     })
 }
 
@@ -45,6 +47,22 @@ pub(crate) fn snapshot<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         clickable: false,
         detached: true,
         native_limit: Some(native_limit),
+        visible: true,
+    })
+}
+
+/// Hide drawing without removing layout or input state during a pointer grab.
+pub(crate) fn visibility<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
+    content: Element<'a, M, T, R>,
+    visible: bool,
+) -> Element<'a, M, T, R> {
+    Element::new(Motion {
+        content,
+        offset: Vector::ZERO,
+        clickable: true,
+        detached: false,
+        native_limit: None,
+        visible,
     })
 }
 
@@ -54,6 +72,7 @@ struct Motion<'a, M, T, R> {
     clickable: bool,
     detached: bool,
     native_limit: Option<Size>,
+    visible: bool,
 }
 
 impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
@@ -151,6 +170,9 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        if !self.visible {
+            return;
+        }
         let child = if self.detached {
             layout.children().next().expect("ghost child")
         } else {
@@ -214,7 +236,7 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
         viewport: &Rectangle,
         offset: Vector,
     ) -> Option<overlay::Element<'b, M, T, R>> {
-        if !self.clickable {
+        if !self.clickable || !self.visible {
             return None;
         }
         self.content
@@ -226,6 +248,78 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hiding_a_pressed_widget_preserves_layout_and_release_without_drawing() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let paints = Arc::new(AtomicUsize::new(0));
+        let content = |visible| {
+            let paints = paints.clone();
+            visibility(
+                iced::widget::button("Drag")
+                    .width(100)
+                    .height(50)
+                    .on_press("released")
+                    .style(move |theme, status| {
+                        paints.fetch_add(1, Ordering::Relaxed);
+                        iced::widget::button::primary(theme, status)
+                    })
+                    .into(),
+                visible,
+            )
+        };
+        let mut renderer = layout_renderer();
+        let mut element = content(true);
+        let mut tree = widget::Tree::new(&element);
+        let size = Size::new(300.0, 200.0);
+        let limits = layout::Limits::new(Size::ZERO, size);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let viewport = Rectangle::with_size(size);
+        let cursor = mouse::Cursor::Available(iced::Point::new(10.0, 10.0));
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Layout::new(&node),
+            cursor,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &viewport,
+        );
+        element = content(false);
+        tree.diff(element.as_widget());
+        let hidden = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(hidden.size(), node.size());
+        element.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &iced::Theme::Dark,
+            &renderer::Style::default(),
+            Layout::new(&hidden),
+            cursor,
+            &viewport,
+        );
+        assert_eq!(paints.load(Ordering::Relaxed), 0);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            Layout::new(&hidden),
+            cursor,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &viewport,
+        );
+        assert_eq!(messages, ["released"]);
+    }
 
     #[test]
     fn picked_up_snapshot_keeps_source_size_on_a_smaller_output_and_is_inert() {

@@ -402,7 +402,20 @@ impl Plots {
         });
 
         let mut subs = vec![
-            iced::event::listen_with(throttled_graft),
+            iced::event::listen_with(throttled_graft)
+                .with(super::desktop_widgets::held_source(self))
+                .map(|(source, message)| match message {
+                    Plant::Graft(
+                        id,
+                        Event::Mouse(iced::mouse::Event::CursorMoved { position }),
+                    ) if Some(id) == source => {
+                        Plant::Desktop(super::desktop_widgets::DesktopEvent::SourceMotion {
+                            source: id,
+                            position,
+                        })
+                    }
+                    message => message,
+                }),
             shell_sub,
             // XDG base windows (Settings) report close so `ids` stays in sync.
             // This is native Closed, not CloseRequested. The backend has
@@ -875,11 +888,15 @@ impl Plots {
                     return super::desktop_widgets::finish(self);
                 }
                 if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = &event
-                    && super::desktop_widgets::source_motion(self, id, *position)
+                    && super::desktop_widgets::held_source(self) == Some(id)
                 {
-                    return Command::done(Plant::Desktop(
-                        super::desktop_widgets::DesktopEvent::Changed,
-                    ));
+                    return super::desktop_widgets::update(
+                        self,
+                        super::desktop_widgets::DesktopEvent::SourceMotion {
+                            source: id,
+                            position: *position,
+                        },
+                    );
                 }
                 if matches!(
                     event,
@@ -1503,6 +1520,12 @@ impl Plots {
 pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
         Plant::Desktop(super::desktop_widgets::DesktopEvent::Tick) => Scope::None,
+        // Source motion resolves the destination before requesting its redraw.
+        Plant::Desktop(super::desktop_widgets::DesktopEvent::SourceMotion { .. }) => Scope::None,
+        // Continuous drag motion only changes its preview surface. Output
+        // transitions emit Changed as well to clear the previous preview.
+        Plant::Desktop(super::desktop_widgets::DesktopEvent::Move { surface, .. }) => Scope::Window(*surface),
+        Plant::Desktop(super::desktop_widgets::DesktopEvent::PreviewChanged(surface)) => Scope::Window(*surface),
         // Background selection tick is throttled drag update — must redraw all outputs
         Plant::BackgroundPlot(BackgroundEvent::SelectionTick) => Scope::All,
         // Post-creation heal (see `repaint_burst`): full redraw; the handler
@@ -1718,6 +1741,84 @@ mod tests {
         assert_eq!(
             redraw_scope(&Plant::Desktop(DesktopEvent::Cancel { surface: stale })),
             Scope::All
+        );
+    }
+
+    #[test]
+    fn desktop_drag_motion_redraws_only_its_surface_until_crossing_outputs() {
+        use super::super::desktop_widgets::{self, DesktopEvent, DragSession};
+        use iced::futures::StreamExt;
+
+        let mut plots = wallpaper_test_plots();
+        let first = iced_wayland_subscriber::OutputId(1);
+        let second = iced_wayland_subscriber::OutputId(2);
+        let first_surface = iced::window::Id::unique();
+        let second_surface = iced::window::Id::unique();
+        plots.windows.drags.insert(first, first_surface);
+        plots.windows.drags.insert(second, second_surface);
+        plots.desktop.drag = Some(DragSession {
+            source: iced::window::Id::unique(),
+            widget: "rectangle".into(),
+            placement: None,
+            cursor: Some((first, Point::ORIGIN)),
+            pickup: Default::default(),
+        });
+
+        let motion = DesktopEvent::Move {
+            surface: first_surface,
+            output: first,
+            position: Point::new(10.0, 20.0),
+        };
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(DesktopEvent::SourceMotion {
+                source: plots.desktop.drag.as_ref().unwrap().source,
+                position: Point::new(10.0, 20.0),
+            })),
+            Scope::None
+        );
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(DesktopEvent::PreviewChanged(first_surface))),
+            Scope::Window(first_surface)
+        );
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(motion.clone())),
+            Scope::Window(first_surface)
+        );
+        assert!(
+            iced_runtime::task::into_stream(desktop_widgets::update(&mut plots, motion)).is_none()
+        );
+
+        let crossing = DesktopEvent::Move {
+            surface: second_surface,
+            output: second,
+            position: Point::new(30.0, 40.0),
+        };
+        let actions = iced::futures::executor::block_on(
+            iced_runtime::task::into_stream(desktop_widgets::update(&mut plots, crossing))
+                .unwrap()
+                .collect::<Vec<_>>(),
+        );
+        let [Action::Output(message @ Plant::Desktop(DesktopEvent::Changed))] = actions.as_slice()
+        else {
+            panic!("crossing outputs must clear the previous preview: {actions:?}");
+        };
+        assert_eq!(redraw_scope(message), Scope::All);
+        assert_eq!(
+            plots.desktop.drag.as_ref().unwrap().cursor,
+            Some((second, Point::new(30.0, 40.0)))
+        );
+
+        let motion = DesktopEvent::Move {
+            surface: second_surface,
+            output: second,
+            position: Point::new(50.0, 60.0),
+        };
+        assert_eq!(
+            redraw_scope(&Plant::Desktop(motion.clone())),
+            Scope::Window(second_surface)
+        );
+        assert!(
+            iced_runtime::task::into_stream(desktop_widgets::update(&mut plots, motion)).is_none()
         );
     }
 

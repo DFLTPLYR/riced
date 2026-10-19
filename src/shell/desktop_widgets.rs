@@ -169,6 +169,11 @@ impl State {
 pub enum DesktopEvent {
     Tick,
     Changed,
+    PreviewChanged(window::Id),
+    SourceMotion {
+        source: window::Id,
+        position: Point,
+    },
     Pick {
         settings: window::Id,
         widget: String,
@@ -554,8 +559,12 @@ fn app_view(
     } else {
         content
     };
+    let picked_up = interactive
+        && plots.desktop.drag.as_ref().is_some_and(|drag| {
+            drag.pickup.owner.is_some() && drag.placement.as_deref() == Some(widget.id.as_str())
+        });
     Some(positioned(
-        content,
+        crate::ui::motion::visibility(content, !picked_up),
         Point::new(widget.x, widget.y),
         interactive,
     ))
@@ -697,6 +706,15 @@ fn across_outputs(
 }
 
 /// The initiating Wayland surface retains its pointer grab until release.
+pub(crate) fn held_source(plots: &Plots) -> Option<window::Id> {
+    plots
+        .desktop
+        .drag
+        .as_ref()
+        .filter(|drag| drag.pickup.owner.is_some())
+        .map(|drag| drag.source)
+}
+
 pub(crate) fn source_motion(plots: &mut Plots, source: window::Id, point: Point) -> bool {
     if plots
         .desktop
@@ -969,7 +987,28 @@ pub(crate) fn finish(plots: &mut Plots) -> Task<Plant> {
 
 pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
     match event {
-        DesktopEvent::Changed => Task::none(),
+        DesktopEvent::Changed | DesktopEvent::PreviewChanged(_) => Task::none(),
+        DesktopEvent::SourceMotion { source, position } => {
+            let previous = plots
+                .desktop
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.cursor.map(|(output, _)| output));
+            if !source_motion(plots, source, position) {
+                return Task::none();
+            }
+            let output = plots
+                .desktop
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.cursor.map(|(output, _)| output));
+            let event = output
+                .filter(|output| Some(*output) == previous)
+                .and_then(|output| plots.windows.drags.get(&output).copied())
+                .map(DesktopEvent::PreviewChanged)
+                .unwrap_or(DesktopEvent::Changed);
+            Task::done(Plant::Desktop(event))
+        }
         DesktopEvent::Tick => {
             retain(plots);
             plots.services.refresh_system();
@@ -1122,7 +1161,12 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
                 && position.y.is_finite()
                 && let Some(drag) = &mut plots.desktop.drag
             {
+                let changed_output = drag.cursor.is_some_and(|(owner, _)| owner != output);
                 drag.cursor = Some((output, position));
+                if changed_output {
+                    // Clear the previous output's ghost and placement highlight too.
+                    return Task::done(Plant::Desktop(DesktopEvent::Changed));
+                }
             }
             Task::none()
         }
@@ -1543,30 +1587,43 @@ fn release(
     Task::batch([result, finish(plots)])
 }
 
-/// Capture surfaces paint a snapshot of the desktop, visually revealing it
-/// without unmapping the Settings toplevel (the backend cannot minimize it).
+/// Held-drag overlays paint only the moving widget and placement cues. Settings
+/// placement paints a desktop snapshot because its toplevel remains mapped.
 pub(crate) fn view(
     plots: &Plots,
     surface: window::Id,
     output: OutputId,
 ) -> Element<'static, Plant> {
+    let held = plots
+        .desktop
+        .drag
+        .as_ref()
+        .is_some_and(|drag| drag.pickup.owner.is_some());
     let mut layers: Vec<Element<'static, Plant>> = vec![
         container(Space::new())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_| iced::widget::container::Style::default().background(iced::Color::BLACK))
+            .style(move |_| {
+                iced::widget::container::Style::default().background(if held {
+                    iced::Color::TRANSPARENT
+                } else {
+                    iced::Color::BLACK
+                })
+            })
             .into(),
     ];
-    if let Some(tile) = plots.desktop.wallpaper.applied.get(&output) {
-        layers.push(
-            iced::widget::image(tile.handle.clone())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .content_fit(iced::ContentFit::Fill)
-                .into(),
-        );
+    if !held {
+        if let Some(tile) = plots.desktop.wallpaper.applied.get(&output) {
+            layers.push(
+                iced::widget::image(tile.handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(iced::ContentFit::Fill)
+                    .into(),
+            );
+        }
+        layers.extend(views(plots, output, false));
     }
-    layers.extend(views(plots, output, false));
     if let Some(drag) = &plots.desktop.drag
         && let Some((owner, point)) = drag.cursor
         && owner == output
@@ -1623,11 +1680,6 @@ pub(crate) fn view(
         .style(crate::theme::menu_box)
         .into(),
     );
-    let held = plots
-        .desktop
-        .drag
-        .as_ref()
-        .is_some_and(|drag| drag.pickup.owner.is_some());
     let content = stack(layers)
         .width(Length::Fill)
         .height(Length::Fill)
