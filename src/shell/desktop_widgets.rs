@@ -847,37 +847,51 @@ pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant>
         );
     }
     content = content.push(choices).push(text("Click inside a widget preview to pick it up at that point. Release, then click the desktop to place."));
+    let mut available = Vec::new();
     for (name, _) in crate::config::discovery::discover_desktop_widget_files() {
-        content = content.push(
+        let card = column![
             button(text(format!("Place {name}"))).on_press(Plant::Desktop(DesktopEvent::Pick {
                 settings: id,
                 widget: name.clone(),
             })),
+            settings_preview(id, plots, PreviewTarget::Available(name)),
+        ]
+        .spacing(8);
+        available.push(
+            container(card)
+                .padding(12)
+                .width(Length::Fill)
+                .style(crate::theme::menu_box)
+                .into(),
         );
-        content = content.push(settings_preview(id, plots, PreviewTarget::Available(name)));
     }
+    content = content.push(crate::ui::widgets::masonry::masonry(available, 344.0, 16.0));
     content = content.push(text("Placed widgets").size(18));
+    let mut placed = Vec::new();
     for (index, widget) in plots.config.desktop.iter().enumerate() {
         let patch = |patch| Plant::Config(super::ConfigEvent::Patch(patch));
-        content = content.push(settings_preview(
+        let mut card = column![settings_preview(
             id,
             plots,
             PreviewTarget::Placed(widget.id.clone()),
-        ));
-        content = content.push(
+        )]
+        .spacing(8);
+        card = card.push(
+            text(format!(
+                "{} · {} · ({:.0}, {:.0})",
+                widget.widget,
+                if widget.output.is_empty() {
+                    "all outputs"
+                } else {
+                    &widget.output
+                },
+                widget.x,
+                widget.y
+            ))
+            .width(Length::Fill),
+        );
+        card = card.push(
             row![
-                text(format!(
-                    "{} · {} · ({:.0}, {:.0})",
-                    widget.widget,
-                    if widget.output.is_empty() {
-                        "all outputs"
-                    } else {
-                        &widget.output
-                    },
-                    widget.x,
-                    widget.y
-                ))
-                .width(Length::Fill),
                 button("Reposition").on_press(Plant::Desktop(DesktopEvent::Reposition {
                     settings: id,
                     placement: widget.id.clone()
@@ -888,7 +902,7 @@ pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant>
         );
         let x = widget.x;
         let y = widget.y;
-        content = content.push(
+        card = card.push(
             row![
                 text("X"),
                 crate::ui::widgets::spin_box::spin_box(
@@ -923,9 +937,10 @@ pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant>
         );
         let width = widget.width;
         let height = widget.height;
-        content = content.push(
+        card = card.push(text("Size overrides (0 = Lua)").size(12));
+        card = card.push(
             row![
-                text("Width (0 = Lua)"),
+                text("Width").size(12),
                 crate::ui::widgets::spin_box::spin_box(
                     width as f64,
                     0.0..=32768.0,
@@ -939,7 +954,7 @@ pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant>
                         }
                     ))
                 ),
-                text("Height (0 = Lua)"),
+                text("Height").size(12),
                 crate::ui::widgets::spin_box::spin_box(
                     height as f64,
                     0.0..=32768.0,
@@ -956,7 +971,15 @@ pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant>
             ]
             .spacing(8),
         );
+        placed.push(
+            container(card)
+                .padding(12)
+                .width(Length::Fill)
+                .style(crate::theme::menu_box)
+                .into(),
+        );
     }
+    content = content.push(crate::ui::widgets::masonry::masonry(placed, 344.0, 16.0));
     content.into()
 }
 

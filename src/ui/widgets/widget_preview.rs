@@ -78,7 +78,7 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Preview<M> {
         tree.diff_children(std::slice::from_ref(&self.content));
     }
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Fixed(320.0), Length::Fixed(180.0))
+        Size::new(Length::Fixed(320.0), Length::Shrink)
     }
     fn layout(
         &mut self,
@@ -91,7 +91,18 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Preview<M> {
             renderer,
             &layout::Limits::new(Size::ZERO, self.native_limit),
         );
-        let size = limits.resolve(Length::Fixed(320.0), Length::Fixed(180.0), Size::ZERO);
+        let width = limits
+            .resolve(Length::Fixed(320.0), Length::Shrink, Size::ZERO)
+            .width;
+        let native = child.size();
+        let scale = (width / native.width.max(1.0))
+            .min(180.0 / native.height.max(1.0))
+            .min(1.0);
+        let size = limits.resolve(
+            Length::Fixed(320.0),
+            Length::Shrink,
+            Size::new(width, native.height * scale),
+        );
         layout::Node::with_children(size, vec![child])
     }
     fn update(
@@ -274,6 +285,35 @@ mod tests {
             &Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0)),
         );
         assert_eq!(messages, [Point::new(140.0, 50.0)]);
+    }
+
+    #[test]
+    fn preview_height_follows_fitted_content_without_changing_native_geometry() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        for (native, expected_height) in [
+            (Size::new(100.0, 40.0), 40.0),
+            (Size::new(640.0, 100.0), 50.0),
+            (Size::new(100.0, 640.0), 180.0),
+        ] {
+            let content = iced::widget::Space::new()
+                .width(native.width)
+                .height(native.height)
+                .into();
+            let mut element = preview(content, Size::new(1920.0, 1080.0), Arc::new(|point| point));
+            let mut tree = widget::Tree::new(&element);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(320.0, f32::INFINITY)),
+            );
+            assert_eq!(node.size(), Size::new(320.0, expected_height));
+            assert_eq!(node.children()[0].size(), native);
+        }
     }
 
     #[test]

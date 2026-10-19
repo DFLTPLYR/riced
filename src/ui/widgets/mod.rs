@@ -2,6 +2,7 @@
 pub mod anchored;
 pub mod display_map;
 pub(crate) mod input;
+pub(crate) mod masonry;
 pub(crate) mod measured;
 pub mod panel;
 pub mod panel_preview;
