@@ -1387,6 +1387,9 @@ pub use paths::widgets_migrated_path;
 /// available to widgets and overlay scenes. No
 /// `require` needed (and none available — the sandbox nils it).
 pub use paths::components_dir;
+pub use paths::shaders_dir;
+#[cfg(test)]
+pub(crate) use seed::SHADER_SEEDS;
 
 impl Config {
     /// Apply a runtime [`ConfigPatch`] to the live config in place.

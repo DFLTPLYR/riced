@@ -43,3 +43,5 @@ tracing = "0.1"
 sysinfo = "0.33"
 aura-anim = "0.3"
 zbus = "5"
+bytemuck = { version = "1", features = ["derive"] }
+naga = { version = "27", features = ["wgsl-in"] }

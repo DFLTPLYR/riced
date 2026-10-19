@@ -98,6 +98,11 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
         iced.set(
             kind,
             lua.create_function(move |lua, args: mlua::MultiValue| {
+                if kind == "shader" && args.len() != 1 {
+                    return Err(mlua::Error::RuntimeError(
+                        "iced.shader needs exactly one WGSL path".into(),
+                    ));
+                }
                 if matches!(kind, "row" | "column" | "listview" | "pick_list")
                     && !matches!(args.front(), Some(Value::Table(_)))
                 {

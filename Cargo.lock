@@ -4052,6 +4052,7 @@ name = "riced"
 version = "0.1.0"
 dependencies = [
  "aura-anim",
+ "bytemuck",
  "bytes",
  "clap",
  "dirs",
@@ -4066,6 +4067,7 @@ dependencies = [
  "material-colors",
  "memmap2",
  "mlua",
+ "naga",
  "regex",
  "resvg",
  "rfd",

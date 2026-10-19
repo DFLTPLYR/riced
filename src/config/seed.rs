@@ -63,6 +63,27 @@ pub(crate) const SEED_WORKSPACES_LUA: &str = include_str!("../../scripts/widgets
 pub(crate) const SEED_SYSTEMTRAY_LUA: &str = include_str!("../../scripts/widgets/systemtray.lua");
 pub(crate) const SEED_CLINEPASS_LUA: &str = include_str!("../../scripts/widgets/clinepass.lua");
 
+pub(crate) const SHADER_SEEDS: &[(&str, &str)] = &[
+    (
+        "plasma.wgsl",
+        include_str!("../../scripts/shaders/plasma.wgsl"),
+    ),
+    (
+        "gradient.wgsl",
+        include_str!("../../scripts/shaders/gradient.wgsl"),
+    ),
+    (
+        "ripple.wgsl",
+        include_str!("../../scripts/shaders/ripple.wgsl"),
+    ),
+];
+
+fn seed_shaders_in(dir: &Path) {
+    for &(name, content) in SHADER_SEEDS {
+        seed_component(dir, name, content);
+    }
+}
+
 pub(super) fn seed_widgets_in(dir: &Path) {
     for (name, content) in [
         (
@@ -153,6 +174,7 @@ impl super::WidgetsFile {
     fn seed_all() {
         initialize_scripts_in(&widgets_dir(), seed_widgets_in);
         seed_components();
+        initialize_scripts_in(&super::paths::shaders_dir(), seed_shaders_in);
         let root = super::paths::config_path()
             .parent()
             .expect("config directory")
@@ -215,6 +237,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         for (name, seed, removed) in [
+            (
+                "shaders",
+                seed_shaders_in as fn(&std::path::Path),
+                "plasma.wgsl",
+            ),
             (
                 "widgets",
                 WidgetsFile::seed_all_in as fn(&std::path::Path),

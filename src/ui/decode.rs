@@ -537,6 +537,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             })
         }
         "canvas" => parse_canvas(t),
+        "shader" => super::shader::parse(t),
         "spinner" => Ok(WidgetNode::Spinner),
         "separator" => Ok(WidgetNode::Separator {
             height: opt_number(t, "height", "iced.separator()")?

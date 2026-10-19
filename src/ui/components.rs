@@ -172,6 +172,10 @@ components! {
     Canvas => CanvasNode, "canvas", ["drawing"], ["width", "height"] {
         drawing: super::canvas::CanvasDrawing, width: NodeLength, height: NodeLength
     }
+    Shader => ShaderNode, "shader", ["path"], ["speed", "params", "animated", "width", "height"] {
+        source: super::shader::Source, speed: f32, params: Vec<f32>, animated: bool,
+        width: NodeLength, height: NodeLength
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

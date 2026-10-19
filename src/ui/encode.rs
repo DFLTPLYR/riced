@@ -252,6 +252,18 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 sizes!(Some(width), Some(height));
             }
             WidgetNode::Spinner => {}
+            WidgetNode::Shader {
+                source,
+                speed,
+                params,
+                animated,
+                width,
+                height,
+            } => {
+                fields!("path" => source.path().to_string_lossy().as_ref(), "speed" => *speed,
+                    "params" => lua.create_sequence_from(params.iter().copied())?, "animated" => *animated);
+                sizes!(Some(width), Some(height));
+            }
             WidgetNode::Anchored { .. } | WidgetNode::Clickable { .. } => {
                 unreachable!("handled above")
             }

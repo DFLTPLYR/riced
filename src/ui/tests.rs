@@ -30,11 +30,18 @@ const EXAMPLES: &[&str] = &[
     "iced.pick_list({'one','two'},'two'):on_select('pick'):placeholder('Choose')",
     "iced.radio('Two','two','one'):on_select('radio'):spacing(12)",
     "iced.canvas({lines={{points={{x=0,y=0},{x=8,y=8}},color='#aabbcc',width=1.5}},rects={{x=0,y=0,width=4,height=4,color='#112233'}}}):width(16):height(16)",
+    "iced.shader(_shader_path):width(96):height(48):speed(0.5):params({0.2,0.4,0.6}):animated(false)",
 ];
 
 fn lua() -> Lua {
     let lua = Lua::new();
     super::dsl::inject_ui_base(&lua).unwrap();
+    lua.globals()
+        .set(
+            "_shader_path",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/shaders/gradient.wgsl"),
+        )
+        .unwrap();
     lua.globals()
         .set(
             "_owned_image",

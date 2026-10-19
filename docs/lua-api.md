@@ -122,8 +122,88 @@ at decode with the field named.
 | `iced.pick_list(options, selected)`                            | unique-string options; selected nil or member                                                              | `selected`, `on_select`, `width`, `placeholder`, `padding`, `size`                                                                                |
 | `iced.radio(label, value, selected)`                           | string value/selection                                                                                     | `selected`, `on_select`, `width`, `size`, `spacing`                                                                                               |
 | `iced.canvas(drawing)`                                         | inert drawing table (see below)                                                                            | `width`, `height`                                                                                                                                 |
+| `iced.shader(path)`                                            | WGSL fragment file (see below)                                                                             | `width`, `height`, `speed`, `params`, `animated`                                                                                                    |
 
 Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
+
+### Shaders
+
+`iced.shader(path)` draws a file-backed GPU fragment anywhere an `iced.*` node
+can appear: bars, popups, desktop widgets, scene/list delegates, Settings previews,
+and the Lua demo. It is inert and click-through; shared `:on_press(key)` can wrap
+it just like other components. Default size is **100 × 100 logical pixels**.
+Give it explicit dimensions or use `:width(size.fill):height(size.fill)`.
+
+```lua
+function app:view(props)
+    return iced.shader("/shaders/plasma.wgsl")
+        :width(240):height(100)
+        :speed(0.5)
+        :params({0.8, 0.5, 1.0})
+end
+```
+
+Files live in `$XDG_CONFIG_HOME/riced/shaders/` (normally
+`~/.config/riced/shaders/`). `"plasma"`, `"plasma.wgsl"`, and
+`"/shaders/plasma.wgsl"` all resolve there; `/shaders/` is an API alias, not a
+directory at the filesystem root. Subdirectories, absolute paths, `~/…`, and
+absolute `file://…` paths are accepted. Missing extensions become `.wgsl`;
+other extensions fail. Sources are loaded from disk, so deletion never falls
+back to a hidden bundled copy.
+
+A fragment file defines **`fn shade(uv: vec2<f32>) -> vec4<f32>`**. riced supplies
+the vertex/fragment entry points and uniform binding. `uv` runs from `(0, 0)` at
+the widget's top-left to `(1, 1)` at its bottom-right. Clipping and scrolling
+retain the original UV mapping. Return straight-alpha RGBA; riced applies host
+transition opacity and alpha blending.
+
+```wgsl
+fn shade(uv: vec2<f32>) -> vec4<f32> {
+    let pulse = 0.5 + 0.5 * sin(riced.time);
+    return vec4<f32>(uv.x, uv.y, pulse, 1.0);
+}
+```
+
+The injected read-only `riced` uniform exposes:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `time` | `f32` | Shared elapsed seconds since the first shader was created, multiplied by `speed`; rebuilding a view does not reset it |
+| `resolution` | `vec2<f32>` | Full widget width/height in logical pixels, independent of display scale |
+| `mouse` | `vec2<f32>` | Cursor in widget-local logical pixels, or `(-1, -1)` outside/unavailable |
+| `params` | `array<vec4<f32>, 4>` | Up to 16 Lua numbers, packed in order and padded with zero; Lua entries 1–4 become `params[0].xyzw` |
+| `opacity` | `f32` | Host opacity, already applied by the supplied fragment entry point |
+
+`speed` defaults to `1`; negative values run time backwards, zero holds time at
+zero. `animated` defaults to `true`. `:animated(false)` supplies time zero and
+uses a slower reload cadence (use this for the bundled static gradient).
+`params` must be a dense array of at most 16 finite numbers. Pass theme colors
+as numeric parameters when needed; the shader does not implicitly read Lua or
+the theme. Unknown properties, invalid numbers, wrong signatures, additional
+entry points, and extra resource bindings are errors. Textures and multi-pass
+effects are not part of this fragment contract.
+
+Visible animated shaders request their own window's next redraw about every
+16 ms. Static shaders check about every 500 ms. These redraws do not re-run Lua
+or introduce a shell-wide animation subscription. Fully clipped, zero-opacity,
+and software-rendered shader nodes do not request shader frames. Pipelines are
+shared for identical code; each draw has independent uniforms. Old source
+revisions and unused GPU bindings are released as frames are trimmed.
+
+Files hot-reload within about 500 ms while drawn. The first load is parsed and
+validated with Naga and reports errors through the normal Lua host error path.
+An invalid replacement or removed file logs its path and diagnostic once per
+changed revision and retains the last valid shader until repaired.
+
+**Renderer:** shaders require iced's **wgpu** backend. On the tiny-skia software
+fallback, their layout remains present but their pixels are transparent; a
+one-time diagnostic is logged. The release build includes the Vulkan runtime
+library path. This does not capture or blur content behind another window.
+
+Fresh shader libraries receive `plasma.wgsl`, `gradient.wgsl`, and `ripple.wgsl`.
+The `.shaders-initialized` marker preserves user edits and intentional deletions;
+an existing shader directory is adopted without filling missing files. The
+bundled sources are also available under `scripts/shaders/` in the repository.
 
 ### Canvas
 

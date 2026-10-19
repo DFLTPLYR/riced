@@ -28,3 +28,7 @@ pub fn components_dir() -> PathBuf {
         .unwrap_or(Path::new("."))
         .join("components")
 }
+
+pub fn shaders_dir() -> PathBuf {
+    config_path().with_file_name("shaders")
+}

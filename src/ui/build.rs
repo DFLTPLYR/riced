@@ -34,7 +34,7 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         WidgetNode::Separator { height, .. } => height.max(1.0),
         WidgetNode::Button { padding, .. } => base * 1.4 + 2.0 * padding.unwrap_or(6.0).max(0.0),
         WidgetNode::Progress { height, .. } => height.as_ref().map(px).unwrap_or(12.0),
-        WidgetNode::Canvas { height, .. } => match height {
+        WidgetNode::Canvas { height, .. } | WidgetNode::Shader { height, .. } => match height {
             NodeLength::Fixed(px) => *px,
             _ => base,
         },
@@ -682,6 +682,22 @@ pub(crate) fn realize<M: Clone + 'static>(
             };
             Ok(canvas.width(width).height(height).into())
         }
+        WidgetNode::Shader {
+            source,
+            speed,
+            params,
+            animated,
+            width,
+            height,
+        } => Ok(super::shader::element(
+            source.clone(),
+            *speed,
+            params,
+            *animated,
+            width.resolve(iced::Length::Fixed(100.0)),
+            height.resolve(iced::Length::Fixed(100.0)),
+            opacity,
+        )),
         WidgetNode::Spinner => Ok(lucide_iced::ThemedIcon::new(
             iced::advanced::svg::Handle::from_memory(lucide_iced::bytes::LOADER_CIRCLE),
             size.max(1.0) * 1.5,
