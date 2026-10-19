@@ -12,6 +12,7 @@ impl<'a> ServiceCtx<'a> {
             notifications: &plots.notification.queue,
             toplevels: &plots.services.toplevels,
             workspaces: &plots.services.workspaces,
+            tray: &plots.services.tray,
         }
     }
 }

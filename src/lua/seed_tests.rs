@@ -108,6 +108,46 @@ fn notify_center_seed_reads_queue_and_dismisses() {
     }
 }
 
+#[test]
+fn systemtray_seed_opens_and_navigates_menu_from_snapshot() {
+    let lua = new_widget_lua().unwrap();
+    load_widget_script(
+        &lua,
+        "systemtray",
+        include_str!("../../scripts/widgets/systemtray.lua"),
+    )
+    .unwrap();
+    lua.load("systemtray={items={}}").exec().unwrap();
+    parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap();
+    lua.load(r#"systemtray={items={{id=':1.5/Item',title='Test',status='Active',has_menu=true,
+        menu={children={{id=2,label='_Options',type='',visible=true,enabled=true,toggle_type='',submenu=true,
+            children={{id=3,label='_Enabled',type='',visible=true,enabled=true,toggle_type='checkmark',checked=true,children={}}}}}}}}}"#).exec().unwrap();
+    parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap();
+    let open = call_lua_named_action(&lua, "item|:1.5/Item").unwrap();
+    assert!(crate::lua::widgets::command_requests_popup(&open));
+    call_lua_named_action(&lua, "entry|2").unwrap();
+    let content = crate::shell::screens::Popup::parse_popup_content(
+        call_lua_value(&lua, "popup").unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    let mut actions = Vec::new();
+    button_actions(content.tree.as_ref().unwrap(), &mut actions);
+    assert_eq!(actions, ["back", "activate", "context", "entry|3"]);
+    let command = call_lua_named_action(&lua, "entry|3").unwrap();
+    let Value::Table(command) = command else {
+        panic!("expected tray command");
+    };
+    assert_eq!(
+        command
+            .get::<mlua::Table>("tray")
+            .unwrap()
+            .get::<i32>("entry")
+            .unwrap(),
+        3
+    );
+}
+
 fn node_has_icon(node: &WidgetNode) -> bool {
     match node {
         WidgetNode::Icon { .. } => true,
@@ -393,6 +433,7 @@ fn workspaces_seed_filters_bar_output_and_dispatches_actual_name() {
             notifications: &notifications,
             toplevels: &toplevels,
             workspaces: &workspaces,
+            tray: &Default::default(),
         },
         &lua,
     )

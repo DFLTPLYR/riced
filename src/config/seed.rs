@@ -60,6 +60,7 @@ pub(crate) const SEED_NOTIFICATIONS_LUA: &str =
 pub(crate) const SEED_NOTIFY_CENTER_LUA: &str =
     include_str!("../../scripts/widgets/notifycenter.lua");
 pub(crate) const SEED_WORKSPACES_LUA: &str = include_str!("../../scripts/widgets/workspaces.lua");
+pub(crate) const SEED_SYSTEMTRAY_LUA: &str = include_str!("../../scripts/widgets/systemtray.lua");
 pub(crate) const SEED_CLINEPASS_LUA: &str = include_str!("../../scripts/widgets/clinepass.lua");
 
 pub(super) fn seed_widgets_in(dir: &Path) {
@@ -75,6 +76,7 @@ pub(super) fn seed_widgets_in(dir: &Path) {
         ("ram.lua", SEED_RAM_LUA),
         ("gpu.lua", SEED_GPU_LUA),
         ("workspaces.lua", SEED_WORKSPACES_LUA),
+        ("systemtray.lua", SEED_SYSTEMTRAY_LUA),
         ("clinepass.lua", SEED_CLINEPASS_LUA),
         ("system.lua", SEED_SYSTEM_LUA),
         ("notifycenter.lua", SEED_NOTIFY_CENTER_LUA),

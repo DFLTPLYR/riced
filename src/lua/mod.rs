@@ -16,6 +16,7 @@ mod seed_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod transitions;
+pub(crate) mod tray;
 pub mod value;
 pub(crate) mod widgets;
 pub use runtime::*;

@@ -80,6 +80,7 @@ mod tests {
             notifications: &queue,
             toplevels: &toplevels,
             workspaces: &workspaces,
+            tray: &Default::default(),
         };
         publish(&ctx, &lua).expect("publish");
         let cpu: f32 = lua.load("return system.cpu_usage").eval().expect("cpu");

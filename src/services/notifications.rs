@@ -62,6 +62,7 @@ mod tests {
             notifications: &queue,
             toplevels: &toplevels,
             workspaces: &workspaces,
+            tray: &Default::default(),
         };
         publish(&ctx, &lua).expect("publish");
         let first: u32 = lua.load("return notifications[1].id").eval().expect("id");

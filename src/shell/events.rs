@@ -309,6 +309,7 @@ pub enum Plant {
     SettingPlot(SettingEvent),
     // Notifications (D-Bus server + internal events)
     Notify(NotifyEvent),
+    TrayChanged,
     Overlay(super::overlay::OverlayEvent),
     // Config
     Config(ConfigEvent),

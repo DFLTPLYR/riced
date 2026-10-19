@@ -607,7 +607,7 @@ impl Popup {
         match outcome {
             Some(Ok(value)) => {
                 plots.placements.errors.remove(&placement_id);
-                let notif = super::notification::command_from_action(&value, plots);
+                let notif = crate::shell::actions::command_from_action(&value, plots);
                 let refresh = Self::refresh_bodies(plots);
                 // Tree-aware cell refresh (same as the cell-action
                 // path): a tree render() must update widget_trees, not

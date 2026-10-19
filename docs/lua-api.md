@@ -354,6 +354,7 @@ also work. Malformed commands are ignored.
 | `theme`         | Live palette hex pairs: `primary`, `on_primary`, `secondary`, `surface`, `background`, `success`, `warning`, `error`, plus `on_*` text colors |
 | `notifications` | Retained history, newest-first: `{ id, app, title, body, urgency, has_image, popup_visible, closed }` — metadata only                         |
 | `wayland`       | `outputs` (`name`, `x`, `y`, `w`, `h`), `workspaces` (`name`, `monitor`, `active`), `toplevels` (`app_id`, `title`); empty where unsupported  |
+| `systemtray`    | `items`: registered StatusNotifier items, including icons, tooltips, and nested D-Bus menus; see below                                       |
 | `bar`           | `bar.output` connector name (nil while unknown; nil in notification scenes)                                                                   |
 
 `system.sampled` is the host-clock time (seconds) of the last reading. Gate
@@ -363,6 +364,64 @@ times per reading, so the `usage` graph appends one point per elapsed step.
 Scene popup props (`props.notifications`, newest-first, output-filtered) carry
 richer items: `{ id, app, title, body, icon, urgency, actions = {{key, label}}, has_image, image }`.
 `image` is an opaque token for `iced.image()`; pixels never serialize through Lua.
+
+### System tray
+
+riced hosts `org.kde.StatusNotifierWatcher` on the session bus. Item registrations,
+property signals, menu changes, and app exits update an event-driven cache; Lua
+entries only read snapshots. If another watcher owns the name, riced logs the
+conflict and leaves `systemtray.items` empty. It does not replace that watcher.
+
+`systemtray.items` is an array in registration order. Each item has:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Unique routing key (`bus-name/object/path`); pass this to every `tray.*` command |
+| `app_id`, `title` | App-supplied identifier (not necessarily unique) and display title |
+| `status` | SNI status, normally `Passive`, `Active`, or `NeedsAttention`; Lua decides visibility |
+| `icon_name`, `icon_path` | App's icon name and resolved theme/absolute path (nil if unresolved) |
+| `icon_pixmap` | Optional opaque image token decoded from SNI ARGB pixels; use `iced.image(token)` |
+| `attention_icon`, `overlay_icon` | Optional opaque image tokens for attention/overlay icons |
+| `tooltip_title`, `tooltip` | Tooltip title and description |
+| `is_menu` | App requests menu behavior rather than ordinary activation |
+| `has_menu`, `menu` | Whether a menu layout is available, and its root node (otherwise nil) |
+
+Every menu node has `id`, `label`, `type` (`separator` or the app's normal type),
+`enabled`, `visible`, `toggle_type`, `toggle_state` (-1/0/1), `checked`,
+`icon_name`, optional `icon` (image token), `submenu`, and a `children` array.
+Labels retain D-Bus menu mnemonic underscores; Lua owns how they are displayed.
+Hidden and disabled entries remain in the snapshot so Lua can style them.
+The host rejects delivery of clicks through hidden/disabled branches.
+
+The separate **`tray`** global constructs commands. Return a command from
+`actions(events)` or a transition completion callback; constructing one alone
+does not perform I/O. All D-Bus calls run asynchronously.
+
+```lua
+return tray.activate(item.id)                 -- Activate(x, y), default 0, 0
+return tray.secondary(item.id, x, y)          -- SecondaryActivate
+return tray.context(item.id, x, y)            -- app-owned ContextMenu
+return tray.scroll(item.id, 120, "vertical") -- vertical or horizontal only
+return tray.open(item.id)                     -- AboutToShow(0) + placement popup
+return tray.aboutToShow(item.id, entry.id)    -- prepare a submenu, no popup toggle
+return tray.menuEvent(item.id, entry.id)      -- D-Bus menu "clicked" event
+```
+
+Coordinates are screen coordinates supplied to the app, not widget-local points.
+`tray.open` uses the existing bar-placement popup host; implement `app:popup()`
+to render the selected item's menu. It requests `AboutToShow` and refetches the
+layout; open popup bodies refresh when the result arrives. Submenu preparation
+and `LayoutUpdated`/`ItemsPropertiesUpdated` signals also refresh the cached tree.
+Invalid command fields and unknown orientations are errors. Data (`systemtray`)
+and constructors (`tray`) have separate names so snapshot publication never
+overwrites action functions.
+
+`scripts/widgets/systemtray.lua` is the bundled example: it hides passive items,
+shows attention icons, and opens Lua-rendered menus with nested navigation,
+separators, and toggle state. Items without a menu activate directly. The popup
+also offers activation and the application's native context menu. Add the
+`systemtray` widget to a bar in Settings. Fresh widget libraries receive the seed;
+existing libraries can copy this file into their `widgets/` directory.
 
 ## Widget properties
 

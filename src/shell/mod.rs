@@ -1,4 +1,5 @@
 //! Wayland window lifecycle, host messages, and per-surface behavior.
+mod actions;
 mod animation;
 mod catalog;
 mod context;

@@ -22,6 +22,7 @@ pub struct ServiceCtx<'a> {
     pub notifications: &'a VecDeque<crate::shell::screens::notification::Notification>,
     pub toplevels: &'a ToplevelCache,
     pub workspaces: &'a WorkspaceCache,
+    pub tray: &'a crate::tray::TrayCache,
 }
 
 /// One namespaced Lua table (`system`, `theme`, …).
@@ -34,6 +35,16 @@ struct SystemService;
 struct ThemeService;
 struct NotificationsService;
 struct WaylandService;
+struct TrayService;
+
+impl Service for TrayService {
+    fn namespace(&self) -> &'static str {
+        "systemtray"
+    }
+    fn publish(&self, ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
+        super::tray::publish(ctx, lua)
+    }
+}
 
 impl Service for SystemService {
     fn namespace(&self) -> &'static str {
@@ -76,6 +87,7 @@ const SERVICES: &[&dyn Service] = &[
     &ThemeService,
     &NotificationsService,
     &WaylandService,
+    &TrayService,
 ];
 
 /// Publish every service table into `lua` globals.
@@ -96,6 +108,9 @@ mod tests {
     fn registry_covers_all_namespaces_once() {
         let mut names: Vec<_> = SERVICES.iter().map(|s| s.namespace()).collect();
         names.sort_unstable();
-        assert_eq!(names, ["notifications", "system", "theme", "wayland"]);
+        assert_eq!(
+            names,
+            ["notifications", "system", "systemtray", "theme", "wayland"]
+        );
     }
 }

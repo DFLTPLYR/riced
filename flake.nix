@@ -26,6 +26,7 @@
             gcc
             vulkan-loader
             vulkan-tools
+            dbus
           ];
 
           shellHook = ''

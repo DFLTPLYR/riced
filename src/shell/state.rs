@@ -467,6 +467,11 @@ impl Plots {
             );
         }
 
+        subs.push(iced::Subscription::run_with(
+            self.services.tray.clone(),
+            Self::tray_stream,
+        ));
+
         // D-Bus notification server: the configured default timeout
         // rides the subscription identity, so editing it restarts the
         // server (re-requests the bus name).
@@ -506,6 +511,15 @@ impl Plots {
         let ms = *default_ms;
         Box::pin(iced::stream::channel(16, async move |tx| {
             crate::notify::serve(tx, ms).await;
+        }))
+    }
+
+    fn tray_stream(
+        cache: &crate::tray::TrayCache,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = Plant> + Send>> {
+        let cache = cache.clone();
+        Box::pin(iced::stream::channel(32, async move |tx| {
+            crate::tray::serve(cache, tx).await;
         }))
     }
 
@@ -649,7 +663,7 @@ impl Plots {
     fn refresh_theme(&mut self) -> Command<Plant> {
         crate::theme::sync(&self.config.theme);
         self.theme_mtime = crate::theme::poll(&self.config.theme, &None).unwrap_or(None);
-        Top::refresh_theme(self);
+        Top::refresh_services(self);
         Command::batch([
             super::overlay::refresh(self, true),
             Popup::refresh_bodies(self),
@@ -1316,6 +1330,10 @@ impl Plots {
                 }
             },
             Plant::TopPlot(TopEvent::Remove(id)) => Top::handle_remove(self, id),
+            Plant::TrayChanged => {
+                Top::refresh_services(self);
+                Popup::refresh_bodies(self)
+            }
             Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, *n),
             Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
             Plant::Notify(NotifyEvent::PeerClosed(id)) => {
@@ -1553,6 +1571,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
         Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
+        Plant::TrayChanged => Scope::All,
         Plant::Overlay(super::overlay::OverlayEvent::Tick | super::overlay::OverlayEvent::Measured { .. }) => Scope::None,
         Plant::Overlay(_) => Scope::All,
         // Widget press only records; every other widget event repaints

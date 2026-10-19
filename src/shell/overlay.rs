@@ -349,6 +349,7 @@ pub(crate) fn refresh(plots: &mut Plots, force: bool) -> Task<Plant> {
                 notifications: &plots.notification.queue,
                 toplevels: &plots.services.toplevels,
                 workspaces: &plots.services.workspaces,
+                tray: &plots.services.tray,
             };
             let state = &mut plots.desktop.overlays;
             let scene = state.scenes.entry((output, spec.id.clone())).or_default();
@@ -583,6 +584,7 @@ pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {
                 notifications: &plots.notification.queue,
                 toplevels: &plots.services.toplevels,
                 workspaces: &plots.services.workspaces,
+                tray: &plots.services.tray,
             };
             let name = plots
                 .windows
@@ -598,7 +600,7 @@ pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {
                 .and_then(|scene| scene.runtime.as_mut())
                 .map(|runtime| runtime.scene_action(&services, name, &action));
             let command = match result {
-                Some(Ok(value)) => super::screens::notification::command_from_action(&value, plots),
+                Some(Ok(value)) => super::actions::command_from_action(&value, plots),
                 Some(Err(error)) => {
                     eprintln!("overlay action {scene}: {error}");
                     Task::none()

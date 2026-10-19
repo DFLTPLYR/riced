@@ -66,6 +66,7 @@ impl RuntimeContext<'_> {
                     notifications: self.services.notifications,
                     toplevels: self.services.toplevels,
                     workspaces: self.services.workspaces,
+                    tray: self.services.tray,
                 },
                 output: self
                     .outputs
@@ -279,6 +280,7 @@ mod tests {
                 notifications: &notifications,
                 toplevels: &toplevels,
                 workspaces: &workspaces,
+                tray: &Default::default(),
             },
             outputs: HashMap::new(),
             paths: vec![],

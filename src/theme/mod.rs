@@ -450,6 +450,7 @@ mod tests {
             notifications: &queue,
             toplevels: &toplevels,
             workspaces: &workspaces,
+            tray: &Default::default(),
         };
         crate::services::publish_all(&ctx, &lua).expect("publish");
         let primary: String = lua.load("return theme.primary").eval().expect("eval");

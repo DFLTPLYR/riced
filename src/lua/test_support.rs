@@ -23,6 +23,7 @@ pub(crate) fn publish_test_services(lua: &Lua, system: &sysinfo::System, gpu: Op
             notifications: &notifications,
             toplevels: &toplevels,
             workspaces: &workspaces,
+            tray: &Default::default(),
         },
         lua,
     )

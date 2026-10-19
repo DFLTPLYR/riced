@@ -28,10 +28,11 @@ fn theme_base_dirs() -> Vec<std::path::PathBuf> {
 }
 /// Candidate size dirs per theme, closest to notification thumbnail
 /// size first; contexts limited to what notifications actually use.
-const THEME_SIZES: [&str; 9] = [
+const THEME_SIZES: [&str; 10] = [
     "48x48", "32x32", "64x64", "24x24", "22x22", "16x16", "128x128", "256x256", "512x512",
+    "scalable",
 ];
-const THEME_CONTEXTS: [&str; 2] = ["apps", "mimetypes"];
+const THEME_CONTEXTS: [&str; 6] = ["apps", "mimetypes", "status", "actions", "devices", "panel"];
 /// PNG first (exact pixels, cheapest), then SVG (rasterized below),
 /// then legacy XPM — `image_file`/`rasterize_svg` decide per format,
 /// so anything undecodable just misses.
@@ -90,6 +91,10 @@ const THEME_CACHE_CAP: usize = 1024;
 /// Decode a theme icon name via lookup + the shared file decoder
 /// (which also enforces the pixel cap).
 pub(crate) fn theme_icon_file(name: &str) -> Option<iced::widget::image::Handle> {
+    image_file(&theme_icon_path(name)?.to_string_lossy())
+}
+
+pub(crate) fn theme_icon_path(name: &str) -> Option<std::path::PathBuf> {
     let hit = THEME_CACHE
         .lock()
         .ok()
@@ -107,7 +112,7 @@ pub(crate) fn theme_icon_file(name: &str) -> Option<iced::widget::image::Handle>
             found?
         }
     };
-    image_file(&path.to_string_lossy())
+    Some(path)
 }
 #[cfg(test)]
 mod tests {

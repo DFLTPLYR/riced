@@ -672,6 +672,7 @@ mod tests {
                 notifications: &queue,
                 toplevels: &toplevels,
                 workspaces: &workspaces,
+                tray: &Default::default(),
             },
             output: "DP-1",
         };
@@ -840,6 +841,7 @@ mod tests {
         let notifications = std::collections::VecDeque::new();
         let toplevels = Default::default();
         let workspaces = Default::default();
+        let tray = Default::default();
         let context = |output| EntryContext {
             services: crate::services::ServiceCtx {
                 sys: &system,
@@ -850,6 +852,7 @@ mod tests {
                 notifications: &notifications,
                 toplevels: &toplevels,
                 workspaces: &workspaces,
+                tray: &tray,
             },
             output,
         };

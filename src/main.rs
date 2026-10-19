@@ -10,6 +10,7 @@ mod shared;
 mod shell;
 mod theme;
 mod theme_gen;
+mod tray;
 mod ui;
 mod wallpaper;
 

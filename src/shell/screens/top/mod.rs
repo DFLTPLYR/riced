@@ -1368,6 +1368,7 @@ impl Top {
                 notifications: &plots.notification.queue,
                 toplevels: &plots.services.toplevels,
                 workspaces: &plots.services.workspaces,
+                tray: &plots.services.tray,
             },
             outputs,
             paths,
@@ -1443,8 +1444,8 @@ impl Top {
         Self::warn_unknown_slot_widgets(plots);
     }
 
-    /// Re-render palette-dependent descriptions without replacing app VMs or IDs.
-    pub(crate) fn refresh_theme(plots: &mut Plots) {
+    /// Re-render service-dependent descriptions without replacing app VMs or IDs.
+    pub(crate) fn refresh_services(plots: &mut Plots) {
         plots.services.refresh_system();
         let gpu = crate::services::gpu::gpu_usage_percent();
         let now = Instant::now();
@@ -1661,7 +1662,7 @@ impl Top {
                         bounds,
                     ));
                 }
-                cmds.push(super::notification::command_from_action(&value, plots));
+                cmds.push(crate::shell::actions::command_from_action(&value, plots));
                 if Self::refresh_widget(plots, &placement_id, gpu) {
                     cmds.push(Command::done(Plant::TopPlot(TopEvent::Widget(
                         WidgetEvent::Changed,

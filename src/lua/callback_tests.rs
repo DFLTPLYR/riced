@@ -74,6 +74,7 @@ fn invoke_with_queue(
             notifications: queue,
             toplevels: &toplevels,
             workspaces: &workspaces,
+            tray: &Default::default(),
         },
         |item| crate::shell::screens::notification::callback_is_current(item, queue),
     )

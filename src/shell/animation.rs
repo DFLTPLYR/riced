@@ -60,9 +60,7 @@ pub(crate) fn complete(
         match result {
             Ok(Some(value)) => {
                 ran = true;
-                commands.push(super::screens::notification::command_from_action(
-                    &value, plots,
-                ));
+                commands.push(super::actions::command_from_action(&value, plots));
             }
             Ok(None) => {}
             Err(error) => {

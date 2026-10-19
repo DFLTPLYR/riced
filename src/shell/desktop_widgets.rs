@@ -461,6 +461,7 @@ fn render(
             notifications: &plots.notification.queue,
             toplevels: &plots.services.toplevels,
             workspaces: &plots.services.workspaces,
+            tray: &plots.services.tray,
         },
         output: info.name.as_deref().unwrap_or(""),
     };
@@ -1408,6 +1409,7 @@ fn widget_action(
         notifications: &plots.notification.queue,
         toplevels: &plots.services.toplevels,
         workspaces: &plots.services.workspaces,
+        tray: &plots.services.tray,
     };
     let name = plots
         .windows
@@ -1445,7 +1447,7 @@ fn widget_action(
     };
     match result {
         Some(Ok(value)) => {
-            let command = super::screens::notification::command_from_action(&value, plots);
+            let command = super::actions::command_from_action(&value, plots);
             if dropping
                 && matches!(&value, mlua::Value::Table(table) if table.get::<bool>("drop").unwrap_or(false))
             {
@@ -1871,6 +1873,7 @@ mod tests {
                 notifications: &notifications,
                 toplevels: &toplevels,
                 workspaces: &workspaces,
+                tray: &Default::default(),
             },
             output: "DP-1",
         });
