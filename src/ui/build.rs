@@ -44,6 +44,14 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
             .iter()
             .map(|c| estimate_height(c, base))
             .fold(0.0, f32::max),
+        WidgetNode::Stack {
+            children, height, ..
+        } => match height {
+            NodeLength::Fixed(px) => *px,
+            _ => children
+                .first()
+                .map_or(base, |child| estimate_height(child, base)),
+        },
         WidgetNode::Column {
             children, spacing, ..
         } => {
@@ -319,6 +327,27 @@ pub(crate) fn realize<M: Clone + 'static>(
             }
             let hints = iced::advanced::Widget::size(&column);
             Ok(column
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
+        }
+        WidgetNode::Stack {
+            children,
+            width,
+            height,
+        } => {
+            let mut stack = iced::widget::Stack::with_capacity(children.len());
+            for child in children {
+                stack = stack.push(realize(
+                    child,
+                    size,
+                    button_msg.clone(),
+                    interactive,
+                    opacity,
+                )?);
+            }
+            let hints = iced::advanced::Widget::size(&stack);
+            Ok(stack
                 .width(width.resolve(hints.width))
                 .height(height.resolve(hints.height))
                 .into())
@@ -978,6 +1007,19 @@ mod tests {
         let fixed = || Space::new().width(40).height(20);
         let fill = || Space::new().width(Length::Fill).height(20);
         let cases: Vec<(&str, Element<'static, Plant>)> = vec![
+            ("iced.stack({})", iced::widget::Stack::new().into()),
+            (
+                "iced.stack({iced.space():width(40):height(20), iced.space():width(100):height(80)})",
+                iced::widget::stack![fixed(), Space::new().width(100).height(80)].into(),
+            ),
+            (
+                "iced.stack({iced.space():width('fill'):height(20), iced.text('overlay')})",
+                iced::widget::stack![fill(), text("overlay").size(13)].into(),
+            ),
+            (
+                "iced.stack({iced.space():width(40):height(20)}):width(120):height(80)",
+                iced::widget::stack![fixed()].width(120).height(80).into(),
+            ),
             (
                 "iced.container(iced.space():width(40):height(20)):padding(7)",
                 container(fixed()).padding(7).into(),

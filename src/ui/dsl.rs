@@ -103,7 +103,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
                         "iced.shader needs exactly one WGSL path".into(),
                     ));
                 }
-                if matches!(kind, "row" | "column" | "listview" | "pick_list")
+                if matches!(kind, "row" | "column" | "stack" | "listview" | "pick_list")
                     && !matches!(args.front(), Some(Value::Table(_)))
                 {
                     return Err(mlua::Error::RuntimeError(format!(

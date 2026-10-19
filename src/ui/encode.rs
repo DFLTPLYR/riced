@@ -137,6 +137,18 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 fields!("children" => lua.create_sequence_from(nodes)?, "spacing" => *spacing);
                 sizes!(Some(width), Some(height));
             }
+            WidgetNode::Stack {
+                children,
+                width,
+                height,
+            } => {
+                let nodes = children
+                    .iter()
+                    .map(|node| to_table(lua, node))
+                    .collect::<mlua::Result<Vec<_>>>()?;
+                fields!("children" => lua.create_sequence_from(nodes)?);
+                sizes!(Some(width), Some(height));
+            }
             WidgetNode::Container {
                 child,
                 width,

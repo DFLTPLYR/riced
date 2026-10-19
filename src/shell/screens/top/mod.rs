@@ -667,6 +667,29 @@ pub(crate) fn build_with_lists(
                 .height(height.resolve(hints.height))
                 .into())
         }
+        WidgetNode::Stack {
+            children,
+            width,
+            height,
+        } => {
+            let mut stack = iced::widget::Stack::with_capacity(children.len());
+            for child in children {
+                stack = stack.push(build_with_lists(
+                    child,
+                    widget,
+                    size,
+                    message.clone(),
+                    runtime,
+                    lists,
+                    hover.clone(),
+                )?);
+            }
+            let hints = iced::advanced::Widget::size(&stack);
+            Ok(stack
+                .width(width.resolve(hints.width))
+                .height(height.resolve(hints.height))
+                .into())
+        }
         WidgetNode::Container {
             child,
             width,

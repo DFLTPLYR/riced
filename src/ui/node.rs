@@ -9,9 +9,9 @@ pub(crate) fn contains_images(node: &WidgetNode) -> bool {
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. } => contains_images(child),
-        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
-            children.iter().any(contains_images)
-        }
+        WidgetNode::Row { children, .. }
+        | WidgetNode::Column { children, .. }
+        | WidgetNode::Stack { children, .. } => children.iter().any(contains_images),
         WidgetNode::ListView { items, .. } => items.iter().any(|(_, child)| contains_images(child)),
         _ => false,
     }

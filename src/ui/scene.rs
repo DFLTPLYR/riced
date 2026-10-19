@@ -55,7 +55,9 @@ fn declared<'a>(
                 declared(node, out)?;
             }
         }
-        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+        WidgetNode::Row { children, .. }
+        | WidgetNode::Column { children, .. }
+        | WidgetNode::Stack { children, .. } => {
             for node in children {
                 declared(node, out)?;
             }
@@ -499,6 +501,28 @@ impl Lists {
                         .height(height.resolve(hints.height))
                         .into())
                 }
+            }
+            WidgetNode::Stack {
+                children,
+                width,
+                height,
+            } => {
+                let mut stack = iced::widget::Stack::with_capacity(children.len());
+                for child in children {
+                    stack = stack.push(self.node(
+                        child,
+                        runtime,
+                        sender.clone(),
+                        hover.clone(),
+                        active,
+                        opacity,
+                    )?);
+                }
+                let hints = iced::advanced::Widget::size(&stack);
+                Ok(stack
+                    .width(width.resolve(hints.width))
+                    .height(height.resolve(hints.height))
+                    .into())
             }
             WidgetNode::ListView {
                 id,

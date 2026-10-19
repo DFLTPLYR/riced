@@ -106,6 +106,7 @@ at decode with the field named.
 | `iced.text(s)`                                                 | text                                                                                                       | `size`, `width`, `height`, `wrap`, `color`, `elide`, `elide_mode`                                                                                 |
 | `iced.icon(name)`                                              | Lucide name, case/separator-insensitive, plus aliases (`mem`, `vol`, `up`); unknown names render literally | `color`                                                                                                                                           |
 | `iced.row({...}[, spacing])` / `iced.column({...}[, spacing])` | children array                                                                                             | `spacing`, `width`, `height`                                                                                                                      |
+| `iced.stack({...})`                                            | children array, back-to-front                                                                               | `width`, `height`                                                                                                                                 |
 | `iced.button(label, action)`                                   | label, action key                                                                                          | `action`, `width`, `height`, `padding`, `radius`, `background`, `color`                                                                           |
 | `iced.progress(v[, width])`                                    | 0.0–1.0 clamped, default width 120                                                                         | `width`, `height` (thickness), `color` (fill), `background` (track)                                                                               |
 | `iced.spinner()`                                               | —                                                                                                          | —                                                                                                                                                 |
@@ -125,6 +126,26 @@ at decode with the field named.
 | `iced.shader(path)`                                            | WGSL fragment file (see below)                                                                             | `width`, `height`, `speed`, `params`, `animated`                                                                                                    |
 
 Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
+
+### Stacks
+
+`iced.stack({ ... })` layers children back-to-front: the first child is the
+background and later children draw above it. The first non-void child determines
+the intrinsic size; later children lay out within that size and do not enlarge
+it. Use `:width(...)` and `:height(...)` to set the stack's dimensions explicitly.
+Children start at the top-left; use `:anchor(...)` and `:margin(...)` for placement.
+Input is handled from the top layer down using iced's native stack behavior.
+Stacks have no spacing setter.
+
+For example, place text over an animated shader:
+
+```lua
+return iced.stack({
+    iced.shader("/shaders/plasma.wgsl"):width(240):height(160):speed(0.4),
+    iced.text("Hello"):size(24):color("#ffffff")
+        :anchor("center"),
+})
+```
 
 ### Shaders
 

@@ -18,6 +18,7 @@ const EXAMPLES: &[&str] = &[
     "iced.scrollable(iced.text('scroll'))",
     "iced.row({iced.text('x'), iced.button('go','go')}, 3)",
     "iced.column({iced.space(), iced.spinner()}):width(size.fill)",
+    "iced.stack({iced.space():width(100):height(40), iced.text('on top')}):width(120):height(60)",
     "iced.button('go','go'):padding(8):radius(3)",
     "iced.progress(0.4):height(8)",
     "iced.separator():height(2)",
@@ -204,6 +205,38 @@ fn click(
             &Rectangle::with_size(Size::new(300.0, 300.0)),
         );
     }
+}
+
+#[test]
+fn stack_routes_clicks_to_the_top_layer() {
+    let lua = lua();
+    let renderer = renderer();
+    let node = parse_node(
+        &lua.load(
+            "return iced.stack({iced.button('base','base'):width(120):height(60), iced.button('top','top'):width(120):height(60)})",
+        )
+        .eval()
+        .unwrap(),
+    )
+    .unwrap();
+    let mut element =
+        realize(&node, 13.0, std::sync::Arc::new(|action| action), true, 1.0).unwrap();
+    let mut tree = Tree::new(&element);
+    let layout = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, Size::new(300.0, 300.0)),
+    );
+    let mut messages = Vec::new();
+    click(
+        &mut element,
+        &mut tree,
+        &layout,
+        &renderer,
+        layout.bounds().center(),
+        &mut messages,
+    );
+    assert_eq!(messages, [Action::from("top")]);
 }
 
 #[test]

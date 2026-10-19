@@ -178,6 +178,9 @@ fn naturalize_height(node: &mut WidgetNode) {
         }
         | WidgetNode::Column {
             children, height, ..
+        }
+        | WidgetNode::Stack {
+            children, height, ..
         } => {
             natural(height);
             for child in children {

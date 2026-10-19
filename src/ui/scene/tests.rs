@@ -300,6 +300,35 @@ fn duplicate_list_ids_fail_and_authored_transitions_are_retained() {
 }
 
 #[test]
+fn lists_inside_stacks_are_synchronized_and_measured() {
+    let node = WidgetNode::Stack {
+        children: vec![node("center", &[20, 40])],
+        width: super::super::node::NodeLength::Native,
+        height: super::super::node::NodeLength::Native,
+    };
+    let mut lists = Lists::default();
+    let mut motion = AnimRuntime::default();
+    lists
+        .synchronize(
+            None,
+            &node,
+            &Measurement::default(),
+            &mut motion,
+            Duration::ZERO,
+        )
+        .unwrap();
+    assert!(lists.lists.contains_key("cards"));
+    let frame = Arc::new(Mutex::new(Frame::default()));
+    let mut element = element(&lists, &node, &motion, frame.clone());
+    let mut tree = Tree::new(&element);
+    layout(&mut element, &mut tree, &renderer());
+    assert_eq!(
+        frame.lock().unwrap().last.as_ref().unwrap().regions.len(),
+        2
+    );
+}
+
+#[test]
 fn natural_wrapped_text_controls_card_height_instead_of_a_host_constant() {
     let lua = mlua::Lua::new();
     crate::ui::dsl::inject_ui_base(&lua).unwrap();

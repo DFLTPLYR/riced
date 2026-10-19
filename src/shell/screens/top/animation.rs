@@ -21,7 +21,9 @@ fn declared_lists<'a>(
                 declared_lists(child, out)?;
             }
         }
-        WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
+        WidgetNode::Row { children, .. }
+        | WidgetNode::Column { children, .. }
+        | WidgetNode::Stack { children, .. } => {
             for child in children {
                 declared_lists(child, out)?;
             }
@@ -151,7 +153,7 @@ mod tests {
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
         for suffix in ["", ":width(80)", ":width('shrink')", ":height(60)"] {
             let source = format!(
-                "return iced.container(iced.scrollable(iced.column({{iced.listview({{{{id=1}}}}):id('sizing'):key('id'):delegate(function() return iced.space():width('fill'):height(20) end){suffix}}}))):padding(7)"
+                "return iced.stack({{iced.container(iced.scrollable(iced.column({{iced.listview({{{{id=1}}}}):id('sizing'):key('id'):delegate(function() return iced.space():width('fill'):height(20) end){suffix}}}))):padding(7), iced.text('overlay')}})"
             );
             let value: mlua::Value = lua.load(source).eval().unwrap();
             let node = crate::ui::decode::parse_node(&value).unwrap();
@@ -164,6 +166,7 @@ mod tests {
             }
             .synchronize("widget", None, &node)
             .unwrap();
+            assert!(lists.contains_key("widget/sizing"));
             let mut built =
                 super::super::build_with_lists(&node, "widget", 13.0, None, &motion, &lists, None)
                     .unwrap();
@@ -176,10 +179,13 @@ mod tests {
                 ":height(60)" => list.height(60),
                 _ => list,
             };
-            let mut native: Element<'static, crate::shell::Plant> = iced::widget::container(
-                iced::widget::scrollable(iced::widget::column![list].spacing(4)),
-            )
-            .padding(7)
+            let mut native: Element<'static, crate::shell::Plant> = iced::widget::stack![
+                iced::widget::container(iced::widget::scrollable(
+                    iced::widget::column![list].spacing(4)
+                ))
+                .padding(7),
+                iced::widget::text("overlay").size(13),
+            ]
             .into();
             assert_eq!(
                 built.as_widget().size_hint(),

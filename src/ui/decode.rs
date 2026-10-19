@@ -445,7 +445,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                 lua_value_kind(&other)
             )),
         },
-        "row" | "column" => {
+        "row" | "column" | "stack" => {
             let children = match t.get::<Value>("children").map_err(|e| e.to_string())? {
                 Value::Table(list) => list
                     .sequence_values::<Value>()
@@ -464,6 +464,13 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                     ));
                 }
             };
+            if kind == "stack" {
+                return Ok(WidgetNode::Stack {
+                    children,
+                    width: opt_length(t, "width", "iced.stack()")?.unwrap_or(NodeLength::Native),
+                    height: opt_length(t, "height", "iced.stack()")?.unwrap_or(NodeLength::Native),
+                });
+            }
             let spacing = match node_property(t, "spacing").map_err(|e| e.to_string())? {
                 Value::Nil | Value::Function(_) => 4.0,
                 Value::Integer(i) => i as f32,
@@ -1201,6 +1208,7 @@ mod tests {
             "return iced.scrollable(iced.text('x'))",
             "return iced.row({iced.text('x')})",
             "return iced.column({iced.text('x')})",
+            "return iced.stack({iced.text('x')})",
         ] {
             let node = native(source);
             let (width, height) = match &node {
@@ -1209,7 +1217,8 @@ mod tests {
                 | WidgetNode::Container { width, height, .. }
                 | WidgetNode::Scrollable { width, height, .. }
                 | WidgetNode::Row { width, height, .. }
-                | WidgetNode::Column { width, height, .. } => (width, height),
+                | WidgetNode::Column { width, height, .. }
+                | WidgetNode::Stack { width, height, .. } => (width, height),
                 other => panic!("{source}: unexpected {other:?}"),
             };
             assert_eq!(*width, NodeLength::Native, "{source} width");
