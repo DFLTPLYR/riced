@@ -272,6 +272,10 @@ pub enum SettingEvent {
     ApplyWallpaper(Id),
     DiscardWallpaper(Id),
     Select(Id, crate::shell::screens::SettingPage),
+    IconPreviewsReady {
+        id: Id,
+        result: Result<crate::shell::screens::setting::IconPreviews, String>,
+    },
     /// Pick the bar edited by the Panel page (`id` = settings window).
     SelectBar(Id, Id),
     /// Pick the wallpaper image edited below the map (`id` = settings

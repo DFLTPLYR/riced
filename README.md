@@ -137,6 +137,14 @@ layers use `[[background.images]]` with `position = [x, y]`. Both recipes are
 retained when switching modes. Image defaults are position `[0, 0]`, `z = 0`,
 `scale = 1`, and native dimensions (`width = 0`, `height = 0`).
 Theme selection uses `mode = "dark"` or `"light"`, with optional `templates-dir`.
+`[theme].icon-theme` selects an installed freedesktop icon theme (default:
+`"hicolor"`), independently of the color palette. **Settings → Theme → Icon
+theme** lists installed themes and saves changes automatically. Shared icon
+lookup supports requested sizes, theme inheritance, `hicolor` fallback, absolute
+filenames, and application-provided search roots such as SNI `IconThemePath`.
+Tray items refresh live when the selection changes; notifications use it when
+their icons are loaded. The resolver in `src/icons.rs` also accepts DesktopEntry
+`Icon` values for application-launcher consumers.
 Notification timeout is spelled `timeout-ms`.
 
 Old flat layouts migrate once at file load, preserving the original as

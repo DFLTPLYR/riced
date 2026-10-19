@@ -34,7 +34,7 @@ pub(super) fn decode_pixbuf(
         bytes::Bytes::from(rgba),
     ))
 }
-use super::icon_theme::theme_icon_file;
+use crate::icons;
 use std::collections::HashMap;
 
 /// `image-data` hint struct to pixels (`None` on any shape/type
@@ -60,7 +60,7 @@ pub(crate) fn hint_image_data(
 }
 /// Plain image file (`image-path` hint or `app_icon`): absolute paths
 /// (and `file://` URIs) only. SVG goes through [`rasterize_svg`];
-/// bare theme names go through [`theme_icon_file`] instead.
+/// Bare theme names go through the shared [`icons`] resolver instead.
 pub(crate) fn image_file(path: &str) -> Option<iced::widget::image::Handle> {
     let path = path.strip_prefix("file://").unwrap_or(path);
     if !path.starts_with('/') {
@@ -161,7 +161,7 @@ pub(crate) fn image_of(
             .and_then(|v| <&str>::try_from(v).ok())
             .or(Some(app_icon))
             .filter(|p| !p.is_empty())
-            .and_then(|p| image_file(p).or_else(|| theme_icon_file(p)))
+            .and_then(|p| image_file(p).or_else(|| icons::image(p, 48, &[])))
     })
 }
 #[cfg(test)]

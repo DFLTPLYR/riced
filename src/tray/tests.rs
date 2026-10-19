@@ -17,9 +17,29 @@ impl Drop for Bus {
     }
 }
 
-struct Item(Arc<AtomicI32>);
+struct Item(Arc<AtomicI32>, String);
 #[interface(name = "org.kde.StatusNotifierItem")]
 impl Item {
+    #[zbus(property)]
+    fn icon_name(&self) -> &str {
+        "steam_tray_mono"
+    }
+    #[zbus(property)]
+    fn icon_theme_path(&self) -> String {
+        if self.0.load(Ordering::SeqCst) == 42 {
+            format!("{}/changed", self.1)
+        } else {
+            self.1.clone()
+        }
+    }
+    #[zbus(property)]
+    fn attention_icon_name(&self) -> &str {
+        "steam_tray_mono"
+    }
+    #[zbus(property)]
+    fn overlay_icon_name(&self) -> &str {
+        "steam_tray_mono"
+    }
     #[zbus(property)]
     fn id(&self) -> &str {
         "test-item"
@@ -102,6 +122,13 @@ async fn until(mut ready: impl FnMut() -> bool) {
 
 #[test]
 fn watcher_tracks_items_refreshes_dynamic_menus_delivers_actions_and_removes_exited_apps() {
+    let icons = std::env::temp_dir().join(format!("riced-tray-icons-{}", std::process::id()));
+    std::fs::create_dir_all(icons.join("changed")).unwrap();
+    let icon = icons.join("steam_tray_mono.png");
+    image::RgbaImage::new(8, 8).save(&icon).unwrap();
+    image::RgbaImage::new(8, 8)
+        .save(icons.join("changed/steam_tray_mono.png"))
+        .unwrap();
     let mut daemon = Bus(Command::new("dbus-daemon")
         .args(["--session", "--nofork", "--print-address=1"])
         .stdout(Stdio::piped())
@@ -138,7 +165,10 @@ fn watcher_tracks_items_refreshes_dynamic_menus_delivers_actions_and_removes_exi
             let menu_state = Arc::new(AtomicI32::new(0));
             let peer = zbus::connection::Builder::address(address.as_str())
                 .unwrap()
-                .serve_at("/Item", Item(called.clone()))
+                .serve_at(
+                    "/Item",
+                    Item(called.clone(), icons.to_string_lossy().into_owned()),
+                )
                 .unwrap()
                 .serve_at("/Menu", Menu(menu_state.clone()))
                 .unwrap()
@@ -156,6 +186,9 @@ fn watcher_tracks_items_refreshes_dynamic_menus_delivers_actions_and_removes_exi
             let item = cache.snapshot().remove(0);
             assert_eq!(item.title, "Test tray");
             assert!(item.icon_pixmap.is_some());
+            assert_eq!(item.icon_path.as_deref(), icon.to_str());
+            assert!(item.attention_icon.is_some());
+            assert!(item.overlay_icon.is_some());
             assert_eq!(item.menu.unwrap().children[0].label, "Initial");
             let registered: Vec<String> = watcher
                 .get_property("RegisteredStatusNotifierItems")
@@ -189,6 +222,12 @@ fn watcher_tracks_items_refreshes_dynamic_menus_delivers_actions_and_removes_exi
                 })
                 .unwrap();
             until(|| called.load(Ordering::SeqCst) == 42).await;
+            cache.refresh_icons();
+            until(|| {
+                cache.snapshot()[0].icon_path.as_deref()
+                    == icons.join("changed/steam_tray_mono.png").to_str()
+            })
+            .await;
             peer.emit_signal(None::<()>, "/Item", ITEM, "NewStatus", &("Passive",))
                 .await
                 .unwrap();
@@ -216,4 +255,5 @@ fn watcher_tracks_items_refreshes_dynamic_menus_delivers_actions_and_removes_exi
             host.abort();
             let _ = host.await;
         });
+    std::fs::remove_dir_all(icons).unwrap();
 }

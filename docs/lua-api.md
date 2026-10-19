@@ -221,7 +221,9 @@ fallback, their layout remains present but their pixels are transparent; a
 one-time diagnostic is logged. The release build includes the Vulkan runtime
 library path. This does not capture or blur content behind another window.
 
-Fresh shader libraries receive `plasma.wgsl`, `gradient.wgsl`, and `ripple.wgsl`.
+Fresh shader libraries receive `plasma.wgsl`, `gradient.wgsl`, `ripple.wgsl`, and
+`engine.wgsl` (a raymarched fractal with continuous camera and structure rotation,
+independent of mouse input).
 The `.shaders-initialized` marker preserves user edits and intentional deletions;
 an existing shader directory is adopted without filling missing files. The
 bundled sources are also available under `scripts/shaders/` in the repository.
@@ -486,6 +488,19 @@ conflict and leaves `systemtray.items` empty. It does not replace that watcher.
 | `tooltip_title`, `tooltip` | Tooltip title and description |
 | `is_menu` | App requests menu behavior rather than ordinary activation |
 | `has_menu`, `menu` | Whether a menu layout is available, and its root node (otherwise nil) |
+
+Tray icons use the shared freedesktop icon resolver. An item's `IconThemePath`
+supplies extra search roots (including flat directories such as Steam's
+`public/`); these are also used for attention, overlay, and menu icons.
+Otherwise lookup uses the icon theme selected in **Settings → Theme**, its
+`index.theme` inheritance, then `hicolor` and flat legacy icons. Absolute icon
+filenames are supported. Changing the theme invalidates lookup caches and
+refreshes registered tray items live. Configure it directly with:
+
+```toml
+[theme]
+icon-theme = "Papirus-Dark" # default: "hicolor"; installed theme directory name
+```
 
 Every menu node has `id`, `label`, `type` (`separator` or the app's normal type),
 `enabled`, `visible`, `toggle_type`, `toggle_state` (-1/0/1), `checked`,

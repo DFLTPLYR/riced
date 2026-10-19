@@ -246,6 +246,59 @@ fn assert_native_frame_cadence(renderer: &iced::Renderer, source: &Source) {
 
 #[test]
 #[ignore = "requires a working wgpu adapter; run explicitly for shader rendering changes"]
+fn engine_renders_an_opaque_fractal_and_changes_with_time() {
+    use iced::advanced::{Layout, renderer::Headless, renderer::Style};
+    let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(13.0),
+        Some("wgpu"),
+    ))
+    .expect("wgpu adapter");
+    let path = std::env::temp_dir().join(format!("riced-engine-gpu-{}.wgsl", std::process::id()));
+    let mut frames = Vec::new();
+    for time in ["0.0", "4.0"] {
+        std::fs::write(
+            &path,
+            include_str!("../../../scripts/shaders/engine.wgsl").replace("riced.time", time),
+        )
+        .unwrap();
+        let mut content: Element<'static, ()> = element(
+            Source::open(path.clone()).unwrap(),
+            1.0,
+            &[],
+            false,
+            Length::Fixed(64.0),
+            Length::Fixed(48.0),
+            1.0,
+        );
+        let bounds = Rectangle::with_size(Size::new(64.0, 48.0));
+        let mut tree = Tree::new(&content);
+        let node = content.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, bounds.size()),
+        );
+        advanced::Renderer::reset(&mut renderer, bounds);
+        content.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &iced::Theme::Dark,
+            &Style::default(),
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &bounds,
+        );
+        let pixels = renderer.screenshot(iced::Size::new(64, 48), 1.0, iced::Color::TRANSPARENT);
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel != &pixels[..4]));
+        frames.push(pixels);
+    }
+    assert_ne!(frames[0], frames[1]);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+#[ignore = "requires a working wgpu adapter; run explicitly for shader rendering changes"]
 fn gpu_shader_instances_keep_separate_uniforms_and_follow_clipping_and_translation() {
     use iced::advanced::{Layout, renderer::Headless, renderer::Style};
     use iced::{Color, Point};

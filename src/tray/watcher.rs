@@ -101,6 +101,7 @@ struct Remote {
     path: String,
     owner: String,
     menu_path: Option<String>,
+    theme_paths: Vec<std::path::PathBuf>,
     item: TrayItem,
 }
 
@@ -122,12 +123,9 @@ impl Remote {
                 .to_owned()
         };
         let icon_name = text("IconName");
-        let icon_path = if std::path::Path::new(&icon_name).is_absolute() {
-            Some(icon_name.clone())
-        } else {
-            crate::notify::icon_theme::theme_icon_path(&icon_name)
-                .map(|path| path.to_string_lossy().into_owned())
-        };
+        self.theme_paths = theme_paths(props.get("IconThemePath").map(|value| &**value));
+        let icon_path = crate::icons::resolve(&icon_name, 24, &self.theme_paths)
+            .map(|path| path.to_string_lossy().into_owned());
         let attention_name = text("AttentionIconName");
         let overlay_name = text("OverlayIconName");
         let menu_path = props
@@ -146,9 +144,9 @@ impl Remote {
             .unwrap_or(false);
         self.item.icon_pixmap = take_pixmap(&mut props, "IconPixmap");
         self.item.attention_icon = take_pixmap(&mut props, "AttentionIconPixmap")
-            .or_else(|| crate::notify::icon_theme::theme_icon_file(&attention_name));
+            .or_else(|| crate::icons::image(&attention_name, 24, &self.theme_paths));
         self.item.overlay_icon = take_pixmap(&mut props, "OverlayIconPixmap")
-            .or_else(|| crate::notify::icon_theme::theme_icon_file(&overlay_name));
+            .or_else(|| crate::icons::image(&overlay_name, 24, &self.theme_paths));
         if let Some(tooltip) = props
             .remove("ToolTip")
             .and_then(|v| <(String, Pixmaps, String, String)>::try_from(v).ok())
@@ -175,7 +173,7 @@ impl Remote {
         };
         let result = async {
             let proxy = zbus::Proxy::new(conn, self.bus.as_str(), path.as_str(), MENU).await?;
-            menu::refresh(&proxy).await
+            menu::refresh(&proxy, &self.theme_paths).await
         }
         .await;
         match result {
@@ -186,6 +184,7 @@ impl Remote {
 
     async fn command(&mut self, conn: &zbus::Connection, action: TrayAction) -> zbus::Result<()> {
         match action {
+            TrayAction::RefreshIcons => self.read(conn).await?,
             TrayAction::Open(entry) | TrayAction::MenuEvent(entry) => {
                 let Some(path) = &self.menu_path else {
                     return Ok(());
@@ -229,6 +228,23 @@ impl Remote {
         }
         Ok(())
     }
+}
+
+fn theme_paths(value: Option<&zbus::zvariant::Value<'_>>) -> Vec<std::path::PathBuf> {
+    use zbus::zvariant::Value;
+    let paths: Vec<_> = match value {
+        Some(Value::Str(path)) => vec![path.as_str()],
+        Some(Value::Array(paths)) => paths
+            .iter()
+            .filter_map(|path| <&str>::try_from(path).ok())
+            .collect(),
+        _ => Vec::new(),
+    };
+    paths
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect()
 }
 
 fn take_pixmap(
@@ -310,7 +326,7 @@ async fn run(
                         let id = format!("{bus}{path}");
                         if remotes.iter().any(|remote| remote.item.id == id) { continue; }
                         let Ok(owner) = dbus.get_name_owner(bus.as_str().try_into()?).await else { continue; };
-                        let mut remote = Remote { bus, path, owner: owner.to_string(), menu_path: None,
+                        let mut remote = Remote { bus, path, owner: owner.to_string(), menu_path: None, theme_paths: Vec::new(),
                             item: TrayItem { id: id.clone(), ..Default::default() } };
                         match remote.read(&conn).await {
                             Ok(()) => { remotes.push(remote); publish(cache, &remotes, tx);
@@ -367,6 +383,24 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn icon_theme_paths_accept_strings_and_arrays_without_relative_roots() {
+        use zbus::zvariant::Value;
+        let path = Value::from("/private/icons");
+        assert_eq!(
+            theme_paths(Some(&path)),
+            [std::path::PathBuf::from("/private/icons")]
+        );
+        let paths = Value::from(vec!["relative", "/first", "/second"]);
+        assert_eq!(
+            theme_paths(Some(&paths)),
+            [
+                std::path::PathBuf::from("/first"),
+                std::path::PathBuf::from("/second")
+            ]
+        );
+        assert!(theme_paths(Some(&Value::from(12_u32))).is_empty());
+    }
     #[test]
     fn registration_accepts_service_and_sender_relative_paths() {
         assert_eq!(

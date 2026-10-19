@@ -416,11 +416,22 @@ enum ThemeMode {
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct Theme {
     name: String,
+    #[serde(deserialize_with = "icon_theme_name")]
+    icon_theme: String,
     mode: ThemeMode,
     #[serde(skip_serializing_if = "is_content")]
     variant: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     templates_dir: String,
+}
+fn icon_theme_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    if name.is_empty() || matches!(name.as_str(), "." | "..") || name.contains(['/', '\\', '\0']) {
+        return Err(serde::de::Error::custom(
+            "icon-theme must be a theme directory name",
+        ));
+    }
+    Ok(name)
 }
 fn is_content(value: &str) -> bool {
     value == "content"
@@ -429,6 +440,7 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             name: "gruvbox".into(),
+            icon_theme: "hicolor".into(),
             mode: ThemeMode::Dark,
             variant: "content".into(),
             templates_dir: String::new(),
@@ -439,6 +451,7 @@ impl From<Theme> for ThemeConfig {
     fn from(value: Theme) -> Self {
         Self {
             name: value.name,
+            icon_theme: value.icon_theme,
             darkmode: matches!(value.mode, ThemeMode::Dark),
             variant: value.variant,
             templates_dir: value.templates_dir,
@@ -449,6 +462,7 @@ impl From<ThemeConfig> for Theme {
     fn from(value: ThemeConfig) -> Self {
         Self {
             name: value.name,
+            icon_theme: value.icon_theme,
             mode: if value.darkmode {
                 ThemeMode::Dark
             } else {
@@ -463,6 +477,24 @@ impl From<ThemeConfig> for Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_theme_selection_defaults_patches_and_roundtrips() {
+        let mut config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.theme.icon_theme, "hicolor");
+        config.apply(ConfigPatch::IconTheme("Papirus-Dark".into()));
+        let saved = to_string(&config).unwrap();
+        assert!(saved.contains("icon-theme = \"Papirus-Dark\""));
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.theme.icon_theme, "Papirus-Dark");
+        for name in ["", "..", "../Papirus", "/tmp/icons", "some\\theme"] {
+            let source = format!("[theme]\nicon-theme = '{name}'");
+            assert!(
+                toml::from_str::<Config>(&source).is_err(),
+                "accepted {source}"
+            );
+        }
+    }
 
     #[test]
     fn inline_and_expanded_slots_have_identical_layout_and_saved_form() {

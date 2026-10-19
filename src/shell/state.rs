@@ -142,6 +142,7 @@ impl Plots {
 
     pub fn new(shell_events: ShellReceiver) -> Self {
         let (config, config_mtime) = Config::load();
+        crate::icons::set_theme(&config.theme.icon_theme);
         crate::theme::ensure_user_themes();
         crate::theme_gen::ensure_user_templates();
         let theme_mtime = crate::theme::poll(&config.theme, &None).unwrap_or(None);
@@ -1038,6 +1039,9 @@ impl Plots {
                 self.config_jobs.invalidate();
                 let images_changed = cfg.background != self.config.background;
                 self.config = cfg;
+                if crate::icons::set_theme(&self.config.theme.icon_theme) {
+                    self.services.tray.refresh_icons();
+                }
                 // Bars resolve [[bar]] entries once at spawn; re-resolve
                 // here so slot/align/geometry edits apply live (anchor
                 // changes still need a respawn). On-disk wins by contract.
@@ -1158,6 +1162,9 @@ impl Plots {
                     _ => None,
                 };
                 self.config.apply(patch);
+                if crate::icons::set_theme(&self.config.theme.icon_theme) {
+                    self.services.tray.refresh_icons();
+                }
                 if let Some(index) = removed_index {
                     for setting in self.windows.settings.values_mut() {
                         setting.image_removed(index);
@@ -1349,6 +1356,12 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::Select(id, page)) => {
                 Setting::handle_select(self, id, page)
+            }
+            Plant::SettingPlot(SettingEvent::IconPreviewsReady { id, result }) => {
+                if let Some(setting) = self.windows.settings.get_mut(&id) {
+                    setting.icon_previews_ready(result);
+                }
+                Command::none()
             }
             Plant::SettingPlot(SettingEvent::SelectBar(id, bar)) => {
                 Setting::handle_select_bar(self, id, bar)
@@ -1619,6 +1632,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // Settings page/bar select / map pan-zoom only affects its own window.
         Plant::SettingPlot(
             SettingEvent::Select(id, _)
+            | SettingEvent::IconPreviewsReady { id, .. }
             | SettingEvent::SelectBar(id, _)
             | SettingEvent::SelectImage(id, _)
             | SettingEvent::SelectMonitor(id, _)
@@ -2423,6 +2437,43 @@ mod tests {
             reclaim_scope(&mut plots, Plant::Uproot(id)),
             Some((false, Scope::None))
         );
+    }
+
+    #[test]
+    fn icon_preview_jobs_are_coalesced_and_closed_windows_release_results() {
+        use crate::shell::screens::SettingPage;
+        use std::sync::Arc;
+        let mut plots = wallpaper_test_plots();
+        let id = iced::window::Id::unique();
+        plots.windows.settings.insert(id, Setting::default());
+        plots.windows.ids.insert(id, PlotInfo::Setting);
+        let select = || Plant::SettingPlot(SettingEvent::Select(id, SettingPage::Theme));
+        // Dropping the unpolled stream avoids real filesystem work in this lifecycle test.
+        assert!(iced_runtime::task::into_stream(plots.update(select())).is_some());
+        assert!(iced_runtime::task::into_stream(plots.update(select())).is_none());
+        let owner: Arc<[u8]> = vec![127; 4 * 4 * 4].into();
+        let weak = Arc::downgrade(&owner);
+        let handle = iced::widget::image::Handle::from_rgba(4, 4, bytes::Bytes::from_owner(owner));
+        let message = Plant::SettingPlot(SettingEvent::IconPreviewsReady {
+            id,
+            result: Ok(vec![("Test".into(), vec![Some(handle)])]),
+        });
+        assert_eq!(redraw_scope(&message), Scope::Window(id));
+        let _ = plots.update(message);
+        assert!(weak.upgrade().is_some());
+        assert!(iced_runtime::task::into_stream(plots.update(select())).is_none());
+        let _ = plots.update(Plant::Uproot(id));
+        assert!(weak.upgrade().is_none());
+
+        let owner: Arc<[u8]> = vec![127; 4 * 4 * 4].into();
+        let weak = Arc::downgrade(&owner);
+        let handle = iced::widget::image::Handle::from_rgba(4, 4, bytes::Bytes::from_owner(owner));
+        let _ = plots.update(Plant::SettingPlot(SettingEvent::IconPreviewsReady {
+            id,
+            result: Ok(vec![("Late".into(), vec![Some(handle)])]),
+        }));
+        assert!(weak.upgrade().is_none());
+        assert!(!plots.windows.settings.contains_key(&id));
     }
 
     #[test]

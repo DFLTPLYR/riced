@@ -7,10 +7,114 @@ use crate::{
 };
 use iced::{
     Element, Length,
-    widget::{Space, button, column, row, text},
+    widget::{Space, button, column, container, image, row, text},
 };
+use std::collections::HashMap;
 
-pub(super) fn theme_page(current: &ThemeConfig) -> Element<'static, Plant> {
+const PREVIEW_APPS: [(&str, &[&str]); 6] = [
+    (
+        "Firefox",
+        &["firefox", "org.mozilla.firefox", "web-browser"],
+    ),
+    (
+        "Files",
+        &["org.gnome.Nautilus", "system-file-manager", "folder"],
+    ),
+    (
+        "Terminal",
+        &["org.gnome.Terminal", "utilities-terminal", "terminal"],
+    ),
+    (
+        "Editor",
+        &["code", "visual-studio-code", "accessories-text-editor"],
+    ),
+    (
+        "VLC",
+        &["vlc", "org.videolan.VLC", "multimedia-video-player"],
+    ),
+    (
+        "Steam",
+        &["steam", "com.valvesoftware.Steam", "applications-games"],
+    ),
+];
+
+pub(super) fn load_icon_previews(current: String) -> super::IconPreviews {
+    let mut themes = crate::icons::available_themes();
+    if !themes.contains(&current) {
+        themes.push(current);
+    }
+    let mut resolver = crate::icons::Resolver::for_previews();
+    let mut decoded = HashMap::new();
+    themes
+        .into_iter()
+        .map(|theme| {
+            let icons = PREVIEW_APPS
+                .iter()
+                .map(|(_, names)| {
+                    names.iter().find_map(|name| {
+                        let path = resolver.resolve_in_theme(&theme, name, 48, &[])?;
+                        decoded
+                            .entry(path.clone())
+                            .or_insert_with(|| {
+                                crate::notify::images::image_file(&path.to_string_lossy())
+                            })
+                            .clone()
+                    })
+                })
+                .collect();
+            (theme, icons)
+        })
+        .collect()
+}
+
+fn icon_theme_card(
+    name: String,
+    icons: &[Option<image::Handle>],
+    selected: bool,
+) -> Element<'static, Plant> {
+    let mut samples = column![].spacing(10);
+    for start in [0, 3] {
+        let mut line = row![].spacing(12);
+        for index in start..start + 3 {
+            let icon: Element<'static, Plant> = match &icons[index] {
+                Some(handle) => image(handle.clone()).width(40).height(40).into(),
+                None => container(text("?").size(24)).center(40).into(),
+            };
+            line = line.push(
+                column![
+                    container(icon).center_x(Length::Fill),
+                    container(text(PREVIEW_APPS[index].0).size(10)).center_x(Length::Fill),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+            );
+        }
+        samples = samples.push(line);
+    }
+    button(
+        column![
+            row![
+                text(name.clone()).size(13).width(Length::Fill).height(36),
+                text(if selected { "Selected" } else { "" }).size(10),
+            ]
+            .spacing(8),
+            samples,
+        ]
+        .spacing(12),
+    )
+    .width(Length::Fill)
+    .padding(12)
+    .style(theme::nav_button(selected))
+    .on_press(Plant::Config(ConfigEvent::Patch(ConfigPatch::IconTheme(
+        name,
+    ))))
+    .into()
+}
+
+pub(super) fn theme_page(
+    current: &ThemeConfig,
+    previews: Option<&Result<super::IconPreviews, String>>,
+) -> Element<'static, Plant> {
     let mut list = column![
         section_heading(
             "Color mode",
@@ -39,6 +143,25 @@ pub(super) fn theme_page(current: &ThemeConfig) -> Element<'static, Plant> {
         .spacing(8),
     ]
     .spacing(16);
+    list = list.push(section_heading(
+        "Icon theme",
+        "Used for application, tray, and notification icons. Missing icons fall back to hicolor.",
+    ));
+    match previews {
+        None => list = list.push(text("Loading icon previews…").size(13)),
+        Some(Err(error)) => {
+            list = list.push(text(format!("Could not load icon previews: {error}")).size(13))
+        }
+        Some(Ok(previews)) => {
+            let cards = previews
+                .iter()
+                .map(|(name, icons)| {
+                    icon_theme_card(name.clone(), icons, name == &current.icon_theme)
+                })
+                .collect();
+            list = list.push(crate::ui::widgets::masonry::masonry(cards, 260.0, 12.0));
+        }
+    }
     list = list.push(section_heading(
         "Choose a palette",
         "Swatches preview the primary, secondary, and tertiary colors.",

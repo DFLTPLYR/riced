@@ -19,7 +19,11 @@ pub(crate) struct MenuNode {
 }
 
 impl MenuNode {
-    pub(super) fn parse((id, props, children): Layout, depth: usize) -> Self {
+    pub(super) fn parse(
+        (id, props, children): Layout,
+        depth: usize,
+        theme_paths: &[std::path::PathBuf],
+    ) -> Self {
         let text = |key: &str| {
             props
                 .get(key)
@@ -43,7 +47,7 @@ impl MenuNode {
                 let rgba = image.to_rgba8();
                 iced::widget::image::Handle::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
             })
-            .or_else(|| crate::notify::icon_theme::theme_icon_file(&icon_name));
+            .or_else(|| crate::icons::image(&icon_name, 24, theme_paths));
         Self {
             id,
             label: text("label"),
@@ -62,7 +66,7 @@ impl MenuNode {
                 children
                     .into_iter()
                     .filter_map(|v| Layout::try_from(v).ok())
-                    .map(|layout| Self::parse(layout, depth + 1))
+                    .map(|layout| Self::parse(layout, depth + 1, theme_paths))
                     .collect()
             } else {
                 Vec::new()
@@ -78,11 +82,14 @@ impl MenuNode {
     }
 }
 
-pub(super) async fn refresh(proxy: &zbus::Proxy<'_>) -> zbus::Result<MenuNode> {
+pub(super) async fn refresh(
+    proxy: &zbus::Proxy<'_>,
+    theme_paths: &[std::path::PathBuf],
+) -> zbus::Result<MenuNode> {
     let (_, layout): (u32, Layout) = proxy
         .call("GetLayout", &(0_i32, -1_i32, Vec::<String>::new()))
         .await?;
-    Ok(MenuNode::parse(layout, 0))
+    Ok(MenuNode::parse(layout, 0, theme_paths))
 }
 
 #[cfg(test)]
@@ -102,7 +109,7 @@ mod tests {
             vec![],
         );
         let variant = OwnedValue::try_from(zbus::zvariant::Value::from(child)).unwrap();
-        let root = MenuNode::parse((0, HashMap::new(), vec![variant]), 0);
+        let root = MenuNode::parse((0, HashMap::new(), vec![variant]), 0, &[]);
         assert_eq!(
             (
                 root.children[0].id,

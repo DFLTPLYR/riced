@@ -91,10 +91,11 @@ src/
     views.rs           wallpaper rasterization and combination
     scheme.rs          scheme construction, JSON and stored-theme reads
     templates.rs       template installation, substitution and hooks
+  icons.rs              shared size/theme-aware icon paths, inheritance and cache
+  icons/tests.rs        isolated freedesktop theme fixtures
   notify/
     server.rs          notification transport and ingestion
     images.rs          pixbuf/file/SVG ingestion
-    icon_theme.rs      freedesktop icon lookup and bounded cache
   services/            system and native Wayland snapshots
     state.rs           owned sampler and native listener caches
   shared/geometry.rs   output geometry independent of UI/window ownership

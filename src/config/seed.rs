@@ -65,6 +65,10 @@ pub(crate) const SEED_CLINEPASS_LUA: &str = include_str!("../../scripts/widgets/
 
 pub(crate) const SHADER_SEEDS: &[(&str, &str)] = &[
     (
+        "engine.wgsl",
+        include_str!("../../scripts/shaders/engine.wgsl"),
+    ),
+    (
         "plasma.wgsl",
         include_str!("../../scripts/shaders/plasma.wgsl"),
     ),

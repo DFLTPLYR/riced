@@ -23,6 +23,16 @@ impl std::hash::Hash for TrayCache {
 }
 
 impl TrayCache {
+    pub(crate) fn refresh_icons(&self) {
+        for item in self.snapshot() {
+            if let Err(error) = self.command(TrayCommand {
+                id: item.id,
+                action: TrayAction::RefreshIcons,
+            }) {
+                tracing::debug!(%error, "tray icon refresh unavailable");
+            }
+        }
+    }
     #[cfg(test)]
     pub(crate) fn from_items(items: Vec<TrayItem>) -> Self {
         Self(Arc::new(Mutex::new(Cache {
@@ -75,6 +85,7 @@ pub(crate) struct TrayItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TrayAction {
+    RefreshIcons,
     Activate(i32, i32),
     Secondary(i32, i32),
     Context(i32, i32),

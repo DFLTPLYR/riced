@@ -356,6 +356,7 @@ pub struct AnimationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "super::format::Theme", into = "super::format::Theme")]
 pub struct ThemeConfig {
+    pub icon_theme: String,
     #[serde(default = "default_theme_name")]
     pub name: String,
     #[serde(default = "default_darkmode")]
@@ -369,6 +370,7 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
+            icon_theme: "hicolor".into(),
             name: default_theme_name(),
             darkmode: default_darkmode(),
             variant: default_variant(),
@@ -683,6 +685,7 @@ pub enum ConfigPatch {
     MonitorWallpaper(MonitorWallpaper),
     ComposableSource(ComposableKind, String),
     ThemeName(String),
+    IconTheme(String),
     ThemeDarkmode(bool),
     ThemeVariant(String),
     AnimationSpeed(AnimationSpeed),
@@ -1467,6 +1470,7 @@ impl Config {
             }
             ConfigPatch::ComposableSource(kind, src) => *c.get_mut(kind) = src,
             ConfigPatch::ThemeName(name) => self.theme.name = name,
+            ConfigPatch::IconTheme(name) => self.theme.icon_theme = name,
             ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
             ConfigPatch::ThemeVariant(variant) => self.theme.variant = variant,
             ConfigPatch::AnimationSpeed(speed) => self.animation.speed = speed,

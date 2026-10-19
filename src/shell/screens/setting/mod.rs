@@ -18,10 +18,14 @@ use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use std::collections::HashMap;
 
+pub(crate) type IconPreviews = Vec<(String, Vec<Option<iced::widget::image::Handle>>)>;
+
 /// Floating XDG toplevel for the Settings panel (spawned via `Plant::Sprout`).
 /// Mirrors `Top` / `Background`: spawn + view live here, `Plots` just delegates.
 #[derive(Debug, Default)]
 pub struct Setting {
+    icon_previews: Option<Result<IconPreviews, String>>,
+    icon_previews_loading: bool,
     pub(crate) wallpaper_draft: Option<crate::wallpaper::draft::Draft>,
     page: SettingPage,
     /// Pan/zoom/drag view for the Background map. Single source of truth for
@@ -198,7 +202,7 @@ impl Setting {
     /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
     /// and persists the choice to `config.toml`.
     fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        pages::theme_page(&plots.config.theme)
+        pages::theme_page(&plots.config.theme, self.icon_previews.as_ref())
     }
 
     /// Animation speed picker: one global speed for every animated
@@ -237,6 +241,26 @@ impl Setting {
     ) -> Command<Plant> {
         if let Some(setting) = plots.windows.settings.get_mut(&id) {
             setting.page = page;
+            if page == SettingPage::Theme
+                && !setting.icon_previews_loading
+                && setting.icon_previews.is_none()
+            {
+                setting.icon_previews_loading = true;
+                let current = plots.config.theme.icon_theme.clone();
+                return Command::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || pages::load_icon_previews(current))
+                            .await
+                            .map_err(|error| error.to_string())
+                    },
+                    move |result| {
+                        Plant::SettingPlot(crate::shell::SettingEvent::IconPreviewsReady {
+                            id,
+                            result,
+                        })
+                    },
+                );
+            }
         }
         if page == SettingPage::Wallpaper {
             if let Some(setting) = plots.windows.settings.get_mut(&id)
@@ -249,6 +273,11 @@ impl Setting {
             return plots.load_wallpaper_preview(id);
         }
         Command::none()
+    }
+
+    pub(crate) fn icon_previews_ready(&mut self, result: Result<IconPreviews, String>) {
+        self.icon_previews_loading = false;
+        self.icon_previews = Some(result);
     }
 
     /// Pick the bar the Panel page edits (`SettingEvent::SelectBar`).
