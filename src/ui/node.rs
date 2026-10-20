@@ -8,7 +8,8 @@ pub(crate) fn contains_images(node: &WidgetNode) -> bool {
         WidgetNode::Container { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
-        | WidgetNode::Clickable { child, .. } => contains_images(child),
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } => contains_images(child),
         WidgetNode::Row { children, .. }
         | WidgetNode::Column { children, .. }
         | WidgetNode::Stack { children, .. } => children.iter().any(contains_images),

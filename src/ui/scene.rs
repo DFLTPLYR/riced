@@ -2,6 +2,7 @@
 use super::{
     action::Sender,
     anim::{AnimRuntime, ItemMotion},
+    layout_props::Align,
     listview::{Axis, ListView},
     node::WidgetNode,
     widgets::measured::{self, Marker, Measurement},
@@ -65,7 +66,8 @@ fn declared<'a>(
         WidgetNode::Container { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
-        | WidgetNode::Clickable { child, .. } => declared(child, out)?,
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } => declared(child, out)?,
         _ => {}
     }
     Ok(())
@@ -370,6 +372,27 @@ impl Lists {
         active: bool,
         opacity: f32,
     ) -> Result<Element<'static, Plant>, String> {
+        self.node_aligned(
+            node,
+            runtime,
+            sender,
+            hover,
+            active,
+            opacity,
+            Align::default(),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn node_aligned(
+        &self,
+        node: &WidgetNode,
+        runtime: &AnimRuntime,
+        sender: Sender,
+        hover: Option<super::action::HoverSender>,
+        active: bool,
+        opacity: f32,
+        align: Align,
+    ) -> Result<Element<'static, Plant>, String> {
         match node {
             WidgetNode::Anchored {
                 child,
@@ -380,6 +403,27 @@ impl Lists {
                 *placement,
                 *margin,
             )),
+            WidgetNode::Aligned {
+                child,
+                align_x,
+                align_y,
+            } => {
+                if !matches!(child.kind(), "text" | "container" | "row" | "column") {
+                    return Err(format!("iced.{}() has no alignment setters", child.kind()));
+                }
+                self.node_aligned(
+                    child,
+                    runtime,
+                    sender,
+                    hover.clone(),
+                    active,
+                    opacity,
+                    Align {
+                        x: *align_x,
+                        y: *align_y,
+                    },
+                )
+            }
             WidgetNode::Clickable { child, action } => {
                 let body = self.node(
                     child,
@@ -412,7 +456,7 @@ impl Lists {
                 let border = *border;
                 let radius = *radius;
                 let border_width = *border_width;
-                let element = iced::widget::container(self.node(
+                let mut element = iced::widget::container(self.node(
                     child,
                     runtime,
                     sender,
@@ -420,6 +464,12 @@ impl Lists {
                     active,
                     opacity,
                 )?);
+                if let Some(align) = align.x {
+                    element = element.align_x(align);
+                }
+                if let Some(align) = align.y {
+                    element = element.align_y(align);
+                }
                 let hints = iced::advanced::Widget::size(&element);
                 Ok(element
                     .width(width.resolve(hints.width))
@@ -487,14 +537,18 @@ impl Lists {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if matches!(node, WidgetNode::Row { .. }) {
-                    let item = iced::widget::Row::with_children(children).spacing(*spacing);
+                    let item = iced::widget::Row::with_children(children)
+                        .spacing(*spacing)
+                        .align_y(align.y.unwrap_or(iced::Alignment::Center));
                     let hints = iced::advanced::Widget::size(&item);
                     Ok(item
                         .width(width.resolve(hints.width))
                         .height(height.resolve(hints.height))
                         .into())
                 } else {
-                    let item = iced::widget::Column::with_children(children).spacing(*spacing);
+                    let item = iced::widget::Column::with_children(children)
+                        .spacing(*spacing)
+                        .align_x(align.x.unwrap_or(iced::Alignment::Center));
                     let hints = iced::advanced::Widget::size(&item);
                     Ok(item
                         .width(width.resolve(hints.width))
@@ -647,11 +701,12 @@ impl Lists {
                     .into())
             }
             _ => {
-                let element = super::build::build_node_opacity(
+                let element = super::build::build_node_opacity_aligned(
                     node,
                     13.0,
                     active.then_some(sender),
                     opacity,
+                    align,
                 )?;
                 let interactive = matches!(
                     node,

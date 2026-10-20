@@ -184,7 +184,8 @@ fn node_has_canvas(node: &WidgetNode) -> bool {
         WidgetNode::Container { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
-        | WidgetNode::Clickable { child, .. } => node_has_canvas(child),
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } => node_has_canvas(child),
         _ => false,
     }
 }

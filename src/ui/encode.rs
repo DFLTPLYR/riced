@@ -52,6 +52,19 @@ fn set_color(lua: &Lua, table: &Table, key: &str, color: &Option<iced::Color>) -
     }
     Ok(())
 }
+fn set_alignment(table: &Table, key: &str, align: Option<iced::Alignment>) -> mlua::Result<()> {
+    if let Some(align) = align {
+        table.set(
+            key,
+            match align {
+                iced::Alignment::Start => "start",
+                iced::Alignment::Center => "center",
+                iced::Alignment::End => "end",
+            },
+        )?;
+    }
+    Ok(())
+}
 
 pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
     match node {
@@ -64,6 +77,17 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
             let properties: Table = table.raw_get("_properties")?;
             properties.set("anchor", placement.name())?;
             properties.set("margin", *margin)?;
+            return Ok(table);
+        }
+        WidgetNode::Aligned {
+            child,
+            align_x,
+            align_y,
+        } => {
+            let table = to_table(lua, child)?;
+            let properties: Table = table.raw_get("_properties")?;
+            set_alignment(&properties, "align_x", *align_x)?;
+            set_alignment(&properties, "align_y", *align_y)?;
             return Ok(table);
         }
         WidgetNode::Clickable { child, action } => {
@@ -276,9 +300,9 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                     "params" => lua.create_sequence_from(params.iter().copied())?, "animated" => *animated);
                 sizes!(Some(width), Some(height));
             }
-            WidgetNode::Anchored { .. } | WidgetNode::Clickable { .. } => {
-                unreachable!("handled above")
-            }
+            WidgetNode::Anchored { .. }
+            | WidgetNode::Clickable { .. }
+            | WidgetNode::Aligned { .. } => unreachable!("handled above"),
             WidgetNode::Raster {
                 handle,
                 width,

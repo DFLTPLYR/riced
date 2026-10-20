@@ -12,6 +12,11 @@ macro_rules! components {
             Spinner,
             Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: f32 },
             Clickable { child: Box<WidgetNode>, action: String },
+            Aligned {
+                child: Box<WidgetNode>,
+                align_x: Option<iced::Alignment>,
+                align_y: Option<iced::Alignment>,
+            },
         }
         $(
             #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +49,7 @@ macro_rules! components {
         ];
         impl WidgetNode {
             pub(crate) fn kind(&self) -> &'static str {
-                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Anchored { child, .. } | Self::Clickable { child, .. } => child.kind() }
+                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Aligned { child, .. } => child.kind() }
             }
         }
     };
@@ -121,7 +126,7 @@ components! {
         pitch: f32, spacing: f32, width: NodeLength, height: NodeLength,
         transitions: Box<(Transition, Transition, Transition)>, callbacks: crate::lua::callbacks::ItemCallbacks
     }
-    Container => ContainerNode, "container", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width"] {
+    Container => ContainerNode, "container", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,
         background: Option<iced::Color>, radius: f32, border: Option<iced::Color>, border_width: f32
     }
@@ -131,16 +136,16 @@ components! {
     Space => SpaceNode, "space", [], ["width", "height"] { width: NodeLength, height: NodeLength }
     Image => ImageNode, "image", ["path"], ["width", "height"] { path: String, width: NodeLength, height: NodeLength }
     Raster => RasterNode, "image_handle", ["image"], ["width", "height"] { handle: iced::widget::image::Handle, width: NodeLength, height: NodeLength }
-    Text => TextNode, "text", ["text"], ["size", "width", "height", "wrap", "color", "elide", "elide_mode"] {
+    Text => TextNode, "text", ["text"], ["size", "width", "height", "wrap", "color", "elide", "elide_mode", "align_x", "align_y"] {
         content: String, size: Option<f32>, width: Option<NodeLength>, height: Option<NodeLength>,
         wrapping: Option<iced::widget::text::Wrapping>, color: Option<iced::Color>,
         elide: Option<TextElide>
     }
     Icon => IconNode, "icon", ["name"], ["color"] { name: String, color: Option<iced::Color> }
-    Row => RowNode, "row", ["children", "spacing"], ["spacing", "width", "height"] {
+    Row => RowNode, "row", ["children", "spacing"], ["spacing", "width", "height", "align_y"] {
         children: Vec<WidgetNode>, spacing: f32, width: NodeLength, height: NodeLength
     }
-    Column => ColumnNode, "column", ["children", "spacing"], ["spacing", "width", "height"] {
+    Column => ColumnNode, "column", ["children", "spacing"], ["spacing", "width", "height", "align_x"] {
         children: Vec<WidgetNode>, spacing: f32, width: NodeLength, height: NodeLength
     }
     Stack => StackNode, "stack", ["children"], ["width", "height"] {

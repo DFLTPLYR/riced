@@ -2,6 +2,7 @@
 use super::action::{Action, ActionValue, Sender};
 use super::{
     icons::{icon_bytes, rich_text_for as rich_text},
+    layout_props::Align,
     node::{NodeLength, WidgetNode},
 };
 use crate::{shell::Plant, theme};
@@ -17,9 +18,9 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         _ => base,
     };
     match node {
-        WidgetNode::Anchored { child, .. } | WidgetNode::Clickable { child, .. } => {
-            estimate_height(child, size)
-        }
+        WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } => estimate_height(child, size),
         WidgetNode::Raster { height, .. } => px(height).max(base),
         WidgetNode::Checkbox { size, .. }
         | WidgetNode::Radio { size, .. }
@@ -93,13 +94,24 @@ pub(crate) fn build_node_opacity(
     button_msg: Option<Sender>,
     opacity: f32,
 ) -> Result<Element<'static, Plant>, String> {
+    build_node_opacity_aligned(node, size, button_msg, opacity, Align::default())
+}
+
+pub(crate) fn build_node_opacity_aligned(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Option<Sender>,
+    opacity: f32,
+    align: Align,
+) -> Result<Element<'static, Plant>, String> {
     let interactive = button_msg.is_some();
-    realize(
+    realize_aligned(
         node,
         size,
         button_msg.unwrap_or_else(|| std::sync::Arc::new(|_| Plant::Tend)),
         interactive,
         opacity,
+        align,
     )
 }
 
@@ -111,6 +123,24 @@ pub(crate) fn realize<M: Clone + 'static>(
     button_msg: Sender<M>,
     interactive: bool,
     opacity: f32,
+) -> Result<Element<'static, M>, String> {
+    realize_aligned(
+        node,
+        size,
+        button_msg,
+        interactive,
+        opacity,
+        Align::default(),
+    )
+}
+
+fn realize_aligned<M: Clone + 'static>(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Sender<M>,
+    interactive: bool,
+    opacity: f32,
+    align: Align,
 ) -> Result<Element<'static, M>, String> {
     match node {
         WidgetNode::Anchored {
@@ -129,6 +159,26 @@ pub(crate) fn realize<M: Clone + 'static>(
                 item = item.on_press(button_msg(action.clone().into()));
             }
             Ok(item.into())
+        }
+        WidgetNode::Aligned {
+            child,
+            align_x,
+            align_y,
+        } => {
+            if !matches!(child.kind(), "text" | "container" | "row" | "column") {
+                return Err(format!("iced.{}() has no alignment setters", child.kind()));
+            }
+            realize_aligned(
+                child,
+                size,
+                button_msg,
+                interactive,
+                opacity,
+                Align {
+                    x: *align_x,
+                    y: *align_y,
+                },
+            )
         }
         WidgetNode::Raster {
             handle,
@@ -182,7 +232,13 @@ pub(crate) fn realize<M: Clone + 'static>(
             let radius = *radius;
             let border = border.map(|c| c.scale_alpha(opacity));
             let border_width = *border_width;
-            let content = container(realize(child, size, button_msg, interactive, opacity)?);
+            let mut content = container(realize(child, size, button_msg, interactive, opacity)?);
+            if let Some(align) = align.x {
+                content = content.align_x(align);
+            }
+            if let Some(align) = align.y {
+                content = content.align_y(align);
+            }
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
                 .width(width.resolve(hints.width))
@@ -259,6 +315,12 @@ pub(crate) fn realize<M: Clone + 'static>(
             if let Some(wrapping) = wrapping {
                 t = t.wrapping(*wrapping);
             }
+            if let Some(align) = align.x {
+                t = t.align_x(align);
+            }
+            if let Some(align) = align.y {
+                t = t.align_y(align);
+            }
             if color.is_some() || opacity < 1.0 {
                 t = t.color(color.unwrap_or_else(theme::text).scale_alpha(opacity));
             }
@@ -291,7 +353,7 @@ pub(crate) fn realize<M: Clone + 'static>(
         } => {
             let mut row = row![]
                 .spacing(spacing.max(0.0))
-                .align_y(iced::Alignment::Center);
+                .align_y(align.y.unwrap_or(iced::Alignment::Center));
             for child in children {
                 row = row.push(realize(
                     child,
@@ -315,7 +377,7 @@ pub(crate) fn realize<M: Clone + 'static>(
         } => {
             let mut column = column![]
                 .spacing(spacing.max(0.0))
-                .align_x(iced::Alignment::Center);
+                .align_x(align.x.unwrap_or(iced::Alignment::Center));
             for child in children {
                 column = column.push(realize(
                     child,
@@ -843,6 +905,53 @@ mod tests {
                 assert_eq!(layout.children().len(), 2);
             }
         }
+    }
+
+    #[test]
+    fn alignment_builds_in_every_host_and_rejects_other_components() {
+        let lua = lua();
+        for source in [
+            "iced.text('x'):width(80):align_x('center'):align_y('end')",
+            "iced.container(iced.space():width(10):height(10)):width(80):height(40):align_x('end'):align_y('center')",
+            "iced.row({iced.space():width(10):height(10),iced.space():width(10):height(20)}):align_y('start')",
+            "iced.column({iced.space():width(10):height(10)}):align_x('end')",
+        ] {
+            let node = parse_node(&lua.load(format!("return {source}")).eval().unwrap()).unwrap();
+            build_node(&node, 13.0, None).unwrap();
+            crate::ui::scene::Lists::default()
+                .build(
+                    &node,
+                    &crate::ui::anim::AnimRuntime::default(),
+                    std::sync::Arc::new(|_| Plant::Tend),
+                    None,
+                )
+                .unwrap();
+            crate::shell::screens::top::build_with_lists(
+                &node,
+                "test",
+                13.0,
+                None,
+                &crate::ui::anim::AnimRuntime::default(),
+                &Default::default(),
+                None,
+            )
+            .unwrap();
+        }
+        let button = parse_node(
+            &lua.load("return iced.button('go','go')")
+                .eval::<Value>()
+                .unwrap(),
+        )
+        .unwrap();
+        let node = WidgetNode::Aligned {
+            child: Box::new(button),
+            align_x: Some(iced::Alignment::Center),
+            align_y: None,
+        };
+        let error = build_node(&node, 13.0, None)
+            .err()
+            .expect("unaligned component must fail");
+        assert!(error.contains("no alignment setters"), "{error}");
     }
 
     #[test]

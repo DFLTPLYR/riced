@@ -169,6 +169,29 @@ pub(crate) fn opt_wrapping(
     }
 }
 
+const ALIGNMENTS: &[(&str, iced::Alignment)] = &[
+    ("start", iced::Alignment::Start),
+    ("center", iced::Alignment::Center),
+    ("end", iced::Alignment::End),
+];
+
+fn opt_alignment(t: &Table, field: &str, what: &str) -> Result<Option<iced::Alignment>, String> {
+    let expected = crate::shared::enums::expected(ALIGNMENTS);
+    match node_property(t, field).map_err(|e| e.to_string())? {
+        Value::Nil | Value::Function(_) => Ok(None),
+        Value::String(s) => {
+            let raw = s.to_string_lossy();
+            crate::shared::enums::lookup(ALIGNMENTS, &raw)
+                .map(Some)
+                .ok_or_else(|| format!("{what} {field} must be {expected}, got {raw:?}"))
+        }
+        other => Err(format!(
+            "{what} {field} must be {expected}, got {}",
+            lua_value_kind(&other)
+        )),
+    }
+}
+
 const AXES: &[(&str, bool)] = &[("horizontal", true), ("vertical", false)];
 
 /// Listview `axis` is case-insensitive and hyphen-tolerant through the shared
@@ -205,10 +228,29 @@ pub(crate) fn parse_node_hovered(
         return Err("margin must be non-negative".into());
     }
     let on_press = control_string(table, "on_press", "iced component")?;
+    let align = match node.kind() {
+        kind @ ("text" | "container") => {
+            let what = format!("iced.{kind}()");
+            super::layout_props::Align {
+                x: opt_alignment(table, "align_x", &what)?,
+                y: opt_alignment(table, "align_y", &what)?,
+            }
+        }
+        "row" => super::layout_props::Align {
+            x: None,
+            y: opt_alignment(table, "align_y", "iced.row()")?,
+        },
+        "column" => super::layout_props::Align {
+            x: opt_alignment(table, "align_x", "iced.column()")?,
+            y: None,
+        },
+        _ => super::layout_props::Align::default(),
+    };
     Ok(super::layout_props::Common {
         anchor,
         margin,
         on_press,
+        align,
     }
     .wrap(node))
 }
@@ -988,6 +1030,77 @@ mod tests {
                 .eval::<Value>()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn alignment_is_case_insensitive_axis_specific_and_roundtrips() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        for (source, x, y) in [
+            (
+                "return iced.text('x'):align_x('center'):align_y('END')",
+                Some(iced::Alignment::Center),
+                Some(iced::Alignment::End),
+            ),
+            ("return iced.text('x')", None, None),
+            (
+                "return iced.row({}):align_y('start')",
+                None,
+                Some(iced::Alignment::Start),
+            ),
+            (
+                "return iced.column({}):align_x('center')",
+                Some(iced::Alignment::Center),
+                None,
+            ),
+            (
+                "return iced.container(iced.space()):align_x('end'):align_y('start')",
+                Some(iced::Alignment::End),
+                Some(iced::Alignment::Start),
+            ),
+        ] {
+            let node = parse_node(&lua.load(source).eval::<Value>().unwrap()).unwrap();
+            match &node {
+                WidgetNode::Aligned {
+                    child,
+                    align_x,
+                    align_y,
+                } => {
+                    assert_eq!((*align_x, *align_y), (x, y), "{source}");
+                    assert!(!matches!(child.as_ref(), WidgetNode::Aligned { .. }));
+                }
+                other => assert_eq!((None, None), (x, y), "{source}: {other:?}"),
+            }
+            let encoded = super::super::encode::to_table(&lua, &node).unwrap();
+            assert_eq!(
+                parse_node(&Value::Table(encoded)).unwrap(),
+                node,
+                "{source}"
+            );
+        }
+        let error = parse_node(
+            &lua.load("return iced.text('x'):align_x('middle')")
+                .eval::<Value>()
+                .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("align_x")
+                && error.contains("start")
+                && error.contains("center")
+                && error.contains("end"),
+            "{error}"
+        );
+        for source in [
+            "return iced.row({}):align_x('center')",
+            "return iced.column({}):align_y('center')",
+            "return iced.button('go','go'):align_y('center')",
+        ] {
+            assert!(
+                lua.load(source).eval::<Value>().is_err(),
+                "{source} must not expose that axis"
+            );
+        }
     }
 
     #[test]
