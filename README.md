@@ -182,7 +182,7 @@ function app:view()
     return iced.row({ iced.icon("clock"), iced.text(os.date(self.props.format)) })
 end
 function app:popup()
-    return { ui = iced.text(os.date("%A, %d %B %Y")), width = 300, height = 200 }
+    return iced.popup(iced.text(os.date("%A, %d %B %Y"))):width(300):height(200)
 end
 return app
 ```
@@ -338,8 +338,10 @@ popups immediately.
 ### Native controls and Rust component structs
 
 `iced.*` is the constructor namespace; there is no `ui` global.
-Popup return tables still use the
-`ui` field, for example `{ ui = iced.text("Popup"), width = 300 }`.
+`app:popup()` returns a surface root such as
+`iced.popup(iced.text("Popup")):width(300)`, or `nil`. Popup roots share container
+presentation properties and fit omitted dimensions to content; no host padding
+or background is injected. Per-component defaults are edited in Settings.
 
 | Constructor | Interaction setter | Payload | Rust description |
 | --- | --- | --- | --- |

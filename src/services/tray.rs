@@ -93,6 +93,7 @@ mod tests {
             gpu: None,
             sampled: 0.0,
             theme: &Default::default(),
+            component_defaults: &Default::default(),
             outputs: &Default::default(),
             notifications: &Default::default(),
             toplevels: &Default::default(),

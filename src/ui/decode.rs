@@ -7,13 +7,16 @@ use mlua::{Table, Value};
 pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
     if let Ok(properties) = t.raw_get::<Table>("_properties") {
         let value = properties.raw_get::<Value>(field)?;
-        return if value == Value::Nil {
-            t.raw_get(field)
-        } else {
-            Ok(value)
-        };
+        if value != Value::Nil {
+            return Ok(value);
+        }
     }
-    t.get(field)
+    match t.raw_get::<Value>(field)? {
+        // Setter slots read as functions on chained nodes; those and plain
+        // omissions both fall through to saved component defaults.
+        Value::Nil | Value::Function(_) => super::settings::inherited(t, field),
+        value => Ok(value),
+    }
 }
 
 pub(crate) fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
@@ -175,7 +178,11 @@ const ALIGNMENTS: &[(&str, iced::Alignment)] = &[
     ("end", iced::Alignment::End),
 ];
 
-fn opt_alignment(t: &Table, field: &str, what: &str) -> Result<Option<iced::Alignment>, String> {
+pub(crate) fn opt_alignment(
+    t: &Table,
+    field: &str,
+    what: &str,
+) -> Result<Option<iced::Alignment>, String> {
     let expected = crate::shared::enums::expected(ALIGNMENTS);
     match node_property(t, field).map_err(|e| e.to_string())? {
         Value::Nil | Value::Function(_) => Ok(None),
@@ -229,7 +236,7 @@ pub(crate) fn parse_node_hovered(
     }
     let on_press = control_string(table, "on_press", "iced component")?;
     let align = match node.kind() {
-        kind @ ("text" | "container") => {
+        kind @ ("text" | "container" | "popup") => {
             let what = format!("iced.{kind}()");
             super::layout_props::Align {
                 x: opt_alignment(table, "align_x", &what)?,
@@ -253,6 +260,16 @@ pub(crate) fn parse_node_hovered(
         align,
     }
     .wrap(node))
+}
+
+fn parse_child(value: &Value, hover: &super::hover::HoverSet) -> Result<WidgetNode, String> {
+    let child = parse_node_hovered(value, hover)?;
+    if super::node::contains_popup(&child) {
+        return Err(
+            "iced.popup() is a surface root and cannot be nested inside another component".into(),
+        );
+    }
+    Ok(child)
 }
 
 fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<WidgetNode, String> {
@@ -380,7 +397,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                 item.set("hovered", hover.contains(&(id.clone(), key.clone())))
                     .map_err(|e| e.to_string())?;
                 let value: Value = delegate.call(item).map_err(|e| e.to_string())?;
-                items.push((key, parse_node_hovered(&value, hover)?));
+                items.push((key, parse_child(&value, hover)?));
             }
             let defaults: super::listview::ListView<String, WidgetNode> =
                 super::listview::ListView::default();
@@ -406,29 +423,112 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                 callbacks,
             })
         }
-        "container" => {
-            let background = opt_color(t, "background", "iced.container()")?;
-            let border = opt_color(t, "border", "iced.container()")?;
-            let border_width = opt_number(t, "border_width", "iced.container()")?
+        "container" | "popup" => {
+            let what = format!("iced.{kind}()");
+            if kind == "popup" {
+                let component = super::components::COMPONENTS
+                    .iter()
+                    .find(|c| c.name == "popup")
+                    .ok_or("popup schema missing")?;
+                let allowed = |field: &str| {
+                    component.setters.contains(&field)
+                        || super::layout_props::SETTERS.contains(&field)
+                };
+                for pair in t.clone().pairs::<String, Value>() {
+                    let (key, _) = pair.map_err(|e| e.to_string())?;
+                    if !allowed(&key)
+                        && !matches!(key.as_str(), "type" | "child" | "_properties" | "_defaults")
+                    {
+                        return Err(format!("{what} unknown field {key:?}"));
+                    }
+                }
+                let properties = t
+                    .raw_get::<Value>("_properties")
+                    .map_err(|e| e.to_string())?;
+                if !matches!(properties, Value::Nil | Value::Table(_)) {
+                    return Err(format!("{what} _properties must be a table"));
+                }
+                if let Value::Table(props) = properties {
+                    for pair in props.pairs::<String, Value>() {
+                        let (key, _) = pair.map_err(|e| e.to_string())?;
+                        if !allowed(&key) {
+                            return Err(format!("{what} unknown property {key:?}"));
+                        }
+                    }
+                }
+                for field in component.setters.iter().chain(super::layout_props::SETTERS) {
+                    if matches!(
+                        node_property(t, field).map_err(|e| e.to_string())?,
+                        Value::Function(_)
+                    ) || matches!(
+                        t.raw_get::<Value>(*field).map_err(|e| e.to_string())?,
+                        Value::Function(_)
+                    ) {
+                        return Err(format!("{what} {field} cannot be a function"));
+                    }
+                }
+            }
+            let background = opt_color(t, "background", &what)?;
+            let border = opt_color(t, "border", &what)?;
+            let border_width = opt_number(t, "border_width", &what)?
                 .map(|w| w.max(0.0))
                 .unwrap_or(if border.is_some() { 1.0 } else { 0.0 });
-            Ok(WidgetNode::Container {
-                child: Box::new(parse_node_hovered(
-                    &t.get::<Value>("child").map_err(|e| e.to_string())?,
-                    hover,
-                )?),
-                width: opt_length(t, "width", "iced.container()")?.unwrap_or(NodeLength::Native),
-                height: opt_length(t, "height", "iced.container()")?.unwrap_or(NodeLength::Native),
-                padding: opt_number(t, "padding", "iced.container()")?.unwrap_or(0.0),
-                radius: opt_number(t, "radius", "iced.container()")?.unwrap_or(0.0),
-                background,
-                border,
-                border_width,
-            })
+            let child = Box::new(parse_child(
+                &t.get::<Value>("child").map_err(|e| e.to_string())?,
+                hover,
+            )?);
+            let width = opt_length(t, "width", &what)?.unwrap_or(NodeLength::Native);
+            let height = opt_length(t, "height", &what)?.unwrap_or(NodeLength::Native);
+            let padding = opt_number(t, "padding", &what)?.unwrap_or(0.0);
+            let radius = opt_number(t, "radius", &what)?.unwrap_or(0.0);
+            if kind == "popup" {
+                for (field, length) in [("width", &width), ("height", &height)] {
+                    match length {
+                        NodeLength::FillPortion(_) => {
+                            return Err(format!(
+                                "{what} {field} cannot use fill:n on a surface root"
+                            ));
+                        }
+                        NodeLength::Fixed(n) if !n.is_finite() || *n <= 0.0 => {
+                            return Err(format!("{what} {field} must be positive and finite"));
+                        }
+                        _ => {}
+                    }
+                }
+                if [padding, radius, border_width]
+                    .iter()
+                    .any(|n| !n.is_finite() || *n < 0.0)
+                {
+                    return Err(format!(
+                        "{what} padding, radius and border width must be finite and non-negative"
+                    ));
+                }
+                Ok(WidgetNode::Popup {
+                    child,
+                    width,
+                    height,
+                    padding,
+                    background,
+                    radius,
+                    border,
+                    border_width,
+                })
+            } else {
+                Ok(WidgetNode::Container {
+                    child,
+                    width,
+                    height,
+                    padding,
+                    background,
+                    radius,
+                    border,
+                    border_width,
+                })
+            }
         }
         "scrollable" => Ok(WidgetNode::Scrollable {
             scrollbar_hidden: scrollbar_hidden(t)?,
-            child: Box::new(parse_node_hovered(
+            child: Box::new(parse_child(
                 &t.get::<Value>("child").map_err(|e| e.to_string())?,
                 hover,
             )?),
@@ -494,7 +594,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                     .map(|child| {
                         child
                             .map_err(|e| e.to_string())
-                            .and_then(|child| parse_node_hovered(&child, hover))
+                            .and_then(|child| parse_child(&child, hover))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 Value::Nil => Vec::new(),

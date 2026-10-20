@@ -18,7 +18,7 @@ return app
 | Method                        | Purpose                                                                                                                                                                                                  |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `app:view(props)`             | Required. Returns text (numbers/booleans coerce, `nil` is empty) or an `iced.*` tree. Widgets, scenes, and composables receive the resolved `props` table, also available as `self.props`.               |
-| `app:popup()`                 | Optional (widgets). Returns a popup descriptor: `{ text }`, `{ text, width, height }`, `{ items = {{label, action}} }`, and/or `{ ui = <tree>, width, height }`. No text, tree, or items means no popup. |
+| `app:popup()`                 | Optional (bar widgets). Returns `iced.popup(child)` or `nil` to open nothing. Width and height are optional. |
 | `app:actions(events)`          | Optional. Receives one owned event table per invocation: control actions, pointer gestures, and delivered keyboard events. |
 | `app:transitions()`           | Optional. `{ add, remove, displaced }` motion overrides; see Transitions.                                                                                                                                |
 
@@ -112,6 +112,7 @@ at decode with the field named.
 | `iced.spinner()`                                               | —                                                                                                          | —                                                                                                                                                 |
 | `iced.separator()`                                             | —                                                                                                          | `height`, `color`                                                                                                                                 |
 | `iced.container(child)`                                        | child                                                                                                      | `width`, `height`, `padding`, `background`, `radius`, `border`, `border_width`, `align_x`, `align_y` (`:border()` implies 1px; bare width without color paints nothing) |
+| `iced.popup(child)` | surface-root child | `width`, `height`, `padding`, `background`, `radius`, `border`, `border_width`, `align_x`, `align_y` |
 | `iced.scrollable(child)`                                       | child                                                                                                      | `width`, `height`, `scrollbar`                                                                                                                    |
 | `iced.space()`                                                 | —                                                                                                          | `width`, `height`                                                                                                                                 |
 | `iced.image(path)`                                             | file path                                                                                                  | `width`, `height`                                                                                                                                 |
@@ -126,6 +127,77 @@ at decode with the field named.
 | `iced.shader(path)`                                            | WGSL fragment file (see below)                                                                             | `width`, `height`, `speed`, `params`, `animated`                                                                                                    |
 
 Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
+
+### Popup roots
+
+`iced.popup(child)` is a surface root returned by `app:popup()`. Its owned
+`PopupNode` preserves popup identity through decoding and `iced.to_table`.
+It shares container layout/styling, but cannot be nested inside a row, stack,
+container, list delegate, or another popup.
+
+```lua
+function app:popup()
+    return iced.popup(
+        iced.column({
+            iced.button("Activate", "activate"):width("fill"),
+            iced.button("Application context menu", "context"):width("fill"),
+        }):spacing(4)
+    ):width(150):background(theme.surface):radius(8)
+end
+```
+
+Setters: `width`, `height`, `padding`, `background`, `radius`, `border`,
+`border_width`, `align_x`, and `align_y`, plus shared layout/event properties.
+Padding and radius fall back to **zero**, background is transparent, and content
+alignment starts at the top-left. Setting a border color implies 1px unless
+`border_width` is explicit. The host injects no padding, margin, background,
+rounding, or extra content spacing. Ordinary controls retain their own defaults.
+
+Sizing applies to the **whole surface, including padding**:
+
+- Omitted, `"auto"`, or `"shrink"` dimensions fit content.
+- Positive finite numbers specify outer logical pixels.
+- `"fill"` uses the available output extent; `"fill:n"` is invalid on a surface.
+- The live renderer measures width before wrapped-text height, within output
+  bounds. Fill-width menu rows fill the resulting popup width rather than forcing
+  a content-sized popup to fill the output. Revision-tagged measurements resize
+  both axes together and reject stale results. Unmeasured content is hidden to
+  avoid flashing a provisional full-output window.
+
+`self:popup()` inside `actions(events)` still requests opening at the reporting
+widget's measured bounds. Native placement, compositor constraints, dismissal,
+and input routing remain host responsibilities. Shared `anchor`/`margin` are
+parent-local layout properties, not native-window positioning controls.
+
+The previous `{ ui, width, height }`, `{ text }`, and `{ items }` return formats
+are removed. Use `iced.text` and ordinary `iced.button` children inside the root;
+return `nil` when there is no content to show.
+
+### Component defaults in Settings
+
+Settings opens on **Info**; Info and About are blank placeholders.
+The **Components** page edits persistent defaults for every native component,
+including `popup`. Pick a component and supported property, enter a TOML value,
+then apply it. **Reset property** removes the saved override. Strings need quotes
+(`"center"`, `"fill"`, `"#ffffff"`); numbers and booleans do not. Invalid edits
+are shown in the editor and do not replace the saved configuration.
+
+```toml
+[component-defaults.popup]
+padding = 8
+background = "#202020"
+radius = 6
+
+[component-defaults.button]
+padding = 4
+```
+
+Resolution is per property: **explicit argument/setter → configured default →
+base fallback**. `:padding(0)` overrides an inherited padding value while still
+inheriting background and radius. Setting `:anchor("center")` changes only the
+anchor. Cached Lua nodes retain live inheritance; exported owned descriptions
+are resolved snapshots. Executable delegates remain script-local. Unsupported
+component/property names and invalid values fail validation.
 
 ### Layout semantics
 

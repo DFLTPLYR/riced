@@ -37,7 +37,7 @@ function app:view()
 end
 
 function app:popup()
-    return { ui = iced.card({ title = "Clock", icon = "clock", body = stamp(self.props) }), width = 300 }
+    return iced.popup(iced.card({ title = "Clock", icon = "clock", body = stamp(self.props) })):width(300)
 end
 
 function app:actions(events)

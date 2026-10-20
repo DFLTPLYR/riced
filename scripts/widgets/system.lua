@@ -7,8 +7,8 @@ function app:view()
 end
 
 function app:popup()
-    return {
-        ui = iced.card({ title = "Session", icon = "power", body = iced.menu({
+    return iced.popup(
+        iced.card({ title = "Session", icon = "power", body = iced.menu({
             id = "session-actions",
             items = {
                 { label = "Suspend", action = "suspend" },
@@ -16,9 +16,8 @@ function app:popup()
                 { label = "Reboot", action = "reboot" },
                 { label = "Power off", action = "poweroff" },
             },
-        }) }),
-        width = 220,
-    }
+        }) })
+    ):width(220)
 end
 
 function app:actions(events)

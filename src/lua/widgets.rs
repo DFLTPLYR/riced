@@ -668,6 +668,7 @@ mod tests {
                 gpu: None,
                 sampled: 0.0,
                 theme: &crate::config::ThemeConfig::default(),
+                component_defaults: &Default::default(),
                 outputs: &outputs,
                 notifications: &queue,
                 toplevels: &toplevels,
@@ -842,12 +843,14 @@ mod tests {
         let toplevels = Default::default();
         let workspaces = Default::default();
         let tray = Default::default();
+        let component_defaults = Default::default();
         let context = |output| EntryContext {
             services: crate::services::ServiceCtx {
                 sys: &system,
                 gpu: None,
                 sampled: 0.0,
                 theme: &theme,
+                component_defaults: &component_defaults,
                 outputs: &outputs,
                 notifications: &notifications,
                 toplevels: &toplevels,

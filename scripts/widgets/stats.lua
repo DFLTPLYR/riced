@@ -16,11 +16,10 @@ function app:popup()
     if self.details then
         lines[#lines + 1] = iced.row({ iced.icon("cpu"), iced.text("Cores " .. system.cpu_count) })
     end
-    return {
-        ui = iced.card({ title = "System stats", body = iced.column(lines) }),
-        width = 300,
-        items = {{ label = self.details and "{icon:arrow-up} Less" or "{icon:arrow-down} More", action = "toggle" }},
-    }
+    return iced.popup(iced.column({
+        iced.card({ title = "System stats", body = iced.column(lines) }),
+        iced.button(self.details and "{icon:arrow-up} Less" or "{icon:arrow-down} More", "toggle"):width("fill"),
+    }):spacing(4)):width(300)
 end
 
 function app:actions(events)

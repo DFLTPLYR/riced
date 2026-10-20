@@ -33,6 +33,7 @@ pub(super) fn node(
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("type", kind)?;
+    table.raw_set("_defaults", super::settings::table(lua)?)?;
     build(&table)?;
     let properties = lua.create_table()?;
     let component = super::components::COMPONENTS

@@ -11,6 +11,7 @@ use iced::{
     widget::{Space, button, column, container, progress_bar, row, text},
 };
 
+#[cfg(test)]
 pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
     let base = size.max(1.0);
     let px = |length: &NodeLength| match length {
@@ -75,7 +76,7 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
                 heights.sum::<f32>() + spacing.max(0.0) * items.len().saturating_sub(1) as f32
             }
         }
-        WidgetNode::Container { child, padding, .. } => {
+        WidgetNode::Container { child, padding, .. } | WidgetNode::Popup { child, padding, .. } => {
             estimate_height(child, base) + 2.0 * padding.max(0.0)
         }
         WidgetNode::Scrollable { child, .. } => estimate_height(child, base),
@@ -165,7 +166,10 @@ fn realize_aligned<M: Clone + 'static>(
             align_x,
             align_y,
         } => {
-            if !matches!(child.kind(), "text" | "container" | "row" | "column") {
+            if !matches!(
+                child.kind(),
+                "text" | "container" | "popup" | "row" | "column"
+            ) {
                 return Err(format!("iced.{}() has no alignment setters", child.kind()));
             }
             realize_aligned(
@@ -219,6 +223,16 @@ fn realize_aligned<M: Clone + 'static>(
             realize(&layout, size, button_msg, interactive, opacity)
         }
         WidgetNode::Container {
+            child,
+            width,
+            height,
+            padding,
+            background,
+            radius,
+            border,
+            border_width,
+        }
+        | WidgetNode::Popup {
             child,
             width,
             height,

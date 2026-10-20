@@ -76,17 +76,16 @@ end
 
 function app:popup()
     sample()
-    return {
-        ui = iced.card({
+    return iced.popup(
+        iced.card({
             title = "Usage",
             icon = "cpu",
             body = iced.column({
                 iced.graph({ width = 268, height = 100, window = WINDOW, series = series() }),
                 legend(),
             }):spacing(8),
-        }),
-        width = 300,
-    }
+        })
+    ):width(300)
 end
 
 function app:actions(events)

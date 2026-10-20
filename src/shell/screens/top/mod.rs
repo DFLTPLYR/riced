@@ -1387,6 +1387,7 @@ impl Top {
                 gpu,
                 sampled: plots.services.sampled(),
                 theme: &plots.config.theme,
+                component_defaults: &plots.config.component_defaults,
                 outputs: &plots.windows.output_infos,
                 notifications: &plots.notification.queue,
                 toplevels: &plots.services.toplevels,

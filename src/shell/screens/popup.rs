@@ -1,13 +1,10 @@
 mod sizing;
 mod surface;
 use super::top::Top;
-use crate::lua::value::{coerce_text, lua_value_kind};
 use crate::shell::state::Plots;
 use crate::shell::{Plant, TopEvent, WidgetEvent};
-use crate::theme;
 use crate::ui::decode::parse_node_hovered;
-use crate::ui::icons::rich_text;
-use crate::ui::node::WidgetNode;
+use crate::ui::node::{NodeLength, WidgetNode};
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_runtime::Action;
@@ -35,11 +32,7 @@ pub struct Popup {
     pub bar_id: window::Id,
     /// Placement id whose `popup()` renders the body.
     pub placement: String,
-    /// Last rendered `popup()` body text.
-    pub body: String,
-    /// Last rendered clickable rows.
-    pub items: Vec<PopupItem>,
-    /// Last rendered composed body (`ui` field).
+    /// Last rendered popup root, including its user-owned presentation.
     pub tree: Option<WidgetNode>,
     /// Listview rows hovered in this popup, keyed `(list id, item key)`.
     /// Re-parsed into `item.hovered` on change; dropped with the popup.
@@ -49,6 +42,8 @@ pub struct Popup {
     /// Box size in px.
     pub w: u32,
     pub h: u32,
+    pub auto_width: bool,
+    pub max_width: f32,
     pub auto_height: bool,
     pub max_height: f32,
     pub sizing_revision: u64,
@@ -56,58 +51,22 @@ pub struct Popup {
     pub positioner: iced_exwlshell::actions::IcedNewPopupSettings,
 }
 
-/// One clickable popup row: label plus the `on_action()` key sent on click.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PopupItem {
-    pub label: String,
-    pub action: String,
-}
-
-/// Parsed `popup()` return: body text, optional explicit size, and
-/// clickable rows. A plain string return is just the text.
+/// A validated popup root and its surface sizing policy. None means no popup.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PopupContent {
-    pub text: String,
     pub width: Option<f32>,
     pub height: Option<f32>,
-    pub items: Vec<PopupItem>,
-    /// Composed body from the `ui` field (a `ui.*` tree).
     pub tree: Option<WidgetNode>,
 }
 
 impl Popup {
-    /// Menu box width in px (height derives from the body line count).
-    pub(crate) const WIDTH: f32 = 280.0;
-
-    /// Provisional surface size until the first renderer layout. Explicit
-    /// dimensions win; an omitted height is subsequently measured by the view.
+    /// Provisional surface bounds until the renderer measures omitted axes.
+    /// Unconfirmed content stays invisible; no padding estimate affects size.
     pub(crate) fn content_size(sw: f32, sh: f32, content: &PopupContent) -> (u32, u32) {
-        let text_h = content.text.lines().count() as f32 * 24.0;
-        let items_h = content.items.len() as f32 * 24.0;
-        // Estimate the tree so nested menus/lists aren't clipped by the
-        // old row-count heuristic (which only saw the `items` shorthand).
-        let tree_h = content
-            .tree
-            .as_ref()
-            .map(|tree| crate::ui::build::estimate_height(tree, 13.0))
-            .unwrap_or(0.0);
-        let gaps = if content.tree.is_some() && !content.items.is_empty() {
-            8.0
-        } else {
-            0.0
+        let dimension = |value: Option<f32>, max: f32| {
+            value.unwrap_or(max).ceil().clamp(1.0, max.max(1.0)) as u32
         };
-        let auto_h = (44.0 + text_h + items_h + tree_h + gaps).clamp(80.0, 720.0);
-        let w = content
-            .width
-            .map(|w| w.clamp(80.0, sw))
-            .unwrap_or_else(|| sw.min(Self::WIDTH))
-            .round() as u32;
-        let h = content
-            .height
-            .map(|h| h.clamp(64.0, sh))
-            .unwrap_or(auto_h)
-            .round() as u32;
-        (w.max(1), h.max(1))
+        (dimension(content.width, sw), dimension(content.height, sh))
     }
 
     pub(crate) fn initial_size(
@@ -118,94 +77,63 @@ impl Popup {
         size: f32,
     ) -> (u32, u32) {
         let (width, height) = Self::content_size(sw, sh, content);
-        if content.height.is_some() {
+        if content.height.is_some() && content.width.is_some() {
             return (width, height);
         }
         let key = sizing::measurement_key(
-            &content.text,
-            &content.items,
             content.tree.as_ref(),
-            width,
+            content.width,
+            content.height,
             size.max(1.0),
+            sw.max(1.0),
             sh.max(1.0),
         );
-        (
-            width,
-            cache.get(key).unwrap_or(height).min(sh.max(1.0) as u32),
-        )
+        cache.get(key).unwrap_or((width, height))
     }
 
-    /// Parse a `popup()` return into content: a plain string is just
-    /// body text, a table carries `text`/`width`/`height`/`items` plus
-    /// an optional `ui` tree (any `ui.*` constructor result) rendered
-    /// above the items.
+    /// Only a popup root or nil is a valid surface description.
     pub(crate) fn parse_popup_content(
         value: mlua::Value,
         hover: &crate::ui::hover::HoverSet,
     ) -> Result<PopupContent, String> {
         use mlua::Value;
-        match value {
-            Value::Table(t) => {
-                let text = match t.get::<Value>("text").map_err(|e| e.to_string())? {
-                    Value::Nil => String::new(),
-                    other => coerce_text(other, "popup().text")?,
-                };
-                let number = |key: &str| -> Result<Option<f32>, String> {
-                    match t.get::<Value>(key).map_err(|e| e.to_string())? {
-                        Value::Nil => Ok(None),
-                        Value::Integer(i) => Ok(Some(i as f32)),
-                        Value::Number(n) => Ok(Some(n as f32)),
-                        other => Err(format!(
-                            "popup().{key} must be a number, got {}",
-                            lua_value_kind(&other)
-                        )),
-                    }
-                };
-                let width = number("width")?;
-                let height = number("height")?;
-                let tree = match t.get::<Value>("ui").map_err(|e| e.to_string())? {
-                    Value::Nil => None,
-                    other => Some(parse_node_hovered(&other, hover)?),
-                };
-                let mut items = Vec::new();
-                match t.get::<Value>("items").map_err(|e| e.to_string())? {
-                    Value::Nil => {}
-                    Value::Table(list) => {
-                        for entry in list.sequence_values::<mlua::Table>() {
-                            let entry = entry.map_err(|e| e.to_string())?;
-                            let label =
-                                match entry.get::<Value>("label").map_err(|e| e.to_string())? {
-                                    Value::Nil => String::new(),
-                                    other => coerce_text(other, "popup() item label")?,
-                                };
-                            let action =
-                                match entry.get::<Value>("action").map_err(|e| e.to_string())? {
-                                    Value::Nil => String::new(),
-                                    other => coerce_text(other, "popup() item action")?,
-                                };
-                            items.push(PopupItem { label, action });
-                        }
-                    }
-                    other => {
-                        return Err(format!(
-                            "popup().items must be an array, got {}",
-                            lua_value_kind(&other)
-                        ));
-                    }
-                }
-                Ok(PopupContent {
-                    text,
-                    width,
-                    height,
-                    items,
-                    tree,
-                })
-            }
-            other => Ok(PopupContent {
-                text: coerce_text(other, "popup()")?,
-                ..Default::default()
-            }),
+        if value == Value::Nil {
+            return Ok(PopupContent::default());
         }
+        let Value::Table(table) = &value else {
+            return Err("app:popup() must return iced.popup(child) or nil".into());
+        };
+        if table
+            .raw_get::<Option<String>>("type")
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            != Some("popup")
+        {
+            return Err("app:popup() must return iced.popup(child) or nil; descriptor tables are no longer supported".into());
+        }
+        let tree = parse_node_hovered(&value, hover)?;
+        let mut root = &tree;
+        while let WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } = root
+        {
+            root = child;
+        }
+        let WidgetNode::Popup { width, height, .. } = root else {
+            return Err("expected popup root".into());
+        };
+        fn dimension(length: &NodeLength) -> Option<f32> {
+            match length {
+                NodeLength::Fixed(value) => Some(*value),
+                NodeLength::Fill => Some(f32::MAX),
+                _ => None,
+            }
+        }
+        Ok(PopupContent {
+            width: dimension(width),
+            height: dimension(height),
+            tree: Some(tree),
+        })
     }
 
     /// GPU busy % from DRM sysfs (AMD + Intel expose `gpu_busy_percent`
@@ -289,10 +217,7 @@ impl Popup {
                 return None;
             }
         };
-        // An empty menu (no text, tree, or items) opens nothing.
-        if body.text.trim().is_empty() && body.items.is_empty() && body.tree.is_none() {
-            return None;
-        }
+        body.tree.as_ref()?;
         match Self::surface_context(plots).open(
             surface::OpenRequest {
                 bar: bar_id,
@@ -326,16 +251,17 @@ impl Popup {
         let content = container(self.body_view(plots, false))
             .width(Length::Fixed(self.w as f32))
             .height(Length::Fixed(self.h as f32))
-            .padding(12)
             .clip(true)
-            .style(theme::menu_box)
             .into();
-        if !self.auto_height {
+        if !self.auto_height && !self.auto_width {
             return content;
         }
         let intrinsic = container(self.body_view(plots, true))
-            .width(Length::Fixed(self.w as f32))
-            .padding(12)
+            .width(if self.auto_width {
+                Length::Shrink
+            } else {
+                Length::Fixed(self.w as f32)
+            })
             .into();
         Element::new(sizing::MeasuredPopup {
             content,
@@ -343,23 +269,20 @@ impl Popup {
             id: self.win_id,
             revision: self.sizing_revision,
             confirmed: self.measured_revision == Some(self.sizing_revision),
-            height: self.h,
-            max_height: self.max_height,
+            size: iced::Size::new(self.w, self.h),
+            max: iced::Size::new(self.max_width, self.max_height),
+            auto_width: self.auto_width,
+            auto_height: self.auto_height,
         })
     }
 
     fn body_view(&self, plots: &Plots, intrinsic: bool) -> Element<'static, Plant> {
         use crate::shell::TopEvent;
-        use iced::widget::{button, column};
         let win_id = self.win_id;
-        let mut content = column![].spacing(4);
-        if !self.body.trim().is_empty() {
-            content = content.push(rich_text(self.body.clone(), self.size, 4.0));
-        }
         if let Some(tree) = &self.tree {
             let measured;
             let tree = if intrinsic {
-                measured = sizing::intrinsic_height(tree);
+                measured = sizing::intrinsic_size(tree, self.auto_width, self.auto_height);
                 &measured
             } else {
                 tree
@@ -385,52 +308,49 @@ impl Popup {
                 &plots.animation.widgets,
                 Some(hover),
             ) {
-                content = content.push(node);
+                return node;
             }
         }
-        for item in &self.items {
-            let action = item.action.clone();
-            content = content.push(
-                button(rich_text(item.label.clone(), self.size, 4.0))
-                    .width(Length::Fill)
-                    .padding(6)
-                    .on_press(Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupSelect(
-                        win_id,
-                        action.into(),
-                    ))))
-                    .style(theme::menu_button(theme::RADIUS)),
-            );
-        }
-        content.into()
+        iced::widget::Space::new().into()
     }
 
     pub(crate) fn handle_measured(
         plots: &mut Plots,
         id: window::Id,
         revision: u64,
-        height: u32,
+        measured: iced::Size<u32>,
     ) -> Command<Plant> {
         let Some(popup) = plots.windows.popups.get_mut(&id) else {
             return Command::none();
         };
-        if !popup.auto_height || revision != popup.sizing_revision {
+        if (!popup.auto_height && !popup.auto_width) || revision != popup.sizing_revision {
             return Command::none();
         }
-        let height = height.max(1).min(popup.max_height.max(1.0) as u32);
+        let width = if popup.auto_width {
+            measured.width.max(1).min(popup.max_width.max(1.0) as u32)
+        } else {
+            popup.w
+        };
+        let height = if popup.auto_height {
+            measured.height.max(1).min(popup.max_height.max(1.0) as u32)
+        } else {
+            popup.h
+        };
         let key = sizing::measurement_key(
-            &popup.body,
-            &popup.items,
             popup.tree.as_ref(),
-            popup.w,
+            (!popup.auto_width).then_some(popup.w as f32),
+            (!popup.auto_height).then_some(popup.h as f32),
             popup.size,
+            popup.max_width,
             popup.max_height,
         );
-        plots.windows.popup_heights.remember(key, height);
+        plots.windows.popup_heights.remember(key, (width, height));
         popup.measured_revision = Some(revision);
-        if height == popup.h {
+        if height == popup.h && width == popup.w {
             return Command::none();
         }
         popup.h = height;
+        popup.w = width;
         popup.reposition()
     }
 
@@ -514,6 +434,9 @@ impl Popup {
                 }
             };
             match content {
+                Some(content) if content.tree.is_none() => {
+                    cmds.push(Self::handle_dismiss(plots, pid))
+                }
                 Some(content) => match Self::surface_context(plots).refresh(pid, content) {
                     Ok(Some(command)) => cmds.push(command),
                     Ok(None) => {}
@@ -648,7 +571,7 @@ mod tests {
         let script = dir.join("hover.lua");
         std::fs::write(
             &script,
-            "return {view=function() return 'x' end, popup=function() return { ui = iced.listview({{id=1},{id=2}}):id('rows'):key('id'):delegate(function(n) return iced.text(n.hovered and 'hot' or 'cold') end) } end}",
+            "return {view=function() return 'x' end, popup=function() return iced.popup(iced.listview({{id=1},{id=2}}):id('rows'):key('id'):delegate(function(n) return iced.text(n.hovered and 'hot' or 'cold') end)) end}",
         )
         .unwrap();
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
@@ -675,8 +598,8 @@ mod tests {
                 win_id: pid,
                 bar_id: bar,
                 placement: "whover".into(),
-                body: String::new(),
-                items: Vec::new(),
+                auto_width: false,
+                max_width: 1920.0,
                 tree: None,
                 hovered: Default::default(),
                 size: 13.0,
@@ -694,9 +617,11 @@ mod tests {
             },
         );
         let labels = |plots: &crate::shell::state::Plots| {
-            let WidgetNode::ListView { items, .. } =
-                plots.windows.popups[&pid].tree.as_ref().unwrap()
+            let WidgetNode::Popup { child, .. } = plots.windows.popups[&pid].tree.as_ref().unwrap()
             else {
+                panic!("popup");
+            };
+            let WidgetNode::ListView { items, .. } = child.as_ref() else {
                 panic!("list");
             };
             items
@@ -734,46 +659,51 @@ mod tests {
     }
 
     #[test]
-    fn lua_popup_content_parses_string_and_table_forms() {
+    fn popup_roots_are_strict_and_roundtrip_without_losing_properties() {
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
         let content = Popup::parse_popup_content(
-            lua.load("return 'hi'").eval().unwrap(),
+            lua.load("return iced.popup(iced.button('Go', 'go')):width(90):height(40):padding(0):align_x('center')").eval().unwrap(),
             &Default::default(),
         )
         .unwrap();
-        assert_eq!(content.text, "hi");
-        assert!(content.width.is_none() && content.items.is_empty());
-        let content = Popup::parse_popup_content(lua.load("return {text='head',width=300,height=200,items={{label='a',action='go'},{label=7,action='n'}}}").eval().unwrap(), &Default::default()).unwrap();
-        assert_eq!(content.text, "head");
-        assert_eq!((content.width, content.height), (Some(300.0), Some(200.0)));
-        assert_eq!(content.items.len(), 2);
-        assert_eq!(content.items[0].action, "go");
-        assert_eq!(content.items[1].label, "7");
+        assert_eq!((content.width, content.height), (Some(90.0), Some(40.0)));
+        let node = content.tree.unwrap();
+        let exported = crate::ui::encode::to_table(&lua, &node).unwrap();
+        assert_eq!(exported.raw_get::<String>("type").unwrap(), "popup");
+        let decoded =
+            Popup::parse_popup_content(mlua::Value::Table(exported), &Default::default()).unwrap();
+        assert_eq!(decoded.tree, Some(node));
+        for source in [
+            "'hi'",
+            "{ui=iced.text('old'),width=90}",
+            "{items={}}",
+            "iced.container(iced.text('not a popup'))",
+            "iced.popup(iced.text('x')):width('fill:2')",
+            "iced.popup(iced.text('x')):width(0)",
+            "iced.popup(iced.text('x')):height(1/0)",
+            "iced.popup(iced.text('x')):padding(function() end)",
+            "{type='popup',child=iced.text('x'),typo=true}",
+            "iced.popup(iced.row({iced.popup(iced.text('nested'))}))",
+        ] {
+            let value = lua.load(format!("return {source}")).eval().unwrap();
+            assert!(
+                Popup::parse_popup_content(value, &Default::default()).is_err(),
+                "{source}"
+            );
+        }
+        for source in [
+            "iced.row({iced.popup(iced.text('x'))})",
+            "iced.container(iced.popup(iced.text('x')))",
+            "iced.stack({iced.popup(iced.text('x'))})",
+        ] {
+            let value = lua.load(format!("return {source}")).eval().unwrap();
+            assert!(crate::ui::decode::parse_node(&value).is_err(), "{source}");
+        }
         assert!(
-            Popup::parse_popup_content(
-                lua.load("return {items='nope'}").eval().unwrap(),
-                &Default::default()
-            )
-            .is_err()
-        );
-        let content = Popup::parse_popup_content(
-            lua.load("return {ui=iced.row({iced.icon('cpu'),iced.text('x')})}")
-                .eval()
-                .unwrap(),
-            &Default::default(),
-        )
-        .unwrap();
-        assert!(content.text.is_empty() && content.items.is_empty());
-        assert!(matches!(content.tree.unwrap(), WidgetNode::Row { .. }));
-        let content = Popup::parse_popup_content(
-            lua.load("return {ui=iced.button('Reboot','reboot')}")
-                .eval()
-                .unwrap(),
-            &Default::default(),
-        )
-        .unwrap();
-        assert!(
-            matches!(content.tree, Some(WidgetNode::Button {action, ..}) if action == "reboot")
+            Popup::parse_popup_content(mlua::Value::Nil, &Default::default())
+                .unwrap()
+                .tree
+                .is_none()
         );
     }
 
@@ -787,8 +717,8 @@ mod tests {
                 win_id: id,
                 bar_id: window::Id::unique(),
                 placement: "session".into(),
-                body: "before".into(),
-                items: vec![],
+                auto_width: false,
+                max_width: 1920.0,
                 tree: None,
                 hovered: Default::default(),
                 size: 13.0,
@@ -816,7 +746,10 @@ mod tests {
             },
         };
         let content = PopupContent {
-            text: "after".into(),
+            tree: Some(WidgetNode::Space {
+                width: NodeLength::Shrink,
+                height: NodeLength::Fixed(20.0),
+            }),
             width: Some(220.0),
             ..Default::default()
         };
@@ -897,7 +830,7 @@ mod tests {
             &renderer,
             &layout::Limits::new(iced::Size::ZERO, iced::Size::new(220.0, 300.0)),
         );
-        let menu = &node.children()[2];
+        let menu = &node.children()[0].children()[2];
         assert_eq!(menu.children().len(), 4);
         assert!(menu.size().width > 100.0, "collapsed menu: {menu:?}");
         for child in menu.children() {
@@ -950,97 +883,14 @@ mod tests {
     }
 
     #[test]
-    fn popup_size_defaults_and_honors_overrides() {
-        let plain = PopupContent {
-            text: "one".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(Popup::content_size(1920.0, 1080.0, &plain), (280, 80));
-        let tall = PopupContent {
-            text: "one\ntwo\nthree".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(Popup::content_size(1920.0, 1080.0, &tall), (280, 116));
-        // Items add rows; narrow outputs shrink the box.
-        let listed = PopupContent {
-            text: "head".to_string(),
-            items: vec![
-                PopupItem {
-                    label: "a".to_string(),
-                    action: "a".to_string(),
-                },
-                PopupItem {
-                    label: "b".to_string(),
-                    action: "b".to_string(),
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(Popup::content_size(1920.0, 1080.0, &listed), (280, 116));
-        assert_eq!(Popup::content_size(200.0, 1080.0, &plain), (200, 80));
-        // Explicit dimensions win, clamped into the output.
-        let custom = PopupContent {
+    fn popup_explicit_dimensions_are_outer_sizes_clamped_to_the_output() {
+        let content = PopupContent {
             width: Some(500.0),
             height: Some(10.0),
             ..Default::default()
         };
-        assert_eq!(Popup::content_size(1920.0, 1080.0, &custom), (500, 64));
-        assert_eq!(Popup::content_size(200.0, 100.0, &custom), (200, 64));
-        // A composed tree sizes to its real shape, not a fixed row count.
-        let single = PopupContent {
-            tree: Some(WidgetNode::Text {
-                content: "hi".to_string(),
-                size: None,
-                width: None,
-                height: None,
-                wrapping: None,
-                color: None,
-                elide: None,
-            }),
-            ..Default::default()
-        };
-        assert_eq!(Popup::content_size(1920.0, 1080.0, &single), (280, 80));
-        // A four-row menu tree reserves enough height for every button.
-        let menu = PopupContent {
-            tree: Some(WidgetNode::ListView {
-                callbacks: Vec::new(),
-                id: "session".to_string(),
-                items: (0..4)
-                    .map(|i| {
-                        (
-                            format!("a{i}"),
-                            WidgetNode::Button {
-                                label: format!("Row {i}"),
-                                action: format!("a{i}"),
-                                width: Some(NodeLength::Fill),
-                                height: None,
-                                padding: None,
-                                color: None,
-                                background: None,
-                                radius: None,
-                            },
-                        )
-                    })
-                    .collect(),
-                horizontal: false,
-                pitch: 32.0,
-                spacing: 4.0,
-                width: NodeLength::Shrink,
-                height: NodeLength::Shrink,
-                transitions: Box::new((
-                    crate::ui::listview::Transition::slide_fade(16.0),
-                    crate::ui::listview::Transition::slide_fade_out(-16.0),
-                    crate::ui::listview::Transition {
-                        from: crate::ui::anim::ItemMotion::settled(),
-                        to: crate::ui::anim::ItemMotion::settled(),
-                        duration: None,
-                    },
-                )),
-            }),
-            ..Default::default()
-        };
-        let (_, menu_h) = Popup::content_size(1920.0, 1080.0, &menu);
-        assert!(menu_h > 150, "menu needs room for all rows, got {menu_h}");
+        assert_eq!(Popup::content_size(1920.0, 1080.0, &content), (500, 10));
+        assert_eq!(Popup::content_size(200.0, 100.0, &content), (200, 10));
     }
 
     #[test]

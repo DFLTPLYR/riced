@@ -172,6 +172,7 @@ pub(crate) fn parse(table: &mlua::Table) -> Result<WidgetNode, String> {
                     | "margin"
                     | "on_press"
                     | "_properties"
+                    | "_defaults"
             )
         }) {
             return Err(format!("{WHAT} unknown field {key:?}"));

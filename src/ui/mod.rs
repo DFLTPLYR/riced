@@ -17,6 +17,7 @@ pub mod motion;
 pub mod node;
 pub(crate) mod placement;
 pub(crate) mod scene;
+pub(crate) mod settings;
 pub(crate) mod shader;
 pub mod style;
 #[cfg(test)]

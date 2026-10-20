@@ -105,13 +105,13 @@ impl SurfaceContext<'_> {
                 win_id: id,
                 bar_id: bar,
                 placement: resolved.id.clone(),
-                body: body.text,
-                items: body.items,
                 tree: body.tree,
                 hovered: Default::default(),
                 size: resolved.size.max(1.0),
                 w,
                 h,
+                auto_width: body.width.is_none(),
+                max_width: sw.max(1.0),
                 auto_height: body.height.is_none(),
                 max_height: sh.max(1.0),
                 sizing_revision: 0,
@@ -135,55 +135,38 @@ impl SurfaceContext<'_> {
             .and_then(|output| Background::available_rect(output, &self.windows.output_infos))
             .map(|(_, _, width, height)| (width, height))
             .unwrap_or((1920.0, 1080.0));
-        let (w, mut h) = Popup::content_size(sw, sh, &content);
-        let cached_height = if content.height.is_none() {
-            let size = self
-                .windows
-                .popups
-                .get(&id)
-                .map_or(13.0, |popup| popup.size);
-            let key = super::sizing::measurement_key(
-                &content.text,
-                &content.items,
-                content.tree.as_ref(),
-                w,
-                size,
-                sh.max(1.0),
-            );
-            self.windows.popup_heights.get(key)
-        } else {
-            None
-        };
+        let (mut w, mut h) = Popup::content_size(sw, sh, &content);
         let Some(popup) = self.windows.popups.get_mut(&id) else {
             return Ok(None);
         };
         let auto_height = content.height.is_none();
+        let auto_width = content.width.is_none();
+        if auto_width && popup.auto_width {
+            w = popup.w.min(sw.max(1.0) as u32);
+        }
         if auto_height && popup.auto_height {
             h = popup.h.min(sh.max(1.0) as u32);
-        }
-        if let Some(cached_height) = cached_height {
-            h = cached_height;
         }
         if let Some(tree) = &content.tree {
             self.animation
                 .synchronize(&format!("popup:{id:?}"), popup.tree.as_ref(), tree)?;
         }
-        if popup.body == content.text
-            && popup.items == content.items
-            && popup.tree == content.tree
+        if popup.tree == content.tree
             && popup.w == w
             && popup.h == h
             && popup.auto_height == auto_height
+            && popup.auto_width == auto_width
+            && popup.max_width == sw.max(1.0)
             && popup.max_height == sh.max(1.0)
         {
             return Ok(None);
         }
-        popup.body = content.text;
-        popup.items = content.items;
         popup.tree = content.tree;
         popup.w = w;
         popup.h = h;
         popup.auto_height = auto_height;
+        popup.auto_width = auto_width;
+        popup.max_width = sw.max(1.0);
         popup.max_height = sh.max(1.0);
         popup.sizing_revision += 1;
         Ok(Some(popup.reposition()))

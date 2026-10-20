@@ -76,6 +76,7 @@ mod tests {
             gpu: Some(42.0),
             sampled: 0.0,
             theme: &theme,
+            component_defaults: &Default::default(),
             outputs: &outputs,
             notifications: &queue,
             toplevels: &toplevels,

@@ -428,6 +428,13 @@ impl LuaRuntime {
         bridge::publish_theme(&self.lua, theme)
     }
 
+    pub(crate) fn publish_component_defaults(
+        &self,
+        defaults: &crate::ui::settings::ComponentDefaults,
+    ) -> mlua::Result<()> {
+        crate::ui::settings::publish(&self.lua, defaults)
+    }
+
     pub fn has_handler(&self, name: &str) -> bool {
         self.app
             .as_ref()

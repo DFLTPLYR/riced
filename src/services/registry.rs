@@ -17,6 +17,7 @@ pub struct ServiceCtx<'a> {
     /// this so time-series widgets advance on their own clock.
     pub sampled: f64,
     pub theme: &'a crate::config::ThemeConfig,
+    pub component_defaults: &'a crate::ui::settings::ComponentDefaults,
     pub outputs:
         &'a HashMap<iced_wayland_subscriber::OutputId, iced_wayland_subscriber::OutputInfo>,
     pub notifications: &'a VecDeque<crate::shell::screens::notification::Notification>,
@@ -92,6 +93,7 @@ const SERVICES: &[&dyn Service] = &[
 
 /// Publish every service table into `lua` globals.
 pub fn publish_all(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
+    crate::ui::settings::publish(lua, ctx.component_defaults)?;
     for service in SERVICES {
         service
             .publish(ctx, lua)

@@ -31,6 +31,7 @@ struct Instance {
 
 #[derive(Default)]
 pub(crate) struct ComposableRuntime {
+    pub defaults: crate::ui::settings::ComponentDefaults,
     instances: HashMap<String, Instance>,
     /// Instance-level hover flags. Set from iced enter/exit reports;
     /// published as `self.hovered` and included in render inputs so a
@@ -91,6 +92,7 @@ impl ComposableRuntime {
             }),
         };
         let input = serde_json::json!({
+            "component_defaults": self.defaults,
             "host": host,
             "theme": crate::theme::lua_palette(theme),
             "hovered": hovered,
@@ -106,6 +108,7 @@ impl ComposableRuntime {
                 let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
                 let mut runtime = LuaRuntime::with_components(crate::config::component_files())?;
                 runtime.publish_theme(theme)?;
+                runtime.publish_component_defaults(&self.defaults)?;
                 runtime.load_named(&source, &path.display().to_string())?;
                 let (node, props) = runtime.component_view(&overrides, &host, theme, hovered)?;
                 let rendered = Rendered { node, props };
@@ -126,7 +129,10 @@ impl ComposableRuntime {
         // A rejected replacement must not freeze a drag at its old size:
         // invoke the old app with the new host geometry and current theme.
         if let Some(runtime) = &mut state.runtime {
-            match runtime.component_view(&overrides, &host, theme, hovered) {
+            match runtime
+                .publish_component_defaults(&self.defaults)
+                .and_then(|()| runtime.component_view(&overrides, &host, theme, hovered))
+            {
                 Ok((node, props)) => {
                     let rendered = Rendered { node, props };
                     match validate(&rendered) {

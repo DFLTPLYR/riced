@@ -130,6 +130,10 @@ components! {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,
         background: Option<iced::Color>, radius: f32, border: Option<iced::Color>, border_width: f32
     }
+    Popup => PopupNode, "popup", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y"] {
+        child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,
+        background: Option<iced::Color>, radius: f32, border: Option<iced::Color>, border_width: f32
+    }
     Scrollable => ScrollableNode, "scrollable", ["child"], ["width", "height", "scrollbar"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, scrollbar_hidden: bool
     }

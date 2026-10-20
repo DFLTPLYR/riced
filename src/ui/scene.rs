@@ -64,6 +64,7 @@ fn declared<'a>(
             }
         }
         WidgetNode::Container { child, .. }
+        | WidgetNode::Popup { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
@@ -408,7 +409,10 @@ impl Lists {
                 align_x,
                 align_y,
             } => {
-                if !matches!(child.kind(), "text" | "container" | "row" | "column") {
+                if !matches!(
+                    child.kind(),
+                    "text" | "container" | "popup" | "row" | "column"
+                ) {
                     return Err(format!("iced.{}() has no alignment setters", child.kind()));
                 }
                 self.node_aligned(
@@ -443,6 +447,16 @@ impl Lists {
                 })
             }
             WidgetNode::Container {
+                child,
+                width,
+                height,
+                padding,
+                background,
+                radius,
+                border,
+                border_width,
+            }
+            | WidgetNode::Popup {
                 child,
                 width,
                 height,

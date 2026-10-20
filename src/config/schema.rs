@@ -69,6 +69,11 @@ pub(crate) use util::decode_handle;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    #[serde(
+        rename = "component-defaults",
+        skip_serializing_if = "crate::ui::settings::ComponentDefaults::is_empty"
+    )]
+    pub component_defaults: crate::ui::settings::ComponentDefaults,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub desktop: Vec<DesktopWidget>,
     #[serde(skip_serializing_if = "ComposableConfig::is_default")]
@@ -656,6 +661,7 @@ impl Default for BackgroundImage {
 /// subscription registry needed; iced views are pure functions of state.
 #[derive(Debug, Clone)]
 pub enum ConfigPatch {
+    ComponentDefaults(crate::ui::settings::ComponentDefaults),
     AddDesktopWidget(DesktopWidget),
     SetDesktopWidgetProp {
         index: usize,
@@ -1046,8 +1052,8 @@ pub use paths::config_path;
 /// local app = { details = false }
 /// function app:view() return iced.text("Details") end
 /// function app:popup()
-///     return { ui = iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) }),
-///              width = 300, height = 200 }
+///     return iced.popup(iced.row({ iced.icon("clock"), iced.text(os.date("%H:%M")) }))
+///         :width(300):height(200)
 /// end
 ///
 /// function app:actions(events)  -- popup items + cell buttons land here
@@ -1400,6 +1406,7 @@ impl Config {
         let c = &mut self.composable;
         let images = &mut self.background.image;
         match patch {
+            ConfigPatch::ComponentDefaults(defaults) => self.component_defaults = defaults,
             ConfigPatch::AddDesktopWidget(mut widget) => {
                 if widget.id.is_empty() || self.desktop.iter().any(|entry| entry.id == widget.id) {
                     widget.id = fresh_placement_id();

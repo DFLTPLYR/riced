@@ -1117,7 +1117,9 @@ impl Plots {
             Plant::Config(ConfigEvent::Patch(patch)) => {
                 let palette_changed = matches!(
                     patch,
-                    ConfigPatch::ThemeName(_) | ConfigPatch::ThemeDarkmode(_)
+                    ConfigPatch::ThemeName(_)
+                        | ConfigPatch::ThemeDarkmode(_)
+                        | ConfigPatch::ComponentDefaults(_)
                 );
                 // Local-first single source of truth: mutate the live
                 // (in-memory) config and redraw All so every subscribed view
@@ -1374,6 +1376,9 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::SelectPlacement(id, bar, placement)) => {
                 Setting::handle_select_placement(self, id, bar, placement)
+            }
+            Plant::SettingPlot(SettingEvent::ComponentsEdit(id, edit)) => {
+                crate::shell::screens::setting::components::handle_edit(self, id, edit)
             }
             Plant::SettingPlot(SettingEvent::MapViewChanged { id, view }) => {
                 if let Some(setting) = self.windows.settings.get_mut(&id) {
@@ -1640,6 +1645,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
             | SettingEvent::MonitorWallpaperPicked(id, _, _)
             | SettingEvent::SelectSlot(id, _)
             | SettingEvent::SelectPlacement(id, _, _)
+            | SettingEvent::ComponentsEdit(id, _)
             | SettingEvent::MapViewChanged { id, .. }
             | SettingEvent::WallpaperPatch(id, _)
             | SettingEvent::PickWallpaper(id)
@@ -1911,10 +1917,10 @@ mod tests {
         .unwrap();
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
         crate::lua::test_support::load_seed_components(&lua);
-        let value = lua.load(r#"return {width=220, ui=iced.card({title='Session',icon='power',body=iced.menu({id='session-actions',items={
+        let value = lua.load(r#"return iced.popup(iced.card({title='Session',icon='power',body=iced.menu({id='session-actions',items={
             {label='Suspend',action='suspend'}, {label='Hibernate',action='hibernate'},
             {label='Reboot',action='reboot'}, {label='Power off',action='poweroff'}
-        }})}):height('fill')}"#).eval().unwrap();
+        }})}):height('fill')):width(220)"#).eval().unwrap();
         let content = Popup::parse_popup_content(value, &Default::default()).unwrap();
         let mut plots = wallpaper_test_plots();
         let id = iced::window::Id::unique();
@@ -1924,8 +1930,8 @@ mod tests {
                 win_id: id,
                 bar_id: iced::window::Id::unique(),
                 placement: "session".into(),
-                body: content.text,
-                items: content.items,
+                auto_width: false,
+                max_width: 1920.0,
                 tree: content.tree,
                 hovered: Default::default(),
                 size: 13.0,
@@ -1973,9 +1979,9 @@ mod tests {
             panic!("measurement expected");
         };
         assert_eq!(*revision, 7);
-        let session_height = *height;
+        let session_height = height.height;
         assert!(
-            session_height > 150 && session_height < 300,
+            (100..300).contains(&session_height),
             "four rows should fit: {session_height}"
         );
         assert_eq!(redraw_scope(&messages[0]), Scope::Window(id));
@@ -2003,8 +2009,6 @@ mod tests {
         assert_eq!(plots.windows.popups[&id].h, session_height);
         let popup = &plots.windows.popups[&id];
         let reopen = crate::shell::screens::popup::PopupContent {
-            text: popup.body.clone(),
-            items: popup.items.clone(),
             tree: popup.tree.clone(),
             width: Some(220.0),
             height: None,
@@ -2075,7 +2079,7 @@ mod tests {
 
         // Fixed descendants remain authoritative; measurement may grow beyond
         // the old native surface and then shrink when content disappears.
-        for (content_height, expected) in [(600.0, 624), (30.0, 54)] {
+        for (content_height, expected) in [(600.0, 600), (30.0, 30)] {
             let popup = plots.windows.popups.get_mut(&id).unwrap();
             popup.tree = Some(WidgetNode::Space {
                 width: NodeLength::Fill,
@@ -2090,25 +2094,94 @@ mod tests {
         }
         let revision = plots.windows.popups[&id].sizing_revision;
         let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
-            WidgetEvent::PopupMeasured(id, revision - 1, 900),
+            WidgetEvent::PopupMeasured(id, revision - 1, iced::Size::new(220, 900)),
         )));
-        assert_eq!(plots.windows.popups[&id].h, 54);
+        assert_eq!(plots.windows.popups[&id].h, 30);
         let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
-            WidgetEvent::PopupMeasured(id, revision, 9000),
+            WidgetEvent::PopupMeasured(id, revision, iced::Size::new(220, 9000)),
         )));
         assert_eq!(plots.windows.popups[&id].h, 1080);
         plots.windows.popups.get_mut(&id).unwrap().auto_height = false;
         assert!(measure(&plots).is_empty());
         let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
-            WidgetEvent::PopupMeasured(id, revision, 54),
+            WidgetEvent::PopupMeasured(id, revision, iced::Size::new(220, 54)),
         )));
         assert_eq!(
             plots.windows.popups[&id].h, 1080,
             "explicit height ignores auto measurements"
         );
+        lua.globals()
+            .set(
+                "_popup_shader",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/shaders/gradient.wgsl"),
+            )
+            .unwrap();
+        lua.globals()
+            .set(
+                "_popup_image",
+                lua.create_userdata(crate::ui::image_value::ImageValue(
+                    iced::widget::image::Handle::from_rgba(8, 6, vec![255; 8 * 6 * 4]),
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        for (source, expected) in [
+            ("iced.popup(iced.space():width(90):height(30))", (90, 30)),
+            (
+                "iced.popup(iced.space():width(90):height(30)):padding(7):align_x('end')",
+                (104, 44),
+            ),
+            (
+                "iced.popup(iced.space():width(90):height(30)):width(120):padding(7)",
+                (120, 44),
+            ),
+            (
+                "iced.popup(iced.column({iced.space():width('fill'):height(30),iced.space():width(90):height(10)}):spacing(0))",
+                (90, 40),
+            ),
+            (
+                "iced.popup(iced.scrollable(iced.space():width(90):height(100)):width('fill'):height(40))",
+                (90, 40),
+            ),
+            (
+                "iced.popup(iced.shader(_popup_shader):animated(false))",
+                (100, 100),
+            ),
+            ("iced.popup(iced.image(_popup_image))", (8, 6)),
+        ] {
+            let content = Popup::parse_popup_content(
+                lua.load(format!("return {source}")).eval().unwrap(),
+                &Default::default(),
+            )
+            .unwrap();
+            let popup = plots.windows.popups.get_mut(&id).unwrap();
+            popup.tree = content.tree;
+            popup.auto_width = content.width.is_none();
+            popup.auto_height = content.height.is_none();
+            if let Some(width) = content.width {
+                popup.w = width as u32;
+            }
+            popup.sizing_revision += 1;
+            let messages = measure(&plots);
+            assert_eq!(messages.len(), 1);
+            let _ = plots.update(messages[0].clone());
+            let popup = &plots.windows.popups[&id];
+            assert_eq!((popup.w, popup.h), expected, "{source}");
+            assert!(measure(&plots).is_empty(), "popup size must settle");
+        }
+        let popup = plots.windows.popups.get_mut(&id).unwrap();
+        popup.tree = Popup::parse_popup_content(lua.load("return iced.popup(iced.text('A long label which must wrap across several lines'):wrap('word')):width(80):padding(5)").eval().unwrap(), &Default::default()).unwrap().tree;
+        popup.w = 80;
+        popup.sizing_revision += 1;
+        let messages = measure(&plots);
+        let _ = plots.update(messages[0].clone());
+        assert!(
+            plots.windows.popups[&id].h > 40,
+            "wrapped text must grow vertically"
+        );
         plots.windows.popups.remove(&id);
         let _ = plots.update(Plant::TopPlot(TopEvent::Widget(
-            WidgetEvent::PopupMeasured(id, revision, 54),
+            WidgetEvent::PopupMeasured(id, revision, iced::Size::new(220, 54)),
         )));
     }
 
@@ -2352,8 +2425,8 @@ mod tests {
             win_id: iced::window::Id::unique(),
             bar_id: iced::window::Id::unique(),
             placement: "clock".into(),
-            body: String::new(),
-            items: Vec::new(),
+            auto_width: false,
+            max_width: 1920.0,
             tree,
             hovered: Default::default(),
             size: 13.0,
@@ -2720,8 +2793,8 @@ mod tests {
                 win_id: popup,
                 bar_id: bar,
                 placement: "clock".into(),
-                body: String::new(),
-                items: Vec::new(),
+                auto_width: false,
+                max_width: 1920.0,
                 tree: None,
                 hovered: Default::default(),
                 size: 13.0,

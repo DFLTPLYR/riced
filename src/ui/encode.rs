@@ -182,6 +182,16 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 radius,
                 border,
                 border_width,
+            }
+            | WidgetNode::Popup {
+                child,
+                width,
+                height,
+                padding,
+                background,
+                radius,
+                border,
+                border_width,
             } => {
                 fields!("child" => to_table(lua, child)?, "padding" => *padding, "radius" => *radius, "border_width" => *border_width);
                 sizes!(Some(width), Some(height));

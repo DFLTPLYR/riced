@@ -19,6 +19,7 @@ pub(crate) fn publish_test_services(lua: &Lua, system: &sysinfo::System, gpu: Op
             gpu,
             sampled: 0.0,
             theme: &theme,
+            component_defaults: &Default::default(),
             outputs: &outputs,
             notifications: &notifications,
             toplevels: &toplevels,

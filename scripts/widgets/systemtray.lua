@@ -33,7 +33,7 @@ end
 
 function app:popup()
     local item = selected(self)
-    if not item then return { text = "Tray item unavailable", width = 260 } end
+    if not item then return iced.popup(iced.text("Tray item unavailable")):width(260) end
     local rows = {}
     if #self.path > 0 then rows[#rows + 1] = iced.button("Back", "back") end
     rows[#rows + 1] = iced.button("Activate", "activate")
@@ -55,7 +55,7 @@ function app:popup()
     end
     local body = iced.column(rows):spacing(4)
     if #rows > 10 then body = iced.scrollable(body):height(360) end
-    return { ui = body, width = 280 }
+    return iced.popup(body):width(280)
 end
 
 function app:actions(events)

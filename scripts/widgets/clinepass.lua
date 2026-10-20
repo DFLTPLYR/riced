@@ -25,12 +25,12 @@ end
 
 function app:popup()
     if API_KEY == "" then
-        return { ui = iced.card({ title = "Cline Pass", icon = "bot", body = "paste API_KEY into clinepass.lua" }), width = 300 }
+        return iced.popup(iced.card({ title = "Cline Pass", icon = "bot", body = "paste API_KEY into clinepass.lua" })):width(300)
     end
     if not self.usage then
-        return { ui = iced.card({ title = "Cline Pass", icon = "bot", body = iced.row({ iced.spinner(), iced.text("fetching…") }) }), width = 300 }
+        return iced.popup(iced.card({ title = "Cline Pass", icon = "bot", body = iced.row({ iced.spinner(), iced.text("fetching…") }) })):width(300)
     end
-    if self.usage:match('"error"') then return { text = "cline: unauthorized (bad key?)", width = 300 } end
+    if self.usage:match('"error"') then return iced.popup(iced.text("cline: unauthorized (bad key?)")):width(300) end
     local rows = {}
     for kind, pct in self.usage:gmatch('"type"%s*:%s*"([%w_%-]+)"%s*,%s*"percentUsed"%s*:%s*(%d+)') do
         local p = tonumber(pct) or 0
@@ -41,7 +41,7 @@ function app:popup()
         })
     end
     if #rows == 0 then rows[1] = iced.text("no usage fields parsed") end
-    return { ui = iced.card({ title = "Cline Pass", icon = "bot", color = theme.primary, body = iced.column(rows) }), width = 300 }
+    return iced.popup(iced.card({ title = "Cline Pass", icon = "bot", color = theme.primary, body = iced.column(rows) })):width(300)
 end
 
 function app:actions(events)

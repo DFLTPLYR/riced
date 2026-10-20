@@ -1,3 +1,4 @@
+pub(crate) mod components;
 mod context_menu;
 mod editors;
 mod pages;
@@ -41,6 +42,16 @@ pub struct Setting {
     /// Slot picked in the Panel page align row (`None` = first slot).
     /// Stored per-window like `selected_bar`.
     selected_slot: Option<usize>,
+    /// Component picked in the Components page (`None` = first component).
+    /// Stored per-window like `selected_bar`.
+    pub(crate) selected_component: Option<usize>,
+    /// Property picked in the Components page (`None` = first property).
+    /// Stored per-window; follows the component pick.
+    pub(crate) selected_property: Option<usize>,
+    /// Draft TOML text for the Components page editor.
+    /// `None` means the input mirrors the saved default.
+    pub(crate) component_draft: Option<String>,
+    pub(crate) component_error: Option<String>,
     /// Placement picked in the Panel preview (`None` = none selected).
     /// Stored per-window; cleared when its placement leaves the bar.
     selected_placement: Option<String>,
@@ -51,48 +62,62 @@ pub struct Setting {
 /// own selection (like `Top` config lives on its own bar).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingPage {
-    Desktop,
     #[default]
+    Info,
+    Desktop,
+    Components,
     ContextMenu,
     Panel,
     Wallpaper,
     Theme,
     Animation,
+    About,
 }
 
 impl SettingPage {
-    fn all() -> [Self; 6] {
+    fn all() -> [Self; 9] {
         [
+            Self::Info,
             Self::Desktop,
+            Self::Components,
             Self::ContextMenu,
             Self::Panel,
             Self::Wallpaper,
             Self::Theme,
             Self::Animation,
+            Self::About,
         ]
     }
 
     fn title(self) -> &'static str {
         match self {
+            Self::Info => "Info",
             Self::Desktop => "Desktop",
+            Self::Components => "Components",
             Self::Panel => "Panel",
             Self::ContextMenu => "Context Menu",
             Self::Wallpaper => "Wallpaper",
             Self::Theme => "Theme",
             Self::Animation => "Animation",
+            Self::About => "About",
         }
     }
 
     fn description(self) -> &'static str {
         match self {
+            Self::Info => "Overview of this Settings panel.",
             Self::Desktop => {
                 "Click inside a widget preview, then click the desktop to place it. Hold and drag a desktop widget; release to drop. Right-click or Escape cancels."
+            }
+            Self::Components => {
+                "Per-component defaults for every Lua component. Explicit setters take precedence."
             }
             Self::Panel => "Choose a bar, arrange its widgets, and fine-tune its appearance.",
             Self::ContextMenu => "Customize the menu opened by right-clicking the wallpaper.",
             Self::Wallpaper => "Arrange images across your displays and adjust their placement.",
             Self::Theme => "Choose a palette and preview its colors in light or dark mode.",
             Self::Animation => "Set the pace of animated color and property changes.",
+            Self::About => "",
         }
     }
 }
@@ -119,11 +144,10 @@ impl Setting {
     }
 
     pub fn view(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        container(
-            row![
-                scrollable(self.nav(id))
-                    .width(Length::Fixed(168.0))
-                    .height(Length::Fill),
+        let body: Element<'_, Plant> =
+            if matches!(self.page, SettingPage::Info | SettingPage::About) {
+                Space::new().width(Length::Fill).height(Length::Fill).into()
+            } else {
                 scrollable(
                     column![
                         page_heading(self.page.title(), self.page.description()),
@@ -139,7 +163,15 @@ impl Setting {
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .spacing(8),
+                .spacing(8)
+                .into()
+            };
+        container(
+            row![
+                scrollable(self.nav(id))
+                    .width(Length::Fixed(168.0))
+                    .height(Length::Fill),
+                body,
             ]
             .spacing(24)
             .padding(24),
@@ -177,12 +209,15 @@ impl Setting {
     /// publishes a desktop snapshot only after Apply completes.
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
+            SettingPage::Info => column![].spacing(0).width(Length::Fill).into(),
             SettingPage::Desktop => crate::shell::desktop_widgets::settings(id, plots),
+            SettingPage::Components => components::view(id, self, &plots.config.component_defaults),
             SettingPage::Panel => self.panel_content(id, panel::PanelContext::from(plots)),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
             SettingPage::Animation => self.animation_content(plots),
+            SettingPage::About => column![].spacing(0).width(Length::Fill).into(),
         }
     }
 

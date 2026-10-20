@@ -89,7 +89,7 @@ impl State {
             .collect();
         self.widgets
             .sync_revision(&resolved.path, ids.iter().map(String::as_str));
-        let input = serde_json::json!({"host":host,"theme":crate::theme::lua_palette(context.services.theme),"library":format!("{library:?}"),"hovered":self.widgets.hovered.get(&resolved.id).copied().unwrap_or(false)});
+        let input = serde_json::json!({"host":host,"theme":crate::theme::lua_palette(context.services.theme),"component_defaults":context.services.component_defaults,"library":format!("{library:?}"),"hovered":self.widgets.hovered.get(&resolved.id).copied().unwrap_or(false)});
         if self.widgets.instances.contains_key(&resolved.id)
             && let Some(entry) = self.entries.get(&resolved.id)
             && entry.input == input
@@ -457,6 +457,7 @@ fn render(
             gpu: plots.services.gpu(),
             sampled: plots.services.sampled(),
             theme: &plots.config.theme,
+            component_defaults: &plots.config.component_defaults,
             outputs: &plots.windows.output_infos,
             notifications: &plots.notification.queue,
             toplevels: &plots.services.toplevels,
@@ -1428,6 +1429,7 @@ fn widget_action(
         gpu: plots.services.gpu(),
         sampled: plots.services.sampled(),
         theme: &plots.config.theme,
+        component_defaults: &plots.config.component_defaults,
         outputs: &plots.windows.output_infos,
         notifications: &plots.notification.queue,
         toplevels: &plots.services.toplevels,
@@ -1892,6 +1894,7 @@ mod tests {
                 gpu: None,
                 sampled: 0.0,
                 theme: &theme,
+                component_defaults: &Default::default(),
                 outputs: &outputs,
                 notifications: &notifications,
                 toplevels: &toplevels,

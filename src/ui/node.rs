@@ -1,11 +1,29 @@
 //! Owned UI descriptions shared by widgets, shell chrome, and the Lua host.
 pub(crate) use super::components::WidgetNode;
 
+/// Whether a description tree contains a popup root (popups never nest).
+pub(crate) fn contains_popup(node: &WidgetNode) -> bool {
+    match node {
+        WidgetNode::Popup { .. } => true,
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } => contains_popup(child),
+        WidgetNode::Row { children, .. }
+        | WidgetNode::Column { children, .. }
+        | WidgetNode::Stack { children, .. } => children.iter().any(contains_popup),
+        WidgetNode::ListView { items, .. } => items.iter().any(|(_, child)| contains_popup(child)),
+        _ => false,
+    }
+}
+
 /// Whether a description tree draws any raster image nodes.
 pub(crate) fn contains_images(node: &WidgetNode) -> bool {
     match node {
         WidgetNode::Image { .. } | WidgetNode::Raster { .. } => true,
         WidgetNode::Container { child, .. }
+        | WidgetNode::Popup { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }

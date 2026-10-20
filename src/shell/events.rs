@@ -117,7 +117,7 @@ pub enum WidgetEvent {
     /// key, then re-render menu and cell.
     PopupSelect(Id, crate::ui::action::Action),
     /// Intrinsic content height measured by the popup's live renderer.
-    PopupMeasured(Id, u64, u32),
+    PopupMeasured(Id, u64, iced::Size<u32>),
     /// Click a cell button (`iced.button` in a `render()` tree): run the
     /// owning widget's `on_action()` with the button key, then
     /// re-render that widget (a toggle flips its next output). Carries
@@ -256,6 +256,17 @@ pub enum NotifyEvent {
     DBusUp,
 }
 
+/// One Components-page edit: pick component/property, type a draft value,
+/// submit it for TOML validation, or reset the saved override.
+#[derive(Debug, Clone)]
+pub enum SettingComponentEdit {
+    Component(String),
+    Property(String),
+    Draft(String),
+    Submit,
+    Reset,
+}
+
 #[derive(Debug, Clone)]
 pub enum SettingEvent {
     SelectMonitor(Id, String),
@@ -288,6 +299,10 @@ pub enum SettingEvent {
     /// bar, placement id). The handler also selects its slot so the
     /// align picker follows chip clicks.
     SelectPlacement(Id, Id, String),
+    /// Edit one `ComponentDefaults` entry from the Components page
+    /// (`id` = settings window). Submit validates then patches config;
+    /// Reset removes the saved override so the property inherits again.
+    ComponentsEdit(Id, SettingComponentEdit),
     MapViewChanged {
         id: Id,
         view: crate::ui::widgets::display_map::MapView,

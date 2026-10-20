@@ -789,6 +789,12 @@ impl Background {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         };
         if cw > 1.0 && ch > 1.0 && op > 0.01 {
+            plots
+                .desktop
+                .composable_runtime
+                .borrow_mut()
+                .defaults
+                .clone_from(&plots.config.component_defaults);
             let rendered = plots.desktop.composable_runtime.borrow_mut().render(
                 &format!("selection/{output:?}"),
                 &plots.config.composable.selection_rect,
@@ -861,6 +867,12 @@ impl Background {
         avail: (f32, f32, f32, f32),
     ) -> WidgetNode {
         let mut host = context_menu_host(&plots.config.composable.context_menu_item);
+        plots
+            .desktop
+            .composable_runtime
+            .borrow_mut()
+            .defaults
+            .clone_from(&plots.config.component_defaults);
         host["output"] =
             serde_json::json!({"x": avail.0, "y": avail.1, "width": avail.2, "height": avail.3});
         if let Some(rendered) = plots

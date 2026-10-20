@@ -8,6 +8,102 @@ use crate::ui::{build::build_node, decode::parse_node, node::WidgetNode};
 use mlua::Value;
 use std::collections::HashMap;
 
+/// Explicit local validation: uses installed sources with the real WidgetState
+/// contract, while disabling shell/network effects. Never installs or restarts.
+#[test]
+#[ignore = "manual validation of user-owned installed widgets"]
+fn installed_widgets_load_render_and_build_popup_roots() {
+    use super::widgets::{EntryContext, ResolvedWidget, WidgetState};
+    let root = dirs::config_dir().unwrap().join("riced/widgets");
+    let system = sysinfo::System::new();
+    let theme = crate::config::ThemeConfig::default();
+    let outputs = Default::default();
+    let notifications = Default::default();
+    let toplevels = Default::default();
+    let workspaces = Default::default();
+    let defaults = Default::default();
+    let tray = crate::tray::TrayCache::from_items(vec![crate::tray::TrayItem {
+        id: "test/item".into(),
+        status: "Active".into(),
+        icon_pixmap: Some(iced::widget::image::Handle::from_rgba(1, 1, vec![255; 4])),
+        menu: Some(crate::tray::MenuNode {
+            enabled: true,
+            visible: true,
+            children: vec![crate::tray::MenuNode {
+                id: 1,
+                label: "Test action".into(),
+                enabled: true,
+                visible: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }]);
+    let context = EntryContext {
+        services: crate::services::ServiceCtx {
+            sys: &system,
+            gpu: None,
+            sampled: 0.0,
+            theme: &theme,
+            component_defaults: &defaults,
+            outputs: &outputs,
+            notifications: &notifications,
+            toplevels: &toplevels,
+            workspaces: &workspaces,
+            tray: &tray,
+        },
+        output: "test",
+    };
+    let mut paths = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        let name = path.file_stem().unwrap().to_str().unwrap().to_owned();
+        let lua = new_widget_lua().unwrap();
+        lua.load("io.popen=function() return nil end; os.execute=function() return true end")
+            .exec()
+            .unwrap();
+        publish_test_services(&lua, &system, None);
+        load_widget_script(&lua, &name, &std::fs::read_to_string(&path).unwrap()).unwrap();
+        let app: mlua::Table = lua.named_registry_value("riced.widget.app").unwrap();
+        let (metadata, _) = super::metadata::load_widget_meta(&lua, &name);
+        let resolved = ResolvedWidget {
+            id: name.clone(),
+            name: name.clone(),
+            path,
+            interval: 1.0,
+            size: 13.0,
+            props: metadata.props,
+        };
+        let mut state = WidgetState::default();
+        state.instances.insert(name.clone(), lua);
+        let value = if name.ends_with(".desktop") {
+            state.render_with_host(&resolved, &context, serde_json::json!({}))
+        } else {
+            state.render(&resolved, &context)
+        }
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let node = parse_node(&value).unwrap_or_else(|e| panic!("{name}: {e}"));
+        build_node(&node, 13.0, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+        if matches!(app.get::<Value>("popup").unwrap(), Value::Function(_)) {
+            // Exercise populated tray menus as well as empty/error popup states.
+            if name == "systemtray" {
+                app.set("selected", "test/item").unwrap();
+            }
+            let value = state.popup(&resolved, &context).unwrap().unwrap();
+            let popup =
+                crate::shell::screens::Popup::parse_popup_content(value, &Default::default())
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+            build_node(popup.tree.as_ref().unwrap(), 13.0, None).unwrap();
+        }
+        println!("validated installed widget {name}");
+    }
+}
+
 #[test]
 fn seed_components_define_working_builders() {
     let lua = new_widget_lua().unwrap();
@@ -166,6 +262,12 @@ fn button_actions(node: &WidgetNode, out: &mut Vec<String>) {
             }
         }
         WidgetNode::Button { action, .. } => out.push(action.clone()),
+        WidgetNode::Popup { child, .. }
+        | WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. } => button_actions(child, out),
         WidgetNode::Row { children, .. } | WidgetNode::Column { children, .. } => {
             for child in children {
                 button_actions(child, out);
@@ -182,6 +284,7 @@ fn node_has_canvas(node: &WidgetNode) -> bool {
             children.iter().any(node_has_canvas)
         }
         WidgetNode::Container { child, .. }
+        | WidgetNode::Popup { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
@@ -288,7 +391,7 @@ fn seed_scripts_parse_and_build() {
         &Default::default(),
     )
     .unwrap();
-    assert!(content.items.is_empty());
+    assert!(matches!(content.tree, Some(WidgetNode::Popup { .. })));
     let mut actions = Vec::new();
     if let Some(tree) = &content.tree {
         button_actions(tree, &mut actions);
@@ -359,9 +462,10 @@ fn clinepass_popup_parses_real_usage_shape() {
         &Default::default(),
     )
     .unwrap();
-    assert!(
-        matches!(content.tree.unwrap(), WidgetNode::Column {children, ..} if children.len() == 3)
-    );
+    let WidgetNode::Popup { child, .. } = content.tree.unwrap() else {
+        panic!("popup root");
+    };
+    assert!(matches!(*child, WidgetNode::Column {children, ..} if children.len() == 3));
     call_lua_value(&lua, "view").unwrap();
     let tree = crate::shell::screens::Popup::parse_popup_content(
         call_lua_value(&lua, "popup").unwrap(),
@@ -371,7 +475,10 @@ fn clinepass_popup_parses_real_usage_shape() {
     .tree
     .unwrap();
     let _ = build_node(&tree, 13.0, None).unwrap();
-    match tree {
+    let WidgetNode::Popup { child, .. } = tree else {
+        panic!("popup root");
+    };
+    match *child {
         WidgetNode::Column { children, .. } => {
             assert_eq!(children.len(), 3);
             let Some(WidgetNode::Column { children: rows, .. }) = children.get(2) else {
@@ -430,6 +537,7 @@ fn workspaces_seed_filters_bar_output_and_dispatches_actual_name() {
             gpu: None,
             sampled: 0.0,
             theme: &theme,
+            component_defaults: &Default::default(),
             outputs: &outputs,
             notifications: &notifications,
             toplevels: &toplevels,

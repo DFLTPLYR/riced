@@ -70,6 +70,7 @@ fn invoke_with_queue(
             gpu: None,
             sampled: 0.0,
             theme: &theme,
+            component_defaults: &Default::default(),
             outputs: &outputs,
             notifications: queue,
             toplevels: &toplevels,
