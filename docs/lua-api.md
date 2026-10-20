@@ -103,15 +103,15 @@ at decode with the field named.
 
 | Constructor                                                    | Arguments                                                                                                  | Setters                                                                                                                                           |
 | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `iced.text(s)`                                                 | text                                                                                                       | `size`, `width`, `height`, `wrap`, `color`, `elide`, `elide_mode`                                                                                 |
+| `iced.text(s)`                                                 | text                                                                                                       | `size`, `width`, `height`, `wrap`, `color`, `elide`, `elide_mode`, `align_x`, `align_y`                                                           |
 | `iced.icon(name)`                                              | Lucide name, case/separator-insensitive, plus aliases (`mem`, `vol`, `up`); unknown names render literally | `color`                                                                                                                                           |
-| `iced.row({...}[, spacing])` / `iced.column({...}[, spacing])` | children array                                                                                             | `spacing`, `width`, `height`                                                                                                                      |
+| `iced.row({...}[, spacing])` / `iced.column({...}[, spacing])` | children array                                                                                             | `spacing`, `width`, `height`, `align_y` (row) / `align_x` (column)                                                                                |
 | `iced.stack({...})`                                            | children array, back-to-front                                                                               | `width`, `height`                                                                                                                                 |
 | `iced.button(label, action)`                                   | label, action key                                                                                          | `action`, `width`, `height`, `padding`, `radius`, `background`, `color`                                                                           |
 | `iced.progress(v[, width])`                                    | 0.0–1.0 clamped, default width 120                                                                         | `width`, `height` (thickness), `color` (fill), `background` (track)                                                                               |
 | `iced.spinner()`                                               | —                                                                                                          | —                                                                                                                                                 |
 | `iced.separator()`                                             | —                                                                                                          | `height`, `color`                                                                                                                                 |
-| `iced.container(child)`                                        | child                                                                                                      | `width`, `height`, `padding`, `background`, `radius`, `border`, `border_width` (`:border()` implies 1px; bare width without color paints nothing) |
+| `iced.container(child)`                                        | child                                                                                                      | `width`, `height`, `padding`, `background`, `radius`, `border`, `border_width`, `align_x`, `align_y` (`:border()` implies 1px; bare width without color paints nothing) |
 | `iced.scrollable(child)`                                       | child                                                                                                      | `width`, `height`, `scrollbar`                                                                                                                    |
 | `iced.space()`                                                 | —                                                                                                          | `width`, `height`                                                                                                                                 |
 | `iced.image(path)`                                             | file path                                                                                                  | `width`, `height`                                                                                                                                 |
@@ -126,6 +126,20 @@ at decode with the field named.
 | `iced.shader(path)`                                            | WGSL fragment file (see below)                                                                             | `width`, `height`, `speed`, `params`, `animated`                                                                                                    |
 
 Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
+
+### Layout semantics
+
+- `:margin(n)` offsets only an anchored node; without `:anchor(...)` it has no
+  effect. There is no sibling margin: use the parent's `spacing`.
+- `:padding(...)` exists on `container`, `button`, `text_input`, and
+  `pick_list`. To pad anything else, wrap it:
+  `iced.container(child):padding(n)`.
+- `:align_x(...)` and `:align_y(...)` accept `"start"`, `"center"`, or
+  `"end"` (case-insensitive). `text` aligns its glyphs; `container` aligns its
+  child inside the container's resolved size. A `row` exposes only
+  `:align_y()` for its cross axis and a `column` only `:align_x()`; both
+  default to `center`. Components without these setters raise at call time
+  rather than ignoring the value.
 
 ### Stacks
 
