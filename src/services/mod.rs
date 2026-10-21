@@ -1,14 +1,13 @@
 //! Namespaced Lua services (`system.*`, `theme.*`, `notifications.*`,
 //! `wayland.*`, `systemtray.*`).
 //!
-//! Each service publishes one read-only snapshot table per widget tick
-//! (same pattern the old `sysinfo`/`gfxinfo` globals used): plain owned
-//! data and opaque image tokens, no borrowed Rust references cross into Lua, and no new
-//! sandbox permissions are needed. Slow or event-driven work stays out
-//! of the tick path — see [`toplevels::ToplevelCache`], whose listener
-//! thread blocks on the compositor socket while ticks just clone the
-//! latest snapshot.
+//! Services publish owned data and opaque image tokens at Lua entries;
+//! no borrowed Rust references cross into Lua. Native Wayland listeners
+//! wake the UI on cache changes, bypassing widget refresh intervals.
+//! Wayland namespace/list tables update in place so captured list references
+//! stay current; rows are snapshot values.
 mod bar;
+pub(crate) mod changes;
 mod notifications;
 mod registry;
 pub(crate) mod state;

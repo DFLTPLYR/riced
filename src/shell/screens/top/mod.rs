@@ -1490,6 +1490,16 @@ impl Top {
         }
     }
 
+    /// Service delivery bypasses intervals without postponing their next
+    /// scheduled execution or sampling unrelated system metrics.
+    pub(crate) fn refresh_wayland(plots: &mut Plots) {
+        let gpu = plots.services.gpu();
+        for (bar, resolved) in Self::all_resolved(plots) {
+            let result = Self::render_lua_value(plots, &resolved, gpu, bar);
+            Self::ingest_render_value(plots, &resolved, bar, result);
+        }
+    }
+
     /// Render every placement slotted on a bar (bar creation at startup
     /// or output hotplug): without this a new bar paints empty until
     /// each placement's interval elapses.

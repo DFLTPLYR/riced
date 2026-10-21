@@ -791,7 +791,9 @@ pub use paths::{config_migrated_path, config_path, legacy_config_path};
 ///   geometry (compositor names are unreliable); unresolvable
 ///   monitors stay empty and remain in the overview popup, not the
 ///   output-specific strip. Unsupported protocols yield empty lists.
-///   No focus: standard Wayland defines none.
+///   Changes refresh Lua data and views immediately, independently of
+///   widget intervals. Namespace/list references stay live across updates;
+///   individual rows are snapshots. No focus: standard Wayland defines none.
 /// - `bar`: where this render happens — `bar.output` is the bar's
 ///   connector name (nil while unknown). States are shared across
 ///   bars but trees render per bar, so filter per-bar content (e.g.

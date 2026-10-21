@@ -418,6 +418,10 @@ impl Plots {
                     message => message,
                 }),
             shell_sub,
+            iced::Subscription::run_with(
+                self.services.wayland_changes.clone(),
+                Self::wayland_stream,
+            ),
             // XDG base windows (Settings) report close so `ids` stays in sync.
             // This is native Closed, not CloseRequested. The backend has
             // already detached the renderer; never queue another native close.
@@ -503,6 +507,15 @@ impl Plots {
         }
 
         iced::Subscription::batch(subs)
+    }
+
+    fn wayland_stream(
+        changes: &crate::services::changes::Changes,
+    ) -> impl iced::futures::Stream<Item = Plant> + use<> {
+        iced::futures::stream::unfold(changes.clone(), |changes| async move {
+            changes.next().await;
+            Some((Plant::WaylandChanged, changes))
+        })
     }
 
     /// D-Bus server stream builder (bare fn pointer for
@@ -696,6 +709,16 @@ impl Plots {
             }
             let cleanup = super::desktop_widgets::finish(self);
             return Command::batch([cleanup, self.update(message)]);
+        }
+        if matches!(
+            &message,
+            Plant::Wayland(
+                LandEvent::OutputAdded(_)
+                    | LandEvent::OutputUpdated(_)
+                    | LandEvent::OutputRemoved(_)
+            )
+        ) {
+            self.services.wayland_changes.notify();
         }
         match message {
             Plant::Desktop(event) => super::desktop_widgets::update(self, event),
@@ -1343,6 +1366,15 @@ impl Plots {
                 Top::refresh_services(self);
                 Popup::refresh_bodies(self)
             }
+            Plant::WaylandChanged => {
+                self.services.wayland_changes.acknowledge();
+                Top::refresh_wayland(self);
+                Command::batch([
+                    Popup::refresh_service_bodies(self),
+                    super::desktop_widgets::refresh_services(self),
+                    super::overlay::refresh(self, true),
+                ])
+            }
             Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, *n),
             Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
             Plant::Notify(NotifyEvent::PeerClosed(id)) => {
@@ -1589,7 +1621,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
         Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
-        Plant::TrayChanged => Scope::All,
+        Plant::TrayChanged | Plant::WaylandChanged => Scope::All,
         Plant::Overlay(super::overlay::OverlayEvent::Tick | super::overlay::OverlayEvent::Measured { .. }) => Scope::None,
         Plant::Overlay(_) => Scope::All,
         // Widget press only records; every other widget event repaints
@@ -2864,6 +2896,106 @@ mod tests {
         assert_eq!(plots.placements.outputs.len(), 1);
         let _ = plots.update(Plant::Uproot(bar));
         assert!(plots.windows.tops.contains_key(&other));
+    }
+
+    #[test]
+    fn wayland_delivery_refreshes_long_interval_widgets_without_advancing_their_clock() {
+        use crate::config::{WidgetDefinition, WidgetPlacement};
+        use iced::futures::{StreamExt, executor::block_on};
+        let dir =
+            std::env::temp_dir().join(format!("riced-wayland-delivery-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("workspaces.lua");
+        std::fs::write(
+            &script,
+            r#"
+            return { count=0, view=function(self)
+                self.count = self.count + 1
+                self.list = self.list or wayland.workspaces
+                self.windows = self.windows or wayland.toplevels
+                return self.count .. ':' .. #self.list .. ':' .. #self.windows
+            end, popup=function(self)
+                self.popup_seen = #self.list
+                return iced.popup(iced.text(self.popup_seen)):width(120)
+            end }
+        "#,
+        )
+        .unwrap();
+        let mut plots = wallpaper_test_plots();
+        plots.services.workspaces = Default::default();
+        plots.services.toplevels = Default::default();
+        plots.services.wayland_changes = Default::default();
+        plots.config.notifications.enabled = false;
+        let bar = iced::window::Id::unique();
+        let mut top = Top::new();
+        top.local.widgets = vec![vec![WidgetPlacement {
+            id: "ws".into(),
+            name: "workspaces".into(),
+            file: Some(script.to_string_lossy().into_owned()),
+            interval: Some(60.0),
+            ..Default::default()
+        }]];
+        plots.windows.tops.insert(bar, top);
+        plots.catalog.definitions.push(WidgetDefinition {
+            name: "workspaces".into(),
+            file: script,
+            defaults: Default::default(),
+            schema: Default::default(),
+        });
+        Top::render_bar_widgets(&mut plots, bar);
+        let popup = iced::window::Id::unique();
+        plots.windows.popups.insert(
+            popup,
+            Popup {
+                win_id: popup,
+                bar_id: bar,
+                placement: "ws".into(),
+                tree: None,
+                hovered: Default::default(),
+                size: 13.0,
+                w: 120,
+                h: 100,
+                auto_width: false,
+                max_width: 1920.0,
+                auto_height: false,
+                max_height: 1080.0,
+                sizing_revision: 0,
+                measured_revision: None,
+                positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                    bar,
+                    iced_exwlshell::reexport::PixelSize::try_px(120, 100).unwrap(),
+                    (0, 0),
+                ),
+            },
+        );
+        let deadline = plots.placements.last_run["ws"];
+        let sampled = plots.services.sampled();
+        assert_eq!(plots.placements.outputs[&(bar, "ws".into())], "1:0:0");
+        plots.services.workspaces =
+            crate::services::WorkspaceCache::from_rows(vec![crate::services::Workspace {
+                name: "code".into(),
+                active: true,
+                ..Default::default()
+            }]);
+        plots.services.toplevels =
+            crate::services::ToplevelCache::from_rows(vec![crate::services::Toplevel {
+                app_id: "kitty".into(),
+                title: "shell".into(),
+            }]);
+        let stream = Plots::wayland_stream(&plots.services.wayland_changes);
+        iced::futures::pin_mut!(stream);
+        plots.services.wayland_changes.notify();
+        let event = block_on(stream.next()).unwrap();
+        assert_eq!(redraw_scope(&event), Scope::All);
+        let _ = plots.update(event);
+        assert_eq!(plots.placements.outputs[&(bar, "ws".into())], "2:1:1");
+        assert_eq!(plots.placements.last_run["ws"], deadline);
+        assert_eq!(plots.services.sampled(), sampled);
+        let app: mlua::Table = plots.placements.instances["ws"]
+            .named_registry_value("riced.widget.app")
+            .unwrap();
+        assert_eq!(app.get::<usize>("popup_seen").unwrap(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

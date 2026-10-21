@@ -2,8 +2,8 @@
 //!
 //! Same shape as [`super::toplevels`]: a dedicated connection +
 //! listener thread (blocking dispatch, no polling) whose snapshots
-//! widget ticks clone. Compositors without the protocol (Sway, Mutter,
-//! KWin, …) yield empty tables. Published rows are `{name, monitor,
+//! widgets read after change notifications. Compositors without the protocol
+//! yield empty tables. Published rows are `{name, monitor,
 //! active}` metadata only — no activate/deactivate/remove/create
 //! requests are ever sent, so this stays a read-only overview.
 
@@ -32,7 +32,7 @@ pub struct Workspace {
     pub rects: Vec<[f32; 4]>,
 }
 
-/// Tick-shared snapshot. `spawn()` starts the listener thread (once);
+/// Event-shared snapshot. `spawn()` starts the listener thread (once);
 /// `snapshot()` clones the latest rows, sorted for deterministic Lua
 /// order. `from_rows` is the thread-free constructor for tests.
 #[derive(Debug, Default)]
@@ -41,13 +41,13 @@ pub struct WorkspaceCache {
 }
 
 impl WorkspaceCache {
-    pub fn spawn() -> Self {
+    pub(crate) fn spawn(changes: super::changes::Changes) -> Self {
         let cache = Self::default();
         std::thread::Builder::new()
             .name("riced-workspaces".to_string())
             .spawn({
                 let rows = cache.rows.clone();
-                move || listen(rows)
+                move || listen(rows, changes)
             })
             .ok();
         cache
@@ -100,6 +100,7 @@ struct Listener {
     /// Kept alive: xdg-outputs die with the manager otherwise.
     _xdg_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     shared: Arc<Mutex<Vec<Workspace>>>,
+    changes: super::changes::Changes,
     /// Set on manager `finished` (revoked): loop exits, snapshot clears.
     finished: bool,
     debug: bool,
@@ -205,8 +206,11 @@ impl Listener {
                 .collect();
             eprintln!("riced(workspaces): snapshot [{}]", summary.join(" "));
         }
-        if let Ok(mut shared) = self.shared.lock() {
+        if let Ok(mut shared) = self.shared.lock()
+            && *shared != rows
+        {
             *shared = rows;
+            self.changes.notify();
         }
     }
 }
@@ -215,7 +219,7 @@ impl Listener {
 /// protocol is unadvertised, and this returns with the snapshot left
 /// empty. Late-advertised globals are not picked up (bind once,
 /// except hotplugged outputs, which bind on registry arrival).
-fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
+fn listen(shared: Arc<Mutex<Vec<Workspace>>>, changes: super::changes::Changes) {
     let debug = debug_enabled();
     if debug {
         eprintln!("riced(workspaces): listener starting");
@@ -238,6 +242,7 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
         xdg_outputs: HashMap::new(),
         _xdg_manager: None,
         shared,
+        changes,
         finished: false,
         debug,
     };
@@ -281,6 +286,8 @@ fn listen(shared: Arc<Mutex<Vec<Workspace>>>) {
             break;
         }
     }
+    listener.workspaces.clear();
+    listener.publish();
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
@@ -545,10 +552,33 @@ mod tests {
             xdg_outputs: HashMap::new(),
             _xdg_manager: None,
             shared: shared.clone(),
+            changes: Default::default(),
             finished: false,
             debug: false,
         };
         (listener, shared)
+    }
+
+    #[test]
+    fn only_changed_workspace_snapshots_wake_consumers() {
+        use iced::futures::{FutureExt, executor::block_on};
+        let (mut listener, _) = listener();
+        listener.workspaces.insert(
+            1,
+            WsRow {
+                name: "code".into(),
+                active: true,
+                group: None,
+            },
+        );
+        listener.publish();
+        block_on(listener.changes.next());
+        listener.changes.acknowledge();
+        listener.publish();
+        assert!(listener.changes.next().now_or_never().is_none());
+        listener.workspaces.clear();
+        listener.publish();
+        block_on(listener.changes.next());
     }
 
     #[test]
@@ -652,7 +682,7 @@ mod tests {
     #[test]
     fn spawn_without_a_session_stays_empty() {
         // No compositor is required: failures leave empty tables.
-        let cache = WorkspaceCache::spawn();
+        let cache = WorkspaceCache::spawn(Default::default());
         let _ = cache.snapshot();
     }
 }

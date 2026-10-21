@@ -2,6 +2,58 @@ use super::*;
 use iced::futures::StreamExt;
 
 #[test]
+fn forced_service_refresh_preserves_scene_state_and_does_not_call_on_tick() {
+    let dir = directory("wayland-delivery");
+    let path = dir.join("scene.lua");
+    std::fs::write(
+        &path,
+        r#"
+        return { views=0, ticks=0,
+            on_tick=function(self) self.ticks=self.ticks+1 end,
+            view=function(self)
+                self.views=self.views+1
+                self.list=self.list or wayland.workspaces
+                return iced.text(self.views .. ':' .. self.ticks .. ':' .. #self.list)
+            end }
+    "#,
+    )
+    .unwrap();
+    let spec = Spec {
+        id: "ws".into(),
+        source: path.to_string_lossy().into(),
+        input: input(0),
+    };
+    let mut scene = Scene::default();
+    let mut motion = Default::default();
+    assert!(render(&mut scene, &spec, &mut motion, false));
+    let system = sysinfo::System::new();
+    let workspaces = crate::services::WorkspaceCache::from_rows(vec![crate::services::Workspace {
+        name: "code".into(),
+        ..Default::default()
+    }]);
+    assert!(scene.render(
+        &spec,
+        &ServiceCtx {
+            sys: &system,
+            gpu: None,
+            sampled: 0.0,
+            theme: &Default::default(),
+            component_defaults: &Default::default(),
+            outputs: &Default::default(),
+            notifications: &Default::default(),
+            toplevels: &Default::default(),
+            workspaces: &workspaces,
+            tray: &Default::default(),
+        },
+        "DP-1",
+        &mut motion,
+        true
+    ));
+    assert!(matches!(scene.node, Some(WidgetNode::Text { ref content, .. }) if content == "2:0:1"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn relative_scene_sources_resolve_in_components_and_absolute_paths_pass_through() {
     for name in ["notifications.lua", "scenes/status.lua"] {
         assert_eq!(source_path(name), config::components_dir().join(name));

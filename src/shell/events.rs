@@ -329,6 +329,8 @@ pub enum Plant {
     // Notifications (D-Bus server + internal events)
     Notify(NotifyEvent),
     TrayChanged,
+    /// Native workspace/toplevel caches or output geometry changed.
+    WaylandChanged,
     Overlay(super::overlay::OverlayEvent),
     // Config
     Config(ConfigEvent),

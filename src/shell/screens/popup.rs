@@ -380,6 +380,15 @@ impl Popup {
     /// good content; popups whose placement left the config are
     /// dismissed. Returns close commands for dismissals (possibly none).
     pub(crate) fn refresh_bodies(plots: &mut Plots) -> Command<Plant> {
+        if !plots.windows.popups.is_empty() {
+            plots.services.refresh_system();
+        }
+        Self::refresh_service_bodies(plots)
+    }
+
+    /// Service events reuse the current samples rather than advancing the
+    /// periodic CPU/GPU sampling clock on every workspace/window change.
+    pub(crate) fn refresh_service_bodies(plots: &mut Plots) -> Command<Plant> {
         let open: Vec<(window::Id, String, window::Id)> = plots
             .windows
             .popups
@@ -389,8 +398,7 @@ impl Popup {
         if open.is_empty() {
             return Command::none();
         }
-        plots.services.refresh_system();
-        let gpu = Self::gpu_usage_percent();
+        let gpu = plots.services.gpu();
         let mut cmds = Vec::new();
         for (pid, placement_id, bar) in open {
             // Gone from the config: dismiss. Anything else keeps its

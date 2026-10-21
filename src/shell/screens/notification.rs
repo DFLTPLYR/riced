@@ -328,6 +328,7 @@ mod tests {
                 system: sysinfo::System::new(),
                 toplevels: Default::default(),
                 workspaces: Default::default(),
+                wayland_changes: Default::default(),
                 tray: Default::default(),
                 started: std::time::Instant::now(),
                 sampled: 0.0,

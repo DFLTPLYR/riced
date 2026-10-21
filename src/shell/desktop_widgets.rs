@@ -43,9 +43,16 @@ struct Cached {
     revision: u64,
     source: Option<SystemTime>,
     library: Option<SystemTime>,
+    service_dirty: bool,
 }
 
 impl State {
+    fn invalidate_services(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.service_dirty = true;
+        }
+    }
+
     fn forget(&mut self, id: &str) {
         self.previews.remove(id);
         self.entries.remove(id);
@@ -93,6 +100,7 @@ impl State {
         if self.widgets.instances.contains_key(&resolved.id)
             && let Some(entry) = self.entries.get(&resolved.id)
             && entry.input == input
+            && !entry.service_dirty
             && now.saturating_duration_since(entry.last_run) < entry.interval
         {
             return Some(entry.rendered.clone());
@@ -140,11 +148,16 @@ impl State {
                         path: resolved.path.clone(),
                         input,
                         rendered: rendered.clone(),
-                        last_run: now,
+                        last_run: self
+                            .entries
+                            .get(&resolved.id)
+                            .filter(|entry| entry.service_dirty)
+                            .map_or(now, |entry| entry.last_run),
                         interval,
                         revision,
                         source,
                         library,
+                        service_dirty: false,
                     },
                 );
                 Some(rendered)
@@ -1010,6 +1023,48 @@ pub(crate) fn finish(plots: &mut Plots) -> Task<Plant> {
     Task::batch(tasks)
 }
 
+/// Invalidate cached views while preserving VMs and periodic deadlines.
+pub(crate) fn refresh_services(plots: &mut Plots) -> Task<Plant> {
+    plots.desktop.widgets.borrow_mut().invalidate_services();
+    refresh_views(plots)
+}
+
+fn refresh_views(plots: &mut Plots) -> Task<Plant> {
+    retain(plots);
+    let mut changed = false;
+    for output in plots.windows.output_infos.keys().copied() {
+        for widget in plots
+            .config
+            .desktop
+            .iter()
+            .filter(|widget| matches_output(plots, output, widget))
+        {
+            let id = instance(output, widget);
+            let before = plots
+                .desktop
+                .widgets
+                .borrow()
+                .entries
+                .get(&id)
+                .map(|entry| entry.rendered.clone());
+            let after = render(plots, output, widget, &id);
+            changed |= match (before, after) {
+                (Some(before), Some(after)) => {
+                    before.node != after.node || before.props != after.props
+                }
+                (None, Some(_)) => true,
+                _ => false,
+            };
+        }
+    }
+    changed |= refresh_previews(plots);
+    if changed {
+        Task::done(Plant::Desktop(DesktopEvent::Changed))
+    } else {
+        Task::none()
+    }
+}
+
 pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
     match event {
         DesktopEvent::Changed | DesktopEvent::PreviewChanged(_) => Task::none(),
@@ -1035,40 +1090,8 @@ pub(crate) fn update(plots: &mut Plots, event: DesktopEvent) -> Task<Plant> {
             Task::done(Plant::Desktop(event))
         }
         DesktopEvent::Tick => {
-            retain(plots);
             plots.services.refresh_system();
-            let mut changed = false;
-            for output in plots.windows.output_infos.keys().copied() {
-                for widget in plots
-                    .config
-                    .desktop
-                    .iter()
-                    .filter(|widget| matches_output(plots, output, widget))
-                {
-                    let id = instance(output, widget);
-                    let before = plots
-                        .desktop
-                        .widgets
-                        .borrow()
-                        .entries
-                        .get(&id)
-                        .map(|entry| entry.rendered.clone());
-                    let after = render(plots, output, widget, &id);
-                    changed |= match (before, after) {
-                        (Some(before), Some(after)) => {
-                            before.node != after.node || before.props != after.props
-                        }
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
-                }
-            }
-            changed |= refresh_previews(plots);
-            if changed {
-                Task::done(Plant::Desktop(DesktopEvent::Changed))
-            } else {
-                Task::none()
-            }
+            refresh_views(plots)
         }
         DesktopEvent::Cancel { surface } => {
             if plots.windows.drags.values().any(|id| *id == surface) {
@@ -2114,6 +2137,79 @@ mod tests {
             );
             assert_eq!(rendered.props["width"], 240);
             assert_eq!(rendered.props["x"], 30);
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
+    #[test]
+    fn service_changes_bypass_desktop_intervals_without_replacing_state_or_postponing_ticks() {
+        with_context(|context| {
+            let dir =
+                std::env::temp_dir().join(format!("riced-desktop-services-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("workspaces.desktop.lua");
+            std::fs::write(
+                &path,
+                r#"
+                return { count=0, defaults={interval=60}, view=function(self)
+                    self.count = self.count + 1
+                    self.list = self.list or wayland.workspaces
+                    return iced.text(self.count .. ':' .. #self.list)
+                end }
+            "#,
+            )
+            .unwrap();
+            let resolved = ResolvedWidget {
+                id: "ws".into(),
+                name: "workspaces".into(),
+                path,
+                interval: 60.0,
+                size: 13.0,
+                props: HashMap::new(),
+            };
+            let mut state = State::default();
+            let now = Instant::now();
+            state
+                .render(&resolved, serde_json::json!({}), context, None, now)
+                .unwrap();
+            let workspaces =
+                crate::services::WorkspaceCache::from_rows(vec![crate::services::Workspace {
+                    name: "code".into(),
+                    ..Default::default()
+                }]);
+            let updated = EntryContext {
+                services: crate::services::ServiceCtx {
+                    workspaces: &workspaces,
+                    ..context.services
+                },
+                output: context.output,
+            };
+            state.invalidate_services();
+            let rendered = state
+                .render(
+                    &resolved,
+                    serde_json::json!({}),
+                    &updated,
+                    None,
+                    now + Duration::from_millis(1),
+                )
+                .unwrap();
+            assert!(
+                matches!(rendered.node, crate::ui::node::WidgetNode::Text { content, .. } if content == "2:1")
+            );
+            assert_eq!(state.entries["ws"].last_run, now);
+            let rendered = state
+                .render(
+                    &resolved,
+                    serde_json::json!({}),
+                    &updated,
+                    None,
+                    now + Duration::from_secs(60),
+                )
+                .unwrap();
+            assert!(
+                matches!(rendered.node, crate::ui::node::WidgetNode::Text { content, .. } if content == "3:1")
+            );
             std::fs::remove_dir_all(dir).unwrap();
         });
     }

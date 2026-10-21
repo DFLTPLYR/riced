@@ -4,7 +4,7 @@
 //! the main connection and won't pump our globals, and a second
 //! connection is the established pattern here (see `run_daemon`).
 //! The thread blocks on the compositor socket — no polling, no CPU
-//! spin — and widget ticks read the latest snapshot. Compositors
+//! spin — and notifies widgets when the snapshot changes. Compositors
 //! without the protocol (or no Wayland session at all) yield empty
 //! tables; only `{app_id, title}` metadata crosses into Lua.
 
@@ -26,7 +26,7 @@ pub struct Toplevel {
     pub title: String,
 }
 
-/// Tick-shared snapshot. `spawn()` starts the listener thread (once);
+/// Event-shared snapshot. `spawn()` starts the listener thread (once);
 /// `snapshot()` clones the latest rows, sorted for deterministic Lua
 /// order. `from_rows` is the thread-free constructor for tests.
 #[derive(Debug, Default)]
@@ -35,13 +35,13 @@ pub struct ToplevelCache {
 }
 
 impl ToplevelCache {
-    pub fn spawn() -> Self {
+    pub(crate) fn spawn(changes: super::changes::Changes) -> Self {
         let cache = Self::default();
         std::thread::Builder::new()
             .name("riced-toplevels".to_string())
             .spawn({
                 let rows = cache.rows.clone();
-                move || listen(rows)
+                move || listen(rows, changes)
             })
             .ok();
         cache
@@ -63,10 +63,11 @@ impl ToplevelCache {
 }
 
 /// Listener state: pending rows keyed by protocol object id, published
-/// to `shared` on every event batch.
+/// to `shared` on change, with coalesced UI wakeups.
 struct Listener {
     pending: HashMap<u32, Toplevel>,
     shared: Arc<Mutex<Vec<Toplevel>>>,
+    changes: super::changes::Changes,
     /// Set when the compositor sends `finished` (list revoked): the
     /// dispatch loop exits and the snapshot clears.
     finished: bool,
@@ -91,8 +92,11 @@ impl Listener {
     fn publish(&self) {
         let mut rows: Vec<Toplevel> = self.pending.values().cloned().collect();
         rows.sort_by(|a, b| (&a.app_id, &a.title).cmp(&(&b.app_id, &b.title)));
-        if let Ok(mut shared) = self.shared.lock() {
+        if let Ok(mut shared) = self.shared.lock()
+            && *shared != rows
+        {
             *shared = rows;
+            self.changes.notify();
         }
     }
 }
@@ -100,13 +104,14 @@ impl Listener {
 /// Run the listener to socket death: connect fails (no session) or
 /// the protocol is unadvertised, and this returns with the snapshot
 /// left empty. Late-advertised globals are not picked up (bind once).
-fn listen(shared: Arc<Mutex<Vec<Toplevel>>>) {
+fn listen(shared: Arc<Mutex<Vec<Toplevel>>>, changes: super::changes::Changes) {
     let Ok(conn) = Connection::connect_to_env() else {
         return;
     };
     let mut listener = Listener {
         pending: HashMap::new(),
         shared,
+        changes,
         finished: false,
     };
     let Ok((globals, mut queue)) = registry_queue_init::<Listener>(&conn) else {
@@ -124,6 +129,8 @@ fn listen(shared: Arc<Mutex<Vec<Toplevel>>>) {
             break;
         }
     }
+    listener.pending.clear();
+    listener.publish();
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listener {
@@ -206,11 +213,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn duplicate_toplevel_events_do_not_wake_consumers() {
+        use iced::futures::{FutureExt, executor::block_on};
+        let mut listener = Listener {
+            pending: HashMap::new(),
+            shared: Default::default(),
+            changes: Default::default(),
+            finished: false,
+        };
+        listener.upsert_title(7, "shell".into());
+        block_on(listener.changes.next());
+        listener.changes.acknowledge();
+        listener.upsert_title(7, "shell".into());
+        assert!(listener.changes.next().now_or_never().is_none());
+        listener.remove(7);
+        block_on(listener.changes.next());
+    }
+
+    #[test]
     fn listener_accumulates_sorted_rows_and_drops_closed() {
         let shared = Arc::new(Mutex::new(Vec::new()));
         let mut listener = Listener {
             pending: HashMap::new(),
             shared: shared.clone(),
+            changes: Default::default(),
             finished: false,
         };
         listener.upsert_title(7, "shell".to_string());
@@ -243,7 +269,7 @@ mod tests {
     #[test]
     fn spawn_without_a_session_stays_empty() {
         // No compositor is required: failures leave empty tables.
-        let cache = ToplevelCache::spawn();
+        let cache = ToplevelCache::spawn(Default::default());
         let _ = cache.snapshot();
     }
 }

@@ -7,6 +7,7 @@ pub(crate) struct ServiceState {
     pub system: sysinfo::System,
     pub toplevels: ToplevelCache,
     pub workspaces: WorkspaceCache,
+    pub wayland_changes: super::changes::Changes,
     pub tray: crate::tray::TrayCache,
     pub(crate) started: Instant,
     pub(crate) sampled: f64,
@@ -18,10 +19,12 @@ impl ServiceState {
         let mut system = sysinfo::System::new();
         system.refresh_cpu_usage();
         system.refresh_memory();
+        let wayland_changes = super::changes::Changes::default();
         Self {
             system,
-            toplevels: ToplevelCache::spawn(),
-            workspaces: WorkspaceCache::spawn(),
+            toplevels: ToplevelCache::spawn(wayland_changes.clone()),
+            workspaces: WorkspaceCache::spawn(wayland_changes.clone()),
+            wayland_changes,
             tray: Default::default(),
             started: Instant::now(),
             sampled: 0.0,

@@ -19,7 +19,9 @@ use crate::shared::geometry::output_geometry;
 ///   which may be empty.
 /// - `toplevels`: `{app_id, title}`, sorted for stable order.
 pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
-    let table = lua.create_table()?;
+    // Namespace and list identity survive publication. Lua may retain a
+    // list in a closure; individual rows remain snapshot values.
+    let table = child_table(lua, &lua.globals(), "wayland")?;
 
     let mut outputs: Vec<_> = ctx.outputs.iter().collect();
     outputs.sort_by(|a, b| {
@@ -28,7 +30,8 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
             .unwrap_or("")
             .cmp(b.1.name.as_deref().unwrap_or(""))
     });
-    let out_list = lua.create_table()?;
+    let out_list = child_table(lua, &table, "outputs")?;
+    out_list.clear()?;
     let mut geometry: Vec<(String, [f32; 4])> = Vec::new();
     for (i, (_id, info)) in outputs.iter().enumerate() {
         let (x, y, w, h) = output_geometry(info);
@@ -45,7 +48,8 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     table.set("outputs", out_list)?;
     debug_geometry_table(&geometry);
 
-    let ws_list = lua.create_table()?;
+    let ws_list = child_table(lua, &table, "workspaces")?;
+    ws_list.clear()?;
     let ws_rows: Vec<Workspace> = ctx.workspaces.snapshot();
     for (i, ws) in ws_rows.iter().enumerate() {
         let entry = lua.create_table()?;
@@ -56,7 +60,8 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     }
     table.set("workspaces", ws_list)?;
 
-    let tl_list = lua.create_table()?;
+    let tl_list = child_table(lua, &table, "toplevels")?;
+    tl_list.clear()?;
     let rows: Vec<Toplevel> = ctx.toplevels.snapshot();
     for (i, tl) in rows.iter().enumerate() {
         let entry = lua.create_table()?;
@@ -67,6 +72,15 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     table.set("toplevels", tl_list)?;
 
     lua.globals().set("wayland", table)
+}
+
+fn child_table(lua: &mlua::Lua, parent: &mlua::Table, key: &str) -> mlua::Result<mlua::Table> {
+    if let Some(table) = parent.raw_get::<Option<mlua::Table>>(key)? {
+        return Ok(table);
+    }
+    let table = lua.create_table()?;
+    parent.raw_set(key, table.clone())?;
+    Ok(table)
 }
 
 /// Stderr the iced-side geometry table when it changes (debug only):
@@ -175,6 +189,26 @@ mod tests {
         assert!(active);
         let count: i64 = lua.load("return #wayland.outputs").eval().expect("len");
         assert_eq!(count, 0);
+
+        // Retained namespace/list references see replacement and removal;
+        // stale tail entries must not survive a shorter snapshot.
+        lua.load("saved = { namespace = wayland, outputs = wayland.outputs, workspaces = wayland.workspaces, toplevels = wayland.toplevels }").exec().unwrap();
+        let empty_toplevels = ToplevelCache::default();
+        let updated_workspaces = WorkspaceCache::from_rows(vec![Workspace {
+            name: "web".into(),
+            active: false,
+            ..Default::default()
+        }]);
+        publish(
+            &ServiceCtx {
+                toplevels: &empty_toplevels,
+                workspaces: &updated_workspaces,
+                ..ctx
+            },
+            &lua,
+        )
+        .unwrap();
+        assert!(lua.load("return saved.namespace == wayland and saved.outputs == wayland.outputs and saved.workspaces == wayland.workspaces and saved.toplevels == wayland.toplevels and #saved.toplevels == 0 and #saved.workspaces == 1 and saved.workspaces[1].name == 'web' and not saved.workspaces[1].active").eval::<bool>().unwrap());
     }
 
     #[test]
