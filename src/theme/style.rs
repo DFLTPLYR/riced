@@ -199,7 +199,11 @@ pub fn selection_box(
 // Buttons — `.style(theme::menu_button(rounding))`
 // ---------------------------------------------------------------------------
 
-fn button_base(background: Color, text_color: Color, radius: f32) -> button::Style {
+fn button_base(
+    background: Color,
+    text_color: Color,
+    radius: impl Into<iced::border::Radius>,
+) -> button::Style {
     button::Style {
         background: Some(background.into()),
         text_color,
@@ -214,7 +218,11 @@ fn button_base(background: Color, text_color: Color, radius: f32) -> button::Sty
 
 /// Press feedback uses a primary-tinted surface and a primary border.
 /// Explicit label tints remain readable because the fill stays mostly surface.
-fn pressed_menu_style(a: &ActiveTheme, text: Color, radius: f32) -> button::Style {
+fn pressed_menu_style(
+    a: &ActiveTheme,
+    text: Color,
+    radius: impl Into<iced::border::Radius>,
+) -> button::Style {
     let surface = a.surface_variant;
     let tint = 0.2;
     let background = Color::from_rgba(
@@ -233,7 +241,10 @@ fn pressed_menu_style(a: &ActiveTheme, text: Color, radius: f32) -> button::Styl
 /// highlighted). `rounding` comes from config
 /// (`context_menu_item.rounding`), so this is a factory returning the
 /// `Fn(&Theme, Status) -> Style` that `Button::style` expects.
-pub fn menu_button(rounding: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn menu_button(
+    rounding: impl Into<iced::border::Radius>,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    let rounding = rounding.into();
     move |_, status| {
         let a = active();
         match status {
@@ -261,9 +272,10 @@ pub fn menu_button(rounding: f32) -> impl Fn(&Theme, button::Status) -> button::
 /// (Lua `:color()`), same surfaces as [`menu_button`]; every status
 /// paints the label in `text`.
 pub fn menu_button_tinted(
-    rounding: f32,
+    rounding: impl Into<iced::border::Radius>,
     text: Color,
 ) -> impl Fn(&Theme, button::Status) -> button::Style {
+    let rounding = rounding.into();
     move |_, status| {
         let a = active();
         match status {

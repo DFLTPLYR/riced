@@ -98,6 +98,12 @@ fn validate_value(lua: &Lua, kind: &str, field: &str, value: &toml::Value) -> Re
         .map_err(|e| e.to_string())?;
     let what = format!("iced.{kind}()");
     match field {
+        "padding" | "margin" => {
+            super::geometry::opt_insets(&table, field, &what)?;
+        }
+        "radius" => {
+            super::geometry::opt_corners(&table, field, &what)?;
+        }
         "width" => {
             let length = super::decode::opt_length(&table, field, &what)?;
             if kind == "popup" && matches!(length, Some(super::node::NodeLength::FillPortion(_))) {
@@ -147,8 +153,7 @@ fn validate_value(lua: &Lua, kind: &str, field: &str, value: &toml::Value) -> Re
                 return Err("expected at most 16 finite numbers".into());
             }
         }
-        "size" | "spacing" | "padding" | "margin" | "radius" | "border_width" | "height"
-        | "pitch" | "step" | "speed" | "elide" => {
+        "size" | "spacing" | "border_width" | "height" | "pitch" | "step" | "speed" | "elide" => {
             let n = number(value).ok_or("expected a finite number")?;
             if (field != "speed" && n < 0.0)
                 || (matches!(field, "step" | "size") && n == 0.0)
@@ -249,10 +254,10 @@ mod tests {
             .load("return iced.text_input('', ''):secure(false)")
             .eval()
             .unwrap();
-        let check = |value: &Value, padding, radius| {
+        let check = |value: &Value, padding: Option<f32>, radius: Option<f32>| {
             let (node, _) = layout_props::unwrap(parse_node(value).unwrap());
             assert!(
-                matches!(node, WidgetNode::Button { padding: p, radius: r, .. } if p == padding && r == radius)
+                matches!(node, WidgetNode::Button { padding: p, radius: r, .. } if p == padding.map(crate::ui::geometry::Insets::from) && r == radius.map(crate::ui::geometry::Corners::from))
             );
         };
         check(&inherited, Some(9.0), Some(3.0));
@@ -346,7 +351,73 @@ width = 150
                 Some(if suffix.is_empty() { 150.0 } else { 90.0 })
             );
             assert!(
-                matches!(content.tree, Some(WidgetNode::Popup { padding, .. }) if padding == expected_padding)
+                matches!(content.tree, Some(WidgetNode::Popup { padding, .. }) if padding == expected_padding.into())
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_defaults_are_atomic_and_sparse_lua_tables_zero_omitted_entries() {
+        use crate::ui::geometry::{Corners, Insets};
+        let lua = Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let config: crate::config::Config = toml::from_str("[component-defaults.popup]\npadding={top=2,right=3,bottom=5,left=7}\nradius={top_left=11,bottom_right=13}").unwrap();
+        let saved = toml::to_string_pretty(&config).unwrap();
+        let loaded: crate::config::Config = toml::from_str(&saved).unwrap();
+        assert_eq!(loaded.component_defaults, config.component_defaults);
+        publish(&lua, &loaded.component_defaults).unwrap();
+        for (source, padding, radius) in [
+            (
+                "iced.popup(iced.space())",
+                Insets {
+                    top: 2.0,
+                    right: 3.0,
+                    bottom: 5.0,
+                    left: 7.0,
+                },
+                Corners {
+                    top_left: 11.0,
+                    bottom_right: 13.0,
+                    ..Corners::ZERO
+                },
+            ),
+            (
+                "iced.popup(iced.space()):padding({left=17}):radius({top_right=19})",
+                Insets {
+                    left: 17.0,
+                    ..Insets::ZERO
+                },
+                Corners {
+                    top_right: 19.0,
+                    ..Corners::ZERO
+                },
+            ),
+            (
+                "iced.popup(iced.space()):padding(0):radius(0)",
+                Insets::ZERO,
+                Corners::ZERO,
+            ),
+        ] {
+            let value = lua.load(format!("return {source}")).eval().unwrap();
+            let node =
+                crate::shell::screens::Popup::parse_popup_content(value, &Default::default())
+                    .unwrap()
+                    .tree
+                    .unwrap();
+            assert!(
+                matches!(node, WidgetNode::Popup { padding: p, radius: r, .. } if p == padding && r == radius),
+                "{source}"
+            );
+        }
+        for source in [
+            "[popup]\npadding={lef=1}",
+            "[popup]\nradius={top=1}",
+            "[button]\npadding=[1,2]",
+            "[text_input]\npadding={left='bad'}",
+        ] {
+            assert!(
+                toml::from_str::<ComponentDefaults>(source).is_err(),
+                "{source}"
             );
         }
     }

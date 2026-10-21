@@ -73,7 +73,7 @@ mod tests {
                     panic!("column")
                 };
                 assert!(
-                    matches!(&children[0], WidgetNode::Button {label, action, padding: Some(5.0), radius: Some(3.0), ..} if label == "Add Top" && action == "add-top")
+                    matches!(&children[0], WidgetNode::Button {label, action, padding: Some(padding), radius: Some(radius), ..} if label == "Add Top" && action == "add-top" && *padding == 5.0.into() && *radius == 3.0.into())
                 );
             }
             let mut element = crate::ui::build::build_node(
@@ -901,8 +901,8 @@ impl Background {
                 action: action.into(),
                 width: Some(NodeLength::Fill),
                 height: None,
-                padding: Some(5.0),
-                radius: Some(3.0),
+                padding: Some(5.0.into()),
+                radius: Some(3.0.into()),
                 color: None,
                 background: None,
             })
@@ -916,8 +916,8 @@ impl Background {
             }),
             width: NodeLength::Fixed(150.0),
             height: NodeLength::Shrink,
-            padding: 4.0,
-            radius: 3.0,
+            padding: 4.0.into(),
+            radius: 3.0.into(),
             background: Some(theme::card()),
             border: Some(theme::border_color()),
             border_width: 1.0,

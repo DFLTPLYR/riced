@@ -322,7 +322,7 @@ mod tests {
                 action: "run".into(),
                 width: Some(NodeLength::Fixed(120.0)),
                 height: None,
-                padding: Some(4.0),
+                padding: Some(4.0.into()),
                 color: None,
                 background: None,
                 radius: None
@@ -690,7 +690,7 @@ mod tests {
                             padding: None,
                             color: None,
                             background: None,
-                            radius: Some(3.0)
+                            radius: Some(3.0.into())
                         },
                         WidgetNode::Progress {
                             value: 0.4,
@@ -706,9 +706,9 @@ mod tests {
                 }),
                 width: NodeLength::Native,
                 height: NodeLength::Native,
-                padding: 4.0,
+                padding: 4.0.into(),
                 background: None,
-                radius: 0.0,
+                radius: 0.0.into(),
                 border: None,
                 border_width: 0.0,
             }

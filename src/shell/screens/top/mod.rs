@@ -699,6 +699,16 @@ pub(crate) fn build_with_lists(
             radius,
             border,
             border_width,
+        }
+        | WidgetNode::Popup {
+            child,
+            width,
+            height,
+            padding,
+            background,
+            radius,
+            border,
+            border_width,
         } => {
             let background = background.map(iced::Background::Color);
             let radius = *radius;
@@ -711,7 +721,7 @@ pub(crate) fn build_with_lists(
             Ok(content
                 .width(width.resolve(hints.width))
                 .height(height.resolve(hints.height))
-                .padding(padding.max(0.0))
+                .padding(*padding)
                 .style(move |_| iced::widget::container::Style {
                     background,
                     border: iced::Border {

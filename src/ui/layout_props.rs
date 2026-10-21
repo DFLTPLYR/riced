@@ -1,5 +1,5 @@
 //! Common layout/event properties preserve the underlying component's setters.
-use super::{node::WidgetNode, placement::Placement};
+use super::{geometry::Insets, node::WidgetNode, placement::Placement};
 pub(crate) const SETTERS: &[&str] = &["anchor", "margin", "on_press"];
 /// Cross/main-axis alignment for the widgets whose native API exposes it.
 /// `None` keeps the widget's native default.
@@ -16,7 +16,7 @@ impl Align {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Common {
     pub anchor: Option<Placement>,
-    pub margin: f32,
+    pub margin: Insets,
     pub on_press: Option<String>,
     pub align: Align,
 }

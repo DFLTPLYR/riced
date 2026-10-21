@@ -29,12 +29,14 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         WidgetNode::Slider { height, .. } => height.unwrap_or(22.0),
         WidgetNode::TextInput { size, padding, .. }
         | WidgetNode::PickList { size, padding, .. } => {
-            size.unwrap_or(base) * 1.4 + padding.unwrap_or(6.0) * 2.0
+            size.unwrap_or(base) * 1.4 + padding.unwrap_or_else(|| 6.0.into()).vertical()
         }
         WidgetNode::Text { size: own, .. } => own.unwrap_or(base).max(1.0) * 1.4,
         WidgetNode::Icon { .. } | WidgetNode::Spinner => base * 1.5,
         WidgetNode::Separator { height, .. } => height.max(1.0),
-        WidgetNode::Button { padding, .. } => base * 1.4 + 2.0 * padding.unwrap_or(6.0).max(0.0),
+        WidgetNode::Button { padding, .. } => {
+            base * 1.4 + padding.unwrap_or_else(|| 6.0.into()).vertical()
+        }
         WidgetNode::Progress { height, .. } => height.as_ref().map(px).unwrap_or(12.0),
         WidgetNode::Canvas { height, .. } | WidgetNode::Shader { height, .. } => match height {
             NodeLength::Fixed(px) => *px,
@@ -77,7 +79,7 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
             }
         }
         WidgetNode::Container { child, padding, .. } | WidgetNode::Popup { child, padding, .. } => {
-            estimate_height(child, base) + 2.0 * padding.max(0.0)
+            estimate_height(child, base) + padding.vertical()
         }
         WidgetNode::Scrollable { child, .. } => estimate_height(child, base),
     }
@@ -257,7 +259,7 @@ fn realize_aligned<M: Clone + 'static>(
             Ok(content
                 .width(width.resolve(hints.width))
                 .height(height.resolve(hints.height))
-                .padding(padding.max(0.0))
+                .padding(*padding)
                 .style(move |_| iced::widget::container::Style {
                     background,
                     border: iced::Border {
@@ -439,10 +441,10 @@ fn realize_aligned<M: Clone + 'static>(
             radius,
         } => {
             let mut item = button(rich_text(label.clone(), size, 4.0))
-                .padding(padding.unwrap_or(6.0).max(0.0));
+                .padding(padding.unwrap_or_else(|| 6.0.into()));
             let tint = *color;
             let custom = *background;
-            let radius = radius.unwrap_or(theme::RADIUS);
+            let radius = radius.unwrap_or_else(|| theme::RADIUS.into());
             item = item.style(move |theme, status| {
                 let mut style = if let Some(c) = tint {
                     theme::menu_button_tinted(radius, c)(theme, status)
@@ -919,6 +921,96 @@ mod tests {
                 assert_eq!(layout.children().len(), 2);
             }
         }
+    }
+
+    #[test]
+    fn asymmetric_padding_and_margins_match_in_native_scene_and_animated_hosts() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = lua();
+        let element = |host: &str, node: &WidgetNode| match host {
+            "scene" => crate::ui::scene::Lists::default()
+                .build(
+                    node,
+                    &crate::ui::anim::AnimRuntime::default(),
+                    std::sync::Arc::new(|_| Plant::Tend),
+                    None,
+                )
+                .unwrap(),
+            "animated" => crate::shell::screens::top::build_with_lists(
+                node,
+                "geometry",
+                13.0,
+                None,
+                &crate::ui::anim::AnimRuntime::default(),
+                &Default::default(),
+                None,
+            )
+            .unwrap(),
+            _ => build_node(node, 13.0, None).unwrap(),
+        };
+        let limits = layout::Limits::new(iced::Size::ZERO, iced::Size::new(200.0, 100.0));
+        for constructor in ["container", "popup"] {
+            let node = parse_node(&lua.load(format!("return iced.{constructor}(iced.space():width(40):height(20)):padding({{top=3,right=5,bottom=7,left=11}}):radius({{top_left=8}})")).eval().unwrap()).unwrap();
+            for host in ["native", "scene", "animated"] {
+                let mut item = element(host, &node);
+                let mut tree = Tree::new(&item);
+                let bounds = item.as_widget_mut().layout(&mut tree, &renderer, &limits);
+                let bounds = if host == "scene" {
+                    &bounds.children()[1]
+                } else {
+                    &bounds
+                };
+                assert_eq!(
+                    bounds.size(),
+                    iced::Size::new(56.0, 30.0),
+                    "{constructor}: {host}"
+                );
+                assert_eq!(
+                    bounds.children()[0].bounds(),
+                    iced::Rectangle::new(iced::Point::new(11.0, 3.0), iced::Size::new(40.0, 20.0)),
+                    "{constructor}: {host}"
+                );
+            }
+        }
+        for (anchor, expected) in [
+            ("top_left", iced::Point::new(10.0, 5.0)),
+            ("top_right", iced::Point::new(140.0, 5.0)),
+            ("bottom_left", iced::Point::new(10.0, 65.0)),
+            ("bottom_right", iced::Point::new(140.0, 65.0)),
+            ("center", iced::Point::new(75.0, 35.0)),
+        ] {
+            let node = parse_node(&lua.load(format!("return iced.space():width(40):height(20):anchor('{anchor}'):margin({{top=5,right=20,bottom=15,left=10}})")).eval().unwrap()).unwrap();
+            for host in ["native", "scene", "animated"] {
+                let mut item = element(host, &node);
+                let mut tree = Tree::new(&item);
+                let bounds = item.as_widget_mut().layout(&mut tree, &renderer, &limits);
+                let bounds = if host == "scene" {
+                    &bounds.children()[1]
+                } else {
+                    &bounds
+                };
+                assert_eq!(
+                    bounds.children()[0].bounds().position(),
+                    expected,
+                    "{anchor}: {host}"
+                );
+            }
+        }
+        let node = parse_node(&lua.load("return iced.space():width(40):height(20):anchor('center'):margin({top=10000,right=10000,bottom=10000,left=10000})").eval().unwrap()).unwrap();
+        let mut item = element("native", &node);
+        let mut tree = Tree::new(&item);
+        let bounds = item.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert_eq!(bounds.children()[0].size(), iced::Size::ZERO);
+        assert_eq!(
+            bounds.children()[0].bounds().position(),
+            iced::Point::new(100.0, 50.0)
+        );
     }
 
     #[test]

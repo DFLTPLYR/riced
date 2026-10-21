@@ -2128,6 +2128,10 @@ mod tests {
         for (source, expected) in [
             ("iced.popup(iced.space():width(90):height(30))", (90, 30)),
             (
+                "iced.popup(iced.space():width(90):height(30)):padding({top=2,right=3,bottom=5,left=7}):radius({top_left=12,bottom_right=8})",
+                (100, 37),
+            ),
+            (
                 "iced.popup(iced.space():width(90):height(30)):padding(7):align_x('end')",
                 (104, 44),
             ),

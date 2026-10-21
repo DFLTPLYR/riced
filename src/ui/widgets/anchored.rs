@@ -1,4 +1,5 @@
 //! Position an overlay after measuring its actual child layout.
+use crate::ui::geometry::Insets;
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer, widget};
 use iced::{Element, Event, Length, Point, Rectangle, Size, Vector};
 use std::sync::{Arc, Mutex};
@@ -17,14 +18,14 @@ pub(crate) fn anchored<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
         output_origin,
         bounds,
         placement: None,
-        margin: 0.0,
+        margin: Insets::ZERO,
     })
 }
 
 pub(crate) fn placed<'a, M: 'a, T: 'a, R: renderer::Renderer + 'a>(
     content: Element<'a, M, T, R>,
     placement: crate::ui::placement::Placement,
-    margin: f32,
+    margin: Insets,
 ) -> Element<'a, M, T, R> {
     Element::new(Anchored {
         content,
@@ -42,7 +43,7 @@ struct Anchored<'a, M, T, R> {
     output_origin: Point,
     bounds: Bounds,
     placement: Option<crate::ui::placement::Placement>,
-    margin: f32,
+    margin: Insets,
 }
 
 impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Anchored<'_, M, T, R> {
@@ -62,22 +63,23 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Anchored<'_, M, T, R> {
         limits: &layout::Limits,
     ) -> layout::Node {
         let mut size = limits.max();
+        let margin = self.margin.fitted(size);
         let mut child = self.content.as_widget_mut().layout(
             &mut tree.children[0],
             renderer,
             &layout::Limits::new(
                 Size::ZERO,
                 Size::new(
-                    (size.width - 2.0 * self.margin).max(1.0),
-                    (size.height - 2.0 * self.margin).max(1.0),
+                    (size.width - margin.horizontal()).max(0.0),
+                    (size.height - margin.vertical()).max(0.0),
                 ),
             ),
         );
         if !size.width.is_finite() {
-            size.width = child.size().width + 2.0 * self.margin;
+            size.width = child.size().width + margin.horizontal();
         }
         if !size.height.is_finite() {
-            size.height = child.size().height + 2.0 * self.margin;
+            size.height = child.size().height + margin.vertical();
         }
         let position = if let Some(placement) = self.placement {
             placement.origin(size, child.size(), self.margin)

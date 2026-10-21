@@ -1,4 +1,5 @@
 //! Parent-local alignment, independent of native surfaces and notification policy.
+use super::geometry::Insets;
 use iced::{Alignment, Point, Size};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,19 +96,31 @@ impl Placement {
             (End, End) => "bottom_right",
         }
     }
-    pub(crate) fn origin(self, parent: Size, child: Size, margin: f32) -> Point {
-        let align = |space: f32, extent: f32, alignment| {
-            let spare = (space - extent).max(0.0);
-            let margin = margin.min(spare / 2.0);
+    pub(crate) fn origin(self, parent: Size, child: Size, margin: Insets) -> Point {
+        let margin = margin.fitted(parent);
+        let align = |space: f32, extent: f32, start: f32, end: f32, alignment| {
+            let spare = (space - start - end - extent).max(0.0);
             match alignment {
-                Alignment::Start => margin,
-                Alignment::Center => spare / 2.0,
-                Alignment::End => spare - margin,
+                Alignment::Start => start,
+                Alignment::Center => start + spare / 2.0,
+                Alignment::End => start + spare,
             }
         };
         Point::new(
-            align(parent.width, child.width, self.horizontal),
-            align(parent.height, child.height, self.vertical),
+            align(
+                parent.width,
+                child.width,
+                margin.left,
+                margin.right,
+                self.horizontal,
+            ),
+            align(
+                parent.height,
+                child.height,
+                margin.top,
+                margin.bottom,
+                self.vertical,
+            ),
         )
     }
 }

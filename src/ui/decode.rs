@@ -1,4 +1,5 @@
 //! Lua description decoding. Values are fully owned before realization.
+use super::geometry::{Corners, opt_corners, opt_insets};
 use super::node::{NodeLength, WidgetNode};
 use crate::lua::transitions::parse_transition_value;
 use crate::lua::value::{coerce_text, lua_value_kind};
@@ -12,9 +13,9 @@ pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
         }
     }
     match t.raw_get::<Value>(field)? {
-        // Setter slots read as functions on chained nodes; those and plain
-        // omissions both fall through to saved component defaults.
-        Value::Nil | Value::Function(_) => super::settings::inherited(t, field),
+        // Raw reads bypass setter methods in the node's metatable. An explicit
+        // value, including an invalid function, must not inherit a default.
+        Value::Nil => super::settings::inherited(t, field),
         value => Ok(value),
     }
 }
@@ -230,10 +231,7 @@ pub(crate) fn parse_node_hovered(
     let anchor = control_string(table, "anchor", "iced component")?
         .map(|name| super::placement::Placement::parse(&name))
         .transpose()?;
-    let margin = control_number(table, "margin", "iced component")?.unwrap_or(0.0);
-    if margin < 0.0 {
-        return Err("margin must be non-negative".into());
-    }
+    let margin = opt_insets(table, "margin", "iced component")?.unwrap_or_default();
     let on_press = control_string(table, "on_press", "iced component")?;
     let align = match node.kind() {
         kind @ ("text" | "container" | "popup") => {
@@ -479,8 +477,8 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             )?);
             let width = opt_length(t, "width", &what)?.unwrap_or(NodeLength::Native);
             let height = opt_length(t, "height", &what)?.unwrap_or(NodeLength::Native);
-            let padding = opt_number(t, "padding", &what)?.unwrap_or(0.0);
-            let radius = opt_number(t, "radius", &what)?.unwrap_or(0.0);
+            let padding = opt_insets(t, "padding", &what)?.unwrap_or_default();
+            let radius = opt_corners(t, "radius", &what)?.unwrap_or(Corners::ZERO);
             if kind == "popup" {
                 for (field, length) in [("width", &width), ("height", &height)] {
                     match length {
@@ -495,12 +493,9 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                         _ => {}
                     }
                 }
-                if [padding, radius, border_width]
-                    .iter()
-                    .any(|n| !n.is_finite() || *n < 0.0)
-                {
+                if !border_width.is_finite() || border_width < 0.0 {
                     return Err(format!(
-                        "{what} padding, radius and border width must be finite and non-negative"
+                        "{what} border width must be finite and non-negative"
                     ));
                 }
                 Ok(WidgetNode::Popup {
@@ -659,10 +654,10 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             )?,
             width: opt_length(t, "width", "iced.button()")?,
             height: opt_length(t, "height", "iced.button()")?,
-            padding: opt_number(t, "padding", "iced.button()")?,
+            padding: opt_insets(t, "padding", "iced.button()")?,
             color: opt_color(t, "color", "iced.button()")?,
             background: opt_color(t, "background", "iced.button()")?,
-            radius: opt_number(t, "radius", "iced.button()")?.map(|r| r.max(0.0)),
+            radius: opt_corners(t, "radius", "iced.button()")?,
         }),
         "progress" => {
             let value = match t.get::<Value>("value").map_err(|e| e.to_string())? {
@@ -841,7 +836,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
             on_submit: string("on_submit")?,
             width,
             size,
-            padding: control_number(t, "padding", &what)?.map(|value| value.max(0.0)),
+            padding: opt_insets(t, "padding", &what)?,
             secure: control_bool(t, "secure", &what)?,
         }
         .into()),
@@ -872,7 +867,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
                 on_select: string("on_select")?,
                 width,
                 placeholder: string("placeholder")?,
-                padding: control_number(t, "padding", &what)?.map(|value| value.max(0.0)),
+                padding: opt_insets(t, "padding", &what)?,
                 size,
             }
             .into())

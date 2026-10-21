@@ -213,6 +213,52 @@ component/property names and invalid values fail validation.
   default to `center`. Components without these setters raise at call time
   rather than ignoring the value.
 
+### Edge spacing and corner radii
+
+`padding`, anchored `margin`, and `radius` accept a uniform non-negative number
+or a named table of logical-pixel values. Numbers remain the uniform shorthand:
+
+```lua
+iced.container(child):padding(12):radius(8)
+
+iced.popup(child)
+    :padding({ top = 8, right = 12, bottom = 8, left = 12 })
+    :radius({ top_left = 12, top_right = 12, bottom_right = 0, bottom_left = 0 })
+
+iced.text("Corner")
+    :anchor("top_right")
+    :margin({ top = 10, right = 16 })
+```
+
+- Padding/margin keys: `top`, `right`, `bottom`, `left`.
+- Radius keys: `top_left`, `top_right`, `bottom_right`, `bottom_left`.
+- **Omitted entries are zero.** `:padding({left = 12})` sets every other edge
+  to zero, and `:radius({top_left = 8})` squares the other three corners.
+- Each setter replaces its entire property, including any configured default;
+  repeated calls are last-write-wins, not a per-edge merge.
+- Unknown keys, positional arrays, negative/non-finite values, and non-numbers
+  fail validation. Radius uses corners, not edges such as `left` or `top`.
+
+Padding applies to containers, popup roots, buttons, text inputs, and pick lists.
+Radius applies to containers, popup roots, and buttons, including all button
+interaction states. Other widgets can be wrapped in a container for these effects.
+
+Anchored margins inset the parent's layout rectangle by the specified edges.
+Center anchors center within that inset rectangle. Excessive margins are fitted
+proportionally on each axis so layout dimensions cannot become negative. Margin
+remains anchor-only; it does not position a native popup window.
+
+The same values work in **Settings → Components** and `config.toml`:
+
+```toml
+[component-defaults.button]
+padding = { top = 4, right = 10, bottom = 4, left = 10 }
+radius = { top_left = 6, top_right = 6 }
+```
+
+Popup measurement includes `left + right` and `top + bottom` once each. Explicit
+popup width/height still describe the entire surface, including asymmetric padding.
+
 ### Stacks
 
 `iced.stack({ ... })` layers children back-to-front: the first child is the

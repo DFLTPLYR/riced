@@ -1,6 +1,10 @@
 //! Named, owned component descriptions and their single Lua API schema.
 //! Structs convert through mlua::FromLua/IntoLua and never retain a Lua VM.
-use super::{listview::Transition, node::NodeLength};
+use super::{
+    geometry::{Corners, Insets},
+    listview::Transition,
+    node::NodeLength,
+};
 
 macro_rules! components {
     ($($variant:ident => $name:ident, $lua:literal, [$($arg:literal),*], [$($setter:literal),*] {
@@ -10,7 +14,7 @@ macro_rules! components {
         pub(crate) enum WidgetNode {
             $($variant { $($field: $ty),* },)*
             Spinner,
-            Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: f32 },
+            Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: Insets },
             Clickable { child: Box<WidgetNode>, action: String },
             Aligned {
                 child: Box<WidgetNode>,
@@ -127,12 +131,12 @@ components! {
         transitions: Box<(Transition, Transition, Transition)>, callbacks: crate::lua::callbacks::ItemCallbacks
     }
     Container => ContainerNode, "container", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y"] {
-        child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,
-        background: Option<iced::Color>, radius: f32, border: Option<iced::Color>, border_width: f32
+        child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: Insets,
+        background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32
     }
     Popup => PopupNode, "popup", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y"] {
-        child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: f32,
-        background: Option<iced::Color>, radius: f32, border: Option<iced::Color>, border_width: f32
+        child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: Insets,
+        background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32
     }
     Scrollable => ScrollableNode, "scrollable", ["child"], ["width", "height", "scrollbar"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, scrollbar_hidden: bool
@@ -157,7 +161,7 @@ components! {
     }
     Button => ButtonNode, "button", ["label", "action"], ["action", "width", "height", "padding", "radius", "background", "color"] {
         label: String, action: String, width: Option<NodeLength>, height: Option<NodeLength>,
-        padding: Option<f32>, color: Option<iced::Color>, background: Option<iced::Color>, radius: Option<f32>
+        padding: Option<Insets>, color: Option<iced::Color>, background: Option<iced::Color>, radius: Option<Corners>
     }
     Progress => ProgressNode, "progress", ["value", "width"], ["width", "height", "color", "background"] {
         value: f32, width: NodeLength, height: Option<NodeLength>, color: Option<iced::Color>, background: Option<iced::Color>
@@ -173,10 +177,10 @@ components! {
         min: f32, max: f32, value: f32, step: f32, on_change: Option<String>, on_release: Option<String>, width: Option<NodeLength>, height: Option<f32>
     }
     TextInput => TextInputNode, "text_input", ["placeholder", "value"], ["value", "on_input", "on_submit", "width", "size", "padding", "secure"] {
-        placeholder: String, value: String, on_input: Option<String>, on_submit: Option<String>, width: Option<NodeLength>, size: Option<f32>, padding: Option<f32>, secure: bool
+        placeholder: String, value: String, on_input: Option<String>, on_submit: Option<String>, width: Option<NodeLength>, size: Option<f32>, padding: Option<Insets>, secure: bool
     }
     PickList => PickListNode, "pick_list", ["options", "selected"], ["selected", "on_select", "width", "placeholder", "padding", "size"] {
-        options: Vec<String>, selected: Option<String>, on_select: Option<String>, width: Option<NodeLength>, placeholder: Option<String>, padding: Option<f32>, size: Option<f32>
+        options: Vec<String>, selected: Option<String>, on_select: Option<String>, width: Option<NodeLength>, placeholder: Option<String>, padding: Option<Insets>, size: Option<f32>
     }
     Radio => RadioNode, "radio", ["label", "value", "selected"], ["selected", "on_select", "width", "size", "spacing"] {
         label: String, value: String, selected: Option<String>, on_select: Option<String>, width: Option<NodeLength>, size: Option<f32>, spacing: f32

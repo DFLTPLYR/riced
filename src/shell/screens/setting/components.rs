@@ -110,6 +110,11 @@ pub(super) fn view(
         id,
         SettingComponentEdit::Submit,
     ));
+    let placeholder = match property.as_str() {
+        "padding" | "margin" => "Number or { top = 0, right = 0, bottom = 0, left = 0 }",
+        "radius" => "Number or { top_left = 0, top_right = 0, bottom_right = 0, bottom_left = 0 }",
+        _ => "TOML value, e.g. 0, true, \"center\", or \"#ffffff\"",
+    };
     let mut body = column![
         super::hint("Explicit Lua setters override these values individually. Reset removes the saved default."),
         row![
@@ -131,10 +136,7 @@ pub(super) fn view(
             .width(Length::Fill),
         ]
         .spacing(12),
-        text_input(
-            "TOML value, e.g. 0, true, \"center\", or \"#ffffff\"",
-            &draft,
-        )
+        text_input(placeholder, &draft)
         .on_input(move |input| Plant::SettingPlot(SettingEvent::ComponentsEdit(
             id,
             SettingComponentEdit::Draft(input),
