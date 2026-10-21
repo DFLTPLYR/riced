@@ -1047,8 +1047,8 @@ impl Top {
 
     /// Pure override application behind [`handle_widget_prop`]
     /// (tested directly; the handler only locates the placement).
-    /// Blank keys are ignored — they can only arrive from hand-edited
-    /// TOML, never from the editor.
+    /// Blank keys are ignored — they can only arrive from a hand-edited
+    /// config, never from the editor.
     pub(crate) fn apply_prop_patch(
         placement: &mut crate::config::WidgetPlacement,
         patch: &crate::shell::PlacementProp,

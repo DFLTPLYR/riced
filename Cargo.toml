@@ -33,7 +33,6 @@ material-colors = { version = "0.4", features = ["image", "serde"] }
 regex = "1"
 include_dir = "0.7"
 toml = "0.8"
-toml_edit = "0.22"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["time", "rt"] }

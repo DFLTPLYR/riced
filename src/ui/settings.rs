@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::{Deserialize, Deserializer, Serialize};
 
-type Properties = BTreeMap<String, toml::Value>;
+type Properties = BTreeMap<String, serde_json::Value>;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -36,7 +36,12 @@ impl ComponentDefaults {
         self.0.is_empty()
     }
 
-    pub(crate) fn set(&mut self, component: String, property: String, value: Option<toml::Value>) {
+    pub(crate) fn set(
+        &mut self,
+        component: String,
+        property: String,
+        value: Option<serde_json::Value>,
+    ) {
         if let Some(value) = value {
             self.0.entry(component).or_default().insert(property, value);
         } else if let Some(properties) = self.0.get_mut(&component) {
@@ -65,19 +70,27 @@ impl ComponentDefaults {
                     ));
                 }
                 validate_value(&lua, kind, field, value)
-                    .map_err(|error| format!("component-defaults.{kind}.{field}: {error}"))?;
+                    .map_err(|error| format!("component_defaults.{kind}.{field}: {error}"))?;
             }
         }
         Ok(())
     }
 }
 
-fn validate_value(lua: &Lua, kind: &str, field: &str, value: &toml::Value) -> Result<(), String> {
-    fn finite(value: &toml::Value) -> bool {
+fn validate_value(
+    lua: &Lua,
+    kind: &str,
+    field: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    fn finite(value: &serde_json::Value) -> bool {
+        use serde_json::Value as Json;
         match value {
-            toml::Value::Float(n) => n.is_finite() && n.abs() <= f64::from(f32::MAX),
-            toml::Value::Array(values) => values.iter().all(finite),
-            toml::Value::Table(values) => values.values().all(finite),
+            Json::Number(number) => number
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n.abs() <= f64::from(f32::MAX)),
+            Json::Array(values) => values.iter().all(finite),
+            Json::Object(values) => values.values().all(finite),
             _ => true,
         }
     }
@@ -143,7 +156,7 @@ fn validate_value(lua: &Lua, kind: &str, field: &str, value: &toml::Value) -> Re
             }
         }
         "checked" | "enabled" | "secure" | "animated" => {
-            if !value.is_bool() {
+            if !value.is_boolean() {
                 return Err("expected a boolean".into());
             }
         }
@@ -172,12 +185,12 @@ fn validate_value(lua: &Lua, kind: &str, field: &str, value: &toml::Value) -> Re
             number(value).ok_or("expected a finite number")?;
         }
         "selected" => {
-            if !value.is_str() {
+            if !value.is_string() {
                 return Err("expected a string selection".into());
             }
         }
         _ => {
-            if !value.is_str() {
+            if !value.is_string() {
                 return Err("expected a string".into());
             }
         }
@@ -185,10 +198,9 @@ fn validate_value(lua: &Lua, kind: &str, field: &str, value: &toml::Value) -> Re
     Ok(())
 }
 
-fn number(value: &toml::Value) -> Option<f64> {
+fn number(value: &serde_json::Value) -> Option<f64> {
     value
-        .as_float()
-        .or_else(|| value.as_integer().map(|n| n as f64))
+        .as_f64()
         .filter(|n| n.is_finite() && n.abs() <= f64::from(f32::MAX))
 }
 
@@ -239,8 +251,10 @@ mod tests {
     fn cached_lua_nodes_inherit_live_defaults_without_overriding_explicit_zero_or_false() {
         let lua = Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
-        let mut defaults: ComponentDefaults =
-            toml::from_str("[button]\npadding=9\nradius=3\n[text_input]\nsecure=true\n").unwrap();
+        let mut defaults: ComponentDefaults = serde_json::from_str(
+            r#"{"button":{"padding":9,"radius":3},"text_input":{"secure":true}}"#,
+        )
+        .unwrap();
         publish(&lua, &defaults).unwrap();
         let inherited: Value = lua
             .load("return iced.button('go','go'):anchor('center')")
@@ -269,7 +283,7 @@ mod tests {
         defaults.set(
             "button".into(),
             "padding".into(),
-            Some(toml::Value::Integer(15)),
+            Some(serde_json::Value::from(15)),
         );
         publish(&lua, &defaults).unwrap();
         check(&inherited, Some(15.0), Some(3.0));
@@ -296,37 +310,34 @@ mod tests {
     #[test]
     fn persistent_defaults_roundtrip_and_reject_unknown_or_invalid_properties() {
         let source = r##"
-[component-defaults.button]
-padding = 8
-background = "#123456"
-[component-defaults.column]
-align_x = "end"
-[component-defaults.shader]
-params = [0.5, 1.0]
-animated = false
-[component-defaults.popup]
-padding = 8
-width = 150
+return {
+    component_defaults = {
+        button = { padding = 8, background = "#123456" },
+        column = { align_x = "end" },
+        shader = { params = { 0.5, 1.0 }, animated = false },
+        popup = { padding = 8, width = 150 },
+    },
+}
 "##;
-        let config: crate::config::Config = toml::from_str(source).unwrap();
-        let encoded = toml::to_string_pretty(&config).unwrap();
-        let decoded: crate::config::Config = toml::from_str(&encoded).unwrap();
+        let config: crate::config::Config = crate::config::test_parse_config(source).unwrap();
+        let encoded = crate::config::test_format_config(&config).unwrap();
+        let decoded: crate::config::Config = crate::config::test_parse_config(&encoded).unwrap();
         assert_eq!(decoded.component_defaults, config.component_defaults);
         for source in [
-            "[unknown]\npadding=1",
-            "[button]\npaddding=1",
-            "[button]\npadding='wide'",
-            "[button]\npadding=-1",
-            "[button]\nwidth=inf",
-            "[row]\nalign_x='center'",
-            "[text]\nalign_x='middle'",
-            "[text_input]\nsecure='yes'",
-            "[shader]\nparams=[true]",
-            "[listview]\ndelegate='a function'",
-            "[popup]\nwidth='fill:2'",
+            "return { unknown = { padding = 1 } }",
+            "return { component_defaults = { button = { paddding = 1 } } }",
+            "return { component_defaults = { button = { padding = 'wide' } } }",
+            "return { component_defaults = { button = { padding = -1 } } }",
+            "return { component_defaults = { button = { width = 0/0 } } }",
+            "return { component_defaults = { row = { align_x = 'center' } } }",
+            "return { component_defaults = { text = { align_x = 'middle' } } }",
+            "return { component_defaults = { text_input = { secure = 'yes' } } }",
+            "return { component_defaults = { shader = { params = { true } } } }",
+            "return { component_defaults = { listview = { delegate = 'a function' } } }",
+            "return { component_defaults = { popup = { width = 'fill:2' } } }",
         ] {
             assert!(
-                toml::from_str::<ComponentDefaults>(source).is_err(),
+                crate::config::test_parse_defaults(source).is_err(),
                 "{source}"
             );
         }
@@ -336,7 +347,8 @@ width = 150
     fn popup_defaults_are_inherited_and_explicit_zero_padding_wins() {
         let lua = Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
-        let defaults = toml::from_str("[popup]\npadding=12\nwidth=150\nheight=40").unwrap();
+        let defaults: ComponentDefaults =
+            serde_json::from_str(r#"{"popup":{"padding":12,"width":150,"height":40}}"#).unwrap();
         publish(&lua, &defaults).unwrap();
         for (suffix, expected_padding) in [("", 12.0), (":padding(0):width(90)", 0.0)] {
             let value = lua
@@ -361,9 +373,12 @@ width = 150
         use crate::ui::geometry::{Corners, Insets};
         let lua = Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
-        let config: crate::config::Config = toml::from_str("[component-defaults.popup]\npadding={top=2,right=3,bottom=5,left=7}\nradius={top_left=11,bottom_right=13}").unwrap();
-        let saved = toml::to_string_pretty(&config).unwrap();
-        let loaded: crate::config::Config = toml::from_str(&saved).unwrap();
+        let config: crate::config::Config = crate::config::test_parse_config(
+            "return { component_defaults = { popup = { padding = { top = 2, right = 3, bottom = 5, left = 7 }, radius = { top_left = 11, bottom_right = 13 } } } }",
+        )
+        .unwrap();
+        let saved = crate::config::test_format_config(&config).unwrap();
+        let loaded: crate::config::Config = crate::config::test_parse_config(&saved).unwrap();
         assert_eq!(loaded.component_defaults, config.component_defaults);
         publish(&lua, &loaded.component_defaults).unwrap();
         for (source, padding, radius) in [
@@ -410,13 +425,13 @@ width = 150
             );
         }
         for source in [
-            "[popup]\npadding={lef=1}",
-            "[popup]\nradius={top=1}",
-            "[button]\npadding=[1,2]",
-            "[text_input]\npadding={left='bad'}",
+            "return { popup = { padding = { lef = 1 } } }",
+            "return { popup = { radius = { top = 1 } } }",
+            "return { button = { padding = { 1, 2 } } }",
+            "return { text_input = { padding = { left = 'bad' } } }",
         ] {
             assert!(
-                toml::from_str::<ComponentDefaults>(source).is_err(),
+                crate::config::test_parse_defaults(source).is_err(),
                 "{source}"
             );
         }

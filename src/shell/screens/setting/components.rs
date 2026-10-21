@@ -1,8 +1,8 @@
-//! Per-component settable defaults editor (`[component-defaults.<component>]`).
+//! Per-component settable defaults editor (`component_defaults.<component>`).
 //! Explicit Lua setters override these per property; Reset removes the
 //! saved override so the property inherits again.
 use super::section_heading;
-use crate::config::ConfigPatch;
+use crate::config::{ConfigPatch, parse_lua_value as parse_config_value, to_lua_literal};
 use crate::shell::{ConfigEvent, Plant, SettingComponentEdit, SettingEvent, state::Plots};
 use crate::theme;
 use crate::ui::settings::{ComponentDefaults, properties};
@@ -35,32 +35,22 @@ fn saved_value(defaults: &ComponentDefaults, component: &str, property: &str) ->
         .0
         .get(component)
         .and_then(|fields| fields.get(property))
-        .map(ToString::to_string)
+        .map(to_lua_literal)
         .unwrap_or_default()
 }
 
-fn parse_toml_value(raw: &str) -> Result<Option<toml::Value>, String> {
-    let raw = raw.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
-        return Ok(None);
-    }
-    // Wrap in a key so scalars, arrays, and inline tables all parse.
-    let mut table: toml::Table = toml::from_str(&format!("value = {raw}"))
-        .map_err(|error| format!("not a TOML value: {error}"))?;
-    if table.len() != 1 {
-        return Err("Enter a single TOML value".into());
-    }
-    table
-        .remove("value")
-        .map(Some)
-        .ok_or_else(|| "Enter a TOML value".into())
+/// Parse one Lua literal from the editor (`nil`/empty/`none` clears the
+/// property). Scalars, `{ ... }` arrays, and `{ key = ... }` tables all
+/// parse; functions and non-data values are rejected by the evaluator.
+fn parse_lua_value(raw: &str) -> Result<Option<serde_json::Value>, String> {
+    parse_config_value(raw).map_err(|error| format!("not a Lua value: {error}"))
 }
 
 fn apply(
     defaults: &ComponentDefaults,
     component: &str,
     property: &str,
-    value: Option<toml::Value>,
+    value: Option<serde_json::Value>,
 ) -> Result<ComponentDefaults, String> {
     let mut next = defaults.clone();
     next.set(component.into(), property.into(), value);
@@ -113,7 +103,7 @@ pub(super) fn view(
     let placeholder = match property.as_str() {
         "padding" | "margin" => "Number or { top = 0, right = 0, bottom = 0, left = 0 }",
         "radius" => "Number or { top_left = 0, top_right = 0, bottom_right = 0, bottom_left = 0 }",
-        _ => "TOML value, e.g. 0, true, \"center\", or \"#ffffff\"",
+        _ => "Lua value, e.g. 0, true, \"center\", or \"#ffffff\"",
     };
     let mut body = column![
         super::hint("Explicit Lua setters override these values individually. Reset removes the saved default."),
@@ -160,8 +150,8 @@ pub(super) fn view(
                 .style(theme::menu_button(theme::RADIUS)),
         ]
         .spacing(12),
-        super::hint("Numbers and booleans are unquoted. Strings (including colors, sizes and action keys) need double quotes. Arrays use [ ... ]. Empty or `none` clears the property."),
-        section_heading("Saved defaults", "Persisted to config.toml under [component-defaults.<component>]."),
+        super::hint("Numbers and booleans are unquoted. Strings (including colors, sizes and action keys) need double quotes. Arrays and tables use { ... }. Empty, `nil`, or `none` clears the property."),
+        section_heading("Saved defaults", "Persisted to config.lua under component_defaults.<component>."),
         saved_list(defaults),
     ]
     .spacing(12)
@@ -179,7 +169,13 @@ fn saved_list(defaults: &ComponentDefaults) -> Element<'static, Plant> {
     let mut list = column![].spacing(4);
     for (component, fields) in &defaults.0 {
         for (property, value) in fields {
-            list = list.push(text(format!("{component}.{property} = {value}")).size(13));
+            list = list.push(
+                text(format!(
+                    "{component}.{property} = {}",
+                    to_lua_literal(value)
+                ))
+                .size(13),
+            );
         }
     }
     list.into()
@@ -232,7 +228,7 @@ pub(crate) fn handle_edit(
                 setting.component_draft.as_deref(),
                 &plots.config.component_defaults,
             );
-            commit(plots, id, parse_toml_value(&raw))
+            commit(plots, id, parse_lua_value(&raw))
         }
         SettingComponentEdit::Reset => commit(plots, id, Ok(None)),
     }
@@ -241,7 +237,7 @@ pub(crate) fn handle_edit(
 fn commit(
     plots: &mut Plots,
     id: window::Id,
-    value: Result<Option<toml::Value>, String>,
+    value: Result<Option<serde_json::Value>, String>,
 ) -> iced::Task<Plant> {
     let names = component_names();
     let value = match value {

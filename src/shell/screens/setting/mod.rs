@@ -48,7 +48,7 @@ pub struct Setting {
     /// Property picked in the Components page (`None` = first property).
     /// Stored per-window; follows the component pick.
     pub(crate) selected_property: Option<usize>,
-    /// Draft TOML text for the Components page editor.
+    /// Draft Lua text for the Components page editor.
     /// `None` means the input mirrors the saved default.
     pub(crate) component_draft: Option<String>,
     pub(crate) component_error: Option<String>,
@@ -235,7 +235,7 @@ impl Setting {
     /// Theme picker: dark/light toggle plus one button per
     /// `~/.config/riced/theme/*.json` (same files as reshell). Writes back
     /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
-    /// and persists the choice to `config.toml`.
+    /// and persists the choice to `config.lua`.
     fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
         pages::theme_page(&plots.config.theme, self.icon_previews.as_ref())
     }
@@ -243,7 +243,7 @@ impl Setting {
     /// Animation speed picker: one global speed for every animated
     /// transition (selection fade and any interpolated color/property
     /// change). Writes back via `ConfigEvent::Patch`, so the daemon
-    /// re-times on the next redraw and persists the choice to `config.toml`.
+    /// re-times on the next redraw and persists the choice to `config.lua`.
     fn animation_content(&self, plots: &Plots) -> Element<'_, Plant> {
         pages::animation_page(plots.config.animation.speed)
     }

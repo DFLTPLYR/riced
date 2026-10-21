@@ -21,11 +21,18 @@ pub(crate) fn reset_budget(lua: &Lua) -> mlua::Result<()> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Profile {
     App,
+    /// `config.lua`: same visible libraries as `App` (tables, strings,
+    /// math, UTF-8 — no `os`/`io`), plus no file loaders, so the config
+    /// cannot read siblings or require modules. It must return plain
+    /// data; Rust owns policy and validation.
+    Config,
     Widget,
 }
 pub(crate) fn new_lua(profile: Profile) -> mlua::Result<Lua> {
     let libs = match profile {
-        Profile::App => StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        Profile::App | Profile::Config => {
+            StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8
+        }
         Profile::Widget => StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::OS | StdLib::IO,
     };
     let lua = Lua::new_with(libs, LuaOptions::default())?;
@@ -57,6 +64,12 @@ pub(crate) fn new_lua(profile: Profile) -> mlua::Result<Lua> {
         let os: Table = globals.get("os")?;
         for key in ["exit", "remove", "rename", "setlocale"] {
             os.set(key, Value::Nil)?;
+        }
+    }
+    if matches!(profile, Profile::Config) {
+        let globals = lua.globals();
+        for key in ["dofile", "loadfile", "require"] {
+            globals.set(key, Value::Nil)?;
         }
     }
     Ok(lua)
@@ -121,13 +134,31 @@ mod tests {
 
     #[test]
     fn execution_budget_is_shared_and_recovers_for_both_profiles() {
-        for profile in [Profile::App, Profile::Widget] {
+        for profile in [Profile::App, Profile::Widget, Profile::Config] {
             let lua = new_lua(profile).unwrap();
             let error = lua.load("while true do end").exec().unwrap_err();
             assert!(error.to_string().contains("instruction budget exceeded"));
             reset_budget(&lua).unwrap();
-            assert_eq!(lua.load("return 42").eval::<i32>().unwrap(), 42);
+            // Fresh chunk state re-publishes `os` to the global table, so
+            // evaluate eagerly: only the retained chunk environment counts.
+            let value: i32 = lua.load("return 42").eval().unwrap();
+            assert_eq!(value, 42);
         }
+    }
+
+    #[test]
+    fn config_profile_matches_app_libs_but_has_no_file_loaders() {
+        let lua = new_lua(Profile::Config).unwrap();
+        let (sum, upper, len): (i32, String, i32) = lua
+            .load("return 1 + 1, string.upper('ok'), #({ 1, 2, 3 })")
+            .eval()
+            .unwrap();
+        assert_eq!((sum, upper.as_str(), len), (2, "OK", 3));
+        let locked: bool = lua
+            .load("return io == nil and dofile == nil and loadfile == nil and require == nil")
+            .eval()
+            .unwrap();
+        assert!(locked);
     }
 
     #[test]

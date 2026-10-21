@@ -232,7 +232,7 @@ fn monitor_assignments_are_isolated_persisted_and_restored_by_output_name() {
             raster::over_black(&image::open(&batch.tiles[id].path).unwrap().to_rgba8())
         );
     }
-    let config_path = dir.join("config.toml");
+    let config_path = dir.join("config.lua");
     commit(
         &crate::config::Config::default(),
         &request.images,
@@ -737,12 +737,12 @@ fn failed_persistence_restores_manifest_and_does_not_replace_configuration() {
             &request.images,
             &batch,
             &cache,
-            &blocking_parent.join("config.toml")
+            &blocking_parent.join("config.lua")
         )
         .is_err()
     );
     assert_eq!(std::fs::read(cache.join("applied.json")).unwrap(), previous);
-    let path = dir.join("config.toml");
+    let path = dir.join("config.lua");
     let (saved, _) = commit(&config, &request.images, &batch, &cache, &path).unwrap();
     assert_eq!(saved.background, request.images);
     assert_eq!(

@@ -17,17 +17,39 @@ fn geometry(table: &mut Table, prefix: &str, fields: &[(&str, &str)]) -> Result<
             grouped.insert((*new).into(), value);
         }
     }
-    if !grouped.is_empty() && table.insert(prefix.into(), Value::Table(grouped)).is_some() {
-        return Err(format!(
-            "both grouped and flat {prefix} fields are configured"
-        ));
+    // Group whatever is present; sparse corners/sides mean explicit
+    // zeroes, matching the old schema semantics. An explicit grouped table
+    // next to flat keys is a conflict.
+    if !grouped.is_empty() {
+        match table.remove(prefix) {
+            Some(Value::Table(mut existing)) => {
+                for (key, value) in grouped {
+                    if existing.insert(key.clone(), value).is_some() {
+                        return Err(format!(
+                            "both grouped and flat {prefix} fields are configured"
+                        ));
+                    }
+                }
+                table.insert(prefix.into(), Value::Table(existing));
+            }
+            Some(_) => {
+                return Err(format!(
+                    "both grouped and flat {prefix} fields are configured"
+                ));
+            }
+            None => {
+                table.insert(prefix.into(), Value::Table(grouped));
+            }
+        }
     }
     Ok(())
 }
 
 fn bar(table: &mut Table) -> Result<(), String> {
-    rename(table, "slot_padding", "slot-padding")?;
-    rename(table, "slot_spacing", "slot-spacing")?;
+    rename(table, "slot_padding", "slot_padding")?;
+    rename(table, "slot-padding", "slot_padding")?;
+    rename(table, "slot_spacing", "slot_spacing")?;
+    rename(table, "slot-spacing", "slot_spacing")?;
     geometry(
         table,
         "margin",
@@ -42,10 +64,10 @@ fn bar(table: &mut Table) -> Result<(), String> {
         table,
         "radius",
         &[
-            ("radius_top_left", "top-left"),
-            ("radius_top_right", "top-right"),
-            ("radius_bottom_left", "bottom-left"),
-            ("radius_bottom_right", "bottom-right"),
+            ("radius_top_left", "top_left"),
+            ("radius_top_right", "top_right"),
+            ("radius_bottom_left", "bottom_left"),
+            ("radius_bottom_right", "bottom_right"),
         ],
     )?;
     let legacy_slots = table.get("slots").is_some_and(Value::is_integer)
@@ -92,12 +114,16 @@ fn bar(table: &mut Table) -> Result<(), String> {
     Ok(())
 }
 
+/// Normalize legacy TOML into structured tables for the one-time
+/// TOML → Lua migration. Never runs on `config.lua`: by migration time,
+/// `top` is stashed under `__legacy_top`, and new-style `bar` tables are
+/// left untouched in their snake_case spellings.
 pub(super) fn migrate(value: &mut Value) -> Result<(), String> {
     if let Some(table) = value.get_mut("composable").and_then(Value::as_table_mut) {
         for (old, new) in [
-            ("selection_rect", "selection-rect"),
-            ("context_menu", "context-menu"),
-            ("context_menu_item", "context-menu-item"),
+            ("selection-rect", "selection_rect"),
+            ("context-menu", "context_menu"),
+            ("context-menu-item", "context_menu_item"),
         ] {
             rename(table, old, new)?;
         }
@@ -171,7 +197,7 @@ pub(super) fn migrate(value: &mut Value) -> Result<(), String> {
             bar(table)?;
         }
     }
-    if let Some(table) = value.get_mut("top").and_then(Value::as_table_mut) {
+    if let Some(table) = value.get_mut("__legacy_top").and_then(Value::as_table_mut) {
         for table in table
             .iter_mut()
             .filter_map(|(_, value)| value.as_table_mut())

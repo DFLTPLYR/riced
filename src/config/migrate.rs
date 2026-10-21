@@ -1,8 +1,7 @@
 //! One-time legacy conversions; reruns must be no-ops on migrated files.
 use super::discovery::lua_files_sorted;
 use super::{
-    Config, SlotEntry, SlotWidgets, TopConfig, WidgetDef, WidgetDefaults, WidgetPlacement,
-    WidgetsFile,
+    SlotEntry, SlotWidgets, TopConfig, WidgetDef, WidgetDefaults, WidgetPlacement, WidgetsFile,
 };
 use std::collections::HashMap;
 
@@ -115,58 +114,77 @@ impl WidgetsFile {
     }
 }
 
-pub(super) fn has_legacy_composables(content: &str) -> bool {
-    let Ok(value) = toml::from_str::<toml::Value>(content) else {
-        return false;
-    };
-    let Some(table) = value.get("composable").and_then(toml::Value::as_table) else {
-        return false;
-    };
-    table.values().any(toml::Value::is_table)
-}
-
-/// Retired tables are converted only at the file-load boundary. Styling is
-/// deliberately retired from TOML; the original file is backed up before save.
-pub(super) fn migrate_composable_sources(value: &mut toml::Value) {
+/// Retired tables are converted only by the one-time TOML → Lua
+/// migration; the daemon never reads TOML after migration.
+pub(super) fn migrate_composable_sources(value: &mut toml::Value) -> Result<(), String> {
     let Some(table) = value
         .get_mut("composable")
         .and_then(toml::Value::as_table_mut)
     else {
-        return;
+        return Ok(());
     };
-    for name in ["selection_rect", "context_menu", "context_menu_item"] {
-        if let Some(entry) = table.get(name).and_then(toml::Value::as_table) {
-            let source = entry.get("src").cloned();
-            if let Some(source) = source {
+    // Flatten `[composable.<name>]` source tables into plain kebab keys
+    // (`context-menu`, ...); `format_migration` normalizes those to the
+    // snake_case keys `Config` parses. New-style plain `context_menu`
+    // strings pass through and merge below. `table.get` + `remove` below
+    // avoids a borrow conflict when reading and writing entries.
+    for name in ["selection-rect", "context-menu", "context-menu-item"] {
+        let snake = name.replace('-', "_");
+        // Handle both spellings: kebab tables flatten to the kebab key,
+        // plain snake strings merge upward, then `format_migration`
+        // converges everything on snake_case.
+        let flattened = if let Some(entry) = table.get(name).and_then(toml::Value::as_table) {
+            entry.get("src").cloned()
+        } else {
+            table
+                .get(&snake)
+                .and_then(toml::Value::as_table)
+                .and_then(|entry| entry.get("src").cloned())
+        };
+        let plain = table.get(&snake).filter(|value| !value.is_table()).cloned();
+        table.remove(name);
+        table.remove(&snake);
+        match (flattened, plain) {
+            (Some(source), None) if source.is_str() => {
                 table.insert(name.into(), source);
-            } else {
-                table.remove(name);
             }
+            (Some(_), None) => {
+                return Err(format!("composable.{name}.src must be a string"));
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!("both composable table and {snake} are configured"));
+            }
+            (None, Some(source)) => {
+                table.insert(name.into(), source);
+                table.remove(&snake);
+            }
+            (None, None) => {}
         }
     }
     table.remove("menu");
+    // Any leftover `[composable.<name>]` tables here are unknown entries
+    // (mistyped names); `Config` strictness rejects them after migration.
+    Ok(())
 }
 
 /// Move legacy `[top.<name>]` entries into `[[bar]]` when no bars exist
-/// yet (sorted by name for determinism). The legacy map is cleared so a
-/// later save writes only the new format.
-pub(super) fn migrate_legacy_top(mut cfg: Config) -> Config {
-    if cfg.bar.is_empty() && !cfg.top.is_empty() {
-        let mut names: Vec<_> = cfg.top.keys().cloned().collect();
+/// yet (sorted by name for determinism). Used only by the one-time
+/// TOML → Lua migration; normal loads never see `top`.
+pub(super) fn migrate_legacy_top_table(
+    bars: &mut Vec<TopConfig>,
+    top: &mut HashMap<String, TopConfig>,
+) {
+    if bars.is_empty() && !top.is_empty() {
+        let mut names: Vec<_> = top.keys().cloned().collect();
         names.sort();
-        cfg.bar = names
-            .into_iter()
-            .filter_map(|k| cfg.top.remove(&k))
-            .collect();
+        *bars = names.into_iter().filter_map(|k| top.remove(&k)).collect();
     } else {
-        cfg.top.clear();
+        top.clear();
     }
-    cfg
 }
 #[cfg(test)]
 mod tests {
-    use super::super::Config;
-    use super::super::io::parse;
+    use super::super::TopConfig;
     use super::super::seed::seed_components_in;
     use super::*;
 
@@ -218,80 +236,27 @@ mod tests {
     }
 
     #[test]
-    fn composable_migration_preserves_sources_and_backs_up_retired_props_once() {
-        let dir =
-            std::env::temp_dir().join(format!("riced-context-migration-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let content = r#"
-            [composable.menu]
-            width = 180.0
-            height = 92.0
-            padding = 0.0
-            spacing = 0.0
-            rounding = 0.0
-            [composable.context_menu]
-            src = "custom-menu.lua"
-            width = 178.0
-            padding = 4.0
-            spacing = 5.0
-            rounding = 3.0
-            [composable.context_menu_item]
-            src = "custom-item.lua"
-            padding = 5.0
-            rounding = 3.0
-            [composable.selection_rect]
-            src = "custom-selection.lua"
-            [composable.selection_rect.props]
-            radius = 4.0
-            [theme]
-            name = "dynamic"
-            [[bar]]
-            output = "DP-1"
-            thickness = 34.0
-        "#;
-        std::fs::write(&path, content).unwrap();
-        let (cfg, stamp) = Config::load_from(&path);
-        assert_eq!(cfg.composable.context_menu, "custom-menu.lua");
-        assert_eq!(cfg.composable.context_menu_item, "custom-item.lua");
-        assert_eq!(cfg.composable.selection_rect, "custom-selection.lua");
-        assert_eq!(cfg.theme.name, "dynamic");
-        assert_eq!(cfg.bar[0].output, "DP-1");
-        assert_eq!(cfg.bar[0].thickness, 34.0);
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(!has_legacy_composables(&saved));
-        assert!(!saved.contains("[composable."));
-        assert!(saved.contains("context-menu = \"custom-menu.lua\""));
-        assert_eq!(
-            std::fs::read_to_string(path.with_extension("toml.pre-composable-sources")).unwrap(),
-            content
+    fn legacy_top_tables_move_into_the_bar_array() {
+        // `top` is migration-only: the runtime `Config` no longer parses it.
+        let mut bars = vec![TopConfig {
+            output: "DP-1".into(),
+            ..Default::default()
+        }];
+        let mut top: HashMap<String, TopConfig> = HashMap::new();
+        migrate_legacy_top_table(&mut bars, &mut top);
+        assert_eq!(bars.len(), 1);
+        let mut bars = Vec::new();
+        top.insert(
+            "main".into(),
+            TopConfig {
+                output: "DP-1".into(),
+                ..Default::default()
+            },
         );
-        let (_, reloaded_stamp) = Config::load_from(&path);
-        assert_eq!(stamp, reloaded_stamp);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn retired_style_only_tables_use_default_sources() {
-        let cfg =
-            parse("[composable.menu]\nwidth = 200.0\n[composable.context_menu]\npadding = 12.0\n");
-        assert_eq!(cfg.composable, super::super::ComposableConfig::default());
-        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("composable"));
-    }
-
-    #[test]
-    fn invalid_legacy_source_does_not_rewrite_the_file() {
-        let dir =
-            std::env::temp_dir().join(format!("riced-invalid-composable-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let content = "[composable.context_menu]\nsrc = 42\n";
-        std::fs::write(&path, content).unwrap();
-        Config::load_from(&path);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
-        assert!(!path.with_extension("toml.pre-composable-sources").exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        migrate_legacy_top_table(&mut bars, &mut top);
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].output, "DP-1");
+        assert!(top.is_empty());
     }
 
     #[test]
@@ -324,18 +289,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_top_tables_migrate_to_bar_array() {
-        // NOTE: migration runs in `parse()` (file loads), not on raw
-        // `toml::from_str` — the file path is what matters in prod.
-        let cfg: Config =
-            parse("[top.main]\nanchor = \"bottom\"\noutput = \"DP-1\"\nlength = 80.0\n");
-        assert_eq!(cfg.bar.len(), 1);
-        assert_eq!(cfg.bar[0].anchor, "bottom");
-        assert_eq!(cfg.bar[0].output, "DP-1");
-        // Legacy map is consumed, so a re-save writes only [[bar]].
-        assert!(cfg.top.is_empty());
-        let text = toml::to_string_pretty(&cfg).unwrap();
-        assert!(text.contains("[[bar]]"));
-        assert!(!text.contains("[top."));
+    fn saved_lua_config_mentions_bars_without_legacy_top() {
+        let mut config = super::super::Config::default();
+        config.bar.push(TopConfig {
+            anchor: "bottom".into(),
+            output: "DP-1".into(),
+            length: 80.0,
+            ..Default::default()
+        });
+        let text = crate::config::format::to_string(&config).unwrap();
+        assert!(text.contains("bar"));
+        assert!(!text.contains("top"));
     }
 }

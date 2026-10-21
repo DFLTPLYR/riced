@@ -422,7 +422,7 @@ impl Plots {
             // This is native Closed, not CloseRequested. The backend has
             // already detached the renderer; never queue another native close.
             iced::window::close_events().map(|id| Plant::Wayland(LandEvent::Closed(id))),
-            // hot-reload poll for config.toml (mtime check only, cheap)
+            // hot-reload poll for config.lua (mtime check only, cheap)
             iced::time::every(Duration::from_millis(500))
                 .map(|_| Plant::Config(ConfigEvent::ConfigTick)),
             // file IPC poll for CLI requests (`riced open-settings`)
@@ -1125,7 +1125,7 @@ impl Plots {
                 // (in-memory) config and redraw All so every subscribed view
                 // previews the value next frame. The disk write is staged,
                 // not per-tick: slider drags fire dozens of patches a second
-                // and must not rewrite config.toml each time. `SaveTimer`
+                // and must not rewrite config.lua each time. `SaveTimer`
                 // persists once idle; panel close flushes synchronously.
                 // Image add/remove re-syncs the pre-decoded wallpaper cache;
                 // move/scale/z reuse the same pixels.

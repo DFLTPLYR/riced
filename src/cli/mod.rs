@@ -30,14 +30,14 @@ pub enum Commands {
     GenerateTheme {
         /// Scheme variant: content, tonalspot, monochrome, neutral,
         /// vibrant, expressive, fidelity, rainbow, fruitsalad.
-        /// Defaults to `[theme] variant` from config.toml.
+        /// Defaults to `[theme] variant` from config.lua.
         #[arg(long)]
         variant: Option<String>,
         /// Also select the new theme (`[theme] name = "dynamic"`) so the
         /// running daemon hot-reloads to it.
         #[arg(long)]
         set: bool,
-        /// Render a `[templates]` dir (config.toml with input/output paths
+        /// Render a `[templates]` dir (TOML with input/output paths
         /// and hooks, same format as sys) against the generated scheme.
         /// Defaults to the seeded `~/.config/riced/templates/`.
         #[arg(long)]

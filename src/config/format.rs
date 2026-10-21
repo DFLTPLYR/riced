@@ -1,4 +1,7 @@
-//! Human-facing TOML shapes, separate from the shell's resolved layout fields.
+//! Human-facing `config.lua` shapes, separate from the shell's resolved
+//! layout fields. Settings saves use compact slot/geometry values rather
+//! than nested widget tables; both compact and expanded input forms
+//! deserialize identically. Serialization goes through `super::lua`.
 use super::schema::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -6,47 +9,7 @@ use std::collections::BTreeMap;
 /// Settings saves use compact slot/geometry values rather than nested widget
 /// tables. Both compact and expanded input forms deserialize identically.
 pub(super) fn to_string(config: &Config) -> Result<String, String> {
-    let text = toml::to_string_pretty(config).map_err(|error| error.to_string())?;
-    let mut document: toml_edit::DocumentMut = text
-        .parse()
-        .map_err(|error: toml_edit::TomlError| error.to_string())?;
-    if let Some(bars) = document
-        .get_mut("bar")
-        .and_then(toml_edit::Item::as_array_of_tables_mut)
-    {
-        for bar in bars.iter_mut() {
-            for key in ["margin", "radius"] {
-                if let Some(item) = bar.get_mut(key) {
-                    item.make_value();
-                }
-            }
-            if let Some(item) = bar.get_mut("slots") {
-                item.make_value();
-                if let Some(slots) = item.as_array_mut() {
-                    for slot in slots.iter_mut() {
-                        slot.decor_mut().set_prefix("\n    ");
-                    }
-                    slots.set_trailing_comma(true);
-                    slots.set_trailing("\n");
-                }
-            }
-        }
-    }
-    if let Some(images) = document
-        .get_mut("background")
-        .and_then(|background| background.get_mut("images"))
-        .and_then(toml_edit::Item::as_array_of_tables_mut)
-    {
-        for image in images.iter_mut() {
-            if let Some(position) = image
-                .get_mut("position")
-                .and_then(toml_edit::Item::as_array_mut)
-            {
-                position.fmt();
-            }
-        }
-    }
-    Ok(document.to_string())
+    super::lua::to_string(config)
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -54,7 +17,7 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct Bar {
     #[serde(skip_serializing_if = "is_top")]
     anchor: String,
@@ -131,6 +94,9 @@ impl Default for Slot {
     }
 }
 
+/// A bare `margin = 8` expands to uniform sides; tables deserialize
+/// sparsely and serialize back sparsely (flat legacy keys are grouped
+/// strictly by `format_migration` before serde runs).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Margin {
@@ -138,7 +104,7 @@ enum Margin {
     Sides(Sides),
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
 struct Sides {
     #[serde(skip_serializing_if = "is_default")]
     top: i32,
@@ -157,7 +123,7 @@ enum Radius {
     Corners(Corners),
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
 struct Corners {
     #[serde(skip_serializing_if = "is_default")]
     top_left: f32,
@@ -413,7 +379,7 @@ enum ThemeMode {
     Light,
 }
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct Theme {
     name: String,
     #[serde(deserialize_with = "icon_theme_name")]
@@ -477,61 +443,35 @@ impl From<ThemeConfig> for Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_format_config as save;
+    use crate::config::test_parse_config as parse;
 
     #[test]
     fn icon_theme_selection_defaults_patches_and_roundtrips() {
-        let mut config: Config = toml::from_str("").unwrap();
+        let mut config: Config = parse("return {}").unwrap();
         assert_eq!(config.theme.icon_theme, "hicolor");
         config.apply(ConfigPatch::IconTheme("Papirus-Dark".into()));
         let saved = to_string(&config).unwrap();
-        assert!(saved.contains("icon-theme = \"Papirus-Dark\""));
-        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert!(saved.contains("icon_theme = \"Papirus-Dark\""));
+        let reloaded: Config = parse(&saved).unwrap();
         assert_eq!(reloaded.theme.icon_theme, "Papirus-Dark");
-        for name in ["", "..", "../Papirus", "/tmp/icons", "some\\theme"] {
-            let source = format!("[theme]\nicon-theme = '{name}'");
-            assert!(
-                toml::from_str::<Config>(&source).is_err(),
-                "accepted {source}"
-            );
+        for name in ["", "..", "../Papirus", "/tmp/icons", r"some\theme"] {
+            let escaped = name.replace('\\', "\\\\");
+            let source = format!("return {{ theme = {{ icon_theme = '{escaped}' }} }}");
+            assert!(parse(&source).is_err(), "accepted {source}");
         }
     }
 
     #[test]
-    fn inline_and_expanded_slots_have_identical_layout_and_saved_form() {
-        let inline: Config = toml::from_str(
-            r#"
-            [[bar]]
-            output = "DP-1"
-            slots = [
-                { align = "start", widgets = ["clock", { name = "stats", size = 17 }] },
-                { align = "end", widgets = [] },
-            ]
-        "#,
-        )
-        .unwrap();
-        let expanded: Config = toml::from_str(
-            r#"
-            [[bar]]
-            output = "DP-1"
-            [[bar.slots]]
-            align = "start"
-            widgets = ["clock", { name = "stats", size = 17 }]
-            [[bar.slots]]
-            align = "end"
-            widgets = []
-        "#,
-        )
-        .unwrap();
-        assert_eq!(inline.bar[0].slots, 2);
-        assert_eq!(inline.bar[0].aligns, ["start", "end"]);
+    fn identical_slot_layouts_share_saved_form_and_omit_defaults() {
+        let source = "return { bar = { { output = 'DP-1', slots = { { align = 'start', widgets = { 'clock', { name = 'stats', size = 17 } } }, { align = 'end', widgets = {} } } } } }";
+        let config: Config = parse(source).unwrap();
+        assert_eq!(config.bar[0].slots, 2);
+        assert_eq!(config.bar[0].aligns, ["start", "end"]);
+        let saved = save(&config).unwrap();
+        let reloaded: Config = parse(&saved).unwrap();
         assert_eq!(
-            serde_json::to_value(&inline).unwrap(),
-            serde_json::to_value(&expanded).unwrap()
-        );
-        let saved = to_string(&inline).unwrap();
-        let reloaded: Config = toml::from_str(&saved).unwrap();
-        assert_eq!(
-            serde_json::to_value(&inline).unwrap(),
+            serde_json::to_value(&config).unwrap(),
             serde_json::to_value(&reloaded).unwrap()
         );
         assert!(
@@ -541,20 +481,13 @@ mod tests {
         assert!(!saved.contains("interval ="));
         assert!(!saved.contains("floating ="));
         assert!(!saved.contains("margin"));
-        assert!(!saved.contains("[[bar.slots"));
+        assert!(saved.contains("slots = {"));
     }
 
     #[test]
     fn grouped_and_uniform_geometry_roundtrip_without_swapping_corners() {
-        let config: Config = toml::from_str(
-            r#"
-            [[bar]]
-            margin = { top = -2, right = 3, bottom = 4, left = 5 }
-            radius = { top-left = 1, top-right = 2, bottom-left = 3, bottom-right = 4 }
-            [[bar]]
-            margin = 8
-            radius = 10
-        "#,
+        let config: Config = parse(
+            "return { bar = { { margin = { top = -2, right = 3, bottom = 4, left = 5 }, radius = { top_left = 1, top_right = 2, bottom_left = 3, bottom_right = 4 } }, { margin = 8, radius = 10 } } }",
         )
         .unwrap();
         let bar = &config.bar[0];
@@ -576,10 +509,10 @@ mod tests {
             ],
             [1.0, 2.0, 3.0, 4.0]
         );
-        let saved = to_string(&config).unwrap();
+        let saved = save(&config).unwrap();
         assert!(saved.contains("margin = 8"));
         assert!(saved.contains("radius = 10"));
-        let reloaded: Config = toml::from_str(&saved).unwrap();
+        let reloaded: Config = parse(&saved).unwrap();
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
             serde_json::to_value(&reloaded).unwrap()
@@ -588,25 +521,8 @@ mod tests {
 
     #[test]
     fn keyed_wallpapers_keep_both_recipes_and_native_image_defaults() {
-        let config: Config = toml::from_str(
-            r#"
-            [background]
-            mode = "per-monitor"
-            [background.monitors.DP-2]
-            path = "portrait.png"
-            fit = "stretch"
-            [background.monitors.DP-1]
-            path = "landscape.png"
-            [[background.images]]
-            path = "free-form.png"
-            position = [-291.53717, -132.1731]
-            z = 1
-            [theme]
-            mode = "light"
-            templates-dir = "off"
-            [notification]
-            timeout-ms = 9000
-        "#,
+        let config: Config = parse(
+            "return { background = { mode = 'per_monitor', monitors = { ['DP-2'] = { path = 'portrait.png', fit = 'stretch' }, ['DP-1'] = { path = 'landscape.png' } }, images = { { path = 'free-form.png', position = { -291.53717, -132.1731 }, z = 1 } } }, theme = { mode = 'light', templates_dir = 'off' }, notifications = { timeout_ms = 9000 } }",
         )
         .unwrap();
         assert_eq!(config.background.monitor[0].output, "DP-1");
@@ -614,25 +530,24 @@ mod tests {
         assert_eq!(config.background.image[0].width, 0.0);
         assert!(!config.theme.darkmode);
         assert_eq!(config.notifications.timeout_ms, 9000);
-        let saved = to_string(&config).unwrap();
+        let saved = save(&config).unwrap();
         assert!(!saved.contains("width ="));
         assert!(!saved.contains("scale ="));
-        let reloaded: Config = toml::from_str(&saved).unwrap();
+        let reloaded: Config = parse(&saved).unwrap();
         assert_eq!(reloaded.background, config.background);
     }
 
     #[test]
     fn malformed_structured_fields_fail_instead_of_being_ignored() {
         for source in [
-            "[[bar]]\nmargin = { sideways = 8 }",
-            "[[bar]]\nradius = { top_left = 8 }",
-            "[[bar]]\nslots = [{ align = 'start', widgets = 4 }]",
-            "[[background.images]]\nposition = [1, 2, 3]",
-            "[background.monitors.DP-1]\nfit = 'squish'",
-            "[theme]\nmode = 'bright'",
+            "return { bar = { { margin = { sideways = 8 } } } }",
+            "return { bar = { { slots = { { align = 'start', widgets = 4 } } } } } }",
+            "return { background = { images = { { position = { 1, 2, 3 } } } } }",
+            "return { background = { monitors = { ['DP-1'] = { fit = 'squish' } } } } }",
+            "return { theme = { mode = 'bright' } }",
         ] {
             assert!(
-                toml::from_str::<Config>(source).is_err(),
+                crate::config::lua::parse::<Config>(source, "test").is_err(),
                 "accepted {source}"
             );
         }
