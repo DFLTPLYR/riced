@@ -31,8 +31,14 @@ fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua
             "view",
             mlua::MultiValue::from_vec(vec![Value::Table(props)]),
         )?;
-        parse_node(&node).map_err(mlua::Error::RuntimeError)?;
-        Ok(node)
+        let hover = lua
+            .app_data_ref::<crate::ui::hover::HoverSet>()
+            .map(|hover| hover.clone())
+            .unwrap_or_default();
+        let decoded = parse_node_hovered(&node, &hover).map_err(mlua::Error::RuntimeError)?;
+        // Export resolved descriptions: user delegates and callback captures
+        // must run once, not again when the parent validates its subtree.
+        crate::ui::encode::to_table(lua, &decoded).map(Value::Table)
     })();
     app.raw_set("props", Value::Nil)?;
     result
@@ -97,13 +103,24 @@ impl LuaRuntime {
         super::library::install(&lua, profile, components)?;
         let api = lua.create_table()?;
         lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
+        lua.set_named_registry_value("riced.component_sources", lua.create_table()?)?;
         api.set(
             "component",
             lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
                 let path = composable::source_path(&src);
                 let modules: Table = lua.named_registry_value("riced.component_modules")?;
                 let cached: Option<Table> = modules.get(src.as_str())?;
-                let source = std::fs::read_to_string(&path).map_err(mlua::Error::external);
+                // Snapshot each source once per host entry. Repeated cards see
+                // the same source, while the next entry still observes edits.
+                let sources: Table = lua.named_registry_value("riced.component_sources")?;
+                let source = (|| -> mlua::Result<String> {
+                    if let Some(source) = sources.raw_get::<Option<String>>(src.as_str())? {
+                        return Ok(source);
+                    }
+                    let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
+                    sources.raw_set(src.as_str(), source.as_str())?;
+                    Ok(source)
+                })();
                 let attempt = (|| -> mlua::Result<(Table, Value, String)> {
                     let source = source?;
                     let app: Table = if let Some(cached) = &cached
@@ -166,12 +183,19 @@ impl LuaRuntime {
 
     fn begin(&self) -> mlua::Result<()> {
         self.lua.expire_registry_values();
+        self.lua.remove_app_data::<crate::ui::hover::HoverSet>();
+        self.lua
+            .set_named_registry_value("riced.component_sources", self.lua.create_table()?)?;
         sandbox::reset_budget(&self.lua)?;
         self.lua
             .set_named_registry_value("riced.effects", self.lua.create_table()?)
     }
 
     fn finish<T>(&mut self, entry: &str, result: mlua::Result<T>) -> mlua::Result<T> {
+        // Entry-local props must not keep opaque resources alive when either
+        // the Lua view or Rust decoder fails. Preserve the original failure.
+        let cleanup = self.clear_entry_props();
+        let result = result.and_then(|value| cleanup.map(|()| value));
         match result {
             Ok(value) => {
                 self.last_error = None;
@@ -182,6 +206,21 @@ impl LuaRuntime {
                 Err(error)
             }
         }
+    }
+
+    fn clear_entry_props(&self) -> mlua::Result<()> {
+        self.lua.remove_app_data::<crate::ui::hover::HoverSet>();
+        if let Some(key) = &self.app {
+            self.lua
+                .registry_value::<Table>(key)?
+                .raw_set("props", Value::Nil)?;
+        }
+        let modules: Table = self.lua.named_registry_value("riced.component_modules")?;
+        for module in modules.pairs::<Value, Table>() {
+            let (_, module) = module?;
+            module.get::<Table>("app")?.raw_set("props", Value::Nil)?;
+        }
+        Ok(())
     }
 
     /// Evaluate a candidate in its own environment before replacing the
@@ -304,6 +343,7 @@ impl LuaRuntime {
     ) -> mlua::Result<Node> {
         let result = (|| {
             self.begin()?;
+            self.lua.set_app_data(hover.clone());
             crate::services::publish_all(services, &self.lua)?;
             crate::services::publish_bar(&self.lua, output)?;
             let app: Table = self.lua.registry_value(
@@ -325,13 +365,7 @@ impl LuaRuntime {
                 mlua::MultiValue::from_vec(vec![Value::Table(props)]),
             )?;
             let node = parse_node_hovered(&value, hover).map_err(mlua::Error::RuntimeError)?;
-            // Child module props are entry-local. In particular an empty list
-            // must not retain the last card's opaque image token in its module.
-            let modules: Table = self.lua.named_registry_value("riced.component_modules")?;
-            for module in modules.pairs::<Value, Table>() {
-                let (_, module) = module?;
-                module.get::<Table>("app")?.set("props", Value::Nil)?;
-            }
+            self.clear_entry_props()?;
             self.lua.gc_collect()?;
             Ok(node)
         })();
@@ -421,7 +455,8 @@ impl LuaRuntime {
             Ok((node, resolved))
         })();
         // The chrome host deduplicates errors across animation ticks.
-        result
+        let cleanup = self.clear_entry_props();
+        result.and_then(|value| cleanup.map(|()| value))
     }
 
     pub(crate) fn publish_theme(&self, theme: &crate::config::ThemeConfig) -> mlua::Result<()> {
@@ -457,6 +492,121 @@ impl LuaRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_list_delegates_run_once_and_keep_host_hover() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("riced-once-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let child = root.join("list.lua");
+        std::fs::write(&child, "return {calls=0, view=function(self) return iced.listview({{id='a'}}):id('inner'):key('id'):delegate(function(item) self.calls=self.calls+1; return iced.text((item.hovered and 'hot:' or 'cold:') .. self.calls) end) end}").unwrap();
+        let mut runtime = LuaRuntime::new().unwrap();
+        runtime
+            .load(&format!(
+                "return {{view=function() return riced.component({:?}) end}}",
+                child.to_string_lossy()
+            ))
+            .unwrap();
+        runtime.lua.set_app_data(crate::ui::hover::HoverSet::from([(
+            "inner".into(),
+            "a".into(),
+        )]));
+        // Match scene_view's entry setup without requiring live services.
+        let app: Table = runtime
+            .lua
+            .registry_value(runtime.app.as_ref().unwrap())
+            .unwrap();
+        let value = super::super::entry::invoke(&runtime.lua, app, "view", mlua::MultiValue::new())
+            .unwrap();
+        let hover = crate::ui::hover::HoverSet::from([("inner".into(), "a".into())]);
+        let node = parse_node_hovered(&value, &hover).unwrap();
+        let Node::ListView { items, .. } = node else {
+            panic!("list")
+        };
+        assert!(matches!(&items[0].1, Node::Text {content, ..} if content == "hot:1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_views_clear_entry_props_and_preserve_original_errors() {
+        use super::*;
+        let mut runtime = LuaRuntime::new().unwrap();
+        let retained = runtime.lua.create_table().unwrap();
+        retained
+            .set("props", runtime.lua.create_table().unwrap())
+            .unwrap();
+        let module = runtime.lua.create_table().unwrap();
+        module.set("app", retained.clone()).unwrap();
+        runtime
+            .lua
+            .named_registry_value::<Table>("riced.component_modules")
+            .unwrap()
+            .set("retained", module)
+            .unwrap();
+        runtime.load("return {view=function(self) self.props={resource='temporary'}; error('original failure') end}").unwrap();
+        assert!(
+            runtime
+                .view(WindowId(1))
+                .unwrap_err()
+                .to_string()
+                .contains("original failure")
+        );
+        let app: Table = runtime
+            .lua
+            .registry_value(runtime.app.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(app.raw_get::<Value>("props").unwrap(), Value::Nil);
+        assert_eq!(retained.raw_get::<Value>("props").unwrap(), Value::Nil);
+    }
+
+    #[test]
+    fn component_sources_are_snapshotted_per_entry_and_reload_between_entries() {
+        use super::*;
+        let root =
+            std::env::temp_dir().join(format!("riced-source-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let child = root.join("card.lua");
+        let source =
+            |label: &str| format!("return {{view=function() return iced.text('{label}') end}}");
+        std::fs::write(&child, source("old")).unwrap();
+        let mut runtime = LuaRuntime::new().unwrap();
+        let rewrite_path = child.clone();
+        runtime
+            .lua
+            .globals()
+            .set(
+                "rewrite",
+                runtime
+                    .lua
+                    .create_function(move |_, ()| {
+                        std::fs::write(
+                            &rewrite_path,
+                            "return {view=function() return iced.text('new') end}",
+                        )
+                        .map_err(mlua::Error::external)
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+        runtime.load(&format!("return {{view=function() local first=riced.component({0:?}); rewrite(); return iced.row({{first,riced.component({0:?})}}) end}}", child.to_string_lossy())).unwrap();
+        let Node::Row { children, .. } = runtime.view(WindowId(1)).unwrap() else {
+            panic!("row")
+        };
+        assert!(
+            children
+                .iter()
+                .all(|node| matches!(node, Node::Text {content, ..} if content == "old"))
+        );
+        let Node::Row { children, .. } = runtime.view(WindowId(2)).unwrap() else {
+            panic!("row")
+        };
+        assert!(
+            children
+                .iter()
+                .all(|node| matches!(node, Node::Text {content, ..} if content == "new"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn control_actions_update_owned_app_state_and_invalidate_cached_views() {
         use crate::ui::action::{Action, ActionValue};
