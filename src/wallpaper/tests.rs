@@ -170,6 +170,7 @@ fn monitor_assignments_are_isolated_persisted_and_restored_by_output_name() {
     );
     let mut request = request(vec![]);
     request.images = BackgroundConfig {
+        shader: None,
         mode: WallpaperMode::PerMonitor,
         image: vec![BackgroundImage {
             path: "/missing/inactive-freeform.png".into(),
@@ -317,6 +318,34 @@ fn legacy_freeform_cache_survives_upgrade_and_cached_monitor_order_is_stable() {
             ["DP-1", "DP-2"]
         );
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn runtime_shader_changes_reuse_cached_tiles_without_original_sources() {
+    let dir = directory("shader-cache");
+    let (image, _) = source(
+        &dir,
+        "source.png",
+        RgbaImage::from_pixel(4, 2, Rgba([20, 30, 40, 255])),
+    );
+    let mut request = request(vec![image.clone()]);
+    let cache = dir.join("cache");
+    let batch = bake(&request, &cache).unwrap();
+    save_manifest(&cache, &request.images, &batch).unwrap();
+    std::fs::remove_file(image.local_path()).unwrap();
+    request.editor = None;
+    request.images.shader = Some(crate::config::WallpaperShader {
+        path: "water".into(),
+        speed: 1.0,
+        params: vec![0.02],
+        animated: true,
+    });
+    let restored = bake(&request, &cache).unwrap();
+    assert_eq!(
+        restored.tiles[&OutputId(1)].path,
+        batch.tiles[&OutputId(1)].path
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

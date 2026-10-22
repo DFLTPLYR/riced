@@ -988,13 +988,14 @@ impl Background {
     /// in the editor or the bake worker, not in every desktop surface.
     fn wallpaper_views(plots: &Plots, output: OutputId) -> Vec<Element<'_, Plant>> {
         match plots.desktop.wallpaper.applied.get(&output) {
-            Some(tile) => vec![
-                Image::new(tile.handle.clone())
+            Some(tile) => vec![match &plots.config.background.shader {
+                Some(effect) => crate::ui::shader::wallpaper(tile.handle.clone(), effect),
+                None => Image::new(tile.handle.clone())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .content_fit(iced::ContentFit::Fill)
                     .into(),
-            ],
+            }],
             None => Vec::new(),
         }
     }

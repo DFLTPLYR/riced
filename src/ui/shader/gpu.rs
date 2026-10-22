@@ -1,6 +1,8 @@
 //! One shared pipeline cache; uniforms belong to individual draws, never files.
 use iced::{
-    Rectangle, wgpu,
+    Rectangle,
+    advanced::image::{Handle, Id},
+    wgpu,
     widget::shader::{self, Viewport},
 };
 use std::{
@@ -29,13 +31,15 @@ pub(super) struct Fragment {
     code: Arc<str>,
     uniforms: Uniforms,
     slot: AtomicUsize,
+    image: Option<Handle>,
 }
 impl Fragment {
-    pub(super) fn new(code: Arc<str>, uniforms: Uniforms) -> Self {
+    pub(super) fn new(code: Arc<str>, uniforms: Uniforms, image: Option<Handle>) -> Self {
         Self {
             code,
             uniforms,
             slot: AtomicUsize::new(usize::MAX),
+            image,
         }
     }
 }
@@ -43,6 +47,11 @@ impl Fragment {
 struct Binding {
     buffer: wgpu::Buffer,
     group: wgpu::BindGroup,
+    image: Option<Id>,
+}
+struct Texture {
+    view: wgpu::TextureView,
+    used: bool,
 }
 struct Entry {
     pipeline: Option<wgpu::RenderPipeline>,
@@ -53,26 +62,53 @@ pub(super) struct Pipeline {
     format: wgpu::TextureFormat,
     layout: wgpu::BindGroupLayout,
     entries: HashMap<Arc<str>, Entry>,
+    textures: HashMap<Option<Id>, Texture>,
+    sampler: wgpu::Sampler,
 }
 impl shader::Pipeline for Pipeline {
     fn new(device: &wgpu::Device, _: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("riced.shader.uniforms"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<Uniforms>() as u64),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<Uniforms>() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         Self {
             format,
             layout,
             entries: HashMap::new(),
+            textures: HashMap::new(),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("riced.shader.image-sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         }
     }
     fn trim(&mut self) {
@@ -84,10 +120,101 @@ impl shader::Pipeline for Pipeline {
             entry.used = 0;
             used > 0
         });
+        self.textures.retain(|_, texture| {
+            let used = texture.used;
+            texture.used = false;
+            used
+        });
     }
 }
 
 impl Pipeline {
+    fn texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<&Handle>,
+    ) -> Option<Id> {
+        let id = image.map(Handle::id);
+        if let Some(texture) = self.textures.get_mut(&id) {
+            texture.used = true;
+            return id;
+        }
+        let (width, height, pixels) = match image {
+            Some(Handle::Rgba {
+                width,
+                height,
+                pixels,
+                ..
+            }) => (*width, *height, pixels.as_ref()),
+            _ => (1, 1, &[255_u8; 4][..]),
+        };
+        // Wallpaper tiles are owned decoded RGBA. Downsample only if an output
+        // exceeds this adapter's texture limit; never decode files in a frame.
+        let maximum = device.limits().max_texture_dimension_2d;
+        let resized = if width > maximum || height > maximum {
+            let scale = maximum as f64 / f64::from(width.max(height));
+            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, pixels).map(|image| {
+                image::imageops::resize(
+                    &image,
+                    (f64::from(width) * scale).max(1.0) as u32,
+                    (f64::from(height) * scale).max(1.0) as u32,
+                    image::imageops::FilterType::Triangle,
+                )
+            })
+        } else {
+            None
+        };
+        let (width, height, pixels) = resized.as_ref().map_or((width, height, pixels), |image| {
+            (image.width(), image.height(), image.as_raw().as_slice())
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("riced.shader.image"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: if iced_renderer::graphics::color::GAMMA_CORRECTION {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            } else {
+                wgpu::TextureFormat::Rgba8Unorm
+            },
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.textures.insert(
+            id,
+            Texture {
+                view: texture.create_view(&Default::default()),
+                used: true,
+            },
+        );
+        id
+    }
+
     fn compile(&self, device: &wgpu::Device, code: &str) -> Option<wgpu::RenderPipeline> {
         // Naga catches source errors before rendering. Device validation still
         // needs an error scope (adapter limits/format support can differ).
@@ -146,7 +273,10 @@ impl shader::Primitive for Fragment {
         _: &Viewport,
     ) {
         if !pipeline.entries.contains_key(&self.code) {
-            let compiled = pipeline.compile(device, &self.code);
+            let compiled = pipeline.compile(device, &self.code).or_else(|| {
+                self.image.as_ref()?;
+                pipeline.compile(device, super::passthrough_code().as_ref())
+            });
             pipeline.entries.insert(
                 self.code.clone(),
                 Entry {
@@ -156,6 +286,7 @@ impl shader::Primitive for Fragment {
                 },
             );
         }
+        let image = pipeline.texture(device, queue, self.image.as_ref());
         let Some(entry) = pipeline.entries.get_mut(&self.code) else {
             return;
         };
@@ -164,7 +295,7 @@ impl shader::Primitive for Fragment {
         if entry.pipeline.is_none() {
             return;
         }
-        if slot == entry.bindings.len() {
+        if slot == entry.bindings.len() || entry.bindings[slot].image != image {
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("riced.shader.instance"),
                 size: size_of::<Uniforms>() as u64,
@@ -174,12 +305,33 @@ impl shader::Primitive for Fragment {
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("riced.shader.instance"),
                 layout: &pipeline.layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            &pipeline.textures[&image].view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                    },
+                ],
             });
-            entry.bindings.push(Binding { buffer, group });
+            let binding = Binding {
+                buffer,
+                group,
+                image,
+            };
+            if slot == entry.bindings.len() {
+                entry.bindings.push(binding);
+            } else {
+                entry.bindings[slot] = binding;
+            }
         }
         queue.write_buffer(
             &entry.bindings[slot].buffer,

@@ -57,6 +57,151 @@ fn source_reloads_valid_edits_and_preserves_last_good_code_on_errors_or_deletion
 }
 
 #[test]
+fn missing_wallpaper_shader_falls_back_and_recovers_without_weakening_ui_errors() {
+    let path = std::env::temp_dir().join(format!(
+        "riced-wallpaper-recover-{}.wgsl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let source = Source::open_inner(path.clone(), true).unwrap();
+    let now = Instant::now();
+    assert_eq!(source.code(now), passthrough_code());
+    assert!(Source::open(path.clone()).is_err());
+    std::fs::write(
+        &path,
+        "fn shade(uv: vec2<f32>) -> vec4<f32> { return sample_image(vec2<f32>(1.0) - uv); }",
+    )
+    .unwrap();
+    assert_ne!(source.code(now + RELOAD_INTERVAL), passthrough_code());
+    std::fs::remove_file(path).unwrap();
+}
+
+fn wallpaper_effect(path: &Path) -> crate::config::WallpaperShader {
+    crate::config::WallpaperShader {
+        path: path.to_string_lossy().into_owned(),
+        speed: 1.0,
+        params: Vec::new(),
+        animated: true,
+    }
+}
+
+#[test]
+fn software_wallpaper_shader_draws_original_pixels_without_scheduling_frames() {
+    use iced::advanced::{Layout, Shell, renderer::Headless, renderer::Style};
+    let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(13.0),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let image = iced::advanced::image::Handle::from_rgba(1, 1, vec![64, 128, 192, 255]);
+    let effect = wallpaper_effect(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/shaders/water.wgsl"
+    )));
+    let mut content: Element<'static, ()> = wallpaper(image, &effect);
+    let bounds = Rectangle::with_size(Size::new(16.0, 16.0));
+    let mut tree = Tree::new(&content);
+    let node = content.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, bounds.size()),
+    );
+    let mut messages = Vec::new();
+    let mut shell = Shell::new(&mut messages);
+    content.as_widget_mut().update(
+        &mut tree,
+        &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+        Layout::new(&node),
+        mouse::Cursor::Unavailable,
+        &renderer,
+        &mut advanced::clipboard::Null,
+        &mut shell,
+        &bounds,
+    );
+    assert_eq!(shell.redraw_request(), iced::window::RedrawRequest::Wait);
+    assert!(!shell.is_event_captured());
+    advanced::Renderer::reset(&mut renderer, bounds);
+    content.as_widget().draw(
+        &tree,
+        &mut renderer,
+        &iced::Theme::Dark,
+        &Style::default(),
+        Layout::new(&node),
+        mouse::Cursor::Unavailable,
+        &bounds,
+    );
+    let pixels = renderer.screenshot(Size::new(16, 16), 1.0, iced::Color::TRANSPARENT);
+    assert_eq!(
+        &pixels[(8 * 16 + 8) * 4..(8 * 16 + 8) * 4 + 4],
+        [64, 128, 192, 255]
+    );
+}
+
+#[test]
+#[ignore = "requires a working wgpu adapter; run explicitly for shader rendering changes"]
+fn gpu_wallpaper_shaders_sample_distort_and_isolate_output_textures() {
+    use iced::advanced::{Layout, renderer::Headless, renderer::Style};
+    let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(13.0),
+        Some("wgpu"),
+    ))
+    .expect("wgpu adapter");
+    let path =
+        std::env::temp_dir().join(format!("riced-wallpaper-gpu-{}.wgsl", std::process::id()));
+    // Flip horizontally to prove this samples the source rather than drawing
+    // procedural colors or simply overlaying the unchanged original image.
+    std::fs::write(&path, "fn shade(uv: vec2<f32>) -> vec4<f32> { return sample_image(vec2<f32>(1.0 - uv.x, uv.y)); }").unwrap();
+    let effect = wallpaper_effect(&path);
+    let sources = [
+        iced::advanced::image::Handle::from_rgba(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]),
+        iced::advanced::image::Handle::from_rgba(2, 1, vec![0, 0, 255, 255, 255, 255, 0, 255]),
+        iced::advanced::image::Handle::from_rgba(1, 1, vec![64, 128, 192, 255]),
+    ];
+    // Reverse draw slots on the second frame: a cached binding must follow the
+    // image ID, not the shader path or draw index from a previous frame.
+    for order in [[0, 1, 2], [2, 1, 0]] {
+        let bounds = Rectangle::with_size(Size::new(96.0, 16.0));
+        advanced::Renderer::reset(&mut renderer, bounds);
+        let mut keep_trees = Vec::new();
+        for (slot, index) in order.into_iter().enumerate() {
+            let mut content: Element<'static, ()> = wallpaper(sources[index].clone(), &effect);
+            let mut tree = Tree::new(&content);
+            let node = content
+                .as_widget_mut()
+                .layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, Size::new(32.0, 16.0)),
+                )
+                .move_to(iced::Point::new(slot as f32 * 32.0, 0.0));
+            content.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &Style::default(),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &bounds,
+            );
+            keep_trees.push(tree);
+        }
+        let pixels = renderer.screenshot(Size::new(96, 16), 1.0, iced::Color::TRANSPARENT);
+        for (slot, index) in order.into_iter().enumerate() {
+            let offset = (8 * 96 + slot * 32 + 2) * 4;
+            let expected = match index {
+                0 => [0, 255, 0, 255],
+                1 => [255, 255, 0, 255],
+                _ => [64, 128, 192, 255],
+            };
+            assert_eq!(&pixels[offset..offset + 4], expected);
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn shader_descriptions_reject_bad_parameters_and_unknown_fields_before_realization() {
     let lua = mlua::Lua::new();
     crate::ui::dsl::inject_ui_base(&lua).unwrap();

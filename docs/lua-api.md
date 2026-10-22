@@ -333,8 +333,52 @@ uses a slower reload cadence (use this for the bundled static gradient).
 `params` must be a dense array of at most 16 finite numbers. Pass theme colors
 as numeric parameters when needed; the shader does not implicitly read Lua or
 the theme. Unknown properties, invalid numbers, wrong signatures, additional
-entry points, and extra resource bindings are errors. Textures and multi-pass
-effects are not part of this fragment contract.
+entry points, and extra resource bindings are errors. `sample_image(uv)` samples
+the host-provided image in the renderer's color space with clamp-to-edge filtering;
+`image_size()` returns its texture dimensions. Procedural `iced.shader` widgets
+receive a white 1×1 texture. User-defined textures and multi-pass effects are
+not part of this fragment contract.
+
+#### Wallpaper image effects
+
+The optional `background.shader` in `config.lua` post-processes the **baked
+wallpaper image for each output**, below desktop widgets, selections and menus.
+It does not capture or distort application windows or those overlays.
+
+```lua
+return {
+    background = {
+        -- Keep your existing images or per-monitor assignments here.
+        shader = "/shaders/water.wgsl",
+    },
+}
+```
+
+The expanded form accepts the same timing and parameter controls as UI shaders:
+
+```lua
+shader = {
+    path = "/shaders/water.wgsl",
+    speed = 0.5,
+    params = {0.015, 2.0},
+    animated = true,
+}
+```
+
+`speed` defaults to `1`, `animated` to `true`, and `params` to an empty array.
+Omit `shader` to disable the effect. Paths use the same rules as `iced.shader`.
+The seeded `water.wgsl` distorts the actual wallpaper texture, including a
+cursor-centered ripple. Each output has independent texture and local mouse
+coordinates, while time is shared. Rendering never reruns Lua or rebakes pixels
+per frame. Texture uploads are reused by image identity and released when idle;
+textures larger than the GPU's dimension limit are downsampled to fit.
+
+Missing or invalid initial shader sources display the original wallpaper and
+recover when repaired. Invalid edits retain the last valid shader. On software
+rendering, the original wallpaper is drawn without animated redraws. Shader
+effects are runtime-only: saved wallpaper tiles, theme extraction and editor
+image previews remain unmodified. This is whole-wallpaper processing, **not
+per-image-layer shading**; image layers are still flattened during baking.
 
 Visible animated shaders request their own window's next redraw about every
 16 ms. Static shaders check about every 500 ms. These redraws do not re-run Lua

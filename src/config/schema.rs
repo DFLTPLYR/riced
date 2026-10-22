@@ -574,9 +574,20 @@ pub enum SlotWidgets {
 #[serde(from = "super::format::Background", into = "super::format::Background")]
 pub struct BackgroundConfig {
     pub mode: WallpaperMode,
+    /// Optional post-processing of the baked wallpaper, below desktop widgets.
+    pub shader: Option<WallpaperShader>,
     pub monitor: Vec<MonitorWallpaper>,
     #[serde(default)]
     pub image: Vec<BackgroundImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "super::format::Shader", into = "super::format::Shader")]
+pub struct WallpaperShader {
+    pub path: String,
+    pub speed: f32,
+    pub params: Vec<f32>,
+    pub animated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

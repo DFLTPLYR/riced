@@ -259,6 +259,8 @@ impl From<TopConfig> for Bar {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Background {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shader: Option<WallpaperShader>,
     #[serde(skip_serializing_if = "is_default")]
     mode: WallpaperMode,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -276,6 +278,7 @@ struct Wallpaper {
 impl From<Background> for BackgroundConfig {
     fn from(value: Background) -> Self {
         Self {
+            shader: value.shader,
             mode: value.mode,
             image: value.images,
             monitor: value
@@ -293,6 +296,7 @@ impl From<Background> for BackgroundConfig {
 impl From<BackgroundConfig> for Background {
     fn from(value: BackgroundConfig) -> Self {
         Self {
+            shader: value.shader,
             mode: value.mode,
             images: value.image,
             monitors: value
@@ -308,6 +312,84 @@ impl From<BackgroundConfig> for Background {
                     )
                 })
                 .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum Shader {
+    Path(String),
+    Options(ShaderOptions),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ShaderOptions {
+    path: String,
+    #[serde(default = "shader_speed", skip_serializing_if = "is_one")]
+    speed: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    params: Vec<f32>,
+    #[serde(
+        default = "shader_animated",
+        skip_serializing_if = "shader_is_animated"
+    )]
+    animated: bool,
+}
+
+fn shader_speed() -> f32 {
+    1.0
+}
+fn shader_animated() -> bool {
+    true
+}
+fn shader_is_animated(value: &bool) -> bool {
+    *value
+}
+
+impl TryFrom<Shader> for WallpaperShader {
+    type Error = String;
+
+    fn try_from(value: Shader) -> Result<Self, Self::Error> {
+        let options = match value {
+            Shader::Path(path) => ShaderOptions {
+                path,
+                speed: 1.0,
+                params: Vec::new(),
+                animated: true,
+            },
+            Shader::Options(options) => options,
+        };
+        if options.path.trim().is_empty() {
+            return Err("background.shader needs a non-empty WGSL path".into());
+        }
+        if !options.speed.is_finite()
+            || options.params.len() > 16
+            || options.params.iter().any(|n| !n.is_finite())
+        {
+            return Err("background.shader needs finite speed and at most 16 finite params".into());
+        }
+        Ok(Self {
+            path: options.path,
+            speed: options.speed,
+            params: options.params,
+            animated: options.animated,
+        })
+    }
+}
+
+impl From<WallpaperShader> for Shader {
+    fn from(value: WallpaperShader) -> Self {
+        if value.speed == 1.0 && value.params.is_empty() && value.animated {
+            Self::Path(value.path)
+        } else {
+            Self::Options(ShaderOptions {
+                path: value.path,
+                speed: value.speed,
+                params: value.params,
+                animated: value.animated,
+            })
         }
     }
 }
@@ -535,6 +617,47 @@ mod tests {
         assert!(!saved.contains("scale ="));
         let reloaded: Config = parse(&saved).unwrap();
         assert_eq!(reloaded.background, config.background);
+    }
+
+    #[test]
+    fn wallpaper_shaders_accept_shorthand_and_options_and_roundtrip() {
+        for shader in [
+            "'/shaders/water.wgsl'",
+            "{path='water',speed=-0.5,params={0.01,2},animated=false}",
+        ] {
+            let config: Config =
+                parse(&format!("return {{background={{shader={shader}}}}}")).unwrap();
+            let saved = save(&config).unwrap();
+            let restored: Config = parse(&saved).unwrap();
+            assert_eq!(restored.background, config.background);
+        }
+        let config: Config = parse("return {background={shader='water'}}").unwrap();
+        let effect = config.background.shader.unwrap();
+        assert_eq!(effect.speed, 1.0);
+        assert!(effect.animated && effect.params.is_empty());
+        let default_config = Config::default();
+        assert!(!save(&default_config).unwrap().contains("shader ="));
+    }
+
+    #[test]
+    fn wallpaper_shader_options_reject_invalid_values() {
+        for shader in [
+            "42",
+            "true",
+            "''",
+            "{}",
+            "{path='water',typo=1}",
+            "{path='water',speed=0/0}",
+            "{path='water',params={1/0}}",
+            "{path='water',params={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}}",
+            "{path='water',params={x=1}}",
+            "{path='water',animated=1}",
+        ] {
+            assert!(
+                parse(&format!("return {{background={{shader={shader}}}}}")).is_err(),
+                "{shader}"
+            );
+        }
     }
 
     #[test]

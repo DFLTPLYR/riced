@@ -259,8 +259,10 @@ fn decode_recipe<'de, D: serde::Deserializer<'de>>(
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Recipe {
-        Current(BackgroundConfig),
+        // Try arrays first: serde also accepts positional struct sequences,
+        // and a legacy one-image array can resemble optional shader options.
         Legacy(Vec<BackgroundImage>),
+        Current(BackgroundConfig),
     }
     Ok(match Recipe::deserialize(deserializer)? {
         Recipe::Current(recipe) => recipe,
@@ -280,7 +282,11 @@ fn load_cached(
         serde_json::from_slice(&std::fs::read(dir.join("applied.json")).ok()?).ok()?;
     if !matches!(manifest.version, 1..=3)
         || (images.mode == WallpaperMode::PerMonitor && manifest.version != 3)
-        || manifest.images != *images
+        // Runtime effects do not change baked pixels. A user can add an
+        // effect even when only the lossless cached tile remains on disk.
+        || manifest.images.mode != images.mode
+        || manifest.images.image != images.image
+        || manifest.images.monitor != images.monitor
     {
         return None;
     }
@@ -352,7 +358,9 @@ pub(crate) fn bake(request: &Request, dir: &Path) -> Result<Batch, String> {
     let sources = raster::load_sources(&active, request.sources.clone())?;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     3_u32.hash(&mut hash);
-    serde_json::to_vec(&request.images)
+    let mut pixel_recipe = request.images.clone();
+    pixel_recipe.shader = None;
+    serde_json::to_vec(&pixel_recipe)
         .map_err(|error| error.to_string())?
         .hash(&mut hash);
     for (_, spec) in &request.outputs {

@@ -9,6 +9,18 @@ struct Riced {
     _uv_rect: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> riced: Riced;
+@group(0) @binding(1) var riced_image: texture_2d<f32>;
+@group(0) @binding(2) var riced_sampler: sampler;
+
+// Wallpaper fragments sample the original baked output. Ordinary procedural
+// widgets receive a white 1x1 texture, keeping one resource layout for both.
+fn sample_image(uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(riced_image, riced_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0);
+}
+
+fn image_size() -> vec2<f32> {
+    return vec2<f32>(textureDimensions(riced_image));
+}
 
 struct Vertex {
     @builtin(position) position: vec4<f32>,

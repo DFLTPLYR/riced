@@ -20,9 +20,16 @@ use std::{
 };
 
 const PRELUDE: &str = include_str!("shader/prelude.wgsl");
+const PASSTHROUGH: &str = "fn shade(uv: vec2<f32>) -> vec4<f32> { return sample_image(uv); }";
+
+fn passthrough_code() -> Arc<str> {
+    static CODE: LazyLock<Arc<str>> = LazyLock::new(|| format!("{PRELUDE}\n{PASSTHROUGH}").into());
+    CODE.clone()
+}
 const RELOAD_INTERVAL: Duration = Duration::from_millis(500);
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
-static SOURCES: LazyLock<Mutex<HashMap<PathBuf, Weak<Asset>>>> = LazyLock::new(Mutex::default);
+type SourceKey = (PathBuf, bool);
+static SOURCES: LazyLock<Mutex<HashMap<SourceKey, Weak<Asset>>>> = LazyLock::new(Mutex::default);
 
 #[derive(Debug)]
 struct Asset {
@@ -51,11 +58,23 @@ impl Source {
     }
 
     fn open(path: PathBuf) -> Result<Self, String> {
+        Self::open_inner(path, false)
+    }
+
+    fn open_inner(path: PathBuf, fallback: bool) -> Result<Self, String> {
         let mut sources = SOURCES.lock().map_err(|error| error.to_string())?;
-        if let Some(asset) = sources.get(&path).and_then(Weak::upgrade) {
+        let key = (path.clone(), fallback);
+        if let Some(asset) = sources.get(&key).and_then(Weak::upgrade) {
             return Ok(Self(asset));
         }
-        let code = read(&path)?;
+        let code = match read(&path) {
+            Ok(code) => code,
+            Err(error) if fallback => {
+                tracing::warn!("{error}; displaying the original wallpaper");
+                passthrough_code()
+            }
+            Err(error) => return Err(error),
+        };
         let asset = Arc::new(Asset {
             state: Mutex::new(AssetState {
                 checked: Instant::now(),
@@ -65,7 +84,7 @@ impl Source {
             path: path.clone(),
         });
         sources.retain(|_, asset| asset.strong_count() > 0);
-        sources.insert(path, Arc::downgrade(&asset));
+        sources.insert(key, Arc::downgrade(&asset));
         Ok(Self(asset))
     }
 
@@ -112,7 +131,7 @@ fn validate(fragment: &str) -> Result<Arc<str>, String> {
         .iter()
         .filter(|(_, var)| var.binding.is_some())
         .count()
-        != 1
+        != 3
         || module.entry_points.len() != 2
     {
         return Err("provide only fn shade(uv: vec2<f32>) -> vec4<f32>; extra bindings and entry points are unsupported".into());
@@ -310,6 +329,57 @@ pub(crate) fn element<M: 'static>(
         width,
         height,
         opacity,
+        image: None,
+    })
+}
+
+/// Sample a baked wallpaper tile without capturing desktop widgets or menus.
+pub(crate) fn wallpaper<M: 'static>(
+    image: iced::advanced::image::Handle,
+    effect: &crate::config::WallpaperShader,
+) -> Element<'static, M> {
+    let fallback = || {
+        iced::widget::Image::new(image.clone())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(iced::ContentFit::Fill)
+            .into()
+    };
+    if !matches!(&image, iced::advanced::image::Handle::Rgba {width, height, pixels, ..}
+        if *width > 0 && *height > 0
+            && u64::from(*width).checked_mul(u64::from(*height))
+                .and_then(|pixels| pixels.checked_mul(4)) == Some(pixels.len() as u64))
+    {
+        return fallback();
+    }
+    let path = match resolve_in(&crate::config::shaders_dir(), &effect.path) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!("{error}; displaying the original wallpaper");
+            return fallback();
+        }
+    };
+    let source = match Source::open_inner(path, true) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!("{error}; displaying the original wallpaper");
+            return fallback();
+        }
+    };
+    let mut packed = [[0.0; 4]; 4];
+    for (index, value) in effect.params.iter().take(16).enumerate() {
+        packed[index / 4][index % 4] = *value;
+    }
+    LazyLock::force(&EPOCH);
+    Element::new(Shader {
+        source,
+        speed: effect.speed,
+        params: packed,
+        animated: effect.animated,
+        width: Length::Fill,
+        height: Length::Fill,
+        opacity: 1.0,
+        image: Some(image),
     })
 }
 
@@ -321,8 +391,20 @@ struct Shader {
     width: Length,
     height: Length,
     opacity: f32,
+    image: Option<iced::advanced::image::Handle>,
 }
 impl<M> Widget<M, iced::Theme, iced::Renderer> for Shader {
+    fn tag(&self) -> advanced::widget::tree::Tag {
+        advanced::widget::tree::Tag::of::<Source>()
+    }
+    fn state(&self) -> advanced::widget::tree::State {
+        // Keep the weak source cache alive across view reconstruction, even
+        // for wallpaper effects that have no Lua-owned intermediate tree.
+        advanced::widget::tree::State::new(self.source.clone())
+    }
+    fn diff(&self, tree: &mut Tree) {
+        *tree.state.downcast_mut::<Source>() = self.source.clone();
+    }
     fn size(&self) -> Size<Length> {
         Size::new(self.width, self.height)
     }
@@ -352,7 +434,9 @@ impl<M> Widget<M, iced::Theme, iced::Renderer> for Shader {
             return;
         }
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
-            let interval = if self.animated && self.speed != 0.0 {
+            let fallback =
+                self.image.is_some() && Arc::ptr_eq(&self.source.code(*now), &passthrough_code());
+            let interval = if self.animated && self.speed != 0.0 && !fallback {
                 Duration::from_millis(16)
             } else {
                 RELOAD_INTERVAL
@@ -382,6 +466,15 @@ impl<M> Widget<M, iced::Theme, iced::Renderer> for Shader {
         };
         // iced's software fallback logs per primitive per frame; skip it explicitly.
         if !matches!(renderer, iced_renderer::fallback::Renderer::Primary(_)) {
+            if let Some(image) = &self.image {
+                use advanced::image::Renderer as _;
+                renderer.draw_image(
+                    advanced::image::Image::new(image.clone()).opacity(self.opacity),
+                    bounds,
+                    clip,
+                );
+                return;
+            }
             static WARN: std::sync::Once = std::sync::Once::new();
             WARN.call_once(|| {
                 tracing::warn!(
@@ -412,7 +505,7 @@ impl<M> Widget<M, iced::Theme, iced::Renderer> for Shader {
                 clip.height / bounds.height,
             ],
         };
-        let primitive = gpu::Fragment::new(self.source.code(now), uniforms);
+        let primitive = gpu::Fragment::new(self.source.code(now), uniforms, self.image.clone());
         // A clipped viewport must not stretch the fragment's UV coordinates.
         // Keep the parent's layer (starting a new iced layer replaces its clip).
         renderer.draw_primitive(clip, primitive);
