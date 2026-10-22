@@ -944,7 +944,11 @@ impl Background {
         }
         let node = Self::context_menu_node(plots, output, avail);
         let message: crate::ui::action::Sender = std::sync::Arc::new(move |action| {
-            Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action.key))
+            if action.is_animation_frame() {
+                Plant::Tend
+            } else {
+                Plant::BackgroundPlot(BackgroundEvent::ContextMenuAction(output, action.key))
+            }
         });
         let content =
             crate::ui::build::build_node(&node, 12.0, Some(message)).expect("validated menu tree");

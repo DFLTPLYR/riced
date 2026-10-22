@@ -266,6 +266,9 @@ impl LuaRuntime {
     }
 
     pub fn update(&mut self, message: &Message) -> mlua::Result<Vec<Effect>> {
+        if matches!(message, Message::Action(action) if action.is_animation_frame()) {
+            return Ok(Vec::new());
+        }
         let handler = match message {
             Message::LuaEvent { handler, .. } => handler.as_str(),
             Message::Action(_) if self.has_handler("actions") => "actions",
@@ -382,6 +385,9 @@ impl LuaRuntime {
         output: &str,
         action: &crate::ui::action::Action,
     ) -> mlua::Result<Value> {
+        if action.is_animation_frame() {
+            return Ok(Value::Nil);
+        }
         if !self.has_handler("actions") {
             return Ok(Value::Nil);
         }

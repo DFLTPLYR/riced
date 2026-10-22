@@ -4,7 +4,7 @@ use mlua::{Function, Lua, Table, Value};
 
 fn setter(lua: &Lua, field: &str, expected: &'static str) -> mlua::Result<Function> {
     let key = field.to_owned();
-    lua.create_function(move |_, (node, value): (Table, Value)| {
+    lua.create_function(move |lua, (node, value): (Table, Value)| {
         let kind: String = node.get("type")?;
         if kind != expected {
             return Err(mlua::Error::RuntimeError(format!(
@@ -12,6 +12,14 @@ fn setter(lua: &Lua, field: &str, expected: &'static str) -> mlua::Result<Functi
             )));
         }
         let properties: Table = node.raw_get("_properties")?;
+        // Lua cannot store `nil`, but `:on_open()` / `:on_close()` with no
+        // argument must still declare the phase (using the popup's root
+        // `:animate` transition) rather than erasing it.
+        let value = if matches!(key.as_str(), "on_open" | "on_close") && value.is_nil() {
+            Value::Table(lua.create_table()?)
+        } else {
+            value
+        };
         properties.set(key.clone(), value)?;
         Ok(node)
     })
@@ -49,10 +57,16 @@ pub(super) fn node(
         table.raw_set(field, Value::Nil)?;
     }
     table.raw_set("_properties", properties)?;
-    if kind == "listview" {
+    if matches!(kind, "listview" | "popup") {
         table.raw_set(
             "_capture_callback",
             lua.named_registry_value::<Function>("riced.capture_callback")?,
+        )?;
+    }
+    if kind == "popup" {
+        table.raw_set(
+            "_capture_lifecycle",
+            lua.named_registry_value::<Function>("riced.capture_lifecycle")?,
         )?;
     }
     table.set_metatable(Some(mt))?;

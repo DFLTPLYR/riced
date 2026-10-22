@@ -5,6 +5,7 @@ use crate::shell::state::Plots;
 use crate::shell::{Plant, TopEvent, WidgetEvent};
 use crate::ui::decode::parse_node_hovered;
 use crate::ui::node::{NodeLength, WidgetNode};
+use crate::ui::{animations, components::PopupLifecycle};
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_runtime::Action;
@@ -13,6 +14,15 @@ use iced_wayland_subscriber::OutputId;
 pub(crate) use sizing::MeasurementCache;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// In-flight close transition: the popup stays mounted until it finishes.
+#[derive(Debug, Clone)]
+pub(crate) struct Closing {
+    revision: u64,
+    tree: WidgetNode,
+    callback: Option<crate::lua::callbacks::Callback>,
+}
 
 /// QML-`Menu`-style popup for widget placements, backed by a native
 /// `xdg_popup` (`Plant::NewPopUp`): an exactly-sized surface anchored
@@ -49,6 +59,16 @@ pub struct Popup {
     pub sizing_revision: u64,
     pub measured_revision: Option<u64>,
     pub positioner: iced_exwlshell::actions::IcedNewPopupSettings,
+    /// Declared `:on_open(...)` transition/callback, kept across body refreshes.
+    pub on_open: Option<PopupLifecycle>,
+    /// Declared `:on_close(...)` transition/callback.
+    pub on_close: Option<PopupLifecycle>,
+    /// Pending open completion `(revision, callback)`.
+    pub opening: Option<(u64, crate::lua::callbacks::Callback)>,
+    /// Pending close transition, if the body is sliding/fading out.
+    pub closing: Option<Closing>,
+    /// Monotonic phase token, so stale timers cannot complete a new phase.
+    pub phase: u64,
 }
 
 /// A validated popup root and its surface sizing policy. None means no popup.
@@ -57,6 +77,33 @@ pub(crate) struct PopupContent {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub tree: Option<WidgetNode>,
+    pub on_open: Option<PopupLifecycle>,
+    pub on_close: Option<PopupLifecycle>,
+}
+
+fn root_spec(node: &WidgetNode) -> Option<&animations::Spec> {
+    match node {
+        WidgetNode::Animated { spec, .. } => Some(spec),
+        _ => None,
+    }
+}
+
+/// Swap the popup's root transition while preserving its tween identity.
+fn with_root_spec(node: WidgetNode, mut spec: animations::Spec) -> WidgetNode {
+    if let WidgetNode::Animated {
+        child,
+        spec: current,
+    } = node
+    {
+        spec.owner = current.owner;
+        spec.scope = current.scope;
+        WidgetNode::Animated { child, spec }
+    } else {
+        WidgetNode::Animated {
+            child: Box::new(node),
+            spec,
+        }
+    }
 }
 
 impl Popup {
@@ -120,7 +167,14 @@ impl Popup {
         {
             root = child;
         }
-        let WidgetNode::Popup { width, height, .. } = root else {
+        let WidgetNode::Popup {
+            width,
+            height,
+            on_open,
+            on_close,
+            ..
+        } = root
+        else {
             return Err("expected popup root".into());
         };
         fn dimension(length: &NodeLength) -> Option<f32> {
@@ -130,10 +184,14 @@ impl Popup {
                 _ => None,
             }
         }
+        let on_open = on_open.clone();
+        let on_close = on_close.clone();
         Ok(PopupContent {
             width: dimension(width),
             height: dimension(height),
             tree: Some(tree),
+            on_open,
+            on_close,
         })
     }
 
@@ -277,10 +335,18 @@ impl Popup {
         })
     }
 
+    /// Active description: the exit-transition tree while closing.
+    fn display_tree(&self) -> Option<&WidgetNode> {
+        self.closing
+            .as_ref()
+            .map(|closing| &closing.tree)
+            .or(self.tree.as_ref())
+    }
+
     fn body_view(&self, plots: &Plots, intrinsic: bool) -> Element<'static, Plant> {
         use crate::shell::TopEvent;
         let win_id = self.win_id;
-        if let Some(tree) = &self.tree {
+        if let Some(tree) = self.display_tree() {
             let measured;
             let tree = if intrinsic {
                 measured = sizing::intrinsic_size(tree, self.auto_width, self.auto_height);
@@ -367,6 +433,159 @@ impl Popup {
         })
     }
 
+    pub(super) fn phase_timer(
+        id: window::Id,
+        revision: u64,
+        duration: Duration,
+        opened: bool,
+    ) -> Command<Plant> {
+        Command::perform(
+            async move { tokio::time::sleep(duration).await },
+            move |()| {
+                Plant::TopPlot(TopEvent::Widget(if opened {
+                    WidgetEvent::PopupOpened(id, revision)
+                } else {
+                    WidgetEvent::PopupClosed(id, revision)
+                }))
+            },
+        )
+    }
+
+    fn close_spec(&self) -> Option<animations::Spec> {
+        let declared = self.on_close.as_ref()?;
+        let root = self.tree.as_ref().and_then(root_spec);
+        match &declared.animate {
+            Some(spec) => {
+                let mut spec = (**spec).clone();
+                // Reuse the open tween so an interrupted opening retargets
+                // from its current position instead of jumping.
+                if let Some(root) = root {
+                    spec.id.clone_from(&root.id);
+                    spec.owner = root.owner.clone();
+                    spec.scope = root.scope.clone();
+                }
+                Some(spec)
+            }
+            None => {
+                let root = root?;
+                // Only a declared `from` gives the close transition a start
+                // state to return to; otherwise the popup is already home.
+                if root.properties.iter().flatten().all(|p| p.from.is_none()) {
+                    return None;
+                }
+                Some(root.reversed())
+            }
+        }
+    }
+
+    /// Start the close transition (killing any pending open completion).
+    /// Popups without `:on_close(...)` still close immediately.
+    pub(crate) fn request_close(plots: &mut Plots, id: window::Id) -> Command<Plant> {
+        let Some(popup) = plots.windows.popups.get_mut(&id) else {
+            return Command::none();
+        };
+        if popup.closing.is_some() {
+            return Command::none();
+        }
+        popup.opening = None;
+        let callback = popup
+            .on_close
+            .as_ref()
+            .and_then(|life| life.callback.clone());
+        let Some(spec) = popup.close_spec() else {
+            let close = Self::handle_dismiss(plots, id);
+            let run = callback
+                .as_ref()
+                .map(|callback| Self::run_callback(plots, callback))
+                .unwrap_or_else(Command::none);
+            return Command::batch(vec![close, run]);
+        };
+        let Some(tree) = popup.tree.clone() else {
+            return Self::handle_dismiss(plots, id);
+        };
+        popup.phase = popup.phase.wrapping_add(1);
+        let revision = popup.phase;
+        popup.closing = Some(Closing {
+            revision,
+            tree: with_root_spec(tree, spec.clone()),
+            callback,
+        });
+        if spec.total_duration().is_zero() {
+            Self::handle_closed(plots, id, revision)
+        } else {
+            Self::phase_timer(id, revision, spec.total_duration(), false)
+        }
+    }
+
+    /// Open transition finished: run its callback once, if still current.
+    pub(crate) fn handle_opened(
+        plots: &mut Plots,
+        id: window::Id,
+        revision: u64,
+    ) -> Command<Plant> {
+        let callback = {
+            let Some(popup) = plots.windows.popups.get_mut(&id) else {
+                return Command::none();
+            };
+            if popup.closing.is_some()
+                || popup.opening.as_ref().map(|(value, _)| *value) != Some(revision)
+            {
+                return Command::none();
+            }
+            popup.opening.take().map(|(_, callback)| callback)
+        };
+        match callback {
+            Some(callback) => Command::batch(vec![
+                Self::run_callback(plots, &callback),
+                Self::refresh_bodies(plots),
+            ]),
+            None => Command::none(),
+        }
+    }
+
+    /// Close transition finished: drop the popup, then run its callback once.
+    pub(crate) fn handle_closed(
+        plots: &mut Plots,
+        id: window::Id,
+        revision: u64,
+    ) -> Command<Plant> {
+        let callback = {
+            let Some(popup) = plots.windows.popups.get_mut(&id) else {
+                return Command::none();
+            };
+            if popup.closing.as_ref().map(|closing| closing.revision) != Some(revision) {
+                return Command::none();
+            }
+            popup
+                .closing
+                .take()
+                .and_then(|closing: Closing| closing.callback)
+        };
+        let close = Self::handle_dismiss(plots, id);
+        match callback {
+            Some(callback) => Command::batch(vec![close, Self::run_callback(plots, &callback)]),
+            None => close,
+        }
+    }
+
+    /// Dispatch a lifecycle callback from the update phase only.
+    fn run_callback(
+        plots: &mut Plots,
+        callback: &crate::lua::callbacks::Callback,
+    ) -> Command<Plant> {
+        match callback.invoke(
+            &crate::services::ServiceCtx::from_plots(plots, Self::gpu_usage_percent()),
+            |_| true,
+        ) {
+            Ok(Some(value)) => crate::shell::actions::command_from_action(&value, plots),
+            Ok(None) => Command::none(),
+            Err(error) => {
+                eprintln!("popup lifecycle callback: {error}");
+                Command::none()
+            }
+        }
+    }
+
     /// Dismiss a popup: drop tracking + cursor state and close its window
     /// (idempotent, like every other layer close).
     pub(crate) fn handle_dismiss(plots: &mut Plots, id: window::Id) -> Command<Plant> {
@@ -394,6 +613,7 @@ impl Popup {
             .windows
             .popups
             .iter()
+            .filter(|(_, popup)| popup.closing.is_none())
             .map(|(id, popup)| (*id, popup.placement.clone(), popup.bar_id))
             .collect();
         if open.is_empty() {
@@ -406,7 +626,7 @@ impl Popup {
             // last good body on error (a typo mid-save must not close
             // the menu you're editing).
             let Some(resolved) = Top::resolve_placement_id(plots, &placement_id) else {
-                cmds.push(Self::handle_dismiss(plots, pid));
+                cmds.push(Self::request_close(plots, pid));
                 continue;
             };
             Top::sync_script_state(plots, &resolved);
@@ -444,14 +664,14 @@ impl Popup {
             };
             match content {
                 Some(content) if content.tree.is_none() => {
-                    cmds.push(Self::handle_dismiss(plots, pid))
+                    cmds.push(Self::request_close(plots, pid))
                 }
                 Some(content) => match Self::surface_context(plots).refresh(pid, content) {
                     Ok(Some(command)) => cmds.push(command),
                     Ok(None) => {}
                     Err(error) => Top::note_widget_error(plots, &label, error),
                 },
-                None => cmds.push(Self::handle_dismiss(plots, pid)),
+                None => cmds.push(Self::request_close(plots, pid)),
             }
         }
         if cmds.is_empty() {
@@ -474,6 +694,9 @@ impl Popup {
         let Some(popup) = plots.windows.popups.get_mut(&id) else {
             return Command::none();
         };
+        if popup.closing.is_some() {
+            return Command::none();
+        }
         let owned = (list, key);
         let mut changed = false;
         if hovered {
@@ -510,6 +733,14 @@ impl Popup {
         let Some(placement_id) = plots.windows.popups.get(&id).map(|p| p.placement.clone()) else {
             return Command::none();
         };
+        if plots
+            .windows
+            .popups
+            .get(&id)
+            .is_some_and(|popup| popup.closing.is_some())
+        {
+            return Command::none();
+        }
         let bar = plots.windows.popups.get(&id).map(|p| p.bar_id);
         // Fresh handler for the click: an edited `on_action()` applies
         // immediately (in-memory toggle state resets on reload, same
@@ -623,6 +854,11 @@ mod tests {
                     iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),
                     (0, 0),
                 ),
+                on_open: None,
+                on_close: None,
+                opening: None,
+                closing: None,
+                phase: 0,
             },
         );
         let labels = |plots: &crate::shell::state::Plots| {
@@ -742,6 +978,11 @@ mod tests {
                     iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),
                     (0, 0),
                 ),
+                on_open: None,
+                on_close: None,
+                opening: None,
+                closing: None,
+                phase: 0,
             },
         );
         let mut lists = super::super::top::animation::WidgetLists::new();
@@ -900,6 +1141,179 @@ mod tests {
         };
         assert_eq!(Popup::content_size(1920.0, 1080.0, &content), (500, 10));
         assert_eq!(Popup::content_size(200.0, 100.0, &content), (200, 10));
+    }
+
+    fn test_popup(
+        id: window::Id,
+        tree: Option<WidgetNode>,
+        on_open: Option<PopupLifecycle>,
+        on_close: Option<PopupLifecycle>,
+    ) -> Popup {
+        Popup {
+            win_id: id,
+            bar_id: window::Id::unique(),
+            placement: "clock".into(),
+            tree,
+            hovered: Default::default(),
+            size: 13.0,
+            w: 100,
+            h: 100,
+            auto_width: false,
+            max_width: 1920.0,
+            auto_height: false,
+            max_height: 1080.0,
+            sizing_revision: 0,
+            measured_revision: None,
+            positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
+                window::Id::unique(),
+                iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
+                (0, 0),
+            ),
+            on_open,
+            on_close,
+            opening: None,
+            closing: None,
+            phase: 0,
+        }
+    }
+
+    #[test]
+    fn popup_lifecycle_setters_are_strict_and_roundtrip() {
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let source = "return iced.popup(iced.text('x')):width(100):animate({id='menu',y=iced.animations.y({from=-160,to=0,duration=250})}):on_open(function() end):on_close({})";
+        let content =
+            Popup::parse_popup_content(lua.load(source).eval().unwrap(), &Default::default())
+                .unwrap();
+        let on_open = content.on_open.clone().unwrap();
+        assert!(on_open.callback.is_some() && on_open.animate.is_none());
+        assert!(content.on_close.is_some());
+        let node = content.tree.clone().unwrap();
+        let encoded = crate::ui::encode::to_table(&lua, &node).unwrap();
+        let decoded =
+            Popup::parse_popup_content(mlua::Value::Table(encoded), &Default::default()).unwrap();
+        assert_eq!(decoded.tree, Some(node));
+        assert!(decoded.on_open.unwrap().callback.is_some());
+        assert!(decoded.on_close.is_some());
+        for source in [
+            "return iced.popup(iced.text('x')):on_open(42)",
+            "return iced.popup(iced.text('x')):on_open({typo=true})",
+            "return iced.popup(iced.text('x')):on_close({callback=42})",
+            "return iced.popup(iced.text('x')):on_close({animate='slide'})",
+            "return iced.popup(iced.text('x')):on_open({animate={y={to=0}}})",
+        ] {
+            let value = lua.load(source).eval().unwrap();
+            assert!(
+                Popup::parse_popup_content(value, &Default::default()).is_err(),
+                "{source}"
+            );
+        }
+        // Without a root animation the lifecycle may declare its own `id`.
+        let explicit = Popup::parse_popup_content(
+            lua.load("return iced.popup(iced.text('x')):on_open({animate={id='open',y={from=-20,to=0}}})")
+                .eval()
+                .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            explicit
+                .on_open
+                .unwrap()
+                .animate
+                .is_some_and(|spec| spec.id == "open")
+        );
+        let no_args = Popup::parse_popup_content(
+            lua.load("return iced.popup(iced.text('x')):animate({id='a',y=iced.animations.y({from=10,to=0})}):on_close()")
+                .eval()
+                .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(no_args.on_close.is_some());
+    }
+
+    #[test]
+    fn close_transition_reverses_the_root_animation_and_keeps_the_surface() {
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let content = Popup::parse_popup_content(
+            lua.load("return iced.popup(iced.text('x')):width(100):animate({id='menu',y=iced.animations.y({from=-160,to=0,duration=250})}):on_close()")
+                .eval()
+                .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = crate::shell::state::Plots::new(receiver);
+        let id = window::Id::unique();
+        plots.windows.popups.insert(
+            id,
+            test_popup(
+                id,
+                content.tree.clone(),
+                content.on_open.clone(),
+                content.on_close.clone(),
+            ),
+        );
+        let _ = Popup::request_close(&mut plots, id);
+        let popup = &plots.windows.popups[&id];
+        assert!(popup.tree.is_some());
+        let closing = popup.closing.as_ref().expect("close transition");
+        let spec = root_spec(&closing.tree).expect("root animation");
+        assert_eq!(spec.id, "menu");
+        let y = spec.properties[1].as_ref().expect("y");
+        assert_eq!((y.from, y.to), (None, -160.0));
+        assert_eq!(spec.total_duration(), std::time::Duration::from_millis(250));
+        // Without `:on_close(...)` the surface closes immediately.
+        plots
+            .windows
+            .popups
+            .insert(id, test_popup(id, content.tree, content.on_open, None));
+        let _ = Popup::request_close(&mut plots, id);
+        assert!(!plots.windows.popups.contains_key(&id));
+    }
+
+    #[test]
+    fn lifecycle_callbacks_run_once_from_update_handlers() {
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        crate::lua::widgets::load_widget_script(
+            &lua,
+            "lifecycle",
+            "hits=0; return {view=function() return 'x' end, popup=function() return iced.popup(iced.text('x')):width(100):animate({id='life',y=iced.animations.y({from=-20,to=0,duration=50})}):on_open(function() hits=hits+1 end):on_close({callback=function() hits=hits+10 end}) end}",
+        )
+        .unwrap();
+        let content = Popup::parse_popup_content(
+            crate::lua::widgets::call_lua_value(&lua, "popup").unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = crate::shell::state::Plots::new(receiver);
+        let id = window::Id::unique();
+        let opening = content.on_open.clone().unwrap().callback.unwrap();
+        let mut popup = test_popup(
+            id,
+            content.tree.clone(),
+            content.on_open.clone(),
+            content.on_close.clone(),
+        );
+        popup.opening = Some((1, opening));
+        popup.phase = 1;
+        plots.windows.popups.insert(id, popup);
+        let hits = || lua.globals().get::<u32>("hits").unwrap();
+        let _ = Popup::handle_opened(&mut plots, id, 1);
+        assert_eq!(hits(), 1);
+        let _ = Popup::handle_opened(&mut plots, id, 1);
+        assert_eq!(hits(), 1);
+        let revision = plots.windows.popups[&id]
+            .closing
+            .as_ref()
+            .expect("refresh starts the close transition")
+            .revision;
+        let _ = Popup::handle_closed(&mut plots, id, revision + 1);
+        assert_eq!(hits(), 1);
+        let _ = Popup::handle_closed(&mut plots, id, revision);
+        assert_eq!(hits(), 11);
+        assert!(!plots.windows.popups.contains_key(&id));
     }
 
     #[test]

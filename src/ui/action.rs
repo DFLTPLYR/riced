@@ -15,6 +15,8 @@ pub struct Action {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Event {
+    /// Native UI refresh only. Never delivered to a Lua action handler.
+    AnimationFrame,
     #[default]
     Action,
     Mouse {
@@ -34,6 +36,17 @@ pub enum Event {
 }
 
 impl Action {
+    pub(crate) fn animation_frame() -> Self {
+        Self {
+            key: String::new(),
+            value: None,
+            event: Event::AnimationFrame,
+        }
+    }
+
+    pub(crate) fn is_animation_frame(&self) -> bool {
+        matches!(self.event, Event::AnimationFrame)
+    }
     pub(crate) fn change(key: String, value: ActionValue) -> Self {
         Self {
             key,
@@ -43,11 +56,16 @@ impl Action {
     }
 
     pub(crate) fn arguments(&self, lua: &mlua::Lua) -> mlua::Result<mlua::MultiValue> {
+        if self.is_animation_frame() {
+            return Err(mlua::Error::RuntimeError(
+                "native animation frames cannot enter Lua".into(),
+            ));
+        }
         let events = lua.create_table()?;
         events.set(
             "type",
             match &self.event {
-                Event::Action => "action",
+                Event::Action | Event::AnimationFrame => "action",
                 Event::Mouse { state, .. } => state,
                 Event::Key { .. } => "key",
             },
@@ -74,7 +92,7 @@ impl Action {
                 flags.set("super", modifiers.logo())?;
                 events.set("modifiers", flags)?;
             }
-            Event::Action => {}
+            Event::Action | Event::AnimationFrame => {}
         }
         if let Some(value) = &self.value {
             events.set(

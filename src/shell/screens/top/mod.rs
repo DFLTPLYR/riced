@@ -482,18 +482,24 @@ fn build_with_lists_opacity(
     opacity: f32,
 ) -> Result<Element<'static, Plant>, String> {
     match node {
-        WidgetNode::Animated { child, spec } => crate::ui::animations::realize(spec, |values| {
-            build_with_lists_opacity(
-                child,
-                widget,
-                size,
-                message,
-                runtime,
-                lists,
-                hover,
-                opacity * values[2],
-            )
-        }),
+        WidgetNode::Animated { child, spec } => crate::ui::animations::realize(
+            spec,
+            message.as_ref().map_or(Plant::Tend, |sender| {
+                sender(crate::ui::action::Action::animation_frame())
+            }),
+            |values| {
+                build_with_lists_opacity(
+                    child,
+                    widget,
+                    size,
+                    message,
+                    runtime,
+                    lists,
+                    hover,
+                    opacity * values[2],
+                )
+            },
+        ),
         WidgetNode::Anchored {
             child,
             placement,
@@ -739,6 +745,7 @@ fn build_with_lists_opacity(
             radius,
             border,
             border_width,
+            ..
         } => {
             let background =
                 background.map(|color| iced::Background::Color(color.scale_alpha(opacity)));
@@ -1782,7 +1789,13 @@ impl Top {
                 .popups
                 .get(&pid)
                 .is_some_and(|popup| popup.placement == placement_id);
-            cmds.push(Popup::handle_dismiss(plots, pid));
+            cmds.push(if same {
+                Popup::request_close(plots, pid)
+            } else {
+                // Replacing a different placement should not wait for an
+                // exit transition; the new surface must open immediately.
+                Popup::handle_dismiss(plots, pid)
+            });
             if same {
                 return Command::batch(cmds);
             }

@@ -65,6 +65,9 @@ pub(crate) fn call_lua_action(
     lua: &Lua,
     action: &crate::ui::action::Action,
 ) -> Result<Value, String> {
+    if action.is_animation_frame() {
+        return Ok(Value::Nil);
+    }
     let app: Table = lua
         .named_registry_value("riced.widget.app")
         .map_err(|error| error.to_string())?;

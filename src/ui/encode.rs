@@ -52,6 +52,19 @@ fn set_color(lua: &Lua, table: &Table, key: &str, color: &Option<iced::Color>) -
     }
     Ok(())
 }
+fn lifecycle_table(
+    lua: &Lua,
+    lifecycle: &super::components::PopupLifecycle,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    if let Some(spec) = &lifecycle.animate {
+        table.set("animate", super::animations::encode(lua, spec)?)?;
+    }
+    if let Some(callback) = &lifecycle.callback {
+        table.set("callback", callback.clone())?;
+    }
+    Ok(table)
+}
 fn set_alignment(table: &Table, key: &str, align: Option<iced::Alignment>) -> mlua::Result<()> {
     if let Some(align) = align {
         table.set(
@@ -108,7 +121,7 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
     }
     let mts: Table = lua.named_registry_value("riced.iced.metatables")?;
     let mt = mts.get(node.kind())?;
-    super::dsl::node(lua, node.kind(), mt, |table| {
+    let table = super::dsl::node(lua, node.kind(), mt, |table| {
         macro_rules! fields { ($($key:literal => $value:expr),* $(,)?) => { $(table.set($key, $value)?;)* }; }
         macro_rules! sizes {
             ($width:expr, $height:expr) => {
@@ -199,6 +212,7 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 radius,
                 border,
                 border_width,
+                ..
             } => {
                 fields!("child" => to_table(lua, child)?, "padding" => *padding, "radius" => *radius, "border_width" => *border_width);
                 sizes!(Some(width), Some(height));
@@ -472,5 +486,18 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
             }
         }
         Ok(())
-    })
+    })?;
+    if let WidgetNode::Popup {
+        on_open, on_close, ..
+    } = node
+    {
+        let properties: Table = table.raw_get("_properties")?;
+        if let Some(lifecycle) = on_open {
+            properties.set("on_open", lifecycle_table(lua, lifecycle)?)?;
+        }
+        if let Some(lifecycle) = on_close {
+            properties.set("on_close", lifecycle_table(lua, lifecycle)?)?;
+        }
+    }
+    Ok(table)
 }

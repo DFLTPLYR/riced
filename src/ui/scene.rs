@@ -397,17 +397,21 @@ impl Lists {
         align: Align,
     ) -> Result<Element<'static, Plant>, String> {
         match node {
-            WidgetNode::Animated { child, spec } => super::animations::realize(spec, |values| {
-                self.node_aligned(
-                    child,
-                    runtime,
-                    sender,
-                    hover,
-                    active,
-                    opacity * values[2],
-                    align,
-                )
-            }),
+            WidgetNode::Animated { child, spec } => super::animations::realize(
+                spec,
+                sender(super::action::Action::animation_frame()),
+                |values| {
+                    self.node_aligned(
+                        child,
+                        runtime,
+                        sender,
+                        hover,
+                        active,
+                        opacity * values[2],
+                        align,
+                    )
+                },
+            ),
             WidgetNode::Anchored {
                 child,
                 placement,
@@ -478,6 +482,7 @@ impl Lists {
                 radius,
                 border,
                 border_width,
+                ..
             } => {
                 let bg = *background;
                 let border = *border;

@@ -67,6 +67,14 @@ pub(crate) struct Component {
     pub setters: &'static [&'static str],
 }
 
+/// Native popup transition declaration. `None` means the phase has no
+/// animation; `Some` with no fields means "use the popup's `:animate`".
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct PopupLifecycle {
+    pub animate: Option<Box<super::animations::Spec>>,
+    pub callback: Option<crate::lua::callbacks::Callback>,
+}
+
 /// Where the ellipsis goes when `:elide(n)` truncates text. The budget
 /// counts visible characters including the single "…" mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,9 +143,10 @@ components! {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: Insets,
         background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32
     }
-    Popup => PopupNode, "popup", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y"] {
+    Popup => PopupNode, "popup", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y", "on_open", "on_close"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: Insets,
-        background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32
+        background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32,
+        on_open: Option<PopupLifecycle>, on_close: Option<PopupLifecycle>
     }
     Scrollable => ScrollableNode, "scrollable", ["child"], ["width", "height", "scrollbar"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, scrollbar_hidden: bool

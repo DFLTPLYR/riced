@@ -95,31 +95,64 @@ impl SurfaceContext<'_> {
                     | PopupConstraintAdjustment::SlideY,
             );
         let id = window::Id::unique();
-        if let Some(tree) = &body.tree {
+        let PopupContent {
+            width,
+            height,
+            tree,
+            on_open,
+            on_close,
+        } = body;
+        let tree = match (
+            tree,
+            on_open
+                .as_ref()
+                .and_then(|life| life.animate.as_deref().cloned()),
+        ) {
+            (Some(tree), Some(spec)) => Some(super::with_root_spec(tree, spec)),
+            (tree, _) => tree,
+        };
+        if let Some(tree) = &tree {
             self.animation
                 .synchronize(&format!("popup:{id:?}"), None, tree)?;
         }
+        let callback = on_open.as_ref().and_then(|life| life.callback.clone());
+        let phase = u64::from(callback.is_some());
+        let duration = tree
+            .as_ref()
+            .and_then(super::root_spec)
+            .map(super::animations::Spec::total_duration)
+            .unwrap_or_default();
         self.windows.register_popup(
             output,
             Popup {
                 win_id: id,
                 bar_id: bar,
                 placement: resolved.id.clone(),
-                tree: body.tree,
+                tree,
                 hovered: Default::default(),
                 size: resolved.size.max(1.0),
                 w,
                 h,
-                auto_width: body.width.is_none(),
+                auto_width: width.is_none(),
                 max_width: sw.max(1.0),
-                auto_height: body.height.is_none(),
+                auto_height: height.is_none(),
                 max_height: sh.max(1.0),
                 sizing_revision: 0,
                 measured_revision: None,
                 positioner: settings,
+                on_open,
+                on_close,
+                opening: callback.map(|callback| (phase, callback)),
+                closing: None,
+                phase,
             },
         );
-        Ok(Some(Task::done(Plant::NewPopUp { settings, id })))
+        let open = Task::done(Plant::NewPopUp { settings, id });
+        Ok(Some(if phase == 0 {
+            open
+        } else {
+            Task::batch(vec![open, Popup::phase_timer(id, phase, duration, true)])
+        }))
     }
 
     pub fn refresh(
@@ -139,6 +172,10 @@ impl SurfaceContext<'_> {
         let Some(popup) = self.windows.popups.get_mut(&id) else {
             return Ok(None);
         };
+        // The exit transition owns the body until it completes.
+        if popup.closing.is_some() {
+            return Ok(None);
+        }
         let auto_height = content.height.is_none();
         let auto_width = content.width.is_none();
         if auto_width && popup.auto_width {
@@ -147,11 +184,26 @@ impl SurfaceContext<'_> {
         if auto_height && popup.auto_height {
             h = popup.h.min(sh.max(1.0) as u32);
         }
-        if let Some(tree) = &content.tree {
+        let PopupContent {
+            tree,
+            on_open,
+            on_close,
+            ..
+        } = content;
+        let tree = match (
+            tree,
+            on_open
+                .as_ref()
+                .and_then(|life| life.animate.as_deref().cloned()),
+        ) {
+            (Some(tree), Some(spec)) => Some(super::with_root_spec(tree, spec)),
+            (tree, _) => tree,
+        };
+        if let Some(tree) = &tree {
             self.animation
                 .synchronize(&format!("popup:{id:?}"), popup.tree.as_ref(), tree)?;
         }
-        if popup.tree == content.tree
+        if popup.tree == tree
             && popup.w == w
             && popup.h == h
             && popup.auto_height == auto_height
@@ -159,9 +211,15 @@ impl SurfaceContext<'_> {
             && popup.max_width == sw.max(1.0)
             && popup.max_height == sh.max(1.0)
         {
+            // Fresh parses mint new callback tokens; keep the live declarations
+            // without treating token identity as a layout change.
+            popup.on_open = on_open;
+            popup.on_close = on_close;
             return Ok(None);
         }
-        popup.tree = content.tree;
+        popup.tree = tree;
+        popup.on_open = on_open;
+        popup.on_close = on_close;
         popup.w = w;
         popup.h = h;
         popup.auto_height = auto_height;

@@ -147,16 +147,18 @@ fn realize_aligned<M: Clone + 'static>(
     align: Align,
 ) -> Result<Element<'static, M>, String> {
     match node {
-        WidgetNode::Animated { child, spec } => super::animations::realize(spec, |values| {
-            realize_aligned(
-                child,
-                size,
-                button_msg,
-                interactive,
-                opacity * values[2],
-                align,
-            )
-        }),
+        WidgetNode::Animated { child, spec } => {
+            super::animations::realize(spec, button_msg(Action::animation_frame()), |values| {
+                realize_aligned(
+                    child,
+                    size,
+                    button_msg,
+                    interactive,
+                    opacity * values[2],
+                    align,
+                )
+            })
+        }
         WidgetNode::Anchored {
             child,
             placement,
@@ -262,6 +264,7 @@ fn realize_aligned<M: Clone + 'static>(
             radius,
             border,
             border_width,
+            ..
         } => {
             let background = background.map(|c| iced::Background::Color(c.scale_alpha(opacity)));
             let radius = *radius;

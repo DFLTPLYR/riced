@@ -148,6 +148,7 @@ end
 
 Setters: `width`, `height`, `padding`, `background`, `radius`, `border`,
 `border_width`, `align_x`, and `align_y`, plus shared layout/event properties.
+Popup roots also accept `:on_open(...)` and `:on_close(...)` (see below).
 Padding and radius fall back to **zero**, background is transparent, and content
 alignment starts at the top-left. Setting a border color implies 1px unless
 `border_width` is explicit. The host injects no padding, margin, background,
@@ -168,6 +169,52 @@ Sizing applies to the **whole surface, including padding**:
 widget's measured bounds. Native placement, compositor constraints, dismissal,
 and input routing remain host responsibilities. Shared `anchor`/`margin` are
 parent-local layout properties, not native-window positioning controls.
+
+#### Popup open/close transitions
+
+`on_open` and `on_close` give a popup phase-specific animation and a
+completion callback without re-running Lua per frame:
+
+```lua
+return iced.popup(self:content())
+    :width(220)
+    :animate({
+        id = "greeting",
+        y = iced.animations.y({ from = -160, to = 0, duration = 250 }),
+    })
+    :on_open(function()
+        print("menu is in")
+    end)
+    :on_close({
+        animate = {
+            y = iced.animations.y({ to = -160, duration = 180 }),
+        },
+        callback = function()
+            print("menu is gone")
+        end,
+    })
+```
+
+- `:on_open()` / `:on_close()` with no arguments use the root `:animate`
+  declaration for that phase.
+- A function is callback shorthand; a table accepts only `animate` and
+  `callback`. Unknown fields and non-function callbacks are errors.
+- A phase `animate` table may omit `id` when the root has `:animate({id=...})`.
+  Close transitions reuse the open tween identity, so an interrupted opening
+  continues from its current position instead of jumping.
+- Without a phase `animate`, closing reverses the root animation: every
+  property heads back to its `from` value (offset `0` or opacity `1` when no
+  `from` was declared).
+- Callbacks run **once**, from the host update phase, after the phase's
+  delay + duration. They never run during layout or drawing. Reduced motion
+  and zero durations complete immediately.
+- A closing popup keeps its surface mounted for the exit transition; input is
+  ignored while it leaves. View refreshes do not replay either callback, and
+  reloading a script invalidates pending callbacks from the old VM.
+- Compositor-initiated dismissal (an outside click) cannot wait for a close
+  transition because the native surface is already gone. Explicit closes
+  (toggling the popup, removing its placement, or `popup()` returning `nil`)
+  do animate.
 
 The previous `{ ui, width, height }`, `{ text }`, and `{ items }` return formats
 are removed. Use `iced.text` and ordinary `iced.button` children inside the root;
@@ -329,17 +376,20 @@ alpha; it is not offscreen group compositing and does not disable input.
 Translated drawing, hit testing, overlays, and measured regions use the same
 coordinates.
 
-Native frames sample `aura-anim` tweens and request Rust widget rebuilds from
-cached descriptions, never Lua views or handlers. Settled animations stop
+Native frames sample `aura-anim` tweens at compositor frame cadence. Translation
+updates drawing and input coordinates without rebuilding widgets. Opacity uses
+internal refresh messages to rebuild Rust widgets from cached descriptions,
+never Lua views or handlers. Settled animations stop
 requesting frames. Native tree ownership releases animation state on unmount;
 list exit ghosts may retain content until their existing exit completes.
 Animated nodes must originate from `iced.*` constructors, not hand-built raw
 node tables. `iced.to_table` preserves descriptors and rebinds VM ownership
 when exported to another runtime.
 
-See `scripts/animations.lua` for a complete interactive app. Completion events,
-springs, repeats/sequences, colors, layout-size animation, scale, and rotation
-are not implemented yet.
+See `scripts/animations.lua` for a complete interactive app. Popup
+open/close callbacks are available through `:on_open(...)`/`:on_close(...)`;
+general property-completion events, springs, repeats/sequences, colors,
+layout-size animation, scale, and rotation are not implemented yet.
 
 ### Shaders
 

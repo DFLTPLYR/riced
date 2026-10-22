@@ -1,10 +1,10 @@
-//! Owned property tweens. Lua declares targets; native frames only rebuild Rust UI.
+//! Owned tweens: translation is sampled natively; opacity refreshes cached Rust UI.
 use aura_anim::core::{
     timing::{Delay, Timing},
     tween::Tween,
 };
 use iced::{
-    Element, Event, Length, Rectangle, Size, Vector,
+    Element, Event, Length, Rectangle, Size, Transformation, Vector,
     advanced::{
         self, Widget, layout,
         widget::{Tree, tree},
@@ -73,6 +73,41 @@ static NEXT_VM: AtomicU64 = AtomicU64::new(1);
 static REDUCED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn reduced_motion(value: bool) {
     REDUCED.store(value, Ordering::Relaxed);
+}
+pub(crate) fn reduced() -> bool {
+    REDUCED.load(Ordering::Relaxed)
+}
+
+impl Spec {
+    /// Longest delay + duration across declared properties.
+    pub(crate) fn total_duration(&self) -> Duration {
+        if self.reduced_motion || reduced() {
+            return Duration::ZERO;
+        }
+        let millis = self
+            .properties
+            .iter()
+            .flatten()
+            .map(|property| property.delay + property.duration)
+            .fold(0.0_f64, f64::max);
+        Duration::from_secs_f64(millis / 1000.0)
+    }
+
+    /// Popup close transition: keep the identity (so the live tween retargets
+    /// from its current position) and head back to each property's start.
+    pub(crate) fn reversed(&self) -> Self {
+        let mut reversed = self.clone();
+        reversed.properties = std::array::from_fn(|index| {
+            self.properties[index].as_ref().map(|property| Property {
+                from: None,
+                to: property.from.unwrap_or(if index == 2 { 1.0 } else { 0.0 }),
+                duration: property.duration,
+                delay: property.delay,
+                easing: property.easing,
+            })
+        });
+        reversed
+    }
 }
 
 pub(crate) fn install(lua: &Lua, iced: &Table) -> mlua::Result<()> {
@@ -161,18 +196,26 @@ fn property(table: &Table, name: &str) -> Result<Property, String> {
 }
 pub(crate) fn parse(node: &Table) -> Result<Option<Spec>, String> {
     let value = super::decode::node_property(node, "animate").map_err(|e| e.to_string())?;
-    let table = match value {
-        Value::Nil => return Ok(None),
-        Value::Table(t) => t,
-        _ => return Err("animate must be a table".into()),
-    };
+    match value {
+        Value::Nil => Ok(None),
+        Value::Table(table) => Ok(Some(parse_animation(&table, None, node)?)),
+        _ => Err("animate must be a table".into()),
+    }
+}
+
+fn parse_animation(
+    table: &Table,
+    default_id: Option<String>,
+    node: &Table,
+) -> Result<Spec, String> {
     strict(
-        &table,
+        table,
         &["id", "x", "y", "opacity", "reduced_motion"],
         "animate",
     )?;
     let id = match table.raw_get::<Value>("id").map_err(|e| e.to_string())? {
         Value::String(id) if !id.to_string_lossy().trim().is_empty() => id.to_string_lossy(),
+        Value::Nil => default_id.ok_or("animate.id must be a non-empty stable string")?,
         _ => return Err("animate.id must be a non-empty stable string".into()),
     };
     let mut properties = [None, None, None];
@@ -212,13 +255,79 @@ pub(crate) fn parse(node: &Table) -> Result<Option<Spec>, String> {
         }
         None => return Err("animated nodes must be built with iced constructors".into()),
     };
-    Ok(Some(Spec {
+    Ok(Spec {
         id,
         properties,
         reduced_motion,
         owner,
         scope: Vec::new(),
-    }))
+    })
+}
+
+/// Parse `:on_open(...)`/`:on_close(...)` on a popup root. A function is a
+/// callback shorthand; a table may carry an explicit transition and callback.
+pub(crate) fn parse_lifecycle(
+    node: &Table,
+    field: &str,
+) -> Result<Option<super::components::PopupLifecycle>, String> {
+    let value = super::decode::node_property(node, field).map_err(|e| e.to_string())?;
+    let default_id =
+        match super::decode::node_property(node, "animate").map_err(|e| e.to_string())? {
+            Value::Table(table) => table
+                .raw_get::<Value>("id")
+                .ok()
+                .and_then(|value| value.as_string().map(|id| id.to_string_lossy())),
+            _ => None,
+        };
+    let mut lifecycle = super::components::PopupLifecycle::default();
+    match value {
+        Value::Nil => return Ok(None),
+        Value::Function(function) => lifecycle.callback = Some(capture_lifecycle(node, function)?),
+        Value::Table(table) => {
+            strict(&table, &["animate", "callback"], field)?;
+            lifecycle.animate = match table
+                .raw_get::<Value>("animate")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                Value::Table(animation) => Some(Box::new(
+                    parse_animation(&animation, default_id, node)
+                        .map_err(|e| format!("{field}.{e}"))?,
+                )),
+                _ => return Err(format!("{field}.animate must be an animation table")),
+            };
+            lifecycle.callback = match table
+                .raw_get::<Value>("callback")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                Value::Function(function) => Some(capture_lifecycle(node, function)?),
+                Value::UserData(token) => Some(
+                    token
+                        .borrow::<crate::lua::callbacks::Callback>()
+                        .map_err(|e| e.to_string())?
+                        .clone(),
+                ),
+                _ => return Err(format!("{field}.callback must be a function")),
+            };
+        }
+        _ => return Err(format!("{field} must be a function or table")),
+    }
+    Ok(Some(lifecycle))
+}
+
+fn capture_lifecycle(
+    node: &Table,
+    function: Function,
+) -> Result<crate::lua::callbacks::Callback, String> {
+    let capture: Function = node
+        .raw_get("_capture_lifecycle")
+        .map_err(|e| e.to_string())?;
+    let token: mlua::AnyUserData = capture.call(function).map_err(|e| e.to_string())?;
+    token
+        .borrow::<crate::lua::callbacks::Callback>()
+        .map_err(|e| e.to_string())
+        .map(|callback| callback.clone())
 }
 pub(crate) fn encode(lua: &Lua, spec: &Spec) -> mlua::Result<Table> {
     let table = lua.create_table()?;
@@ -326,8 +435,9 @@ static STATES: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
 });
 
 /// Build from cached descriptions only. Native Tree ownership bounds lifetime.
-pub(crate) fn realize<M: 'static>(
+pub(crate) fn realize<M: Clone + 'static>(
     spec: &Spec,
+    frame: M,
     build: impl FnOnce([f32; 3]) -> Result<Element<'static, M>, String>,
 ) -> Result<Element<'static, M>, String> {
     let now = Instant::now();
@@ -352,19 +462,32 @@ pub(crate) fn realize<M: 'static>(
         state.reconcile(spec, now);
         state.values()
     };
-    let content = super::motion::shifted(build(values)?, values[0], values[1], true);
+    let content = build(values)?;
     Ok(Element::new(Animated {
         content,
         state,
-        values,
+        opacity: values[2],
+        frame,
     }))
 }
 struct Animated<M> {
     content: Element<'static, M>,
     state: Shared,
-    values: [f32; 3],
+    opacity: f32,
+    frame: M,
 }
-impl<M: 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
+impl<M> Animated<M> {
+    fn offset(&self) -> Vector {
+        self.state
+            .lock()
+            .map(|state| {
+                let values = state.values();
+                Vector::new(values[0], values[1])
+            })
+            .unwrap_or(Vector::ZERO)
+    }
+}
+impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<Shared>()
     }
@@ -405,28 +528,40 @@ impl<M: 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
         shell: &mut advanced::Shell<'_, M>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
         let now = match event {
             Event::Window(iced::window::Event::RedrawRequested(now)) => *now,
             _ => Instant::now(),
         };
         if let Ok(mut state) = self.state.lock() {
             state.tick(now);
-            if state.values() != self.values {
-                shell.invalidate_widgets();
+            let opacity_changed = state.values()[2] != self.opacity;
+            if opacity_changed
+                && matches!(
+                    event,
+                    Event::Window(iced::window::Event::RedrawRequested(_))
+                )
+            {
+                // Do not invalidate_widgets here: the layer-shell redraw path
+                // discards Outdated, including its next-frame request.
+                shell.publish(self.frame.clone());
             }
-            if state.active() {
-                shell.request_redraw_at(now + Duration::from_millis(16));
+            if state.active() || opacity_changed {
+                shell.request_redraw();
             }
+        }
+        let offset = self.offset();
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor * Transformation::translate(-offset.x, -offset.y),
+            renderer,
+            clipboard,
+            shell,
+            &(*viewport - offset),
+        );
+        if matches!(event, Event::Mouse(_)) {
+            shell.request_redraw();
         }
     }
     fn draw(
@@ -439,15 +574,18 @@ impl<M: 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            viewport,
-        );
+        let offset = self.offset();
+        advanced::Renderer::with_translation(renderer, offset, |renderer| {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor * Transformation::translate(-offset.x, -offset.y),
+                &(*viewport - offset),
+            )
+        });
     }
     fn mouse_interaction(
         &self,
@@ -457,11 +595,12 @@ impl<M: 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
+        let offset = self.offset();
         self.content.as_widget().mouse_interaction(
             &tree.children[0],
             layout,
-            cursor,
-            viewport,
+            cursor * Transformation::translate(-offset.x, -offset.y),
+            &(*viewport - offset),
             renderer,
         )
     }
@@ -472,9 +611,13 @@ impl<M: 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
         renderer: &iced::Renderer,
         operation: &mut dyn advanced::widget::Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        let offset = self.offset();
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            &mut super::widgets::measured::Translated { operation, offset },
+        );
     }
     fn overlay<'a>(
         &'a mut self,
@@ -484,12 +627,13 @@ impl<M: 'static> Widget<M, iced::Theme, iced::Renderer> for Animated<M> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<advanced::overlay::Element<'a, M, iced::Theme, iced::Renderer>> {
+        let offset = self.offset();
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
             renderer,
             viewport,
-            translation,
+            translation + offset,
         )
     }
 }
@@ -610,7 +754,7 @@ mod tests {
         }
     }
     #[test]
-    fn native_frames_request_rust_rebuilds_without_touching_lua_and_release_state() {
+    fn translation_frames_do_not_rebuild_widgets_or_touch_lua_and_release_state() {
         use iced::advanced::{Layout, renderer::Headless};
         let lua = lua();
         let description = node(
@@ -647,8 +791,11 @@ mod tests {
             &mut shell,
             &Rectangle::with_size(Size::new(100.0, 50.0)),
         );
-        assert!(shell.are_widgets_invalid());
-        assert_ne!(shell.redraw_request(), iced::window::RedrawRequest::Wait);
+        assert!(!shell.are_widgets_invalid());
+        assert_eq!(
+            shell.redraw_request(),
+            iced::window::RedrawRequest::NextFrame
+        );
         assert!(shell.is_empty());
         assert_eq!(lua.globals().get::<u32>("calls").unwrap(), 1);
         let rebuilt =
@@ -708,6 +855,139 @@ mod tests {
         };
         assert_ne!(owner(a.clone()), owner(b));
         assert_ne!(owner(a), owner(c));
+    }
+
+    #[test]
+    fn opacity_frames_publish_native_refreshes_without_outdating_the_redraw() {
+        use iced::advanced::{Layout, renderer::Headless};
+        let lua = lua();
+        let description = node(
+            &lua,
+            "return iced.text('fade'):animate({id='native-alpha-refresh',opacity={from=0,to=1,duration=100,easing='linear'}})",
+        );
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut content =
+            crate::ui::build::realize(&description, 13.0, Arc::new(|action| action), false, 1.0)
+                .unwrap();
+        let mut tree = Tree::new(&content);
+        let now = native_state(&tree).lock().unwrap().last;
+        let bounds = Rectangle::with_size(Size::new(100.0, 50.0));
+        let layout = content.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, bounds.size()),
+        );
+        let mut messages = Vec::new();
+        let mut shell = advanced::Shell::new(&mut messages);
+        content.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(
+                now + Duration::from_millis(50),
+            )),
+            Layout::new(&layout),
+            mouse::Cursor::Unavailable,
+            &renderer,
+            &mut advanced::clipboard::Null,
+            &mut shell,
+            &bounds,
+        );
+        assert!(!shell.are_widgets_invalid());
+        assert_eq!(
+            shell.redraw_request(),
+            iced::window::RedrawRequest::NextFrame
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_animation_frame());
+    }
+
+    #[test]
+    fn native_refresh_does_not_invoke_handlers_or_invalidate_lua_views() {
+        let mut runtime = crate::lua::LuaRuntime::new().unwrap();
+        runtime.load("return {calls=0,view=function(self) self.calls=self.calls+1; return iced.text(self.calls) end,actions=function() error('frame reached Lua') end}").unwrap();
+        let window = crate::lua::WindowId(1);
+        let before = runtime.view(window).unwrap();
+        runtime
+            .update(&crate::lua::Message::Action(
+                crate::ui::action::Action::animation_frame(),
+            ))
+            .unwrap();
+        assert_eq!(runtime.view(window).unwrap(), before);
+        assert!(runtime.last_error.is_none());
+    }
+
+    #[test]
+    fn translation_draws_every_frame_using_the_same_element_and_layout() {
+        use iced::advanced::{Layout, renderer::Headless, renderer::Style};
+        let lua = lua();
+        let description = node(
+            &lua,
+            "return iced.container(iced.space():width(10):height(10)):background('#00ff00'):animate({id='draw-without-rebuild',x={from=0,to=40,duration=100,easing='linear'}})",
+        );
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut content =
+            crate::ui::build::realize(&description, 13.0, Arc::new(|action| action), false, 1.0)
+                .unwrap();
+        let mut tree = Tree::new(&content);
+        let start = native_state(&tree).lock().unwrap().last;
+        let bounds = Rectangle::with_size(Size::new(80.0, 20.0));
+        let layout = content.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, bounds.size()),
+        );
+        for millis in [0, 25, 50, 75, 100] {
+            let mut messages = Vec::new();
+            let mut shell = advanced::Shell::new(&mut messages);
+            content.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    start + Duration::from_millis(millis),
+                )),
+                Layout::new(&layout),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut advanced::clipboard::Null,
+                &mut shell,
+                &bounds,
+            );
+            assert!(!shell.are_widgets_invalid());
+            assert!(shell.is_empty());
+            assert_eq!(
+                shell.redraw_request(),
+                if millis == 100 {
+                    iced::window::RedrawRequest::Wait
+                } else {
+                    iced::window::RedrawRequest::NextFrame
+                }
+            );
+            advanced::Renderer::reset(&mut renderer, bounds);
+            content.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &Style::default(),
+                Layout::new(&layout),
+                mouse::Cursor::Unavailable,
+                &bounds,
+            );
+            let pixels = renderer.screenshot(Size::new(80, 20), 1.0, iced::Color::TRANSPARENT);
+            let x = (millis * 40 / 100) as usize + 5;
+            assert_eq!(
+                &pixels[(5 * 80 + x) * 4..(5 * 80 + x) * 4 + 4],
+                [0, 255, 0, 255],
+                "frame {millis}"
+            );
+        }
     }
 
     #[test]
@@ -777,7 +1057,7 @@ mod tests {
                     "return iced.button('go','go'):width(40):height(20):animate({{id='hit-{kind}',x={{from=0,to=40,duration=100,easing='linear'}}}})"
                 ),
             );
-            let original = host(&description, kind);
+            let mut original = host(&description, kind);
             let mut tree = Tree::new(&original);
             let state = native_state(&tree);
             {
@@ -785,10 +1065,8 @@ mod tests {
                 let now = state.last;
                 state.tick(now + Duration::from_millis(50));
             }
-            let mut rebuilt = host(&description, kind);
-            tree.diff(&rebuilt);
             let bounds = Rectangle::with_size(Size::new(100.0, 40.0));
-            let layout = rebuilt.as_widget_mut().layout(
+            let layout = original.as_widget_mut().layout(
                 &mut tree,
                 &renderer,
                 &layout::Limits::new(Size::ZERO, bounds.size()),
@@ -799,7 +1077,7 @@ mod tests {
                     mouse::Event::ButtonPressed(mouse::Button::Left),
                     mouse::Event::ButtonReleased(mouse::Button::Left),
                 ] {
-                    rebuilt.as_widget_mut().update(
+                    original.as_widget_mut().update(
                         &mut tree,
                         &Event::Mouse(button),
                         Layout::new(&layout),

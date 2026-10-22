@@ -26,6 +26,24 @@ impl PartialEq for Callback {
 }
 impl UserData for Callback {}
 
+fn capture(lua: &Lua, function: Function, item: Table) -> mlua::Result<mlua::AnyUserData> {
+    let entry = lua.create_table()?;
+    entry.set("function", function)?;
+    entry.set("item", item)?;
+    let output = lua
+        .globals()
+        .get::<Table>("bar")
+        .ok()
+        .and_then(|bar| bar.get::<String>("output").ok())
+        .unwrap_or_default();
+    lua.create_userdata(Callback(Arc::new(Entry {
+        lua: lua.weak(),
+        key: lua.create_registry_value(entry)?,
+        epoch: lua.named_registry_value("riced.callback_epoch")?,
+        output,
+    })))
+}
+
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.set_named_registry_value("riced.callback_epoch", 0_u64)?;
     lua.set_named_registry_value(
@@ -36,22 +54,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let (key, value) = pair?;
                 snapshot.raw_set(key, value)?;
             }
-            let entry = lua.create_table()?;
-            entry.set("function", function)?;
-            entry.set("item", snapshot)?;
-            let output = lua
-                .globals()
-                .get::<Table>("bar")
-                .ok()
-                .and_then(|bar| bar.get::<String>("output").ok())
-                .unwrap_or_default();
-            lua.create_userdata(Callback(Arc::new(Entry {
-                lua: lua.weak(),
-                key: lua.create_registry_value(entry)?,
-                epoch: lua.named_registry_value("riced.callback_epoch")?,
-                output,
-            })))
+            capture(lua, function, snapshot)
         })?,
+    )?;
+    // Popup lifecycle callbacks receive no event or item payload.
+    lua.set_named_registry_value(
+        "riced.capture_lifecycle",
+        lua.create_function(|lua, function: Function| capture(lua, function, lua.create_table()?))?,
     )
 }
 

@@ -111,6 +111,10 @@ pub enum WidgetEvent {
     /// enter/exit transitions and sweeps settled ghosts. Only
     /// subscribed while a motion is active (repaint via Scope::All).
     Anim,
+    /// Popup open transition finished: dispatch its lifecycle callback.
+    PopupOpened(Id, u64),
+    /// Popup close transition finished: dismiss and dispatch its callback.
+    PopupClosed(Id, u64),
     /// A Lua widget output moved: repaint so bars pick the new text up.
     Changed,
     /// Click a popup item: run the widget's `on_action()` with the item

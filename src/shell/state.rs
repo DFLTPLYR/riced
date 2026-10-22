@@ -687,6 +687,22 @@ impl Plots {
     }
 
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
+        // The Wayland redraw path does not rebuild Outdated widget trees.
+        // Internal frame actions wake the normal UI rebuild path without
+        // invoking handlers, refreshing Lua views, or mutating host state.
+        let frame_action = match &message {
+            Plant::TopPlot(TopEvent::Widget(
+                WidgetEvent::CellAction(_, _, action) | WidgetEvent::PopupSelect(_, action),
+            )) => Some(action),
+            Plant::Desktop(super::desktop_widgets::DesktopEvent::Action { action, .. }) => {
+                Some(action)
+            }
+            Plant::Overlay(super::overlay::OverlayEvent::Action { action, .. }) => Some(action),
+            _ => None,
+        };
+        if frame_action.is_some_and(crate::ui::action::Action::is_animation_frame) {
+            return Command::none();
+        }
         let cancel_drag = self
             .desktop
             .drag
@@ -1299,6 +1315,8 @@ impl Plots {
                 }
                 WidgetEvent::Tick => Top::handle_widget_tick(self),
                 WidgetEvent::Anim => Top::handle_anim_frame(self),
+                WidgetEvent::PopupOpened(id, revision) => Popup::handle_opened(self, id, revision),
+                WidgetEvent::PopupClosed(id, revision) => Popup::handle_closed(self, id, revision),
                 WidgetEvent::Changed => Popup::refresh_bodies(self),
                 WidgetEvent::PopupSelect(id, action) => Popup::handle_select(self, id, action),
                 WidgetEvent::PopupMeasured(id, revision, height) => {
@@ -1588,6 +1606,10 @@ impl Plots {
 
 pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
+        Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(id,_,action)
+            | WidgetEvent::PopupSelect(id,action))) if action.is_animation_frame() => Scope::Window(*id),
+        Plant::Overlay(super::overlay::OverlayEvent::Action {surface,action,..})
+            if action.is_animation_frame() => Scope::Window(*surface),
         Plant::Desktop(super::desktop_widgets::DesktopEvent::Tick) => Scope::None,
         // Source motion resolves the destination before requesting its redraw.
         Plant::Desktop(super::desktop_widgets::DesktopEvent::SourceMotion { .. }) => Scope::None,
@@ -1979,6 +2001,11 @@ mod tests {
                     iced_exwlshell::reexport::PixelSize::try_px(220, 64).unwrap(),
                     (0, 0),
                 ),
+                on_open: None,
+                on_close: None,
+                opening: None,
+                closing: None,
+                phase: 0,
             },
         );
         let measure = |plots: &Plots| {
@@ -2045,6 +2072,8 @@ mod tests {
             tree: popup.tree.clone(),
             width: Some(220.0),
             height: None,
+            on_open: popup.on_open.clone(),
+            on_close: popup.on_close.clone(),
         };
         assert_eq!(
             Popup::initial_size(
@@ -2478,6 +2507,11 @@ mod tests {
                 iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
                 (0, 0),
             ),
+            on_open: None,
+            on_close: None,
+            opening: None,
+            closing: None,
+            phase: 0,
         };
         let output = OutputId(7);
 
@@ -2846,6 +2880,11 @@ mod tests {
                     iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
                     (0, 0),
                 ),
+                on_open: None,
+                on_close: None,
+                opening: None,
+                closing: None,
+                phase: 0,
             },
         );
         for id in [bar, popup, other] {
@@ -2967,6 +3006,11 @@ mod tests {
                     iced_exwlshell::reexport::PixelSize::try_px(120, 100).unwrap(),
                     (0, 0),
                 ),
+                on_open: None,
+                on_close: None,
+                opening: None,
+                closing: None,
+                phase: 0,
             },
         );
         let deadline = plots.placements.last_run["ws"];

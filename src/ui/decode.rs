@@ -556,7 +556,13 @@ fn parse_component(
                     if !allowed(&key)
                         && !matches!(
                             key.as_str(),
-                            "type" | "child" | "_properties" | "_defaults" | "_animation_owner"
+                            "type"
+                                | "child"
+                                | "_properties"
+                                | "_defaults"
+                                | "_animation_owner"
+                                | "_capture_callback"
+                                | "_capture_lifecycle"
                         )
                     {
                         return Err(format!("{what} unknown field {key:?}"));
@@ -577,6 +583,9 @@ fn parse_component(
                     }
                 }
                 for field in component.setters.iter().chain(super::layout_props::SETTERS) {
+                    if matches!(*field, "on_open" | "on_close") {
+                        continue;
+                    }
                     if matches!(
                         node_property(t, field).map_err(|e| e.to_string())?,
                         Value::Function(_)
@@ -624,6 +633,10 @@ fn parse_component(
                         "{what} border width must be finite and non-negative"
                     ));
                 }
+                let on_open = super::animations::parse_lifecycle(t, "on_open")
+                    .map_err(|error| format!("{what} {error}"))?;
+                let on_close = super::animations::parse_lifecycle(t, "on_close")
+                    .map_err(|error| format!("{what} {error}"))?;
                 Ok(WidgetNode::Popup {
                     child,
                     width,
@@ -633,6 +646,8 @@ fn parse_component(
                     radius,
                     border,
                     border_width,
+                    on_open,
+                    on_close,
                 })
             } else {
                 Ok(WidgetNode::Container {
