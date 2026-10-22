@@ -5,6 +5,19 @@ use crate::lua::transitions::parse_transition_value;
 use crate::lua::value::{coerce_text, lua_value_kind};
 use mlua::{Table, Value};
 
+// Keep recursion below the stack budget of ordinary Rust worker threads,
+// including debug builds where decoder frames are substantially larger.
+const MAX_DEPTH: usize = 24;
+const MAX_NODES: usize = 16_384;
+const MAX_LIST_ITEMS: usize = 4_096;
+
+#[derive(Default)]
+struct DecodeBudget {
+    nodes: usize,
+    ancestors: Vec<*const std::ffi::c_void>,
+    depth: usize,
+}
+
 pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
     if let Ok(properties) = t.raw_get::<Table>("_properties") {
         let value = properties.raw_get::<Value>(field)?;
@@ -21,15 +34,27 @@ pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
 }
 
 pub(crate) fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
-    match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
-        Value::Integer(i) => Ok(Some(i as f32)),
-        Value::Number(n) => Ok(Some(n as f32)),
-        other => Err(format!(
-            "{what} {field} must be a number, got {}",
-            lua_value_kind(&other)
-        )),
+    let number = match node_property(t, field).map_err(|e| e.to_string())? {
+        Value::Nil => return Ok(None),
+        Value::Integer(i) => i as f32,
+        Value::Number(n) => n as f32,
+        other => {
+            return Err(format!(
+                "{what} {field} must be a number, got {}",
+                lua_value_kind(&other)
+            ));
+        }
+    };
+    if !number.is_finite() {
+        return Err(format!("{what} {field} must be finite"));
     }
+    if matches!(field, "size" | "pitch") && number <= 0.0 {
+        return Err(format!("{what} {field} must be positive"));
+    }
+    if matches!(field, "spacing" | "border_width" | "height") && number < 0.0 {
+        return Err(format!("{what} {field} must be non-negative"));
+    }
+    Ok(Some(number))
 }
 pub(crate) fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<iced::Color>, String> {
     fn num(v: &Value) -> Option<f32> {
@@ -40,7 +65,7 @@ pub(crate) fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<ice
         }
     }
     match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
+        Value::Nil => Ok(None),
         Value::String(s) => {
             let raw = s.to_string_lossy();
             let expanded = if raw.len() == 4 && raw.starts_with('#') {
@@ -52,19 +77,28 @@ pub(crate) fn opt_color(t: &Table, field: &str, what: &str) -> Result<Option<ice
             crate::theme::parse_hex(&expanded).ok_or_else(|| format!("{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table, got {raw:?}")).map(Some)
         }
         Value::Table(rgb) => {
-            let chan = |k: &str, i: i32| {
-                rgb.get::<Value>(k)
-                    .ok()
-                    .as_ref()
-                    .and_then(num)
-                    .or_else(|| rgb.get::<Value>(i).ok().as_ref().and_then(num))
+            let chan = |k: &str, i: i32| -> Result<Option<f32>, String> {
+                let named = rgb.raw_get::<Value>(k).map_err(|error| error.to_string())?;
+                let value = if named == Value::Nil {
+                    rgb.raw_get::<Value>(i).map_err(|error| error.to_string())?
+                } else {
+                    named
+                };
+                if value == Value::Nil {
+                    return Ok(None);
+                }
+                num(&value)
+                    .filter(|channel| channel.is_finite())
+                    .map(Some)
+                    .ok_or_else(|| format!("{what} {field}.{k} must be a finite number"))
             };
-            match (chan("r", 1), chan("g", 2), chan("b", 3)) {
+            let alpha = chan("a", 4)?.unwrap_or(1.0);
+            match (chan("r", 1)?, chan("g", 2)?, chan("b", 3)?) {
                 (Some(r), Some(g), Some(b)) => Ok(Some(iced::Color::from_rgba(
                     r.clamp(0.0, 1.0),
                     g.clamp(0.0, 1.0),
                     b.clamp(0.0, 1.0),
-                    chan("a", 4).unwrap_or(1.0).clamp(0.0, 1.0),
+                    alpha.clamp(0.0, 1.0),
                 ))),
                 _ => Err(format!(
                     "{what} {field} must be a hex color like \"#rrggbb\" or an {{r, g, b}} table"
@@ -107,9 +141,14 @@ fn scrollbar_hidden(t: &Table) -> Result<bool, String> {
 
 pub(crate) fn opt_length(t: &Table, field: &str, what: &str) -> Result<Option<NodeLength>, String> {
     match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
-        Value::Integer(i) => Ok(Some(NodeLength::Fixed(i as f32))),
-        Value::Number(n) => Ok(Some(NodeLength::Fixed(n as f32))),
+        Value::Nil => Ok(None),
+        Value::Integer(_) | Value::Number(_) => {
+            let number = opt_number(t, field, what)?;
+            if number.is_some_and(|n| n < 0.0) {
+                return Err(format!("{what} {field} must be non-negative"));
+            }
+            Ok(number.map(NodeLength::Fixed))
+        }
         Value::String(s) => {
             let raw = s.to_string_lossy();
             if let Some(length) = crate::shared::enums::lookup(LENGTH_NAMES, &raw) {
@@ -159,7 +198,7 @@ pub(crate) fn opt_wrapping(
 ) -> Result<Option<iced::widget::text::Wrapping>, String> {
     let expected = crate::shared::enums::expected(WRAPPING_NAMES);
     match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
+        Value::Nil => Ok(None),
         Value::String(s) => {
             let raw = s.to_string_lossy();
             crate::shared::enums::lookup(WRAPPING_NAMES, &raw)
@@ -186,7 +225,7 @@ pub(crate) fn opt_alignment(
 ) -> Result<Option<iced::Alignment>, String> {
     let expected = crate::shared::enums::expected(ALIGNMENTS);
     match node_property(t, field).map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => Ok(None),
+        Value::Nil => Ok(None),
         Value::String(s) => {
             let raw = s.to_string_lossy();
             crate::shared::enums::lookup(ALIGNMENTS, &raw)
@@ -202,15 +241,20 @@ pub(crate) fn opt_alignment(
 
 const AXES: &[(&str, bool)] = &[("horizontal", true), ("vertical", false)];
 
-/// Listview `axis` is case-insensitive and hyphen-tolerant through the shared
-/// tables; non-strings and omissions keep the default vertical axis.
+/// Listview `axis` uses the shared enum normalization; omission is vertical.
 fn opt_axis(t: &Table) -> Result<bool, String> {
     match node_property(t, "axis").map_err(|e| e.to_string())? {
+        Value::Nil => Ok(false),
         Value::String(s) => {
             let raw = s.to_string_lossy();
-            Ok(crate::shared::enums::lookup(AXES, &raw).unwrap_or(false))
+            crate::shared::enums::lookup(AXES, &raw).ok_or_else(|| {
+                format!("iced.listview() axis must be horizontal or vertical, got {raw:?}")
+            })
         }
-        _ => Ok(false),
+        other => Err(format!(
+            "iced.listview() axis must be horizontal or vertical, got {}",
+            lua_value_kind(&other)
+        )),
     }
 }
 
@@ -224,7 +268,46 @@ pub(crate) fn parse_node_hovered(
     value: &Value,
     hover: &super::hover::HoverSet,
 ) -> Result<WidgetNode, String> {
-    let node = parse_component(value, hover)?;
+    decode_node(value, hover, &mut DecodeBudget::default())
+}
+
+fn decode_node(
+    value: &Value,
+    hover: &super::hover::HoverSet,
+    budget: &mut DecodeBudget,
+) -> Result<WidgetNode, String> {
+    if budget.depth >= MAX_DEPTH {
+        return Err(format!("ui tree exceeds maximum depth {MAX_DEPTH}"));
+    }
+    if budget.nodes >= MAX_NODES {
+        return Err(format!("ui tree exceeds maximum node count {MAX_NODES}"));
+    }
+    let pointer = match value {
+        Value::Table(table) => Some(table.to_pointer()),
+        _ => None,
+    };
+    if pointer.is_some_and(|pointer| budget.ancestors.contains(&pointer)) {
+        return Err("ui tree contains a cyclic component reference".into());
+    }
+    budget.nodes += 1;
+    budget.depth += 1;
+    if let Some(pointer) = pointer {
+        budget.ancestors.push(pointer);
+    }
+    let result = decode_node_inner(value, hover, budget);
+    if pointer.is_some() {
+        budget.ancestors.pop();
+    }
+    budget.depth -= 1;
+    result
+}
+
+fn decode_node_inner(
+    value: &Value,
+    hover: &super::hover::HoverSet,
+    budget: &mut DecodeBudget,
+) -> Result<WidgetNode, String> {
+    let node = parse_component(value, hover, budget)?;
     let Value::Table(table) = value else {
         return Ok(node);
     };
@@ -260,8 +343,12 @@ pub(crate) fn parse_node_hovered(
     .wrap(node))
 }
 
-fn parse_child(value: &Value, hover: &super::hover::HoverSet) -> Result<WidgetNode, String> {
-    let child = parse_node_hovered(value, hover)?;
+fn parse_child(
+    value: &Value,
+    hover: &super::hover::HoverSet,
+    budget: &mut DecodeBudget,
+) -> Result<WidgetNode, String> {
+    let child = decode_node(value, hover, budget)?;
     if super::node::contains_popup(&child) {
         return Err(
             "iced.popup() is a surface root and cannot be nested inside another component".into(),
@@ -270,7 +357,11 @@ fn parse_child(value: &Value, hover: &super::hover::HoverSet) -> Result<WidgetNo
     Ok(child)
 }
 
-fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<WidgetNode, String> {
+fn parse_component(
+    value: &Value,
+    hover: &super::hover::HoverSet,
+    budget: &mut DecodeBudget,
+) -> Result<WidgetNode, String> {
     let Value::Table(t) = value else {
         return Ok(WidgetNode::Text {
             content: coerce_text(value.clone(), "ui node")?,
@@ -334,7 +425,12 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                 }
             }
             let mut seen = std::collections::HashSet::new();
-            for item in data.sequence_values::<Table>() {
+            for (index, item) in data.sequence_values::<Table>().enumerate() {
+                if index >= MAX_LIST_ITEMS {
+                    return Err(format!(
+                        "listview {id:?} exceeds maximum item count {MAX_LIST_ITEMS}"
+                    ));
+                }
                 let item = item.map_err(|e| e.to_string())?;
                 let key = match item
                     .get::<Value>(key_field.as_str())
@@ -395,7 +491,9 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                 item.set("hovered", hover.contains(&(id.clone(), key.clone())))
                     .map_err(|e| e.to_string())?;
                 let value: Value = delegate.call(item).map_err(|e| e.to_string())?;
-                items.push((key, parse_child(&value, hover)?));
+                let child = parse_child(&value, hover, budget)
+                    .map_err(|error| format!("listview {id:?}.items[{key:?}]: {error}"))?;
+                items.push((key, child));
             }
             let defaults: super::listview::ListView<String, WidgetNode> =
                 super::listview::ListView::default();
@@ -471,10 +569,14 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             let border_width = opt_number(t, "border_width", &what)?
                 .map(|w| w.max(0.0))
                 .unwrap_or(if border.is_some() { 1.0 } else { 0.0 });
-            let child = Box::new(parse_child(
-                &t.get::<Value>("child").map_err(|e| e.to_string())?,
-                hover,
-            )?);
+            let child = Box::new(
+                parse_child(
+                    &t.get::<Value>("child").map_err(|e| e.to_string())?,
+                    hover,
+                    budget,
+                )
+                .map_err(|error| format!("{kind}.child: {error}"))?,
+            );
             let width = opt_length(t, "width", &what)?.unwrap_or(NodeLength::Native);
             let height = opt_length(t, "height", &what)?.unwrap_or(NodeLength::Native);
             let padding = opt_insets(t, "padding", &what)?.unwrap_or_default();
@@ -526,6 +628,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             child: Box::new(parse_child(
                 &t.get::<Value>("child").map_err(|e| e.to_string())?,
                 hover,
+                budget,
             )?),
             width: opt_length(t, "width", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
             height: opt_length(t, "height", "iced.scrollable()")?.unwrap_or(NodeLength::Native),
@@ -586,10 +689,12 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             let children = match t.get::<Value>("children").map_err(|e| e.to_string())? {
                 Value::Table(list) => list
                     .sequence_values::<Value>()
-                    .map(|child| {
+                    .enumerate()
+                    .map(|(index, child)| {
                         child
                             .map_err(|e| e.to_string())
-                            .and_then(|child| parse_child(&child, hover))
+                            .and_then(|child| parse_child(&child, hover, budget))
+                            .map_err(|error| format!("{kind}.children[{}]: {error}", index + 1))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 Value::Nil => Vec::new(),
@@ -608,18 +713,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
                     height: opt_length(t, "height", "iced.stack()")?.unwrap_or(NodeLength::Native),
                 });
             }
-            let spacing = match node_property(t, "spacing").map_err(|e| e.to_string())? {
-                Value::Nil | Value::Function(_) => 4.0,
-                Value::Integer(i) => i as f32,
-                Value::Number(n) => n as f32,
-                other => {
-                    return Err(format!(
-                        "iced.{}() spacing must be a number, got {}",
-                        kind,
-                        lua_value_kind(&other)
-                    ));
-                }
-            };
+            let spacing = opt_number(t, "spacing", &format!("iced.{kind}()"))?.unwrap_or(4.0);
             let what = if kind == "row" {
                 "iced.row()"
             } else {
@@ -660,17 +754,7 @@ fn parse_component(value: &Value, hover: &super::hover::HoverSet) -> Result<Widg
             radius: opt_corners(t, "radius", "iced.button()")?,
         }),
         "progress" => {
-            let value = match t.get::<Value>("value").map_err(|e| e.to_string())? {
-                Value::Nil => 0.0,
-                Value::Integer(i) => i as f32,
-                Value::Number(n) => n as f32,
-                other => {
-                    return Err(format!(
-                        "iced.progress() value must be a number, got {}",
-                        lua_value_kind(&other)
-                    ));
-                }
-            };
+            let value = opt_number(t, "value", "iced.progress()")?.unwrap_or(0.0);
             Ok(WidgetNode::Progress {
                 value,
                 width: opt_length(t, "width", "iced.progress()")?
@@ -726,7 +810,7 @@ fn control_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, Str
 fn opt_elide(t: &Table) -> Result<Option<super::components::TextElide>, String> {
     const WHAT: &str = "iced.text()";
     let max_chars = match node_property(t, "elide").map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => None,
+        Value::Nil => None,
         Value::Integer(n) if n >= 1 => Some(n as usize),
         Value::Number(n) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 => Some(n as usize),
         other => {
@@ -737,7 +821,7 @@ fn opt_elide(t: &Table) -> Result<Option<super::components::TextElide>, String> 
         }
     };
     let mode = match node_property(t, "elide_mode").map_err(|e| e.to_string())? {
-        Value::Nil | Value::Function(_) => super::components::ElideMode::Tail,
+        Value::Nil => super::components::ElideMode::Tail,
         Value::String(s) => {
             let raw = s.to_string_lossy();
             crate::shared::enums::lookup(super::components::ELIDE_MODES, &raw).ok_or_else(|| {
@@ -890,7 +974,7 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
 fn parse_canvas(t: &Table) -> Result<WidgetNode, String> {
     const WHAT: &str = "iced.canvas()";
     let drawing = match node_property(t, "drawing").map_err(|error| error.to_string())? {
-        Value::Nil | Value::Function(_) => super::canvas::CanvasDrawing::default(),
+        Value::Nil => super::canvas::CanvasDrawing::default(),
         Value::Table(spec) => parse_canvas_drawing(&spec)?,
         other => {
             return Err(format!(
@@ -1016,6 +1100,75 @@ fn canvas_point(value: &Value) -> Result<(f32, f32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoding_rejects_cycles_and_recovers_for_shared_siblings() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let cyclic = lua
+            .load("local t={type='container'}; t.child=t; return t")
+            .eval()
+            .unwrap();
+        assert!(parse_node(&cyclic).unwrap_err().contains("cyclic"));
+        let shared = lua
+            .load("local t=iced.text('shared'); return iced.row({t,t})")
+            .eval()
+            .unwrap();
+        assert!(parse_node(&shared).is_ok());
+    }
+
+    #[test]
+    fn decoding_bounds_depth_total_nodes_and_list_items() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        for (source, expected) in [
+            (
+                format!(
+                    "local t=iced.text('leaf'); for i=1,{MAX_DEPTH} do t=iced.container(t) end; return t"
+                ),
+                "depth",
+            ),
+            (
+                format!(
+                    "local t=iced.text('leaf'); local children={{}}; for i=1,{MAX_NODES} do children[i]=t end; return iced.row(children)"
+                ),
+                "node count",
+            ),
+            (
+                format!(
+                    "local data={{}}; for i=1,{} do data[i]={{id=i}} end; return iced.listview(data):id('bounded'):key('id'):delegate(function() return iced.space() end)",
+                    MAX_LIST_ITEMS + 1
+                ),
+                "item count",
+            ),
+        ] {
+            let value = lua.load(source).eval().unwrap();
+            assert!(parse_node(&value).unwrap_err().contains(expected));
+        }
+    }
+
+    #[test]
+    fn invalid_primitive_properties_fail_with_child_context() {
+        let lua = mlua::Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        for source in [
+            "iced.text('x'):size(0/0)",
+            "iced.text('x'):size(0)",
+            "iced.space():width(-1)",
+            "iced.space():height(1/0)",
+            "iced.row({}):spacing(-1)",
+            "iced.text('x'):wrap(function() end)",
+            "iced.text('x'):color({r=0/0,g=0,b=0})",
+            "iced.progress(1/0)",
+        ] {
+            let value = lua
+                .load(format!("return iced.column({{{source}}})"))
+                .eval()
+                .unwrap();
+            let error = parse_node(&value).unwrap_err();
+            assert!(error.contains("column.children[1]"), "{source}: {error}");
+        }
+    }
 
     #[test]
     fn fill_portions_are_strict_clamped_and_roundtrip_without_changing_plain_fill() {
@@ -1350,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn listview_axis_is_case_insensitive_and_unknown_values_default_to_vertical() {
+    fn listview_axis_is_case_insensitive_and_rejects_unknown_values() {
         let lua = mlua::Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
         let horizontal = |axis: &str| {
@@ -1382,22 +1535,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(!horizontal("diagonal"));
-        for axis in ["false", "42", "{}", "function() end"] {
+        for axis in ["'diagonal'", "false", "42", "{}", "function() end"] {
             let value: Value = lua
                 .load(format!("return iced.listview({{}}):id('a'):key('id'):delegate(function() return iced.text('x') end):axis({axis})"))
                 .eval()
                 .unwrap();
-            assert!(
-                matches!(
-                    parse_node(&value).unwrap(),
-                    WidgetNode::ListView {
-                        horizontal: false,
-                        ..
-                    }
-                ),
-                "{axis}"
-            );
+            assert!(parse_node(&value).unwrap_err().contains("axis"), "{axis}");
         }
     }
 
