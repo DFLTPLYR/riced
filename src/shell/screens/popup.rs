@@ -115,7 +115,8 @@ impl Popup {
         let mut root = &tree;
         while let WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
-        | WidgetNode::Aligned { child, .. } = root
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } = root
         {
             root = child;
         }

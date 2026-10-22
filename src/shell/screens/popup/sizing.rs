@@ -206,7 +206,8 @@ fn naturalize_width(node: &mut WidgetNode) {
     match node {
         WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
-        | WidgetNode::Aligned { child, .. } => naturalize_width(child),
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => naturalize_width(child),
         WidgetNode::Container { child, width, .. }
         | WidgetNode::Popup { child, width, .. }
         | WidgetNode::Scrollable { child, width, .. } => {
@@ -264,7 +265,8 @@ fn naturalize_height(node: &mut WidgetNode) {
     match node {
         WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
-        | WidgetNode::Aligned { child, .. } => naturalize_height(child),
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => naturalize_height(child),
         WidgetNode::Container { child, height, .. }
         | WidgetNode::Popup { child, height, .. }
         | WidgetNode::Scrollable { child, height, .. } => {

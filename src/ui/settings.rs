@@ -25,7 +25,7 @@ pub(crate) fn properties(kind: &str) -> Vec<&'static str> {
     let mut fields = component.map(|c| c.setters.to_vec()).unwrap_or_default();
     fields.extend(super::layout_props::SETTERS);
     // A callback delegate is executable Lua, not a persistent value.
-    fields.retain(|field| *field != "delegate");
+    fields.retain(|field| !matches!(*field, "delegate" | "animate"));
     fields.sort_unstable();
     fields.dedup();
     fields

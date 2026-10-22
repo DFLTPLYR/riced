@@ -16,6 +16,7 @@ macro_rules! components {
             Spinner,
             Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: Insets },
             Clickable { child: Box<WidgetNode>, action: String },
+            Animated { child: Box<WidgetNode>, spec: super::animations::Spec },
             Aligned {
                 child: Box<WidgetNode>,
                 align_x: Option<iced::Alignment>,
@@ -53,7 +54,7 @@ macro_rules! components {
         ];
         impl WidgetNode {
             pub(crate) fn kind(&self) -> &'static str {
-                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Aligned { child, .. } => child.kind() }
+                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Animated { child, .. } | Self::Aligned { child, .. } => child.kind() }
             }
         }
     };

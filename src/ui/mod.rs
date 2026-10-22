@@ -1,6 +1,7 @@
 //! Owned descriptions, iced realization, reusable layout, and animation.
 pub mod action;
 pub mod anim;
+pub(crate) mod animations;
 pub(crate) mod assets;
 pub mod build;
 pub(crate) mod canvas;

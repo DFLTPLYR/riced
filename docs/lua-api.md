@@ -279,6 +279,68 @@ return iced.stack({
 })
 ```
 
+### Property animations
+
+All `iced.*` components accept `:animate(...)`. `iced.animations.x`, `.y`, and
+`.opacity` validate and return plain animation descriptor tables:
+
+```lua
+local animations = iced.animations
+
+function app:view()
+    return iced.container(iced.text("Details")):padding(16):animate({
+        id = "details-card",
+        y = animations.y({to = self.open and 0 or 24, duration = 300}),
+        opacity = animations.opacity({
+            from = 0,
+            to = self.open and 1 or 0.25,
+            duration = 200,
+            easing = "ease_out",
+        }),
+    })
+end
+```
+
+Plain descriptors such as `x = {from = -16, to = 0}` work too. `id` is required
+and must be a stable, non-empty string. Duplicate animation IDs in the same
+description scope are errors. List delegates automatically scope IDs by list
+and item key, so each row can use the same local animation ID. VMs, reload
+epochs, and runtime windows/scene outputs isolate their animation state.
+
+Supported properties are `x` and `y` (visual offsets in logical pixels, without
+changing surrounding layout) and `opacity` (endpoints in `0..1`). Every
+descriptor requires a finite numeric `to`; `from` is optional and only applies
+when the property first mounts. Without `from`, initial rendering starts at
+`to`. A changed target retargets smoothly from the currently displayed value;
+unchanged targets do not restart, even if a view returns fresh Lua tables.
+
+`duration` defaults to **200 ms**, `delay` to **0 ms**, and `easing` to
+`"ease_out"`. Available curves are `"linear"`, `"ease_in"`, `"ease_out"`, and
+`"ease_in_out"`. Durations and delays must be finite, non-negative, and at most
+one day. Zero-duration animations snap immediately, ignoring delay. Timing-only
+or `from`-only changes do not restart an unchanged target. Removing a property
+restores its default offset (`0`) or opacity (`1`).
+
+Use `animation = {reduced_motion = true}` in `config.lua` to snap property
+animations throughout the shell, or `reduced_motion = true` in an individual
+`:animate` table. Explicit durations are independent of the list-animation
+speed setting. Opacity multiplies primitive alpha, including list-transition
+alpha; it is not offscreen group compositing and does not disable input.
+Translated drawing, hit testing, overlays, and measured regions use the same
+coordinates.
+
+Native frames sample `aura-anim` tweens and request Rust widget rebuilds from
+cached descriptions, never Lua views or handlers. Settled animations stop
+requesting frames. Native tree ownership releases animation state on unmount;
+list exit ghosts may retain content until their existing exit completes.
+Animated nodes must originate from `iced.*` constructors, not hand-built raw
+node tables. `iced.to_table` preserves descriptors and rebinds VM ownership
+when exported to another runtime.
+
+See `scripts/animations.lua` for a complete interactive app. Completion events,
+springs, repeats/sequences, colors, layout-size animation, scale, and rotation
+are not implemented yet.
+
 ### Shaders
 
 `iced.shader(path)` draws a file-backed GPU fragment anywhere an `iced.*` node

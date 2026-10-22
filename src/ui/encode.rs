@@ -68,6 +68,13 @@ fn set_alignment(table: &Table, key: &str, align: Option<iced::Alignment>) -> ml
 
 pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
     match node {
+        WidgetNode::Animated { child, spec } => {
+            let table = to_table(lua, child)?;
+            table
+                .raw_get::<Table>("_properties")?
+                .set("animate", super::animations::encode(lua, spec)?)?;
+            return Ok(table);
+        }
         WidgetNode::Anchored {
             child,
             placement,
@@ -312,7 +319,8 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
             }
             WidgetNode::Anchored { .. }
             | WidgetNode::Clickable { .. }
-            | WidgetNode::Aligned { .. } => unreachable!("handled above"),
+            | WidgetNode::Aligned { .. }
+            | WidgetNode::Animated { .. } => unreachable!("handled above"),
             WidgetNode::Raster {
                 handle,
                 width,

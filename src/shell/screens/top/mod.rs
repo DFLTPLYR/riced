@@ -467,19 +467,53 @@ pub(crate) fn build_with_lists(
     lists: &WidgetLists,
     hover: Option<crate::ui::action::HoverSender>,
 ) -> Result<Element<'static, Plant>, String> {
+    build_with_lists_opacity(node, widget, size, message, runtime, lists, hover, 1.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_lists_opacity(
+    node: &WidgetNode,
+    widget: &str,
+    size: f32,
+    message: Option<crate::ui::action::Sender>,
+    runtime: &aura_anim::core::runtime::MotionRuntime,
+    lists: &WidgetLists,
+    hover: Option<crate::ui::action::HoverSender>,
+    opacity: f32,
+) -> Result<Element<'static, Plant>, String> {
     match node {
+        WidgetNode::Animated { child, spec } => crate::ui::animations::realize(spec, |values| {
+            build_with_lists_opacity(
+                child,
+                widget,
+                size,
+                message,
+                runtime,
+                lists,
+                hover,
+                opacity * values[2],
+            )
+        }),
         WidgetNode::Anchored {
             child,
             placement,
             margin,
         } => Ok(crate::ui::widgets::anchored::placed(
-            build_with_lists(child, widget, size, message, runtime, lists, hover)?,
+            build_with_lists_opacity(child, widget, size, message, runtime, lists, hover, opacity)?,
             *placement,
             *margin,
         )),
         WidgetNode::Clickable { child, action } => {
-            let element =
-                build_with_lists(child, widget, size, message.clone(), runtime, lists, hover)?;
+            let element = build_with_lists_opacity(
+                child,
+                widget,
+                size,
+                message.clone(),
+                runtime,
+                lists,
+                hover,
+                opacity,
+            )?;
             let mut area = iced::widget::mouse_area(element);
             if let Some(sender) = message {
                 area = area.on_press(sender(action.clone().into()));
@@ -510,24 +544,16 @@ pub(crate) fn build_with_lists(
                           child: WidgetNode,
                           motion: crate::ui::anim::ItemMotion,
                           live: bool| {
-                let mut element = if motion.opacity < 1.0 || !live {
-                    build_node_opacity(
-                        &child,
-                        size,
-                        if live { message.clone() } else { None },
-                        motion.opacity,
-                    )
-                } else {
-                    build_with_lists(
-                        &child,
-                        widget,
-                        size,
-                        message.clone(),
-                        runtime,
-                        lists,
-                        hover.clone(),
-                    )
-                }
+                let mut element = build_with_lists_opacity(
+                    &child,
+                    widget,
+                    size,
+                    if live { message.clone() } else { None },
+                    runtime,
+                    lists,
+                    if live { hover.clone() } else { None },
+                    opacity * motion.opacity,
+                )
                 .unwrap_or_else(|error| text(error).into());
                 // Inert ghosts never report hover; live rows do, so the
                 // host can re-parse with `item.hovered` set.
@@ -549,7 +575,7 @@ pub(crate) fn build_with_lists(
                 items
                     .iter()
                     .map(|(key, c)| {
-                        let mut element = build_with_lists(
+                        let mut element = build_with_lists_opacity(
                             c,
                             widget,
                             size,
@@ -557,6 +583,7 @@ pub(crate) fn build_with_lists(
                             runtime,
                             lists,
                             hover.clone(),
+                            opacity,
                         )?;
                         // Lists without animation state still report hover
                         // for their live rows.
@@ -620,7 +647,7 @@ pub(crate) fn build_with_lists(
             let elements = children
                 .iter()
                 .map(|c| {
-                    build_with_lists(
+                    build_with_lists_opacity(
                         c,
                         widget,
                         size,
@@ -628,6 +655,7 @@ pub(crate) fn build_with_lists(
                         runtime,
                         lists,
                         hover.clone(),
+                        opacity,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -647,7 +675,7 @@ pub(crate) fn build_with_lists(
             let elements = children
                 .iter()
                 .map(|c| {
-                    build_with_lists(
+                    build_with_lists_opacity(
                         c,
                         widget,
                         size,
@@ -655,6 +683,7 @@ pub(crate) fn build_with_lists(
                         runtime,
                         lists,
                         hover.clone(),
+                        opacity,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -674,7 +703,7 @@ pub(crate) fn build_with_lists(
         } => {
             let mut stack = iced::widget::Stack::with_capacity(children.len());
             for child in children {
-                stack = stack.push(build_with_lists(
+                stack = stack.push(build_with_lists_opacity(
                     child,
                     widget,
                     size,
@@ -682,6 +711,7 @@ pub(crate) fn build_with_lists(
                     runtime,
                     lists,
                     hover.clone(),
+                    opacity,
                 )?);
             }
             let hints = iced::advanced::Widget::size(&stack);
@@ -710,12 +740,13 @@ pub(crate) fn build_with_lists(
             border,
             border_width,
         } => {
-            let background = background.map(iced::Background::Color);
+            let background =
+                background.map(|color| iced::Background::Color(color.scale_alpha(opacity)));
             let radius = *radius;
             let border = *border;
             let border_width = *border_width;
-            let content = container(build_with_lists(
-                child, widget, size, message, runtime, lists, hover,
+            let content = container(build_with_lists_opacity(
+                child, widget, size, message, runtime, lists, hover, opacity,
             )?);
             let hints = iced::advanced::Widget::size(&content);
             Ok(content
@@ -725,7 +756,7 @@ pub(crate) fn build_with_lists(
                 .style(move |_| iced::widget::container::Style {
                     background,
                     border: iced::Border {
-                        color: border.unwrap_or_default(),
+                        color: border.unwrap_or_default().scale_alpha(opacity),
                         width: border_width,
                         radius: radius.into(),
                     },
@@ -739,8 +770,8 @@ pub(crate) fn build_with_lists(
             height,
             scrollbar_hidden,
         } => {
-            let mut content = iced::widget::scrollable(build_with_lists(
-                child, widget, size, message, runtime, lists, hover,
+            let mut content = iced::widget::scrollable(build_with_lists_opacity(
+                child, widget, size, message, runtime, lists, hover, opacity,
             )?);
             if *scrollbar_hidden {
                 content = content.direction(iced::widget::scrollable::Direction::Vertical(
@@ -753,7 +784,7 @@ pub(crate) fn build_with_lists(
                 .height(height.resolve(hints.height))
                 .into())
         }
-        _ => build_node(node, size, message),
+        _ => build_node_opacity(node, size, message, opacity),
     }
 }
 
@@ -773,7 +804,7 @@ fn lua_cell_text(
 }
 
 use crate::lua::metadata::load_widget_meta;
-use crate::ui::build::{build_node, build_node_opacity};
+use crate::ui::build::build_node_opacity;
 use crate::ui::node::{NodeLength, WidgetNode};
 
 impl Top {

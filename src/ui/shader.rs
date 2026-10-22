@@ -190,6 +190,8 @@ pub(crate) fn parse(table: &mlua::Table) -> Result<WidgetNode, String> {
                     | "anchor"
                     | "margin"
                     | "on_press"
+                    | "animate"
+                    | "_animation_owner"
                     | "_properties"
                     | "_defaults"
             )
@@ -218,6 +220,7 @@ pub(crate) fn parse(table: &mlua::Table) -> Result<WidgetNode, String> {
                     | "anchor"
                     | "margin"
                     | "on_press"
+                    | "animate"
             ) {
                 return Err(format!("{WHAT} unknown property {key:?}"));
             }

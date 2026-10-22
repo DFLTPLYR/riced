@@ -25,6 +25,12 @@ pub(crate) fn call_widget_method(
     args: mlua::MultiValue,
 ) -> Result<Value, String> {
     lua.expire_registry_values();
+    if matches!(method, "view" | "popup") {
+        // A placement's bar/desktop view and its popup share one Lua VM,
+        // but their native trees must never share property animation state.
+        lua.set_named_registry_value("riced.animation_host", format!("widget:{method}"))
+            .map_err(|error| error.to_string())?;
+    }
     super::sandbox::reset_budget(lua).map_err(|error| error.to_string())?;
     let app: Table = lua
         .named_registry_value("riced.widget.app")

@@ -68,7 +68,8 @@ fn declared<'a>(
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
-        | WidgetNode::Aligned { child, .. } => declared(child, out)?,
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => declared(child, out)?,
         _ => {}
     }
     Ok(())
@@ -396,6 +397,17 @@ impl Lists {
         align: Align,
     ) -> Result<Element<'static, Plant>, String> {
         match node {
+            WidgetNode::Animated { child, spec } => super::animations::realize(spec, |values| {
+                self.node_aligned(
+                    child,
+                    runtime,
+                    sender,
+                    hover,
+                    active,
+                    opacity * values[2],
+                    align,
+                )
+            }),
             WidgetNode::Anchored {
                 child,
                 placement,

@@ -16,6 +16,8 @@ struct DecodeBudget {
     nodes: usize,
     ancestors: Vec<*const std::ffi::c_void>,
     depth: usize,
+    animation_ids: std::collections::HashSet<(Vec<String>, String)>,
+    animation_scope: Vec<String>,
 }
 
 pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
@@ -316,6 +318,19 @@ fn decode_node_inner(
         .transpose()?;
     let margin = opt_insets(table, "margin", "iced component")?.unwrap_or_default();
     let on_press = control_string(table, "on_press", "iced component")?;
+    let mut animate = super::animations::parse(table)?;
+    if let Some(spec) = &mut animate {
+        spec.scope = budget.animation_scope.clone();
+        if !budget
+            .animation_ids
+            .insert((spec.scope.clone(), spec.id.clone()))
+        {
+            return Err(format!(
+                "duplicate animation id {:?} in the same scope",
+                spec.id
+            ));
+        }
+    }
     let align = match node.kind() {
         kind @ ("text" | "container" | "popup") => {
             let what = format!("iced.{kind}()");
@@ -339,6 +354,7 @@ fn decode_node_inner(
         margin,
         on_press,
         align,
+        animate,
     }
     .wrap(node))
 }
@@ -491,8 +507,13 @@ fn parse_component(
                 item.set("hovered", hover.contains(&(id.clone(), key.clone())))
                     .map_err(|e| e.to_string())?;
                 let value: Value = delegate.call(item).map_err(|e| e.to_string())?;
-                let child = parse_child(&value, hover, budget)
-                    .map_err(|error| format!("listview {id:?}.items[{key:?}]: {error}"))?;
+                budget.animation_scope.extend([id.clone(), key.clone()]);
+                let child = parse_child(&value, hover, budget);
+                budget
+                    .animation_scope
+                    .truncate(budget.animation_scope.len() - 2);
+                let child =
+                    child.map_err(|error| format!("listview {id:?}.items[{key:?}]: {error}"))?;
                 items.push((key, child));
             }
             let defaults: super::listview::ListView<String, WidgetNode> =
@@ -533,7 +554,10 @@ fn parse_component(
                 for pair in t.clone().pairs::<String, Value>() {
                     let (key, _) = pair.map_err(|e| e.to_string())?;
                     if !allowed(&key)
-                        && !matches!(key.as_str(), "type" | "child" | "_properties" | "_defaults")
+                        && !matches!(
+                            key.as_str(),
+                            "type" | "child" | "_properties" | "_defaults" | "_animation_owner"
+                        )
                     {
                         return Err(format!("{what} unknown field {key:?}"));
                     }

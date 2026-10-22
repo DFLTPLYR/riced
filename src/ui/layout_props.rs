@@ -1,6 +1,6 @@
 //! Common layout/event properties preserve the underlying component's setters.
 use super::{geometry::Insets, node::WidgetNode, placement::Placement};
-pub(crate) const SETTERS: &[&str] = &["anchor", "margin", "on_press"];
+pub(crate) const SETTERS: &[&str] = &["anchor", "margin", "on_press", "animate"];
 /// Cross/main-axis alignment for the widgets whose native API exposes it.
 /// `None` keeps the widget's native default.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -19,6 +19,7 @@ pub(crate) struct Common {
     pub margin: Insets,
     pub on_press: Option<String>,
     pub align: Align,
+    pub animate: Option<super::animations::Spec>,
 }
 impl Common {
     pub(crate) fn wrap(self, mut node: WidgetNode) -> WidgetNode {
@@ -42,6 +43,12 @@ impl Common {
                 margin: self.margin,
             };
         }
+        if let Some(spec) = self.animate {
+            node = WidgetNode::Animated {
+                child: Box::new(node),
+                spec,
+            };
+        }
         node
     }
 }
@@ -49,6 +56,10 @@ pub(crate) fn unwrap(mut node: WidgetNode) -> (WidgetNode, Common) {
     let mut props = Common::default();
     loop {
         match node {
+            WidgetNode::Animated { child, spec } => {
+                props.animate = Some(spec);
+                node = *child;
+            }
             WidgetNode::Anchored {
                 child,
                 placement,

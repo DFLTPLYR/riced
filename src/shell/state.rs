@@ -545,6 +545,7 @@ impl Plots {
     }
 
     pub fn view(&self, id: iced::window::Id) -> Element<'_, Plant> {
+        crate::ui::animations::reduced_motion(self.config.animation.reduced_motion);
         // Background windows render their own selection/context overlays clipped
         // Top windows render the bar. Daemon's tiny 1x1 window: empty.
         // Settings (XDG toplevel) renders its own panel (see layers/setting.rs).

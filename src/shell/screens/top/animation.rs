@@ -32,7 +32,9 @@ fn declared_lists<'a>(
         | WidgetNode::Popup { child, .. }
         | WidgetNode::Scrollable { child, .. }
         | WidgetNode::Anchored { child, .. }
-        | WidgetNode::Clickable { child, .. } => declared_lists(child, out)?,
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => declared_lists(child, out)?,
         _ => {}
     }
     Ok(())

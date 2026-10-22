@@ -346,6 +346,13 @@ impl AnimationSpeed {
 #[derive(Default)]
 pub struct AnimationConfig {
     pub speed: AnimationSpeed,
+    /// Snap declarative property animations to their targets.
+    #[serde(skip_serializing_if = "is_false")]
+    pub reduced_motion: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Theme selection under `theme`, mirroring reshell's `Global.general`

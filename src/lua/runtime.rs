@@ -310,6 +310,8 @@ impl LuaRuntime {
         }
         let result = (|| {
             self.begin()?;
+            self.lua
+                .set_named_registry_value("riced.animation_host", format!("window:{}", window.0))?;
             let app: Table = self.lua.registry_value(
                 self.app
                     .as_ref()
@@ -344,6 +346,8 @@ impl LuaRuntime {
         let result = (|| {
             self.begin()?;
             self.lua.set_app_data(hover.clone());
+            self.lua
+                .set_named_registry_value("riced.animation_host", format!("output:{output}"))?;
             crate::services::publish_all(services, &self.lua)?;
             crate::services::publish_bar(&self.lua, output)?;
             let app: Table = self.lua.registry_value(

@@ -21,7 +21,8 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
     match node {
         WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
-        | WidgetNode::Aligned { child, .. } => estimate_height(child, size),
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => estimate_height(child, size),
         WidgetNode::Raster { height, .. } => px(height).max(base),
         WidgetNode::Checkbox { size, .. }
         | WidgetNode::Radio { size, .. }
@@ -146,6 +147,16 @@ fn realize_aligned<M: Clone + 'static>(
     align: Align,
 ) -> Result<Element<'static, M>, String> {
     match node {
+        WidgetNode::Animated { child, spec } => super::animations::realize(spec, |values| {
+            realize_aligned(
+                child,
+                size,
+                button_msg,
+                interactive,
+                opacity * values[2],
+                align,
+            )
+        }),
         WidgetNode::Anchored {
             child,
             placement,

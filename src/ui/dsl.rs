@@ -34,6 +34,10 @@ pub(super) fn node(
     let table = lua.create_table()?;
     table.set("type", kind)?;
     table.raw_set("_defaults", super::settings::table(lua)?)?;
+    table.raw_set(
+        "_animation_owner",
+        lua.named_registry_value::<Function>("riced.animation_owner")?,
+    )?;
     build(&table)?;
     let properties = lua.create_table()?;
     let component = super::components::COMPONENTS
@@ -59,6 +63,7 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     crate::lua::tray::install(lua)?;
     crate::lua::callbacks::install(lua)?;
     let iced = lua.create_table()?;
+    super::animations::install(lua, &iced)?;
     let mts = lua.create_table()?;
     let schemas = lua.create_table()?;
     for component in super::components::COMPONENTS {
