@@ -152,10 +152,11 @@ impl Lists {
                 transitions.2.clone(),
                 true,
             );
+            let live_keys: HashSet<_> = new_items.iter().map(|(key, _)| key).collect();
             let removed: Vec<_> = old_items
                 .iter()
                 .enumerate()
-                .filter(|(_, (key, _))| !new_items.iter().any(|(new, _)| new == key))
+                .filter(|(_, (key, _))| !live_keys.contains(key))
                 .map(|(index, (key, node))| {
                     let key = (id.clone(), key.clone());
                     if let Some(bounds) = frame.items.get(&item_id(&id, &key.1)) {

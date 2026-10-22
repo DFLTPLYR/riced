@@ -206,23 +206,31 @@ fn realize_aligned<M: Clone + 'static>(
             height,
             ..
         } => {
-            let children = items.iter().map(|(_, c)| c.clone()).collect();
-            let layout = if *horizontal {
-                WidgetNode::Row {
-                    children,
-                    spacing: *spacing,
-                    width: width.clone(),
-                    height: height.clone(),
-                }
+            // Realize borrowed descriptions directly instead of cloning an
+            // entire subtree just to construct a temporary layout node.
+            let children = items
+                .iter()
+                .map(|(_, child)| realize(child, size, button_msg.clone(), interactive, opacity))
+                .collect::<Result<Vec<_>, _>>()?;
+            if *horizontal {
+                let layout = iced::widget::Row::with_children(children)
+                    .spacing(*spacing)
+                    .align_y(iced::Alignment::Center);
+                let hints = iced::advanced::Widget::size(&layout);
+                Ok(layout
+                    .width(width.resolve(hints.width))
+                    .height(height.resolve(hints.height))
+                    .into())
             } else {
-                WidgetNode::Column {
-                    children,
-                    spacing: *spacing,
-                    width: width.clone(),
-                    height: height.clone(),
-                }
-            };
-            realize(&layout, size, button_msg, interactive, opacity)
+                let layout = iced::widget::Column::with_children(children)
+                    .spacing(*spacing)
+                    .align_x(iced::Alignment::Center);
+                let hints = iced::advanced::Widget::size(&layout);
+                Ok(layout
+                    .width(width.resolve(hints.width))
+                    .height(height.resolve(hints.height))
+                    .into())
+            }
         }
         WidgetNode::Container {
             child,
