@@ -24,16 +24,13 @@ pub(crate) struct Closing {
     callback: Option<crate::lua::callbacks::Callback>,
 }
 
-/// QML-`Menu`-style popup for widget placements, backed by a native
-/// `xdg_popup` (`Plant::NewPopUp`): an exactly-sized surface anchored
-/// to the reporting widget's measured bounds, with the compositor
-/// flipping/sliding it into view on overflow. No fullscreen overlay, no
-/// cursor math.
+/// Widget-placement popup, anchored to the reporting widget's measured bounds.
+/// Exit-animated popups use a host-owned layer so native grabs cannot unmap
+/// them before their transition finishes. Other popups use `xdg_popup`.
 ///
 /// Opened from `actions(events)` by calling `self:popup()` on a click;
 /// the box renders whatever `popup()` returns (icons included). Clicking
-/// the same placement toggles it; the compositor dismisses on outside
-/// clicks (menu-grab semantics).
+/// the same placement toggles it; outside clicks dismiss it.
 #[derive(Debug, Clone)]
 pub struct Popup {
     /// Own window id (item clicks address their popup).
@@ -59,6 +56,7 @@ pub struct Popup {
     pub sizing_revision: u64,
     pub measured_revision: Option<u64>,
     pub positioner: iced_exwlshell::actions::IcedNewPopupSettings,
+    pub(crate) hosted: Option<surface::Hosted>,
     /// Declared `:on_open(...)` transition/callback, kept across body refreshes.
     pub on_open: Option<PopupLifecycle>,
     /// Declared `:on_close(...)` transition/callback.
@@ -306,6 +304,14 @@ impl Popup {
     }
 
     pub fn view(&self, plots: &Plots) -> Element<'static, Plant> {
+        let content = self.content_view(plots);
+        match self.hosted {
+            Some(hosted) => hosted.view(self, plots, content),
+            None => content,
+        }
+    }
+
+    fn content_view(&self, plots: &Plots) -> Element<'static, Plant> {
         use iced::widget::container;
         let content = container(self.body_view(plots, false))
             .width(Length::Fixed(self.w as f32))
@@ -423,6 +429,9 @@ impl Popup {
 
     /// xdg_popup resizing uses its positioner, not iced's generic window API.
     fn reposition(&mut self) -> Command<Plant> {
+        if self.hosted.is_some() {
+            return Command::none();
+        }
         let Some(size) = iced_exwlshell::reexport::PixelSize::try_px(self.w, self.h) else {
             return Command::none();
         };
@@ -849,6 +858,7 @@ mod tests {
                 max_height: 1080.0,
                 sizing_revision: 0,
                 measured_revision: None,
+                hosted: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),
@@ -973,6 +983,7 @@ mod tests {
                 max_height: 1080.0,
                 sizing_revision: 0,
                 measured_revision: None,
+                hosted: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(220, 137).unwrap(),
@@ -1164,6 +1175,7 @@ mod tests {
             max_height: 1080.0,
             sizing_revision: 0,
             measured_revision: None,
+            hosted: None,
             positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                 window::Id::unique(),
                 iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
@@ -1230,6 +1242,217 @@ mod tests {
         )
         .unwrap();
         assert!(no_args.on_close.is_some());
+    }
+
+    #[test]
+    fn explicit_close_draws_the_phase_animation_without_a_root_animate() {
+        use iced::advanced::{Layout, renderer::Headless, renderer::Style, widget::Tree};
+        use std::time::Instant;
+
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let content = Popup::parse_popup_content(
+            lua.load("return iced.popup(iced.container(iced.space():width(100):height(100)):background('#00ff00')):width(100):on_open({animate={id='test',y=iced.animations.y({from=-180,to=0,duration=180})}}):on_close({animate={id='test',y=iced.animations.y({from=0,to=-180,duration=180})}})")
+                .eval()
+                .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = crate::shell::state::Plots::new(receiver);
+        let id = window::Id::unique();
+        let spec = content.on_open.as_ref().unwrap().animate.as_ref().unwrap();
+        let mut popup = test_popup(
+            id,
+            Some(with_root_spec(content.tree.unwrap(), (**spec).clone())),
+            content.on_open,
+            content.on_close,
+        );
+        popup.auto_height = true;
+        popup.measured_revision = Some(0);
+        popup.hosted = Some(surface::Hosted::new((0, 0)));
+        popup.max_width = 100.0;
+        popup.max_height = 100.0;
+        plots.windows.popups.insert(id, popup);
+
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let bounds = iced::Rectangle::with_size(iced::Size::new(100.0, 100.0));
+        let mut element = plots.windows.popups[&id].view(&plots);
+        let mut tree = Tree::new(&element);
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(iced::Size::ZERO, bounds.size()),
+        );
+        let opened = Instant::now() + Duration::from_millis(180);
+        let frame = |element: &mut Element<'static, Plant>,
+                     tree: &mut Tree,
+                     renderer: &iced::Renderer,
+                     now| {
+            element.as_widget_mut().update(
+                tree,
+                &iced::Event::Window(window::Event::RedrawRequested(now)),
+                Layout::new(&layout),
+                iced::mouse::Cursor::Unavailable,
+                renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut Vec::new()),
+                &bounds,
+            );
+        };
+        frame(&mut element, &mut tree, &renderer, opened);
+        let _ = Popup::request_close(&mut plots, id);
+        let mut closing = plots.windows.popups[&id].view(&plots);
+        tree.diff(&closing);
+        let mut visible = Vec::new();
+        for millis in [0, 30, 180] {
+            frame(
+                &mut closing,
+                &mut tree,
+                &renderer,
+                opened + Duration::from_millis(millis),
+            );
+            iced::advanced::Renderer::reset(&mut renderer, bounds);
+            closing.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &Style::default(),
+                Layout::new(&layout),
+                iced::mouse::Cursor::Unavailable,
+                &bounds,
+            );
+            let pixels =
+                renderer.screenshot(iced::Size::new(100, 100), 1.0, iced::Color::TRANSPARENT);
+            visible.push(pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0).count());
+        }
+        assert_eq!(visible[0], 10_000);
+        assert!(visible[1] > 0 && visible[1] < visible[0], "{visible:?}");
+        assert_eq!(visible[2], 0);
+    }
+
+    fn hosted_test_popup() -> (Plots, window::Id) {
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let content = Popup::parse_popup_content(
+            lua.load("return iced.popup(iced.space():width(100):height(100)):width(100):height(100):on_close({animate={id='hosted',y=iced.animations.y({from=0,to=-180,duration=180})}})")
+                .eval()
+                .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(receiver);
+        let id = window::Id::unique();
+        let mut popup = test_popup(id, content.tree, content.on_open, content.on_close);
+        popup.hosted = Some(surface::Hosted::new((100, 49)));
+        popup.max_width = 1000.0;
+        popup.max_height = 600.0;
+        plots.windows.tops.insert(popup.bar_id, Top::new());
+        plots.windows.register_popup(OutputId(7), popup);
+        (plots, id)
+    }
+
+    #[test]
+    fn hosted_icon_and_outside_clicks_animate_but_blank_card_space_does_not_dismiss() {
+        use iced::advanced::{Layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        for (point, dismiss) in [
+            (iced::Point::new(100.0, 25.0), true), // The spawning icon, outside the card.
+            (iced::Point::new(900.0, 500.0), true),
+            (iced::Point::new(75.0, 75.0), false), // Blank content inside the card.
+        ] {
+            let (mut plots, id) = hosted_test_popup();
+            let mut element = plots.windows.popups[&id].view(&plots);
+            let mut tree = Tree::new(&element);
+            let viewport = iced::Rectangle::with_size(iced::Size::new(1000.0, 600.0));
+            let layout = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &iced::advanced::layout::Limits::new(iced::Size::ZERO, viewport.size()),
+            );
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                Layout::new(&layout),
+                iced::mouse::Cursor::Available(point),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &viewport,
+            );
+            assert_eq!(messages.len(), usize::from(dismiss), "{point:?}");
+            if dismiss {
+                assert!(
+                    matches!(&messages[0], Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupCloseRequested(target))) if *target == id)
+                );
+                let _ = plots.update(messages.remove(0));
+                let popup = &plots.windows.popups[&id];
+                let revision = popup
+                    .closing
+                    .as_ref()
+                    .expect("exit transition keeps the surface mounted")
+                    .revision;
+                let _ = plots.update(Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupClosed(
+                    id, revision,
+                ))));
+                assert!(!plots.windows.popups.contains_key(&id));
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_escape_uses_the_exit_transition_and_repaints_its_surface() {
+        use iced::futures::StreamExt;
+        use iced::keyboard::{self, Key, Location, Modifiers, key};
+        let (mut plots, id) = hosted_test_popup();
+        let message = Plant::Graft(
+            id,
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Named(key::Named::Escape),
+                modified_key: Key::Named(key::Named::Escape),
+                physical_key: key::Physical::Code(key::Code::Escape),
+                location: Location::Standard,
+                modifiers: Modifiers::default(),
+                text: None,
+                repeat: false,
+            }),
+        );
+        let command = plots.update(message);
+        let actions = iced::futures::executor::block_on(
+            iced_runtime::task::into_stream(command)
+                .unwrap()
+                .collect::<Vec<_>>(),
+        );
+        let [Action::Output(request)] = actions.as_slice() else {
+            panic!("Escape must request a host-owned close");
+        };
+        assert_eq!(
+            crate::shell::state::redraw_scope(request),
+            iced_exwlshell::redraw::Scope::Window(id)
+        );
+        let _ = plots.update(request.clone());
+        let phase = plots.windows.popups[&id].phase;
+        assert!(plots.windows.popups[&id].closing.is_some());
+        let _ = plots.update(request.clone());
+        assert_eq!(plots.windows.popups[&id].phase, phase);
+    }
+
+    #[test]
+    fn hosted_measurement_does_not_reposition_a_native_popup() {
+        let (mut plots, id) = hosted_test_popup();
+        let popup = plots.windows.popups.get_mut(&id).unwrap();
+        popup.w = 200;
+        assert!(iced_runtime::task::into_stream(popup.reposition()).is_none());
     }
 
     #[test]

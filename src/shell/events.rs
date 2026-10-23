@@ -115,6 +115,8 @@ pub enum WidgetEvent {
     PopupOpened(Id, u64),
     /// Popup close transition finished: dismiss and dispatch its callback.
     PopupClosed(Id, u64),
+    /// Host-owned popup backdrop or Escape requests an animated close.
+    PopupCloseRequested(Id),
     /// A Lua widget output moved: repaint so bars pick the new text up.
     Changed,
     /// Click a popup item: run the widget's `on_action()` with the item

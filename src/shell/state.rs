@@ -929,6 +929,23 @@ impl Plots {
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
             Plant::Graft(id, event) => {
+                if self
+                    .windows
+                    .popups
+                    .get(&id)
+                    .is_some_and(|popup| popup.hosted.is_some())
+                    && matches!(
+                        &event,
+                        Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                            ..
+                        })
+                    )
+                {
+                    return Command::done(Plant::TopPlot(TopEvent::Widget(
+                        WidgetEvent::PopupCloseRequested(id),
+                    )));
+                }
                 if self.desktop.drag.is_some()
                     && matches!(
                         &event,
@@ -1317,6 +1334,7 @@ impl Plots {
                 WidgetEvent::Anim => Top::handle_anim_frame(self),
                 WidgetEvent::PopupOpened(id, revision) => Popup::handle_opened(self, id, revision),
                 WidgetEvent::PopupClosed(id, revision) => Popup::handle_closed(self, id, revision),
+                WidgetEvent::PopupCloseRequested(id) => Popup::request_close(self, id),
                 WidgetEvent::Changed => Popup::refresh_bodies(self),
                 WidgetEvent::PopupSelect(id, action) => Popup::handle_select(self, id, action),
                 WidgetEvent::PopupMeasured(id, revision, height) => {
@@ -1652,6 +1670,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         // popup, actions refreshing tiles, changed outputs).
         Plant::TopPlot(TopEvent::Widget(WidgetEvent::Pressed(..))) => Scope::None,
         Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupMeasured(id, _, _))) => Scope::Window(*id),
+        Plant::TopPlot(TopEvent::Widget(WidgetEvent::PopupCloseRequested(id))) => Scope::Window(*id),
         Plant::TopPlot(TopEvent::Widget(_))
         | Plant::TopPlot(TopEvent::Bar(_))
         | Plant::TopPlot(TopEvent::Style(_))
@@ -1996,6 +2015,7 @@ mod tests {
                 max_height: 1080.0,
                 sizing_revision: 7,
                 measured_revision: None,
+                hosted: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     iced::window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(220, 64).unwrap(),
@@ -2502,6 +2522,7 @@ mod tests {
             max_height: 1080.0,
             sizing_revision: 0,
             measured_revision: None,
+            hosted: None,
             positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                 iced::window::Id::unique(),
                 iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
@@ -2875,6 +2896,7 @@ mod tests {
                 max_height: 1080.0,
                 sizing_revision: 0,
                 measured_revision: None,
+                hosted: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     iced::window::Id::unique(),
                     iced_exwlshell::reexport::PixelSize::try_px(100, 100).unwrap(),
@@ -3001,6 +3023,7 @@ mod tests {
                 max_height: 1080.0,
                 sizing_revision: 0,
                 measured_revision: None,
+                hosted: None,
                 positioner: iced_exwlshell::actions::IcedNewPopupSettings::at_position(
                     bar,
                     iced_exwlshell::reexport::PixelSize::try_px(120, 100).unwrap(),

@@ -8,10 +8,13 @@ use crate::{
         windows::{PlotInfo, WindowState},
     },
 };
-use iced::{Task, window};
+use iced::{Element, Point, Size, Task, window};
 use iced_exwlshell::{
     actions::IcedNewPopupSettings,
-    reexport::{Anchor, PixelSize, PopupAnchor, PopupConstraintAdjustment, PopupGravity},
+    reexport::{
+        Anchor, BlurOption, KeyboardInteractivity, Layer, LayerSize, NewLayerShellSettings,
+        OutputOption, PixelSize, PopupAnchor, PopupConstraintAdjustment, PopupGravity,
+    },
 };
 use iced_wayland_subscriber::OutputId;
 
@@ -26,6 +29,114 @@ pub(super) struct OpenRequest {
     /// Reporting widget rect in bar-local px; the popup anchors to its
     /// center. `None` falls back to the bar center.
     pub anchor: Option<(f32, f32, f32, f32)>,
+}
+
+/// An output-local anchor for an exit-animated, host-owned popup surface.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Hosted {
+    anchor: (i32, i32),
+}
+
+impl Hosted {
+    pub(super) fn new(anchor: (i32, i32)) -> Self {
+        Self { anchor }
+    }
+
+    fn settings(output: OutputId) -> NewLayerShellSettings {
+        NewLayerShellSettings {
+            anchor: Anchor::all(),
+            layer: Layer::Overlay,
+            size: LayerSize::FILL,
+            exclusive_zone: Some(-1),
+            output_option: OutputOption::GlobalName(output.0),
+            margin: Some((0, 0, 0, 0)),
+            namespace: Some("Riced - Popup".into()),
+            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+            events_transparent: false,
+            blur_option: BlurOption::None,
+        }
+    }
+
+    fn origin(&self, viewport: Size, bar: Size, edge: Anchor, content: Size) -> Point {
+        let horizontal = edge == Anchor::Top || edge == Anchor::Bottom;
+        let (x, y) = if horizontal {
+            (
+                (viewport.width - bar.width) / 2.0 + self.anchor.0 as f32 - content.width / 2.0,
+                if edge == Anchor::Top {
+                    bar.height
+                } else {
+                    viewport.height - bar.height - content.height
+                },
+            )
+        } else {
+            (
+                if edge == Anchor::Left {
+                    bar.width
+                } else {
+                    viewport.width - bar.width - content.width
+                },
+                (viewport.height - bar.height) / 2.0 + self.anchor.1 as f32 - content.height / 2.0,
+            )
+        };
+        Point::new(
+            x.clamp(0.0, (viewport.width - content.width).max(0.0)),
+            y.clamp(0.0, (viewport.height - content.height).max(0.0)),
+        )
+    }
+
+    pub(super) fn view(
+        &self,
+        popup: &Popup,
+        plots: &crate::shell::state::Plots,
+        content: Element<'static, Plant>,
+    ) -> Element<'static, Plant> {
+        use iced::widget::{Space, mouse_area, opaque, stack};
+        let viewport = plots
+            .windows
+            .ids
+            .get(&popup.win_id)
+            .and_then(|info| match info {
+                PlotInfo::Popup(output) => {
+                    Background::available_rect(*output, &plots.windows.output_infos)
+                }
+                _ => None,
+            })
+            .map(|(_, _, w, h)| Size::new(w, h))
+            .unwrap_or(Size::new(popup.max_width, popup.max_height));
+        let (bar, edge) =
+            plots
+                .windows
+                .tops
+                .get(&popup.bar_id)
+                .map_or((Size::ZERO, Anchor::Top), |top| {
+                    let (w, h) =
+                        top.local
+                            .px_size(viewport.width, viewport.height, top.is_horizontal());
+                    (Size::new(w as f32, h as f32), top.anchor())
+                });
+        let origin = self.origin(
+            viewport,
+            bar,
+            edge,
+            Size::new(popup.w as f32, popup.h as f32),
+        );
+        let close = Plant::TopPlot(crate::shell::TopEvent::Widget(
+            crate::shell::WidgetEvent::PopupCloseRequested(popup.win_id),
+        ));
+        let backdrop = mouse_area(Space::new().width(iced::Fill).height(iced::Fill))
+            .on_press(close.clone())
+            .on_right_press(close.clone())
+            .on_middle_press(close);
+        // Opaque before anchoring: blank space inside the card consumes clicks,
+        // while the fullscreen area outside it belongs to the dismiss backdrop.
+        let body = crate::ui::widgets::anchored::anchored(
+            opaque(content),
+            origin,
+            Point::ORIGIN,
+            Default::default(),
+        );
+        stack![backdrop, body].into()
+    }
 }
 
 impl SurfaceContext<'_> {
@@ -95,6 +206,9 @@ impl SurfaceContext<'_> {
                     | PopupConstraintAdjustment::SlideY,
             );
         let id = window::Id::unique();
+        // Native grabs dismiss on an icon click before Lua can toggle.
+        // Keep exit-animated surfaces under host control until completion.
+        let hosted = body.on_close.as_ref().map(|_| Hosted::new(anchor_at));
         let PopupContent {
             width,
             height,
@@ -140,6 +254,7 @@ impl SurfaceContext<'_> {
                 sizing_revision: 0,
                 measured_revision: None,
                 positioner: settings,
+                hosted,
                 on_open,
                 on_close,
                 opening: callback.map(|callback| (phase, callback)),
@@ -147,7 +262,14 @@ impl SurfaceContext<'_> {
                 phase,
             },
         );
-        let open = Task::done(Plant::NewPopUp { settings, id });
+        let open = Task::done(if hosted.is_some() {
+            Plant::NewLayerShell {
+                settings: Hosted::settings(output),
+                id,
+            }
+        } else {
+            Plant::NewPopUp { settings, id }
+        });
         Ok(Some(if phase == 0 {
             open
         } else {
@@ -228,5 +350,74 @@ impl SurfaceContext<'_> {
         popup.max_height = sh.max(1.0);
         popup.sizing_revision += 1;
         Ok(Some(popup.reposition()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_surface_captures_input_without_a_native_popup_grab_or_exclusive_zone() {
+        let settings = Hosted::settings(OutputId(7));
+        assert_eq!(settings.anchor, Anchor::all());
+        assert_eq!(settings.layer, Layer::Overlay);
+        assert_eq!(settings.size, LayerSize::FILL);
+        assert_eq!(settings.exclusive_zone, Some(-1));
+        assert_eq!(settings.output_option, OutputOption::GlobalName(7));
+        assert_eq!(
+            settings.keyboard_interactivity,
+            KeyboardInteractivity::Exclusive
+        );
+        assert!(!settings.events_transparent);
+    }
+
+    #[test]
+    fn hosted_placement_follows_all_bar_edges_and_clamps_to_the_output() {
+        let viewport = Size::new(1000.0, 600.0);
+        let content = Size::new(100.0, 100.0);
+        for (edge, bar, anchor, expected) in [
+            (
+                Anchor::Top,
+                Size::new(600.0, 50.0),
+                (100, 49),
+                Point::new(250.0, 50.0),
+            ),
+            (
+                Anchor::Bottom,
+                Size::new(600.0, 50.0),
+                (100, 0),
+                Point::new(250.0, 450.0),
+            ),
+            (
+                Anchor::Left,
+                Size::new(50.0, 400.0),
+                (49, 100),
+                Point::new(50.0, 150.0),
+            ),
+            (
+                Anchor::Right,
+                Size::new(50.0, 400.0),
+                (0, 100),
+                Point::new(850.0, 150.0),
+            ),
+            (
+                Anchor::Top,
+                Size::new(1000.0, 50.0),
+                (0, 49),
+                Point::new(0.0, 50.0),
+            ),
+            (
+                Anchor::Top,
+                Size::new(1000.0, 50.0),
+                (999, 49),
+                Point::new(900.0, 50.0),
+            ),
+        ] {
+            assert_eq!(
+                Hosted::new(anchor).origin(viewport, bar, edge, content),
+                expected
+            );
+        }
     }
 }

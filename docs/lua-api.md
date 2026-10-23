@@ -154,7 +154,7 @@ alignment starts at the top-left. Setting a border color implies 1px unless
 `border_width` is explicit. The host injects no padding, margin, background,
 rounding, or extra content spacing. Ordinary controls retain their own defaults.
 
-Sizing applies to the **whole surface, including padding**:
+Sizing applies to the **whole popup, including padding**:
 
 - Omitted, `"auto"`, or `"shrink"` dimensions fit content.
 - Positive finite numbers specify outer logical pixels.
@@ -166,7 +166,7 @@ Sizing applies to the **whole surface, including padding**:
   avoid flashing a provisional full-output window.
 
 `self:popup()` inside `actions(events)` still requests opening at the reporting
-widget's measured bounds. Native placement, compositor constraints, dismissal,
+widget's measured bounds. Surface placement, output constraints, dismissal,
 and input routing remain host responsibilities. Shared `anchor`/`margin` are
 parent-local layout properties, not native-window positioning controls.
 
@@ -211,10 +211,15 @@ return iced.popup(self:content())
 - A closing popup keeps its surface mounted for the exit transition; input is
   ignored while it leaves. View refreshes do not replay either callback, and
   reloading a script invalidates pending callbacks from the old VM.
-- Compositor-initiated dismissal (an outside click) cannot wait for a close
-  transition because the native surface is already gone. Explicit closes
-  (toggling the popup, removing its placement, or `popup()` returning `nil`)
-  do animate.
+- Popups declaring `on_close` use a transparent, host-managed layer on their
+  output, rather than a native popup grab. Clicking outside the card (including
+  its bar icon) or pressing Escape requests the exit transition before the
+  surface is removed. Outside clicks on that output dismiss the popup; they do
+  not activate the underlying widget or application. The layer takes keyboard
+  focus while open and does not reserve output space.
+- Popups without `on_close` keep native popup placement and dismissal. A
+  compositor-initiated dismissal cannot wait for an animation because the
+  native surface is already gone.
 
 The previous `{ ui, width, height }`, `{ text }`, and `{ items }` return formats
 are removed. Use `iced.text` and ordinary `iced.button` children inside the root;
