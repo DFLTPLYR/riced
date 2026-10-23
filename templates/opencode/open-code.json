@@ -42,6 +42,8 @@
     "diffRemovedBg": { "dark": "surface_variant", "light": "surface_variant" },
     "diffContextBg": { "dark": "surface_variant", "light": "surface_variant" },
     "diffLineNumber": { "dark": "on_surface_variant", "light": "on_surface_variant" },
+    "diffAddedLineNumberBg": { "dark": "surface_variant", "light": "surface_variant" },
+    "diffRemovedLineNumberBg": { "dark": "surface_variant", "light": "surface_variant" },
     "markdownText": { "dark": "on_surface", "light": "on_surface" },
     "markdownHeading": { "dark": "primary", "light": "primary" },
     "markdownLink": { "dark": "primary", "light": "primary" },
