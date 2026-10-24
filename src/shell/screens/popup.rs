@@ -334,6 +334,7 @@ impl Popup {
             id: self.win_id,
             revision: self.sizing_revision,
             confirmed: self.measured_revision == Some(self.sizing_revision),
+            visible: self.measured_revision.is_some(),
             size: iced::Size::new(self.w, self.h),
             max: iced::Size::new(self.max_width, self.max_height),
             auto_width: self.auto_width,
@@ -1014,7 +1015,7 @@ mod tests {
             width: Some(220.0),
             ..Default::default()
         };
-        assert!(context.refresh(id, content.clone()).unwrap().is_some());
+        assert!(context.refresh(id, content.clone()).unwrap().is_none());
         assert_eq!(context.windows.popups[&id].h, 137);
         assert_eq!(context.windows.popups[&id].sizing_revision, 1);
         assert!(context.refresh(id, content.clone()).unwrap().is_none());
@@ -1242,6 +1243,112 @@ mod tests {
         )
         .unwrap();
         assert!(no_args.on_close.is_some());
+    }
+
+    #[test]
+    fn list_dismissals_keep_measured_popup_visible_without_replaying_open() {
+        use iced::advanced::{Layout, renderer::Headless, renderer::Style, widget::Tree};
+
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let content = |items: &str| {
+            Popup::parse_popup_content(
+                lua.load(format!(r#"return iced.popup(iced.listview({{{items}}})
+                    :id('notifications'):key('id'):pitch(32)
+                    :delegate(function(item)
+                        return iced.container(iced.space():width(100):height(32)):background('#00ff00')
+                    end)
+                    :onEntered({{duration=0}})
+                    :onExit({{opacity={{to=0}},duration=250}})
+                    :onDisplaced({{duration=250}}))
+                    :width(100):on_open({{animate={{id='open',y={{from=-180,to=0,duration=180}}}}}})"#))
+                    .eval().unwrap(),
+                &Default::default(),
+            ).unwrap()
+        };
+        let initial = content("{id=1},{id=2},{id=3}");
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(receiver);
+        let id = window::Id::unique();
+        let spec = initial.on_open.as_ref().unwrap().animate.as_ref().unwrap();
+        let mut popup = test_popup(
+            id,
+            Some(with_root_spec(initial.tree.unwrap(), (**spec).clone())),
+            initial.on_open,
+            None,
+        );
+        popup.auto_height = true;
+        popup.measured_revision = Some(0);
+        Popup::surface_context(&mut plots)
+            .animation
+            .synchronize(&format!("popup:{id:?}"), None, popup.tree.as_ref().unwrap())
+            .unwrap();
+        plots.windows.popups.insert(id, popup);
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let bounds = iced::Rectangle::with_size(iced::Size::new(100.0, 100.0));
+        let mut element = plots.windows.popups[&id].view(&plots);
+        let mut tree = Tree::new(&element);
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(iced::Size::ZERO, bounds.size()),
+        );
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Window(window::Event::RedrawRequested(
+                std::time::Instant::now() + Duration::from_millis(180),
+            )),
+            Layout::new(&layout),
+            iced::mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut Vec::new()),
+            &bounds,
+        );
+
+        for items in ["{id=2},{id=3}", "{id=3}", ""] {
+            let previous_spec =
+                root_spec(plots.windows.popups[&id].tree.as_ref().unwrap()).cloned();
+            assert!(
+                Popup::surface_context(&mut plots)
+                    .refresh(id, content(items))
+                    .unwrap()
+                    .is_none()
+            );
+            let popup = &plots.windows.popups[&id];
+            assert_eq!(
+                previous_spec.as_ref(),
+                root_spec(popup.tree.as_ref().unwrap())
+            );
+            assert_ne!(popup.measured_revision, Some(popup.sizing_revision));
+            let mut refreshed = popup.view(&plots);
+            tree.diff(&refreshed);
+            let layout = refreshed.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &iced::advanced::layout::Limits::new(iced::Size::ZERO, bounds.size()),
+            );
+            iced::advanced::Renderer::reset(&mut renderer, bounds);
+            refreshed.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &Style::default(),
+                Layout::new(&layout),
+                iced::mouse::Cursor::Unavailable,
+                &bounds,
+            );
+            let pixels =
+                renderer.screenshot(iced::Size::new(100, 100), 1.0, iced::Color::TRANSPARENT);
+            assert!(
+                pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "popup must remain visible during dismissal, including the last row's exit: {items}"
+            );
+        }
     }
 
     #[test]

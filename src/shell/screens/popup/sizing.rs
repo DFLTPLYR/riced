@@ -313,6 +313,7 @@ pub(super) struct MeasuredPopup {
     pub id: window::Id,
     pub revision: u64,
     pub confirmed: bool,
+    pub visible: bool,
     pub size: Size<u32>,
     pub max: Size,
     pub auto_width: bool,
@@ -413,7 +414,9 @@ impl Widget<Plant, iced::Theme, iced::Renderer> for MeasuredPopup {
                 )));
             }
         }
-        if !self.confirmed {
+        // Only the initial measurement gates visibility. Live content changes
+        // keep drawing at the last measured size while the next size is reported.
+        if !self.visible {
             return;
         }
         self.content.as_widget_mut().update(
@@ -437,7 +440,7 @@ impl Widget<Plant, iced::Theme, iced::Renderer> for MeasuredPopup {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        if !self.confirmed {
+        if !self.visible {
             return;
         }
         self.content.as_widget().draw(

@@ -339,6 +339,7 @@ impl SurfaceContext<'_> {
             popup.on_close = on_close;
             return Ok(None);
         }
+        let resized = popup.w != w || popup.h != h;
         popup.tree = tree;
         popup.on_open = on_open;
         popup.on_close = on_close;
@@ -349,7 +350,7 @@ impl SurfaceContext<'_> {
         popup.max_width = sw.max(1.0);
         popup.max_height = sh.max(1.0);
         popup.sizing_revision += 1;
-        Ok(Some(popup.reposition()))
+        Ok(resized.then(|| popup.reposition()))
     }
 }
 

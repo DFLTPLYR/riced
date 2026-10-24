@@ -7,7 +7,6 @@ function app:view()
 end
 
 function app:popup()
-    if #notifications == 0 then return iced.popup(iced.text("No notifications")):width(300) end
     local rows = iced.listview(notifications):id("notification-center"):key("id"):pitch(32)
         :delegate(function(item)
             local label = item.title ~= "" and item.title or item.body
@@ -16,7 +15,10 @@ function app:popup()
         :onEntered({ x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 })
         :onExit({ x = { to = -200 }, opacity = { to = 0 }, duration = 250 })
         :onDisplaced({ duration = 250 })
-    local body = iced.column({ rows, iced.button("Dismiss all", "dismiss-all"):width("fill") }):spacing(8)
+    -- Keep the keyed list mounted so the final dismissed row can finish exiting.
+    local footer = #notifications == 0 and iced.text("No notifications")
+        or iced.button("Dismiss all", "dismiss-all"):width("fill")
+    local body = iced.column({ rows, footer }):spacing(8)
     return iced.popup(iced.card({ title = "Notifications", icon = "bell", body = body })):width(320)
 end
 
