@@ -77,6 +77,15 @@ fn render_slot_widgets(
                 )))
             });
             let built = match node {
+                _ if context.lists.display(&scope, node).1 => build_with_lists(
+                    node,
+                    &scope,
+                    size,
+                    Some(message.clone()),
+                    context.motion,
+                    context.lists,
+                    None,
+                ),
                 WidgetNode::Row {
                     children,
                     spacing,

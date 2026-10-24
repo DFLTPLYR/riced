@@ -656,6 +656,10 @@ Constrain `:height()` so taller content scrolls. `:scrollbar("hidden" | "visible
 case-insensitive, default visible; unknown values raise. Hiding keeps
 wheel/touchpad scrolling.
 
+Mouse-wheel steps scroll smoothly and repeated steps retarget the animation.
+Touchpad pixel scrolling and scrollbar dragging stay direct. Reduced-motion
+mode disables wheel interpolation.
+
 ### Listview and transitions
 
 ```lua
@@ -667,6 +671,7 @@ iced.listview(items):id("list"):key("id")
 ```
 
 - `pitch` is the estimated row size plus spacing along the list axis (displaced math).
+- Both list orientations preserve surviving items' native state by key. In bar widgets and popups, removing an entire list retains an inert snapshot of its previous layout until row exits finish, then displays the replacement content.
 - `transitions()` returns `{ add, remove, displaced }` in the same shape; partial specs compose with defaults.
 - Optional per-item `callback` in any slot runs once when that transition completes, receiving the captured item; its return value flows through the command parser like `actions`. No callback means silent ghost cleanup. Re-entering cancels a pending exit; reloads and teardown invalidate old callbacks.
 

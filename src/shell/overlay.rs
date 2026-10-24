@@ -493,6 +493,10 @@ pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
     for list in plots.animation.widgets.values_mut() {
         callbacks.extend(list.take_completed());
     }
+    plots
+        .animation
+        .widgets
+        .finish_retirements(&mut plots.animation.motion);
     super::animation::complete(plots, callbacks)
 }
 pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {

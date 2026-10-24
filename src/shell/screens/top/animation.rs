@@ -6,7 +6,88 @@ use crate::ui::{
 };
 use std::{collections::HashMap, time::Duration};
 
-pub(crate) type WidgetLists = HashMap<String, ListView<(String, String), WidgetNode>>;
+#[derive(Debug, Default)]
+pub(crate) struct WidgetLists {
+    lists: HashMap<String, ListView<(String, String), WidgetNode>>,
+    retiring: HashMap<String, Retirement>,
+}
+
+#[derive(Debug)]
+struct Retirement {
+    tree: WidgetNode,
+    lists: Vec<String>,
+}
+
+impl std::ops::Deref for WidgetLists {
+    type Target = HashMap<String, ListView<(String, String), WidgetNode>>;
+    fn deref(&self) -> &Self::Target {
+        &self.lists
+    }
+}
+
+impl std::ops::DerefMut for WidgetLists {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.lists
+    }
+}
+
+impl WidgetLists {
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn display<'a>(
+        &'a self,
+        widget: &str,
+        current: &'a WidgetNode,
+    ) -> (&'a WidgetNode, bool) {
+        self.retiring
+            .get(widget)
+            .filter(|retirement| {
+                retirement.lists.iter().any(|id| {
+                    self.lists
+                        .get(&format!("{widget}/{id}"))
+                        .is_some_and(ListView::has_ghosts)
+                })
+            })
+            .map_or((current, false), |retirement| (&retirement.tree, true))
+    }
+
+    pub(crate) fn is_retiring(&self, widget: &str, list: &str) -> bool {
+        self.retiring
+            .get(widget)
+            .is_some_and(|retirement| retirement.lists.iter().any(|id| id == list))
+    }
+
+    pub(crate) fn finish_retirements(&mut self, motion: &mut AnimRuntime) {
+        self.retiring.retain(|widget, retirement| {
+            let active = retirement.lists.iter().any(|id| {
+                self.lists
+                    .get(&format!("{widget}/{id}"))
+                    .is_some_and(ListView::has_ghosts)
+            });
+            if !active {
+                for id in &retirement.lists {
+                    if let Some(mut list) = self.lists.remove(&format!("{widget}/{id}")) {
+                        list.clear_all(motion);
+                    }
+                }
+            }
+            active
+        });
+    }
+
+    pub(crate) fn forget_retirements(&mut self, prefix: &str) {
+        self.retiring
+            .retain(|widget, _| !widget.starts_with(prefix));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.lists.clear();
+        self.retiring.clear();
+    }
+}
 
 fn declared_lists<'a>(
     node: &'a WidgetNode,
@@ -59,10 +140,71 @@ impl ListContext<'_> {
             declared_lists(old, &mut before)?;
         }
         declared_lists(new, &mut after)?;
-        for id in before.keys().filter(|id| !after.contains_key(*id)) {
-            if let Some(mut list) = self.lists.remove(&format!("{widget}/{id}")) {
-                list.clear_all(self.motion);
+        // A conditional empty-state branch is a list removal, not a host teardown.
+        // Keep its last layout inert until the departing rows have finished.
+        if let Some(retirement) = self.lists.retiring.get_mut(widget) {
+            retirement.lists.retain(|id| !after.contains_key(id));
+        }
+        if self
+            .lists
+            .retiring
+            .get(widget)
+            .is_some_and(|retirement| retirement.lists.is_empty())
+        {
+            self.lists.retiring.remove(widget);
+        }
+        let removed_lists: Vec<_> = before
+            .keys()
+            .filter(|id| !after.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in &removed_lists {
+            let WidgetNode::ListView {
+                items, horizontal, ..
+            } = before[id]
+            else {
+                continue;
+            };
+            let owner = format!("{widget}/{id}");
+            if let Some(list) = self.lists.get_mut(&owner) {
+                let keys: Vec<_> = items
+                    .iter()
+                    .map(|(key, _)| (owner.clone(), key.clone()))
+                    .collect();
+                let removed: Vec<_> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (key, child))| {
+                        (index, (owner.clone(), key.clone()), child.clone())
+                    })
+                    .collect();
+                list.update(
+                    self.motion,
+                    self.duration,
+                    if *horizontal {
+                        Axis::Horizontal
+                    } else {
+                        Axis::Vertical
+                    },
+                    &keys,
+                    &[],
+                    &removed,
+                );
+                list.sweep(self.motion);
             }
+        }
+        if !removed_lists.is_empty()
+            && let Some(old) = old
+        {
+            self.lists
+                .retiring
+                .entry(widget.into())
+                .or_insert_with(|| Retirement {
+                    tree: old.clone(),
+                    lists: Vec::new(),
+                })
+                .lists
+                .extend(removed_lists);
         }
         for (id, node) in after {
             if before.get(&id).copied() == Some(node) {
@@ -101,11 +243,10 @@ impl ListContext<'_> {
                 transitions.2.clone(),
                 true,
             );
-            let Some(WidgetNode::ListView {
-                items: old_items, ..
-            }) = before.get(&id).copied()
-            else {
-                continue;
+            let old_items = match before.get(&id).copied() {
+                Some(WidgetNode::ListView { items, .. }) => items.as_slice(),
+                _ if list.has_ghosts() => &[],
+                _ => continue,
             };
             let old_keys: Vec<_> = old_items
                 .iter()
@@ -141,6 +282,40 @@ impl ListContext<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conditional_list_removal_finishes_exits_and_readdition_cancels_retirement() {
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let parse =
+            |source| crate::ui::decode::parse_node(&lua.load(source).eval().unwrap()).unwrap();
+        let full = parse(
+            "return iced.listview({{id=1}}):id('items'):key('id'):delegate(function() return iced.text('one') end):onExit({opacity={to=0},duration=150})",
+        );
+        let empty = parse("return iced.text('No items')");
+        let mut lists = WidgetLists::new();
+        let mut motion = AnimRuntime::default();
+        let mut context = ListContext {
+            lists: &mut lists,
+            motion: &mut motion,
+            duration: Duration::from_millis(150),
+        };
+        context.synchronize("popup", None, &full).unwrap();
+        context.synchronize("popup", Some(&full), &empty).unwrap();
+        assert!(context.lists.display("popup", &empty).1);
+        assert!(context.lists["popup/items"].has_ghosts());
+        context.synchronize("popup", Some(&empty), &full).unwrap();
+        assert!(!context.lists.display("popup", &full).1);
+        assert!(!context.lists["popup/items"].has_ghosts());
+        context.synchronize("popup", Some(&full), &empty).unwrap();
+        context.motion.tick(Duration::from_millis(300));
+        for list in context.lists.values_mut() {
+            list.sweep(context.motion);
+        }
+        context.lists.finish_retirements(context.motion);
+        assert!(!context.lists.display("popup", &empty).1);
+        assert!(!context.lists.contains_key("popup/items"));
+        assert_eq!(context.motion.motion_count(), 0);
+    }
 
     #[test]
     fn nested_animated_lists_preserve_native_sizing_and_explicit_overrides() {

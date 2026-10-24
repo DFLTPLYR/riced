@@ -538,10 +538,10 @@ impl Lists {
                     ));
                 }
                 let hints = iced::advanced::Widget::size(&item);
-                Ok(item
-                    .width(width.resolve(hints.width))
-                    .height(height.resolve(hints.height))
-                    .into())
+                Ok(super::widgets::smooth_scroll::wrap(
+                    item.width(width.resolve(hints.width))
+                        .height(height.resolve(hints.height)),
+                ))
             }
             WidgetNode::Row {
                 children,
@@ -679,10 +679,12 @@ impl Lists {
                     },
                 );
                 let content: Element<'static, Plant> = if *horizontal {
-                    iced::widget::Row::with_children(elements)
-                        .spacing(*spacing)
-                        .height(height.resolve(hints.height))
-                        .into()
+                    super::widgets::keyed_row::wrap(
+                        keys,
+                        iced::widget::Row::with_children(elements)
+                            .spacing(*spacing)
+                            .height(height.resolve(hints.height)),
+                    )
                 } else {
                     iced::widget::keyed::Column::from_vecs(keys, elements)
                         .spacing(*spacing)
@@ -706,9 +708,9 @@ impl Lists {
                     })
                     .sum::<f32>()
                     + *spacing * ghosts.len().saturating_sub(usize::from(items.is_empty())) as f32;
-                let content: Element<'static, Plant> = if reserve <= 0.0 {
-                    content
-                } else if *horizontal {
+                // Keep the wrapper stable as exits start and finish: replacing
+                // the keyed list with a wrapper would discard every child's state.
+                let content: Element<'static, Plant> = if *horizontal {
                     iced::widget::row![content, iced::widget::Space::new().width(reserve)].into()
                 } else {
                     iced::widget::column![content, iced::widget::Space::new().height(reserve)]
@@ -727,10 +729,10 @@ impl Lists {
                 let item = iced::widget::scrollable(content)
                     .id(self.scroll_id(id))
                     .direction(direction);
-                Ok(item
-                    .width(width.resolve(hints.width))
-                    .height(height.resolve(Length::Shrink))
-                    .into())
+                Ok(super::widgets::smooth_scroll::wrap(
+                    item.width(width.resolve(hints.width))
+                        .height(height.resolve(Length::Shrink)),
+                ))
             }
             _ => {
                 let element = super::build::build_node_opacity_aligned(

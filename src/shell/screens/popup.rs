@@ -12,8 +12,6 @@ use iced_runtime::Action;
 use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::OutputId;
 pub(crate) use sizing::MeasurementCache;
-#[cfg(test)]
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// In-flight close transition: the popup stays mounted until it finishes.
@@ -354,6 +352,12 @@ impl Popup {
         use crate::shell::TopEvent;
         let win_id = self.win_id;
         if let Some(tree) = self.display_tree() {
+            let scope = format!("popup:{win_id:?}");
+            let (tree, retiring) = if self.closing.is_some() {
+                (tree, false)
+            } else {
+                plots.animation.widgets.display(&scope, tree)
+            };
             let measured;
             let tree = if intrinsic {
                 measured = sizing::intrinsic_size(tree, self.auto_width, self.auto_height);
@@ -373,16 +377,17 @@ impl Popup {
                         win_id, list, key, entered,
                     )))
                 });
-            if let Ok(node) = super::top::build_with_lists(
+            if let Ok(node) = super::top::build_with_lists_opacity(
                 tree,
-                &format!("popup:{win_id:?}"),
+                &scope,
                 self.size,
-                Some(msg),
+                (!retiring).then_some(msg),
                 &plots.animation.motion,
                 &plots.animation.widgets,
-                Some(hover),
+                (!retiring).then_some(hover),
+                1.0,
             ) {
-                return node;
+                return crate::ui::motion::shifted(node, 0.0, 0.0, !retiring);
             }
         }
         iced::widget::Space::new().into()
@@ -1064,7 +1069,7 @@ mod tests {
         .unwrap();
         let tree = content.tree.unwrap();
         let runtime = aura_anim::core::runtime::MotionRuntime::new();
-        let mut lists = HashMap::new();
+        let mut lists = top::animation::WidgetLists::new();
         lists.insert("session/session-actions".into(), ListView::new(32.0));
         let popup_id = window::Id::unique();
         let handler: crate::ui::action::Sender = std::sync::Arc::new(move |key| {
@@ -1252,7 +1257,8 @@ mod tests {
         let lua = crate::lua::widgets::new_widget_lua().unwrap();
         let content = |items: &str| {
             Popup::parse_popup_content(
-                lua.load(format!(r#"return iced.popup(iced.listview({{{items}}})
+                lua.load(format!(r#"local items = {{{items}}}
+                    return iced.popup(#items == 0 and iced.space() or iced.listview(items)
                     :id('notifications'):key('id'):pitch(32)
                     :delegate(function(item)
                         return iced.container(iced.space():width(100):height(32)):background('#00ff00')

@@ -334,10 +334,7 @@ fn build_anim_list(
     size: f32,
     button_msg: crate::ui::action::Sender,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-    lists: &std::collections::HashMap<
-        String,
-        crate::ui::listview::ListView<(String, String), WidgetNode>,
-    >,
+    lists: &WidgetLists,
 ) -> Result<Element<'static, Plant>, String> {
     // This widget's own list (absent on first paint): settled motion.
     let at_rest = crate::ui::anim::ItemMotion::settled();
@@ -352,7 +349,7 @@ fn build_anim_list(
     };
     let mut items = Vec::new();
     for child in children {
-        let el = build_with_lists(
+        let el = build_with_lists_opacity(
             child,
             widget,
             size,
@@ -360,6 +357,7 @@ fn build_anim_list(
             anim_runtime,
             lists,
             None,
+            1.0,
         )?;
         match child {
             WidgetNode::Button { action, .. } => {
@@ -467,11 +465,23 @@ pub(crate) fn build_with_lists(
     lists: &WidgetLists,
     hover: Option<crate::ui::action::HoverSender>,
 ) -> Result<Element<'static, Plant>, String> {
-    build_with_lists_opacity(node, widget, size, message, runtime, lists, hover, 1.0)
+    let (node, retiring) = lists.display(widget, node);
+    let element = build_with_lists_opacity(
+        node,
+        widget,
+        size,
+        if retiring { None } else { message },
+        runtime,
+        lists,
+        if retiring { None } else { hover },
+        1.0,
+    )?;
+    // Stable wrapper: entering retirement must not replace the native subtree.
+    Ok(crate::ui::motion::shifted(element, 0.0, 0.0, !retiring))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_with_lists_opacity(
+pub(crate) fn build_with_lists_opacity(
     node: &WidgetNode,
     widget: &str,
     size: f32,
@@ -561,6 +571,9 @@ fn build_with_lists_opacity(
                     opacity * motion.opacity,
                 )
                 .unwrap_or_else(|error| text(error).into());
+                if live && lists.is_retiring(widget, id) {
+                    return crate::ui::motion::visibility(element, false);
+                }
                 // Inert ghosts never report hover; live rows do, so the
                 // host can re-parse with `item.hovered` set.
                 if live && let Some(hover) = &hover {
@@ -619,11 +632,17 @@ fn build_with_lists_opacity(
             let list_width = width.resolve(list_width);
             let list_height = height.resolve(list_height);
             if *horizontal {
-                Ok(iced::widget::Row::with_children(elements)
-                    .spacing(*spacing)
-                    .width(list_width)
-                    .height(list_height)
-                    .into())
+                let mut identities: Vec<_> = keys.into_iter().map(Some).collect();
+                if identities.is_empty() && !elements.is_empty() {
+                    identities.push(None);
+                }
+                Ok(crate::ui::widgets::keyed_row::wrap(
+                    identities,
+                    iced::widget::Row::with_children(elements)
+                        .spacing(*spacing)
+                        .width(list_width)
+                        .height(list_height),
+                ))
             } else {
                 use std::hash::{Hash, Hasher};
                 let mut identities: Vec<u64> = keys
@@ -786,10 +805,11 @@ fn build_with_lists_opacity(
                 ));
             }
             let hints = iced::advanced::Widget::size(&content);
-            Ok(content
-                .width(width.resolve(hints.width))
-                .height(height.resolve(hints.height))
-                .into())
+            Ok(crate::ui::widgets::smooth_scroll::wrap(
+                content
+                    .width(width.resolve(hints.width))
+                    .height(height.resolve(hints.height)),
+            ))
         }
         _ => build_node_opacity(node, size, message, opacity),
     }
@@ -948,10 +968,7 @@ impl Top {
         widgets: &[WidgetDefinition],
         placements: &crate::lua::widgets::WidgetState,
         anim_runtime: &aura_anim::core::runtime::MotionRuntime,
-        lists: &std::collections::HashMap<
-            String,
-            crate::ui::listview::ListView<(String, String), WidgetNode>,
-        >,
+        lists: &WidgetLists,
         hold: Duration,
     ) -> Element<'_, Plant> {
         render::view(
@@ -2729,7 +2746,7 @@ mod tests {
         );
         assert_eq!(list.ghosts_for(|_| true).len(), 1);
         let msg: crate::ui::action::Sender = std::sync::Arc::new(|_| Plant::Tend);
-        let mut lists = std::collections::HashMap::new();
+        let mut lists = WidgetLists::new();
         lists.insert("demo".to_string(), list);
         // Live + ghost merge builds (ghost renders inert), rows and
         // columns alike.

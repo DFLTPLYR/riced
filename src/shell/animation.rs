@@ -1,17 +1,19 @@
 //! Shared motion clock and widget-list lifetime ownership.
-use crate::ui::{anim::AnimRuntime, listview::ListView, node::WidgetNode};
-use std::{collections::HashMap, time::Instant};
+use crate::ui::anim::AnimRuntime;
+use std::time::Instant;
 
 #[derive(Debug, Default)]
 pub(crate) struct AnimationState {
     pub motion: AnimRuntime,
-    pub widgets: HashMap<String, ListView<(String, String), WidgetNode>>,
+    pub widgets: super::screens::top::animation::WidgetLists,
 }
 
 impl AnimationState {
     pub(crate) fn forget_window(&mut self, id: iced::window::Id) {
         let bar_prefix = format!("{id:?}/");
         let popup_prefix = format!("popup:{id:?}/");
+        self.widgets.forget_retirements(&bar_prefix);
+        self.widgets.forget_retirements(&format!("popup:{id:?}"));
         let scopes: Vec<_> = self
             .widgets
             .keys()

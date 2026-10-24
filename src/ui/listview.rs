@@ -477,6 +477,10 @@ impl<K: Eq + Hash + Clone, C: Clone> ListView<K, C> {
     }
 
     /// Ghosts matching `pred`, in index order, for mask math and tests.
+    pub(crate) fn has_ghosts(&self) -> bool {
+        !self.ghosts.is_empty()
+    }
+
     pub fn ghosts_for(&self, pred: impl Fn(&K) -> bool) -> Vec<&ListGhost<K, C>> {
         let mut out: Vec<&ListGhost<K, C>> = self.ghosts.iter().filter(|g| pred(&g.key)).collect();
         out.sort_by_key(|g| g.index);

@@ -307,10 +307,11 @@ fn realize_aligned<M: Clone + 'static>(
                 ));
             }
             let hints = iced::advanced::Widget::size(&content);
-            Ok(content
-                .width(width.resolve(hints.width))
-                .height(height.resolve(hints.height))
-                .into())
+            Ok(super::widgets::smooth_scroll::wrap(
+                content
+                    .width(width.resolve(hints.width))
+                    .height(height.resolve(hints.height)),
+            ))
         }
         WidgetNode::Space { width, height } => Ok(Space::new()
             .width(width.clone().iced())
@@ -1159,6 +1160,34 @@ mod tests {
                     &iced::Rectangle::with_size(iced::Size::new(200.0, 200.0)),
                 );
                 let mut offset = Offset::default();
+                // Wheel input establishes a target; native redraws advance it.
+                for millis in [40, 200] {
+                    element.as_widget_mut().update(
+                        &mut tree,
+                        &iced::Event::Window(iced::window::Event::RedrawRequested(
+                            std::time::Instant::now() + std::time::Duration::from_millis(millis),
+                        )),
+                        Layout::new(&layout),
+                        iced::mouse::Cursor::Unavailable,
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut Shell::new(&mut messages),
+                        &iced::Rectangle::with_size(iced::Size::new(200.0, 200.0)),
+                    );
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        Layout::new(&layout),
+                        &renderer,
+                        &mut offset,
+                    );
+                    if millis == 40 {
+                        assert!(
+                            offset.0.y > 0.0 && offset.0.y < 180.0,
+                            "{host}: {:?}",
+                            offset.0
+                        );
+                    }
+                }
                 element.as_widget_mut().operate(
                     &mut tree,
                     Layout::new(&layout),

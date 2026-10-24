@@ -131,7 +131,13 @@ impl<M, T, R: renderer::Renderer> Widget<M, T, R> for Motion<'_, M, T, R> {
         shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
-        if !self.clickable {
+        // Retiring snapshots ignore input but still advance native animations.
+        if !self.clickable
+            && !matches!(
+                event,
+                Event::Window(iced::window::Event::RedrawRequested(_))
+            )
+        {
             return;
         }
         self.content.as_widget_mut().update(
