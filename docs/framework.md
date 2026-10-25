@@ -258,6 +258,12 @@ without discarding application state. Layer roots cannot appear in widget trees.
 | `pointer_events` | Boolean, default false. Deliver unconsumed layer-local pointer gestures to `actions`; child controls handle input first. |
 | `content` | Required ordinary `iced.*` widget tree. |
 
+Layer-app pointer moves are coalesced to the latest position on each redraw.
+Pending motion is delivered before release or pointer exit, so drag endpoints
+are not lost. Input refreshes only its owning app instance without rescanning
+source files; hot reload remains handled by the regular project refresh.
+Content-only changes redraw the affected surface rather than every window.
+
 Unknown fields and invalid geometry fail before native creation. Layout, focus,
 layer, margins, input, and reserved space reconcile on the same native window.
 Native UI realization/animation uses cached owned trees, never per-frame Lua.

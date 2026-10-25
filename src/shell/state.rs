@@ -1651,6 +1651,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
         Plant::App(super::apps::AppMessage::Tick | super::apps::AppMessage::Measured { .. } | super::apps::AppMessage::Managed(_)) => Scope::None,
         Plant::App(super::apps::AppMessage::Action { surface, .. }) => Scope::Window(*surface),
+        Plant::App(super::apps::AppMessage::Redraw(surface)) => Scope::Window(*surface),
         Plant::App(_) => Scope::All,
         Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(id,_,action)
             | WidgetEvent::PopupSelect(id,action))) if action.is_animation_frame() => Scope::Window(*id),

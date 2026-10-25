@@ -30,6 +30,7 @@ pub enum AppMessage {
     Managed(Delivery),
     Tick,
     Changed,
+    Redraw(window::Id),
     Action {
         surface: window::Id,
         action: Action,
@@ -188,6 +189,36 @@ impl Instance {
                 return Err(error.to_string());
             }
         };
+        let modified = match self.update_root(root, motion, replaced) {
+            Ok(modified) => modified,
+            Err(error) => {
+                if let Some(runtime) = candidate.as_mut() {
+                    let _ = runtime.app_event(
+                        services,
+                        &self.output_name,
+                        &self.context,
+                        &self.props,
+                        AppEvent::Unmount("failed_mount"),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if let Some(runtime) = candidate {
+            self.unmount(services, "reload");
+            self.runtime = Some(runtime);
+            self.accepted = Some(signature);
+            self.error = None;
+        }
+        Ok(modified)
+    }
+
+    fn update_root(
+        &mut self,
+        root: Option<LayerRoot>,
+        motion: &mut crate::ui::anim::AnimRuntime,
+        replaced: bool,
+    ) -> Result<bool, String> {
         let modified = replaced || self.root != root;
         if modified {
             if let Some(root) = &root {
@@ -205,30 +236,13 @@ impl Instance {
                     motion,
                     Duration::from_millis(250),
                 );
-                if let Err(error) = synchronized {
-                    if let Some(runtime) = candidate.as_mut() {
-                        let _ = runtime.app_event(
-                            services,
-                            &self.output_name,
-                            &self.context,
-                            &self.props,
-                            AppEvent::Unmount("failed_mount"),
-                        );
-                    }
-                    return Err(error);
-                }
+                synchronized?;
             } else {
                 self.lists.clear(motion);
                 self.hover.clear();
             }
             self.root = root;
             self.revision = self.revision.wrapping_add(1);
-        }
-        if let Some(runtime) = candidate {
-            self.unmount(services, "reload");
-            self.runtime = Some(runtime);
-            self.accepted = Some(signature);
-            self.error = None;
         }
         Ok(modified)
     }
@@ -331,6 +345,48 @@ pub(crate) fn refresh(plots: &mut Plots, tick: bool) -> Task<Plant> {
 fn refresh_project(plots: &mut Plots, project: &Project, tick: bool) -> Task<Plant> {
     refresh_target(plots, project, tick, None)
 }
+
+// Input does not need source discovery/hot reload or unrelated app views.
+fn refresh_surface(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
+    let mut state = std::mem::take(&mut plots.apps);
+    let mut commands = Vec::new();
+    let mut modified = false;
+    if let Some(instance) = state
+        .instances
+        .values_mut()
+        .find(|i| i.surface == Some(surface))
+    {
+        let result = instance.runtime.as_mut().map(|runtime| {
+            runtime.layer_view(
+                &services(plots),
+                &instance.output_name,
+                &instance.props,
+                &instance.context,
+                &instance.hover,
+            )
+        });
+        if let Some(result) = result {
+            match result
+                .map_err(|e| e.to_string())
+                .and_then(|root| instance.update_root(root, &mut plots.animation.motion, false))
+            {
+                Ok(changed) => modified = changed,
+                Err(error) => {
+                    crate::lua::error::report_once(&mut instance.error, "app render: ", error)
+                }
+            }
+        }
+        commands.extend(instance.managed_work(&services(plots)));
+    }
+    let lifecycle_changed = reconcile(plots, &mut state, &mut commands);
+    plots.apps = state;
+    if lifecycle_changed {
+        commands.push(Task::done(Plant::App(AppMessage::Changed)));
+    } else if modified {
+        commands.push(Task::done(Plant::App(AppMessage::Redraw(surface))));
+    }
+    Task::batch(commands)
+}
 fn refresh_target(
     plots: &mut Plots,
     project: &Project,
@@ -345,6 +401,7 @@ fn refresh_target(
     let mut desired = HashSet::new();
     let mut commands = Vec::new();
     let mut changed = false;
+    let mut redraws = Vec::new();
     for config in &plots.config.apps {
         let sources = project.sources(&config.name);
         for (&output, info) in &plots.windows.output_infos {
@@ -391,7 +448,12 @@ fn refresh_target(
                 services: &service_ctx,
             };
             match instance.render(&request, &mut plots.animation.motion, tick) {
-                Ok(modified) => changed |= modified,
+                Ok(true) => {
+                    if let Some(surface) = instance.surface {
+                        redraws.push(surface);
+                    }
+                }
+                Ok(false) => {}
                 Err(error) => crate::lua::error::report_once(
                     &mut instance.error,
                     &format!("app {} on {name}: ", config.identity()),
@@ -421,6 +483,12 @@ fn refresh_target(
     plots.apps = state;
     if changed {
         commands.push(Task::done(Plant::App(AppMessage::Changed)));
+    } else {
+        commands.extend(
+            redraws
+                .into_iter()
+                .map(|surface| Task::done(Plant::App(AppMessage::Redraw(surface)))),
+        );
     }
     Task::batch(commands)
 }
@@ -550,7 +618,7 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
     ) {
         Ok(element) => {
             let element = if root.surface.pointer_events {
-                crate::ui::widgets::input::input(element, sender)
+                crate::ui::widgets::input::frame_input(element, sender)
             } else {
                 element
             };
@@ -647,7 +715,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
             }
             refresh(plots, true)
         }
-        AppMessage::Changed => Task::none(),
+        AppMessage::Changed | AppMessage::Redraw(_) => Task::none(),
         AppMessage::Measured {
             surface,
             revision,
@@ -666,7 +734,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                 &mut plots.animation.motion,
                 Duration::from_millis(250),
             ) {
-                Task::done(Plant::App(AppMessage::Changed))
+                Task::done(Plant::App(AppMessage::Redraw(surface)))
             } else {
                 Task::none()
             }
@@ -692,7 +760,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
             } else {
                 instance.hover.remove(&key);
             }
-            refresh(plots, false)
+            refresh_surface(plots, surface)
         }
         AppMessage::Action { surface, action } => {
             if action.is_animation_frame() {
@@ -723,7 +791,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                 }
                 None => return Task::none(),
             };
-            Task::batch([command, refresh(plots, false)])
+            Task::batch([command, refresh_surface(plots, surface)])
         }
     }
 }

@@ -393,9 +393,12 @@ impl LuaRuntime {
         props: impl FnOnce(&Lua) -> mlua::Result<Table>,
         hover: &crate::ui::hover::HoverSet,
     ) -> mlua::Result<Node> {
-        self.scene_render(services, output, props, hover, |_, value| {
+        let node = self.scene_render(services, output, props, hover, |_, value| {
             parse_node_hovered(&value, hover).map_err(mlua::Error::RuntimeError)
-        })
+        })?;
+        // Legacy scene hosts promise prompt release of opaque service resources.
+        self.lua.gc_collect()?;
+        Ok(node)
     }
 
     fn scene_render<T>(
@@ -433,7 +436,8 @@ impl LuaRuntime {
             )?;
             let node = decode(&self.lua, value)?;
             self.clear_entry_props()?;
-            self.lua.gc_collect()?;
+            // Let Lua's automatic incremental collector pace work with allocations;
+            // a full collection here stalls every pointer-driven view rebuild.
             Ok(node)
         })();
         self.finish("view", result)

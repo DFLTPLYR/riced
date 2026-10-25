@@ -100,6 +100,55 @@ return {
 "#;
 
 #[test]
+fn input_refreshes_only_the_owning_instance_and_redraws_its_surface() {
+    let fixture =
+        Fixture::new(&COUNTER.replace("assert(props.height==32)", "self.count=self.count+1"));
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let mut state = State::default();
+    for output in [1, 2] {
+        let mut app = instance(&format!("DP-{output}"));
+        fixture.render(&mut app, false).unwrap();
+        state
+            .instances
+            .insert((OutputId(output), "bar".into()), app);
+    }
+    reconcile(&mut plots, &mut state, &mut Vec::new());
+    let surface = state.instances[&(OutputId(1), "bar".into())]
+        .surface
+        .unwrap();
+    // Every view increments count, making unrelated executions observable.
+    let other_revision = state.instances[&(OutputId(2), "bar".into())].revision;
+    plots.apps = state;
+    let actions = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface,
+            action: "drag".into(),
+        },
+    ));
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(1), "bar".into())]),
+        "DP-1:3:0"
+    );
+    assert_eq!(
+        plots.apps.instances[&(OutputId(2), "bar".into())].revision,
+        other_revision
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(2), "bar".into())]),
+        "DP-2:1:0"
+    );
+    assert!(
+        matches!(&actions[..], [iced_runtime::Action::Output(Plant::App(AppMessage::Redraw(id)))] if *id == surface)
+    );
+    assert_eq!(
+        super::super::state::redraw_scope(&Plant::App(AppMessage::Redraw(surface))),
+        iced_exwlshell::redraw::Scope::Window(surface)
+    );
+}
+
+#[test]
 fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
     let fixture = Fixture::new(include_str!(
         "../../../config/riced/example/apps/background/app.lua"
