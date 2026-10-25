@@ -164,6 +164,37 @@ pub(crate) fn install(lua: &Lua, root: &Path) -> mlua::Result<()> {
         pending: Vec::new(),
     });
     let methods = lua.create_table()?;
+    methods.set(
+        "pick_file",
+        lua.create_function(
+            |lua, (_app, options, callback): (Table, Value, Option<Function>)| {
+                let (options, callback) = match (options, callback) {
+                    (Value::Function(callback), None) => {
+                        (crate::framework::dialog::FileOptions::default(), callback)
+                    }
+                    (Value::Nil, Some(callback)) => {
+                        (crate::framework::dialog::FileOptions::default(), callback)
+                    }
+                    (Value::Table(options), Some(callback)) => {
+                        (lua.from_value(Value::Table(options))?, callback)
+                    }
+                    _ => {
+                        return Err(error(
+                            "pick_file expects optional {title, extensions} and a callback",
+                        ));
+                    }
+                };
+                options.validate().map_err(error)?;
+                register(
+                    lua,
+                    callback,
+                    false,
+                    None,
+                    Some(Operation::PickFile(options)),
+                )
+            },
+        )?,
+    )?;
     methods.set("spawn", lua.create_function(|lua, (_app, argv, options, callback): (Table, Table, Value, Option<Function>)| {
         let (options, callback) = match (options, callback) {
             (Value::Function(callback), None) => (ProcessOptions::default(), callback),
@@ -394,6 +425,7 @@ mod tests {
     fn views_and_teardown_cannot_start_resources_and_invalid_options_fail_early() {
         let lua = lua();
         assert!(lua.load("app:after(1,function() end)").exec().is_err());
+        assert!(lua.load("app:pick_file(function() end)").exec().is_err());
         phase(&lua, Phase::Active);
         for source in [
             "app:spawn({},function() end)",
@@ -403,10 +435,15 @@ mod tests {
             "app:every(0,function() end)",
             "app:every(1.5,function() end)",
             "app:subscribe('missing',function() end)",
+            "app:pick_file({typo=true},function() end)",
+            "app:pick_file({extensions={'*.png'}},function() end)",
+            "app:pick_file({title=string.rep('x',1025)},function() end)",
+            "app:pick_file({extensions={'png'}})",
         ] {
             assert!(lua.load(source).exec().is_err(), "{source}");
         }
         phase(&lua, Phase::Closing);
+        assert!(lua.load("app:pick_file(function() end)").exec().is_err());
         assert!(lua.load("app:after(1,function() end)").exec().is_err());
         assert!(commands(&lua).is_empty());
     }
@@ -437,6 +474,34 @@ mod tests {
             .exec()
             .unwrap();
         assert!(poll(&lua).unwrap().is_empty());
+    }
+    #[test]
+    fn file_pickers_stage_owned_options_deliver_once_and_cancel_silently() {
+        let lua = lua();
+        phase(&lua, Phase::Active);
+        let id: u64 = lua.load("return app:pick_file({title='Wallpaper',extensions={'png','jpg'}},function(result) calls=(calls or 0)+1; path=result.path end)").eval().unwrap();
+        let requests = commands(&lua);
+        assert!(
+            matches!(&requests[..], [Command::Start { operation:Operation::PickFile(options), .. }] if options.title.as_deref()==Some("Wallpaper") && options.extensions==["png","jpg"])
+        );
+        let delivery = Delivery {
+            kind: DeliveryKind::Job,
+            generation: generation(&lua).unwrap(),
+            id,
+            revision: 1,
+            payload: serde_json::json!({"ok":true,"type":"file_dialog","path":"/wallpaper.png","cancelled":false}),
+        };
+        invoke(&lua, &delivery).unwrap();
+        invoke(&lua, &delivery).unwrap();
+        assert_eq!(lua.globals().get::<u32>("calls").unwrap(), 1);
+        assert_eq!(
+            lua.globals().get::<String>("path").unwrap(),
+            "/wallpaper.png"
+        );
+        let id: u64 = lua.load("token=app:pick_file(function() error('cancelled callback ran') end); assert(app:cancel(token)); return token").eval().unwrap();
+        let cancelled = Delivery { id, ..delivery };
+        assert!(!accepts(&lua, &cancelled));
+        invoke(&lua, &cancelled).unwrap();
     }
     #[test]
     fn callbacks_can_schedule_work_without_reentrant_borrows_and_release_once() {

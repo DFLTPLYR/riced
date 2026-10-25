@@ -1,4 +1,5 @@
 //! Project conventions and owned surface descriptions.
+pub(crate) mod dialog;
 mod layer;
 mod project;
 pub(crate) mod storage;

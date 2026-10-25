@@ -67,7 +67,7 @@ termination is not guaranteed to run Lua cleanup hooks.
 
 ## Managed tasks and timers
 
-Framework apps receive reserved methods `spawn`, `after`, `every`, `subscribe`,
+Framework apps receive reserved methods `spawn`, `pick_file`, `after`, `every`, `subscribe`,
 and `cancel`. Do not define app methods with these names.
 
 ```lua
@@ -139,6 +139,45 @@ Commands that deliberately detach into another session are not supervised daemon
 use a service manager for those. Cleanup on forced process termination cannot
 be guaranteed. Returning `nil` from `view` merely hides the layer and does not
 stop the app's timers, subscriptions, or tasks.
+
+## Native file picker
+
+```lua
+function app:actions(event)
+    if event.key == "choose-file" then
+        self.picker = self:pick_file({
+            title = "Choose wallpaper",
+            extensions = { "png", "jpg", "jpeg", "webp" },
+        }, function(result)
+            if not result.ok then
+                self.error = result.error.message
+            elseif not result.cancelled then
+                self.path = result.path
+            end
+        end)
+    end
+end
+```
+
+`pick_file(callback)` also works with defaults. It uses the same native `rfd`
+dialog backend as the legacy shell; no Zenity executable is required. Backend
+support (such as a working desktop portal) is still required by the platform.
+Options accept only `title` (NUL-free, up to 1024 bytes) and `extensions` (up to
+32 alphanumeric suffixes, 1–32 bytes each, without dots or wildcards). Omit
+extensions to allow all files. Filters are picker hints, not file validation.
+
+Results have `type = "file_dialog"`. A selection returns
+`{ok=true, cancelled=false, path=...}` with an absolute native path encoded as
+UTF-8. Dismissing returns `{ok=true, cancelled=true}` without a path. The backend
+does not distinguish dismissal from some backend failures. A non-UTF-8 path
+returns `ok=false` with `error.code = "path"`. Only one managed native picker
+can be active across apps; another request receives `error.code = "busy"`.
+
+The numeric token works with `self:cancel(token)`. Calls are staged until the
+candidate validates, callbacks run on the host update thread, and cancellation
+or app teardown silently suppresses late callbacks. Cancellation stops waiting;
+closing an already displayed native dialog is backend-dependent. There is no
+timeout while the user chooses a file. Picking does not read or save the file.
 
 ## Unified service snapshots and subscriptions
 

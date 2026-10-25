@@ -29,6 +29,7 @@ impl Default for ProcessOptions {
 }
 #[derive(Debug, Clone)]
 pub(crate) enum Operation {
+    PickFile(super::dialog::FileOptions),
     File(super::storage::Request),
     Process {
         argv: Vec<String>,
@@ -180,6 +181,7 @@ impl Job {
             failure("cancelled", "operation cancelled before starting")
         } else {
             match self.operation {
+                Operation::PickFile(options) => super::dialog::run(options, self.receiver).await,
                 Operation::File(request) => super::storage::run(request, self.receiver).await,
                 Operation::Timer { millis, .. } => match select(
                     Box::pin(tokio::time::sleep(Duration::from_millis(millis))),
@@ -400,6 +402,20 @@ mod tests {
                 assert_eq!(result.payload["error"]["code"], "cancelled");
                 assert!(!owner.complete(&result));
             });
+    }
+    #[test]
+    fn cancelled_picker_jobs_never_open_a_native_dialog() {
+        let mut owner = Owner::default();
+        owner.reset(1);
+        owner.apply(vec![Command::Start {
+            id: 1,
+            operation: Operation::PickFile(Default::default()),
+        }]);
+        let job = owner.jobs().pop().unwrap();
+        owner.reset(2);
+        let result = iced::futures::executor::block_on(job.run());
+        assert_eq!(result.payload["error"]["code"], "cancelled");
+        assert!(!owner.complete(&result));
     }
     #[test]
     fn recurring_timers_reject_duplicate_ticks_and_stop_when_cancelled() {
