@@ -52,6 +52,7 @@ pub(crate) enum AppEvent<'a> {
     Unmount(&'a str),
     Tick,
     Action(&'a crate::ui::action::Action),
+    Managed(&'a crate::framework::tasks::Delivery),
 }
 
 /// Owned boundary messages, including native control keys and typed values.
@@ -208,6 +209,7 @@ impl LuaRuntime {
     }
 
     fn begin(&self) -> mlua::Result<()> {
+        super::managed::phase(&self.lua, super::managed::Phase::ReadOnly);
         self.lua.expire_registry_values();
         self.lua.remove_app_data::<crate::ui::hover::HoverSet>();
         self.lua
@@ -218,6 +220,7 @@ impl LuaRuntime {
     }
 
     fn finish<T>(&mut self, entry: &str, result: mlua::Result<T>) -> mlua::Result<T> {
+        super::managed::phase(&self.lua, super::managed::Phase::ReadOnly);
         // Entry-local props must not keep opaque resources alive when either
         // the Lua view or Rust decoder fails. Preserve the original failure.
         let cleanup = self.clear_entry_props();
@@ -272,6 +275,7 @@ impl LuaRuntime {
                 .eval()?;
             let _: Function = app.get("view")?;
             super::widgets::validate_actions(&app)?;
+            super::managed::attach(&self.lua, &app)?;
             if self
                 .lua
                 .named_registry_value::<String>("riced.app_root")
@@ -435,6 +439,7 @@ impl LuaRuntime {
     }
 
     pub(crate) fn set_app_root(&self, root: &Path) -> mlua::Result<()> {
+        super::managed::install(&self.lua, root)?;
         self.lua
             .set_named_registry_value("riced.app_root", root.to_string_lossy().into_owned())
     }
@@ -480,9 +485,18 @@ impl LuaRuntime {
             AppEvent::Unmount(_) => "unmount",
             AppEvent::Tick => "on_tick",
             AppEvent::Action(_) => "actions",
+            AppEvent::Managed(_) => "callback",
         };
         let result = (|| {
             self.begin()?;
+            super::managed::phase(
+                &self.lua,
+                if matches!(event, AppEvent::Unmount(_)) {
+                    super::managed::Phase::Closing
+                } else {
+                    super::managed::Phase::Active
+                },
+            );
             crate::services::publish_all(services, &self.lua)?;
             crate::services::publish_bar(&self.lua, output)?;
             let app: Table = self.lua.registry_value(
@@ -493,6 +507,9 @@ impl LuaRuntime {
             let resolved = component_props(&self.lua, &app, self.lua.to_value(props)?, Value::Nil)?;
             app.set("props", resolved)?;
             app.set("context", self.lua.to_value(context)?)?;
+            if let AppEvent::Managed(delivery) = event {
+                return super::managed::invoke(&self.lua, delivery);
+            }
             let function = match app.get::<Value>(handler)? {
                 Value::Nil => return Ok(Value::Nil),
                 Value::Function(function) => function,
@@ -509,11 +526,29 @@ impl LuaRuntime {
                 }
                 AppEvent::Tick => mlua::MultiValue::new(),
                 AppEvent::Action(action) => action.arguments(&self.lua)?,
+                AppEvent::Managed(_) => mlua::MultiValue::new(),
             };
             arguments.push_front(Value::Table(app));
             function.call(arguments)
         })();
         self.finish(handler, result)
+    }
+
+    pub(crate) fn managed_generation(&self) -> Option<u64> {
+        super::managed::generation(&self.lua)
+    }
+    pub(crate) fn managed_commands(&self) -> Vec<crate::framework::tasks::Command> {
+        super::managed::commands(&self.lua)
+    }
+    pub(crate) fn managed_services(
+        &self,
+        services: &crate::services::ServiceCtx<'_>,
+    ) -> mlua::Result<Vec<crate::framework::tasks::Delivery>> {
+        crate::services::publish_all(services, &self.lua)?;
+        super::managed::poll(&self.lua)
+    }
+    pub(crate) fn accepts_managed(&self, delivery: &crate::framework::tasks::Delivery) -> bool {
+        super::managed::accepts(&self.lua, delivery)
     }
 
     pub(crate) fn scene_action(

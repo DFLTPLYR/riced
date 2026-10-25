@@ -20,6 +20,7 @@ mod workspaces;
 
 pub use bar::publish as publish_bar;
 pub use registry::{ServiceCtx, publish_all};
+pub(crate) use registry::{snapshot, valid_topic};
 pub use toplevels::{Toplevel, ToplevelCache};
 pub use workspaces::{Workspace, WorkspaceCache};
 pub(crate) mod gpu;

@@ -6,6 +6,7 @@ pub mod demo;
 pub(crate) mod entry;
 pub mod error;
 pub(crate) mod library;
+pub(crate) mod managed;
 pub(crate) mod metadata;
 pub(crate) mod notifications;
 pub mod props;

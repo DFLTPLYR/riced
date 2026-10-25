@@ -1,6 +1,7 @@
 //! Opt-in framework apps: one Lua instance and layer root per app/output.
 use super::{Plant, Plots, windows::PlotInfo};
 use crate::{
+    framework::tasks::{Delivery, DeliveryKind, Owner},
     framework::{AppConfig, LayerRoot, Project, Surface},
     lua::{AppEvent, LuaRuntime},
     services::ServiceCtx,
@@ -26,6 +27,7 @@ mod tests;
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
+    Managed(Delivery),
     Tick,
     Changed,
     Action {
@@ -59,6 +61,7 @@ impl std::fmt::Debug for State {
 }
 #[derive(Default)]
 struct Instance {
+    managed: Owner,
     runtime: Option<LuaRuntime>,
     accepted: Option<Sources>,
     attempted: Option<(Sources, Value)>,
@@ -73,9 +76,11 @@ struct Instance {
     hover: crate::ui::hover::HoverSet,
     revision: u64,
     error: Option<String>,
+    service_error: Option<String>,
 }
 impl Instance {
     fn unmount(&mut self, services: &ServiceCtx<'_>, reason: &str) {
+        self.managed.cancel_all();
         if let Some(runtime) = &mut self.runtime
             && let Err(error) = runtime.app_event(
                 services,
@@ -227,6 +232,64 @@ impl Instance {
         }
         Ok(modified)
     }
+
+    fn managed_work(&mut self, services: &ServiceCtx<'_>) -> Vec<Task<Plant>> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Vec::new();
+        };
+        let Some(generation) = runtime.managed_generation() else {
+            return Vec::new();
+        };
+        self.managed.reset(generation);
+        self.managed.apply(runtime.managed_commands());
+        let mut tasks: Vec<_> = self
+            .managed
+            .jobs()
+            .into_iter()
+            .map(|job| {
+                Task::perform(job.run(), |delivery| {
+                    Plant::App(AppMessage::Managed(delivery))
+                })
+            })
+            .collect();
+        match runtime.managed_services(services) {
+            Ok(deliveries) => {
+                self.service_error = None;
+                tasks.extend(
+                    deliveries
+                        .into_iter()
+                        .map(|delivery| Task::done(Plant::App(AppMessage::Managed(delivery)))),
+                );
+            }
+            Err(error) => crate::lua::error::report_once(
+                &mut self.service_error,
+                "app service subscription: ",
+                error.to_string(),
+            ),
+        }
+        tasks
+    }
+
+    fn deliver(
+        &mut self,
+        services: &ServiceCtx<'_>,
+        delivery: &Delivery,
+    ) -> Option<mlua::Result<mlua::Value>> {
+        let runtime = self.runtime.as_mut()?;
+        if !runtime.accepts_managed(delivery) {
+            return None;
+        }
+        if delivery.kind == DeliveryKind::Job && !self.managed.complete(delivery) {
+            return None;
+        }
+        Some(runtime.app_event(
+            services,
+            &self.output_name,
+            &self.context,
+            &self.props,
+            AppEvent::Managed(delivery),
+        ))
+    }
 }
 struct Request<'a> {
     project: &'a Project,
@@ -266,6 +329,14 @@ pub(crate) fn refresh(plots: &mut Plots, tick: bool) -> Task<Plant> {
     refresh_project(plots, &Project::installed(), tick)
 }
 fn refresh_project(plots: &mut Plots, project: &Project, tick: bool) -> Task<Plant> {
+    refresh_target(plots, project, tick, None)
+}
+fn refresh_target(
+    plots: &mut Plots,
+    project: &Project,
+    tick: bool,
+    target: Option<u64>,
+) -> Task<Plant> {
     if plots.config.apps.is_empty() && plots.apps.instances.is_empty() {
         return Task::none();
     }
@@ -284,6 +355,15 @@ fn refresh_project(plots: &mut Plots, project: &Project, tick: bool) -> Task<Pla
             let key = (output, config.identity().to_string());
             desired.insert(key.clone());
             let instance = state.instances.entry(key).or_default();
+            if target.is_some_and(|target| {
+                instance
+                    .runtime
+                    .as_ref()
+                    .and_then(LuaRuntime::managed_generation)
+                    != Some(target)
+            }) {
+                continue;
+            }
             let geometry = crate::shared::geometry::output_geometry(info);
             let output_context = json!({"name":name,"x":geometry.0,"y":geometry.1,"width":geometry.2,"height":geometry.3});
             instance.context = json!({"id":config.identity(),"name":config.name,"root":project.app_root(&config.name),"output":output_context});
@@ -318,6 +398,7 @@ fn refresh_project(plots: &mut Plots, project: &Project, tick: bool) -> Task<Pla
                     error,
                 ),
             }
+            commands.extend(instance.managed_work(&service_ctx));
         }
     }
     let obsolete: Vec<_> = state
@@ -512,7 +593,38 @@ pub(crate) fn forget(plots: &mut Plots, surface: window::Id) {
 }
 pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
     match message {
-        AppMessage::Tick => refresh(plots, true),
+        AppMessage::Managed(delivery) => {
+            let mut state = std::mem::take(&mut plots.apps);
+            let result = state
+                .instances
+                .values_mut()
+                .find_map(|instance| instance.deliver(&services(plots), &delivery));
+            plots.apps = state;
+            let command = match result {
+                Some(Ok(value)) => super::actions::command_from_action(&value, plots),
+                Some(Err(error)) => {
+                    eprintln!("app callback: {error}");
+                    Task::none()
+                }
+                None => return Task::none(),
+            };
+            Task::batch([
+                command,
+                refresh_target(
+                    plots,
+                    &Project::installed(),
+                    false,
+                    Some(delivery.generation),
+                ),
+            ])
+        }
+        AppMessage::Tick => {
+            // A framework-only project must not depend on the legacy widget timer.
+            if plots.catalog.definitions.is_empty() {
+                plots.services.refresh_system();
+            }
+            refresh(plots, true)
+        }
         AppMessage::Changed => Task::none(),
         AppMessage::Measured {
             surface,

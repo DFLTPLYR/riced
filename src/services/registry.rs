@@ -91,6 +91,38 @@ const SERVICES: &[&dyn Service] = &[
     &TrayService,
 ];
 
+/// Framework topics share the existing publishers; no extra polling or IPC here.
+pub(crate) fn valid_topic(name: &str) -> bool {
+    SERVICES.iter().any(|service| service.namespace() == name)
+        || matches!(
+            name,
+            "wayland.workspaces" | "wayland.outputs" | "wayland.toplevels"
+        )
+}
+
+pub(crate) fn snapshot(lua: &mlua::Lua, name: &str) -> mlua::Result<serde_json::Value> {
+    use mlua::LuaSerdeExt;
+    if !valid_topic(name) {
+        return Err(mlua::Error::RuntimeError(format!(
+            "unknown service {name:?}"
+        )));
+    }
+    let mut value: mlua::Value = mlua::Value::Table(lua.globals());
+    for part in name.split('.') {
+        let mlua::Value::Table(table) = value else {
+            return Ok(serde_json::json!({"name":name,"available":false}));
+        };
+        value = table.raw_get(part)?;
+    }
+    let available = !value.is_nil();
+    // Snapshot subscriptions carry data only, not executable functions or image handles.
+    let data: serde_json::Value = lua.from_value_with(
+        value,
+        mlua::serde::de::Options::new().deny_unsupported_types(false),
+    )?;
+    Ok(serde_json::json!({"name":name,"available":available,"data":data}))
+}
+
 /// Publish every service table into `lua` globals.
 pub fn publish_all(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     crate::ui::settings::publish(lua, ctx.component_defaults)?;
@@ -114,5 +146,22 @@ mod tests {
             names,
             ["notifications", "system", "systemtray", "theme", "wayland"]
         );
+    }
+
+    #[test]
+    fn unified_snapshots_strip_opaque_values_and_validate_topics() {
+        struct ImageToken;
+        impl mlua::UserData for ImageToken {}
+        let lua = mlua::Lua::new();
+        let data = lua.create_table().unwrap();
+        data.set("count", 1).unwrap();
+        data.set("icon", lua.create_userdata(ImageToken).unwrap())
+            .unwrap();
+        lua.globals().set("systemtray", data).unwrap();
+        let snapshot = snapshot(&lua, "systemtray").unwrap();
+        assert_eq!(snapshot["data"]["count"], 1);
+        assert!(snapshot["data"]["icon"].is_null());
+        assert!(super::snapshot(&lua, "missing").is_err());
+        assert!(valid_topic("wayland.workspaces"));
     }
 }

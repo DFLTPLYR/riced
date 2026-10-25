@@ -2,7 +2,8 @@
 
 Riced can host opt-in Lua applications as native Wayland layer surfaces.
 Existing bars, desktop widgets, notifications, and overlays remain supported.
-This is the first framework milestone, not yet a stable extension SDK.
+The application and managed-resource APIs are experimental, not yet a stable
+extension SDK.
 
 ## Project layout
 
@@ -58,10 +59,124 @@ handlers. They are cleared between entries to release temporary resources.
 
 Apps currently use the trusted widget Lua profile, including native filesystem
 and shell access. Hooks have instruction/memory budgets, but synchronous I/O
-can still block the UI. Managed asynchronous tasks are a later milestone.
+can still block the UI. Use the managed APIs below instead of `os.execute`
+or blocking pipe reads for background work.
 Do not perform blocking work in views or assume hook side effects can be rolled
 back. Rust releases owned resources even if an unmount hook errors; process
 termination is not guaranteed to run Lua cleanup hooks.
+
+## Managed tasks and timers
+
+Framework apps receive reserved methods `spawn`, `after`, `every`, `subscribe`,
+and `cancel`. Do not define app methods with these names.
+
+```lua
+function app:mount()
+    self.status = "loading"
+    self.request = self:spawn({ "hostname" }, {
+        timeout_ms = 2000,
+        max_output_bytes = 65536,
+        -- cwd = "assets", -- relative to this app, or an absolute path
+    }, function(result)
+        self.status = result.ok and result.stdout or result.error.message
+    end)
+
+    self.clock = os.date("%H:%M:%S")
+    self.clock_timer = self:every(1000, function()
+        self.clock = os.date("%H:%M:%S")
+    end)
+
+    self:after(3000, function()
+        self.ready = true
+    end)
+end
+```
+
+All three return a numeric cancellation token. `self:cancel(token)` returns
+true when an active callback was removed, false when already completed or
+cancelled. Explicit cancellation is silent: it does not invoke the callback.
+Tokens are local to an app VM; do not exchange them between instances.
+
+`spawn(argv, callback)` also works without options. Arguments are passed
+directly to the executable, **not through a shell**. Pipelines and shell syntax
+require an explicit shell executable. Child stdin is closed; stdout and stderr
+are captured separately and decoded as UTF-8 with replacement for invalid bytes.
+The default working directory is the app directory; the shell process's own
+working directory is not changed.
+
+Process results contain `ok`, `type = "process"`, `code` (when available),
+`stdout`, and `stderr` after normal exit. Nonzero exit adds an `error` object.
+Spawn errors, timeout, cancellation, and output overflow return `ok = false`
+with `error = { code, message }`. Error codes are `spawn`, `exit`, `io`,
+`timeout`, `cancelled`, and `output_limit`. Not every failure includes captured
+output. Timer callbacks receive `{ ok = true, type = "timer" }`.
+
+Limits:
+
+- At most 128 active managed callbacks per instance, including subscriptions.
+- At most 256 staged start/cancel requests between host drains.
+- Process argv: 1–256 NUL-free strings, at most 65536 bytes in total.
+- Timeout: 1–86400000 ms; default 30000 ms.
+- Output limit: 1–1048576 bytes **per stream**; default 65536 bytes.
+- One-shot timers: 1–86400000 ms; recurring timers: 16–86400000 ms.
+
+Timers are fixed-delay: the next delay starts after the previous tick is
+handled, not on a catch-up schedule. A busy UI therefore does not accumulate
+timer callbacks. All callbacks run under the app's normal Lua budgets on the
+host update thread, with fresh `self.props`, `self.context`, and service tables.
+The callback receives only its result; capture `self` in the Lua closure.
+After a managed callback, only the owning app's Lua view is refreshed.
+
+Create resources in `mount`, `actions`, `on_tick`, or managed callbacks—not in
+views, top-level module evaluation, or `unmount`. Candidate requests remain
+staged until mount and first-view validation succeed. Reload, removal, output
+loss, and runtime drop cancel owned jobs and release callbacks. Old-generation,
+cancelled, duplicated, and superseded deliveries are ignored.
+
+Cancellation, timeout, and output overflow kill the process group and reap the
+direct child. Dropping an in-flight process future also kills its process group.
+Commands that deliberately detach into another session are not supervised daemons;
+use a service manager for those. Cleanup on forced process termination cannot
+be guaranteed. Returning `nil` from `view` merely hides the layer and does not
+stop the app's timers, subscriptions, or tasks.
+
+## Unified service snapshots and subscriptions
+
+```lua
+function app:mount()
+    local service = riced.service("system")
+    local initial = service:snapshot()
+    self.cpu = initial.data.cpu_usage
+
+    self.cpu_subscription = service:subscribe(function(snapshot)
+        self.cpu = snapshot.data.cpu_usage
+    end)
+
+    -- Equivalent convenience method:
+    self:subscribe("wayland.workspaces", function(snapshot)
+        self.workspaces = snapshot.data
+    end)
+end
+```
+
+Snapshots use `{ name, available, data }`. `available` means the published topic
+exists, not that a compositor implements every underlying protocol. Topics are
+`system`, `theme`, `notifications`, `wayland`, `systemtray`, `wayland.outputs`,
+`wayland.workspaces`, and `wayland.toplevels`. Unknown names fail immediately.
+
+`snapshot()` reads cached published data without filesystem, D-Bus, or Wayland
+requests. It returns detached plain data; mutating it does not edit the service.
+Functions and opaque image tokens are omitted. Image-only changes therefore do
+not constitute metadata snapshot changes; existing service globals remain the
+API for opaque image values and existing native command APIs remain unchanged.
+Generic service commands and service registration belong to the extension SDK
+milestone, not this read/subscription interface.
+
+Subscriptions deliver one initial snapshot asynchronously, then changed data
+only. Multiple pending updates coalesce to the latest snapshot. Source changes
+arrive through the existing native service events or the 500 ms app poll;
+callbacks never run recursively inside publication. Cancel subscription tokens
+with `self:cancel(token)`, or let app teardown release them automatically.
 
 ## Layer roots
 
@@ -122,8 +237,9 @@ your project and merge the example `apps` entry into your existing config.
 
 ## Subsequent milestones
 
-Managed tasks and unified service contracts come next, followed by a versioned
-Rust extension SDK and standard Cargo crates under `extensions/<name>/`.
+Structured file persistence (`riced.file`) comes next, followed by a versioned
+Rust extension SDK, generic service registration/commands, and standard Cargo
+crates under `extensions/<name>/`.
 Compiled-in extensions will require rebuilding/restarting; supervised process
 extensions will follow for independently restartable service workloads. Rust
 dynamic-library loading is intentionally not part of the initial design.

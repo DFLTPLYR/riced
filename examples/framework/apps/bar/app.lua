@@ -2,6 +2,10 @@ local app = { defaults = { height = 32 }, clicks = 0 }
 
 function app:mount(context)
     self.output = context.output.name
+    self.clock = os.date("%H:%M:%S")
+    self:every(1000, function()
+        self.clock = os.date("%H:%M:%S")
+    end)
 end
 
 function app:actions(event)
@@ -24,7 +28,7 @@ function app:view(props)
                 riced.component("status.lua", { output = self.output }),
                 iced.space():width(size.fill),
                 iced.button("Clicks: " .. self.clicks, "increment"),
-                iced.text(os.date("%H:%M:%S")),
+                iced.text(self.clock),
             }):spacing(12):height(size.fill):align_y("center")
         ):padding({ left = 12, right = 12 })
             :background(theme.surface):width(size.fill):height(size.fill),

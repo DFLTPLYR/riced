@@ -372,3 +372,142 @@ fn native_close_releases_the_instance_even_if_unmount_fails() {
     assert!(plots.apps.instances.is_empty());
     assert!(!plots.windows.ids.contains_key(&surface));
 }
+
+async fn managed_deliveries(instance: &mut Instance) -> Vec<Delivery> {
+    let tasks = with_services(|services| instance.managed_work(services));
+    let Some(stream) = iced_runtime::task::into_stream(Task::batch(tasks)) else {
+        return Vec::new();
+    };
+    stream
+        .filter_map(|action| async move {
+            match action {
+                iced_runtime::Action::Output(Plant::App(AppMessage::Managed(delivery))) => {
+                    Some(delivery)
+                }
+                _ => None,
+            }
+        })
+        .collect()
+        .await
+}
+
+#[test]
+fn process_results_enter_the_owning_app_and_callbacks_can_schedule_timers() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self)
+            self.message='pending'
+            self:spawn({'/bin/sh','-c','printf ready'}, {timeout_ms=1000}, function(result)
+                assert(result.ok)
+                self.message=result.stdout
+                self:after(1,function() self.message='timer' end)
+            end)
+        end,
+        view=function(self) return iced.layer({width=100,height=32,content=iced.text(self.message)}) end
+    }"#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    assert_eq!(text(&app), "pending");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let deliveries = managed_deliveries(&mut app).await;
+            assert_eq!(deliveries.len(), 1);
+            with_services(|services| app.deliver(services, &deliveries[0]).unwrap().unwrap());
+            fixture.render(&mut app, false).unwrap();
+            assert_eq!(text(&app), "ready");
+            let deliveries = managed_deliveries(&mut app).await;
+            with_services(|services| app.deliver(services, &deliveries[0]).unwrap().unwrap());
+            fixture.render(&mut app, false).unwrap();
+            assert_eq!(text(&app), "timer");
+        });
+}
+
+#[test]
+fn reload_cancels_old_work_and_late_results_cannot_enter_the_new_vm() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self) self:after(60000,function() error('retired callback ran') end) end,
+        view=function() return iced.layer({width=100,height=32,content=iced.text('old')}) end
+    }"#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let tasks = with_services(|services| app.managed_work(services));
+    fixture.write("return {view=function() return iced.layer({width=100,height=32,content=iced.text('new')}) end}");
+    fixture.render(&mut app, false).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = iced_runtime::task::into_stream(Task::batch(tasks)).unwrap();
+            let actions: Vec<_> = tokio::time::timeout(Duration::from_secs(1), stream.collect())
+                .await
+                .unwrap();
+            for action in actions {
+                if let iced_runtime::Action::Output(Plant::App(AppMessage::Managed(delivery))) =
+                    action
+                {
+                    assert_eq!(delivery.payload["error"]["code"], "cancelled");
+                    assert!(with_services(|services| app.deliver(services, &delivery)).is_none());
+                }
+            }
+        });
+    assert_eq!(text(&app), "new");
+}
+
+#[test]
+fn failed_candidates_never_launch_work_and_views_cannot_register_it() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self) self:spawn({'/bin/sh','-c','touch launched'},function() end) end,
+        view=function() return iced.layer({width=0,height=32,content=iced.text('bad')}) end
+    }"#,
+    );
+    let mut app = instance("DP-1");
+    assert!(fixture.render(&mut app, false).is_err());
+    assert!(with_services(|services| app.managed_work(services)).is_empty());
+    assert!(!fixture.project.app_root("bar").join("launched").exists());
+    fixture.write("return {view=function(self) self:after(1,function() end); return nil end}");
+    assert!(
+        fixture
+            .render(&mut app, false)
+            .unwrap_err()
+            .contains("not views")
+    );
+}
+
+#[test]
+fn service_subscriptions_deliver_an_initial_detached_snapshot_only_once() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self)
+            self.updates=0
+            self:subscribe('system',function(snapshot)
+                assert(snapshot.available and snapshot.name=='system')
+                self.updates=self.updates+1
+                self.cpu=snapshot.data.cpu_usage
+            end)
+        end,
+        view=function(self) return iced.layer({width=100,height=32,content=iced.text(self.updates)}) end
+    }"#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let deliveries = managed_deliveries(&mut app).await;
+            assert_eq!(deliveries.len(), 1);
+            with_services(|services| app.deliver(services, &deliveries[0]).unwrap().unwrap());
+            fixture.render(&mut app, false).unwrap();
+            assert_eq!(text(&app), "1");
+            assert!(managed_deliveries(&mut app).await.is_empty());
+        });
+}
