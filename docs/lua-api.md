@@ -368,7 +368,9 @@ unchanged targets do not restart, even if a view returns fresh Lua tables.
 
 `duration` defaults to **200 ms**, `delay` to **0 ms**, and `easing` to
 `"ease_out"`. Available curves are `"linear"`, `"ease_in"`, `"ease_out"`, and
-`"ease_in_out"`. Durations and delays must be finite, non-negative, and at most
+`"ease_in_out"`. Custom curves use `easing = iced.snappy()` after registration
+with `iced.define` (see **Named easing curves**). Durations and delays must be
+finite, non-negative, and at most
 one day. Zero-duration animations snap immediately, ignoring delay. Timing-only
 or `from`-only changes do not restart an unchanged target. Removing a property
 restores its default offset (`0`) or opacity (`1`).
@@ -689,6 +691,33 @@ containing `-` must use `iced.use("name", props)` or `iced["name"](props)` —
 `iced.my-name` parses as subtraction. Unknown component names and non-node
 returns error naming the component. `iced.to_table(node)` exports a description
 table; `iced.components.<name>` exposes `{ rust_type, arguments, setters }`.
+
+### Named easing curves
+
+`iced.define` also accepts a declarative cubic Bézier easing descriptor:
+
+```lua
+iced.define("snappy", {
+    type = "easing",
+    bezier = { 0.2, 0.0, 0.2, 1.0 }, -- x1, y1, x2, y2
+})
+
+local slide = iced.animations.y({
+    from = -40, to = 0, duration = 250,
+    easing = iced.snappy(), -- or iced.use("snappy")
+})
+```
+
+Control points must be exactly four finite numbers; x1 and x2 must be in
+`0..1`. The endpoints are `(0, 0)` and `(1, 1)`. Y control points may lie outside
+`0..1` for overshoot. Unknown descriptor fields fail validation. A descriptor
+may also be passed directly as an animation property's `easing` value.
+
+Definitions share the component namespace: built-in names are reserved, and
+redefinitions use the last definition. Registration snapshots the curve and
+each call returns a fresh descriptor, so editing a returned table does not
+change the definition. Custom curves survive `iced.to_table` round-trips and
+popup reversal, and are sampled in Rust without per-frame Lua execution.
 
 ## Hover state
 

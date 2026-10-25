@@ -155,18 +155,29 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
         .set("_riced_components", lua.create_table()?)?;
     iced.set(
         "define",
-        lua.create_function(|lua, (name, func): (String, Function)| {
+        lua.create_function(|lua, (name, definition): (String, Value)| {
             let namespace: Table = lua.globals().get("iced")?;
             if namespace.raw_get::<Value>(name.as_str())? != Value::Nil {
                 return Err(mlua::Error::RuntimeError(format!(
                     "component {name:?} conflicts with an iced constructor"
                 )));
             }
+            let definition = match definition {
+                Value::Function(function) => Value::Function(function),
+                Value::Table(table) => super::animations::Easing::descriptor(&table)
+                    .map_err(mlua::Error::RuntimeError)?
+                    .encode(lua)?,
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "iced.define expects a component function or easing descriptor".into(),
+                    ));
+                }
+            };
             let registry: Table = lua.globals().get("_riced_components")?;
             if registry.get::<Value>(name.clone())? != Value::Nil {
                 eprintln!("iced: component {name:?} redefined (last wins)");
             }
-            registry.set(name, func)?;
+            registry.set(name, definition)?;
             Ok(())
         })?,
     )?;
@@ -176,6 +187,11 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
             let registry: Table = lua.globals().get("_riced_components")?;
             let func = match registry.get::<Value>(name.clone())? {
                 Value::Function(f) => f,
+                Value::Table(table) => {
+                    return super::animations::Easing::descriptor(&table)
+                        .map_err(mlua::Error::RuntimeError)?
+                        .encode(lua);
+                }
                 _ => {
                     return Err(mlua::Error::RuntimeError(format!(
                         "unknown component {name:?} — iced.define it first"

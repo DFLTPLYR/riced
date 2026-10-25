@@ -27,15 +27,77 @@ pub(crate) enum Easing {
     EaseIn,
     EaseOut,
     EaseInOut,
+    Bezier([f64; 4]),
 }
 impl Easing {
-    fn name(self) -> &'static str {
-        match self {
+    pub(crate) fn descriptor(table: &Table) -> Result<Self, String> {
+        strict(table, &["type", "bezier"], "easing")?;
+        if !matches!(table.raw_get::<Value>("type").map_err(|e| e.to_string())?, Value::String(s) if s.to_string_lossy() == "easing")
+        {
+            return Err("easing.type must be 'easing'".into());
+        }
+        let points = table
+            .raw_get::<Table>("bezier")
+            .map_err(|_| "easing.bezier must be an array of four finite numbers")?;
+        for pair in points.clone().pairs::<Value, Value>() {
+            let (key, _) = pair.map_err(|e| e.to_string())?;
+            if !matches!(key, Value::Integer(1..=4)) {
+                return Err("easing.bezier must contain exactly four finite numbers".into());
+            }
+        }
+        let mut curve = [0.0; 4];
+        for (index, point) in curve.iter_mut().enumerate() {
+            *point = match points
+                .raw_get::<Value>(index + 1)
+                .map_err(|e| e.to_string())?
+            {
+                Value::Integer(n) => n as f64,
+                Value::Number(n) if n.is_finite() => n,
+                _ => return Err("easing.bezier must contain exactly four finite numbers".into()),
+            };
+        }
+        if !(0.0..=1.0).contains(&curve[0]) || !(0.0..=1.0).contains(&curve[2]) {
+            return Err("easing.bezier x control points must be in 0..1".into());
+        }
+        Ok(Self::Bezier(curve))
+    }
+    pub(crate) fn encode(self, lua: &Lua) -> mlua::Result<Value> {
+        let name = match self {
             Self::Linear => "linear",
             Self::EaseIn => "ease_in",
             Self::EaseOut => "ease_out",
             Self::EaseInOut => "ease_in_out",
+            Self::Bezier(points) => {
+                let table = lua.create_table()?;
+                table.set("type", "easing")?;
+                table.set("bezier", lua.create_sequence_from(points)?)?;
+                return Ok(Value::Table(table));
+            }
+        };
+        Ok(Value::String(lua.create_string(name)?))
+    }
+    fn sample(self, progress: f64) -> f64 {
+        let Self::Bezier([x1, y1, x2, y2]) = self else {
+            return progress;
+        };
+        if progress <= 0.0 || progress >= 1.0 {
+            return progress;
         }
+        let coordinate = |t: f64, a: f64, b: f64| {
+            let u = 1.0 - t;
+            3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+        };
+        // Invert x(t), rather than treating elapsed progress as the curve parameter.
+        let (mut low, mut high) = (0.0, 1.0);
+        for _ in 0..40 {
+            let mid = (low + high) * 0.5;
+            if coordinate(mid, x1, x2) < progress {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        coordinate((low + high) * 0.5, y1, y2)
     }
     fn timing(self, duration: f64) -> Timing {
         match self {
@@ -43,6 +105,7 @@ impl Easing {
             Self::EaseIn => Timing::ease_in(duration),
             Self::EaseOut => Timing::ease_out(duration),
             Self::EaseInOut => Timing::ease_in_out(duration),
+            Self::Bezier(_) => Timing::linear(duration),
         }
     }
 }
@@ -184,7 +247,8 @@ fn property(table: &Table, name: &str) -> Result<Property, String> {
             "ease_in_out" => Easing::EaseInOut,
             _ => return Err("easing must be linear, ease_in, ease_out, or ease_in_out".into()),
         },
-        _ => return Err("easing must be a string".into()),
+        Value::Table(table) => Easing::descriptor(&table)?,
+        _ => return Err("easing must be a built-in string or easing descriptor".into()),
     };
     Ok(Property {
         from,
@@ -342,7 +406,7 @@ pub(crate) fn encode(lua: &Lua, spec: &Spec) -> mlua::Result<Table> {
             value.set("to", p.to)?;
             value.set("duration", p.duration)?;
             value.set("delay", p.delay)?;
-            value.set("easing", p.easing.name())?;
+            value.set("easing", p.easing.encode(lua)?)?;
             table.set(*name, value)?;
         }
     }
@@ -350,8 +414,32 @@ pub(crate) fn encode(lua: &Lua, spec: &Spec) -> mlua::Result<Table> {
 }
 
 #[derive(Debug)]
+struct Track {
+    property: Property,
+    tween: Tween<f64>,
+    from: f64,
+}
+impl Track {
+    fn value(&self) -> f64 {
+        let value = *self.tween.value();
+        if !matches!(self.property.easing, Easing::Bezier(_)) {
+            return value;
+        }
+        let to = f64::from(self.property.to);
+        if self.from == to {
+            return to;
+        }
+        self.from
+            + (to - self.from)
+                * self
+                    .property
+                    .easing
+                    .sample((value - self.from) / (to - self.from))
+    }
+}
+#[derive(Debug)]
 struct State {
-    tracks: [Option<(Property, Tween<f64>)>; 3],
+    tracks: [Option<Track>; 3],
     last: Instant,
 }
 impl State {
@@ -366,8 +454,8 @@ impl State {
     fn tick(&mut self, now: Instant) {
         let delta = now.saturating_duration_since(self.last);
         self.last = self.last.max(now);
-        for (_, tween) in self.tracks.iter_mut().flatten() {
-            tween.tick(delta);
+        for track in self.tracks.iter_mut().flatten() {
+            track.tween.tick(delta);
         }
     }
     fn reconcile(&mut self, spec: &Spec, now: Instant) {
@@ -379,45 +467,51 @@ impl State {
             };
             let reduced = spec.reduced_motion || REDUCED.load(Ordering::Relaxed);
             if reduced || p.duration == 0.0 {
-                *current = Some((p.clone(), Tween::new(f64::from(p.to))));
+                *current = Some(Track {
+                    property: p.clone(),
+                    tween: Tween::new(f64::from(p.to)),
+                    from: f64::from(p.to),
+                });
                 continue;
             }
-            if current.as_ref().is_some_and(|(old, _)| old.to == p.to) {
+            if current
+                .as_ref()
+                .is_some_and(|track| track.property.to == p.to)
+            {
                 continue;
             }
             let to = f64::from(p.to);
             let from = current
                 .as_ref()
-                .map(|(_, tween)| *tween.value())
+                .map(Track::value)
                 .unwrap_or(f64::from(p.from.unwrap_or(p.to)));
             let timing = p
                 .easing
                 .timing(p.duration)
                 .with_delay(Delay::from_millis(p.delay));
-            *current = Some((
-                p.clone(),
-                if from == to {
+            *current = Some(Track {
+                property: p.clone(),
+                from,
+                tween: if from == to {
                     Tween::new(to)
                 } else {
                     Tween::between(from, to, timing)
                 },
-            ));
+            });
         }
     }
     fn values(&self) -> [f32; 3] {
         std::array::from_fn(|i| {
             self.tracks[i]
                 .as_ref()
-                .map_or(if i == 2 { 1.0 } else { 0.0 }, |(_, tween)| {
-                    *tween.value() as f32
-                })
+                .map_or(if i == 2 { 1.0 } else { 0.0 }, |track| track.value() as f32)
         })
     }
     fn active(&self) -> bool {
         self.tracks
             .iter()
             .flatten()
-            .any(|(_, tween)| tween.is_active())
+            .any(|track| track.tween.is_active())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -690,6 +784,94 @@ mod tests {
                 .unwrap();
             assert!(parse_node(&value).is_err(), "{body}");
         }
+    }
+    #[test]
+    fn defined_easing_roundtrips_and_snapshots_tables() {
+        let lua = lua();
+        lua.load(
+            r#"
+            local definition = {type='easing', bezier={0.2, 0, 0.2, 1}}
+            iced.define('snappy', definition)
+            definition.bezier[1] = 99
+            local curve = iced.snappy()
+            curve.bezier[1] = 99
+            assert(iced.use('snappy').bezier[1] == 0.2)
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let value = node(
+            &lua,
+            "return iced.text('x'):animate({id='curve', x=iced.animations.x({from=0,to=10,easing=iced.snappy()})})",
+        );
+        let encoded = crate::ui::encode::to_table(&lua, &value).unwrap();
+        assert_eq!(parse_node(&Value::Table(encoded)).unwrap(), value);
+    }
+    #[test]
+    fn easing_definitions_reject_malformed_descriptors_and_reserved_names() {
+        let lua = lua();
+        for definition in [
+            "{}",
+            "{type='other',bezier={0,0,1,1}}",
+            "{type='easing',bezier={0,0,1}}",
+            "{type='easing',bezier={0,0,1,1,2}}",
+            "{type='easing',bezier={0,0,1,1,extra=1}}",
+            "{type='easing',bezier={-0.1,0,1,1}}",
+            "{type='easing',bezier={0,0,1.1,1}}",
+            "{type='easing',bezier={0,0/0,1,1}}",
+            "{type='easing',bezier={0,0,1,1/0}}",
+            "{type='easing',bezier={0,'0',1,1}}",
+            "{type='easing',bezier={0,0,1,1},typo=true}",
+        ] {
+            assert!(
+                lua.load(format!("iced.define('invalid', {definition})"))
+                    .exec()
+                    .is_err(),
+                "{definition}"
+            );
+        }
+        assert!(
+            lua.load("iced.define('text', {type='easing',bezier={0,0,1,1}})")
+                .exec()
+                .is_err()
+        );
+    }
+    #[test]
+    fn bezier_sampling_inverts_time_and_preserves_endpoints_and_overshoot() {
+        let curve = Easing::Bezier([0.0, 0.0, 1.0, 1.0]);
+        for progress in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            assert!((curve.sample(progress) - progress).abs() < 1e-9);
+        }
+        assert!((Easing::Bezier([0.0, 0.0, 0.0, 1.0]).sample(0.125) - 0.5).abs() < 1e-9);
+        assert!(Easing::Bezier([0.2, 2.0, 0.8, 2.0]).sample(0.5) > 1.0);
+    }
+    #[test]
+    fn custom_curves_delay_retarget_reverse_and_finish_natively() {
+        let lua = lua();
+        lua.load("iced.define('snappy', {type='easing',bezier={0,0,0,1}})")
+            .exec()
+            .unwrap();
+        let mut spec = spec(
+            &lua,
+            "{id='custom',x={from=0,to=10,duration=800,delay=100,easing=iced.snappy()}}",
+        );
+        let start = Instant::now();
+        let mut state = State::new(&spec, start);
+        state.tick(start + Duration::from_millis(50));
+        assert_eq!(state.values()[0], 0.0);
+        state.tick(start + Duration::from_millis(200));
+        assert!((state.values()[0] - 5.0).abs() < 1e-5);
+        assert_eq!(
+            spec.reversed().properties[0].as_ref().unwrap().easing,
+            Easing::Bezier([0.0, 0.0, 0.0, 1.0])
+        );
+        spec.properties[0].as_mut().unwrap().to = 20.0;
+        spec.properties[0].as_mut().unwrap().delay = 0.0;
+        state.reconcile(&spec, start + Duration::from_millis(200));
+        assert!((state.values()[0] - 5.0).abs() < 1e-5);
+        state.tick(start + Duration::from_millis(1000));
+        assert_eq!(state.values()[0], 20.0);
+        assert!(!state.active());
     }
     #[test]
     fn duplicate_ids_are_rejected_but_list_items_scope_their_animations() {
