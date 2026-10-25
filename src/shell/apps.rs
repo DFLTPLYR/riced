@@ -595,11 +595,26 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
     match message {
         AppMessage::Managed(delivery) => {
             let mut state = std::mem::take(&mut plots.apps);
-            let result = state
-                .instances
-                .values_mut()
-                .find_map(|instance| instance.deliver(&services(plots), &delivery));
+            let mut refresh = false;
+            let mut continuation = Vec::new();
+            let result = state.instances.values_mut().find_map(|instance| {
+                let result = instance.deliver(&services(plots), &delivery)?;
+                refresh = instance
+                    .runtime
+                    .as_ref()
+                    .is_some_and(LuaRuntime::managed_was_invoked);
+                if !refresh {
+                    continuation.extend(instance.managed_work(&services(plots)));
+                }
+                Some(result)
+            });
             plots.apps = state;
+            if !refresh {
+                if let Some(Err(error)) = result {
+                    eprintln!("app callback: {error}");
+                }
+                return Task::batch(continuation);
+            }
             let command = match result {
                 Some(Ok(value)) => super::actions::command_from_action(&value, plots),
                 Some(Err(error)) => {

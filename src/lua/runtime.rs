@@ -209,6 +209,7 @@ impl LuaRuntime {
     }
 
     fn begin(&self) -> mlua::Result<()> {
+        super::managed::reset_delivery(&self.lua);
         super::managed::phase(&self.lua, super::managed::Phase::ReadOnly);
         self.lua.expire_registry_values();
         self.lua.remove_app_data::<crate::ui::hover::HoverSet>();
@@ -549,6 +550,9 @@ impl LuaRuntime {
     }
     pub(crate) fn accepts_managed(&self, delivery: &crate::framework::tasks::Delivery) -> bool {
         super::managed::accepts(&self.lua, delivery)
+    }
+    pub(crate) fn managed_was_invoked(&self) -> bool {
+        super::managed::was_invoked(&self.lua)
     }
 
     pub(crate) fn scene_action(

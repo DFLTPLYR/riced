@@ -5,6 +5,7 @@ pub mod composable;
 pub mod demo;
 pub(crate) mod entry;
 pub mod error;
+pub(crate) mod files;
 pub(crate) mod library;
 pub(crate) mod managed;
 pub(crate) mod metadata;

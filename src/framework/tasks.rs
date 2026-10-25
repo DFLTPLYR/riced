@@ -29,6 +29,7 @@ impl Default for ProcessOptions {
 }
 #[derive(Debug, Clone)]
 pub(crate) enum Operation {
+    File(super::storage::Request),
     Process {
         argv: Vec<String>,
         options: ProcessOptions,
@@ -40,7 +41,15 @@ pub(crate) enum Operation {
 }
 #[derive(Debug)]
 pub(crate) enum Command {
-    Start { id: u64, operation: Operation },
+    Start {
+        id: u64,
+        operation: Operation,
+    },
+    PollFile {
+        id: u64,
+        revision: u64,
+        request: super::storage::Request,
+    },
     Cancel(u64),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +90,20 @@ impl Owner {
     pub fn apply(&mut self, commands: Vec<Command>) {
         for command in commands {
             match command {
+                Command::PollFile {
+                    id,
+                    revision,
+                    request,
+                } => {
+                    self.active.insert(
+                        id,
+                        Running {
+                            operation: Operation::File(request),
+                            cancel: None,
+                            revision: revision.saturating_sub(1),
+                        },
+                    );
+                }
                 Command::Start { id, operation } => {
                     self.active.insert(
                         id,
@@ -157,6 +180,7 @@ impl Job {
             failure("cancelled", "operation cancelled before starting")
         } else {
             match self.operation {
+                Operation::File(request) => super::storage::run(request, self.receiver).await,
                 Operation::Timer { millis, .. } => match select(
                     Box::pin(tokio::time::sleep(Duration::from_millis(millis))),
                     self.receiver,

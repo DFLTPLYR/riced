@@ -511,3 +511,163 @@ fn service_subscriptions_deliver_an_initial_detached_snapshot_only_once() {
             assert!(managed_deliveries(&mut app).await.is_empty());
         });
 }
+
+#[test]
+fn file_callbacks_update_owned_cache_and_lua_data_saves_do_not_reload_app_code() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self)
+            self.settings=riced.file({type='lua',path='settings.lua',write_mode='generated',defaults={count=0}})
+            self.settings:reload(function(result) assert(result.ok) end)
+        end,
+        actions=function(self,event)
+            self.settings:set('count',self.settings:get('count')+1)
+            self.settings:save(function(result) assert(result.ok) end)
+        end,
+        view=function(self) return iced.layer({width=100,height=32,content=iced.text(self.settings:get('count'))}) end
+    }"#,
+    );
+    let path = fixture.project.app_root("bar").join("settings.lua");
+    std::fs::write(&path, "return {count=7}").unwrap();
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let generation = app.runtime.as_ref().unwrap().managed_generation();
+    assert_eq!(text(&app), "0");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for delivery in managed_deliveries(&mut app).await {
+                with_services(|services| app.deliver(services, &delivery).unwrap().unwrap());
+            }
+            fixture.render(&mut app, false).unwrap();
+            assert_eq!(text(&app), "7");
+            with_services(|services| {
+                app.runtime
+                    .as_mut()
+                    .unwrap()
+                    .app_event(
+                        services,
+                        &app.output_name,
+                        &app.context,
+                        &app.props,
+                        AppEvent::Action(&Action::from("save".to_string())),
+                    )
+                    .unwrap()
+            });
+            for delivery in managed_deliveries(&mut app).await {
+                with_services(|services| app.deliver(services, &delivery).unwrap().unwrap());
+            }
+            fixture.render(&mut app, false).unwrap();
+            assert_eq!(text(&app), "8");
+        });
+    assert_eq!(
+        app.runtime.as_ref().unwrap().managed_generation(),
+        generation
+    );
+    assert!(
+        std::fs::read_to_string(path)
+            .unwrap()
+            .contains("Generated data")
+    );
+}
+
+#[test]
+fn unchanged_file_watch_deliveries_do_not_reexecute_lua_views() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self)
+            self.views=0
+            self.file=riced.file({type='json',path='settings.json'})
+            self.file:reload(function(result)
+                assert(result.ok)
+                self.file:watch(function() error('unchanged file invoked callback') end)
+            end)
+        end,
+        view=function(self) self.views=self.views+1; return iced.layer({width=100,height=32,content=iced.text(self.views)}) end
+    }"#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for delivery in managed_deliveries(&mut app).await {
+                with_services(|services| app.deliver(services, &delivery).unwrap().unwrap());
+            }
+            fixture.render(&mut app, false).unwrap();
+            assert_eq!(text(&app), "2");
+            let deliveries = managed_deliveries(&mut app).await;
+            assert_eq!(deliveries.len(), 1);
+            assert_eq!(deliveries[0].payload["unchanged"], true);
+            let (_, receiver) = iced_wayland_subscriber::shell::channel();
+            let mut plots = Plots::new(receiver);
+            plots.config.apps.clear();
+            plots
+                .apps
+                .instances
+                .insert((OutputId(1), "bar".into()), app);
+            assert!(
+                messages(update(
+                    &mut plots,
+                    AppMessage::Managed(deliveries.into_iter().next().unwrap())
+                ))
+                .is_empty()
+            );
+            assert_eq!(
+                text(&plots.apps.instances[&(OutputId(1), "bar".into())]),
+                "2"
+            );
+        });
+}
+
+#[test]
+fn app_teardown_cancels_file_watch_work_and_rejects_retired_deliveries() {
+    let fixture = Fixture::new(
+        r#"return {
+        mount=function(self)
+            self.file=riced.file({type='json',path='settings.json'})
+            self.file:watch(function() error('retired watcher ran') end)
+        end,
+        view=function() return iced.layer({width=100,height=32,content=iced.text('watch')}) end
+    }"#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let tasks = with_services(|services| app.managed_work(services));
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let surface = window::Id::unique();
+    app.surface = Some(surface);
+    plots
+        .apps
+        .instances
+        .insert((OutputId(1), "bar".into()), app);
+    plots
+        .windows
+        .ids
+        .insert(surface, PlotInfo::App(OutputId(1)));
+    plots.forget_window(surface);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = iced_runtime::task::into_stream(Task::batch(tasks)).unwrap();
+            let actions: Vec<_> = tokio::time::timeout(Duration::from_secs(1), stream.collect())
+                .await
+                .unwrap();
+            for action in actions {
+                if let iced_runtime::Action::Output(Plant::App(AppMessage::Managed(delivery))) =
+                    action
+                {
+                    assert_eq!(delivery.payload["error"]["code"], "cancelled");
+                    assert!(messages(update(&mut plots, AppMessage::Managed(delivery))).is_empty());
+                }
+            }
+        });
+    assert!(plots.apps.instances.is_empty());
+}

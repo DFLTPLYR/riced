@@ -20,6 +20,8 @@ pub(crate) enum Phase {
     Closing,
 }
 struct Callback {
+    watch: Option<u64>,
+    file: Option<super::files::Pending>,
     key: RegistryKey,
     repeat: bool,
     topic: Option<String>,
@@ -28,6 +30,7 @@ struct Callback {
     delivered: u64,
 }
 struct Bridge {
+    invoked: bool,
     generation: u64,
     next: u64,
     phase: Phase,
@@ -65,6 +68,8 @@ fn register(
     bridge.callbacks.insert(
         id,
         Callback {
+            watch: None,
+            file: None,
             key,
             repeat,
             topic,
@@ -78,6 +83,67 @@ fn register(
     }
     Ok(id)
 }
+pub(crate) fn require_active(lua: &Lua) -> mlua::Result<()> {
+    if lua
+        .app_data_ref::<Bridge>()
+        .is_some_and(|bridge| matches!(bridge.phase, Phase::Active))
+    {
+        Ok(())
+    } else {
+        Err(error(
+            "file handles and operations may only be created or edited in mount, actions, on_tick, or managed callbacks",
+        ))
+    }
+}
+pub(crate) fn register_file(
+    lua: &Lua,
+    callback: Function,
+    operation: Operation,
+    pending: super::files::Pending,
+) -> mlua::Result<u64> {
+    let id = register(lua, callback, false, None, Some(operation))?;
+    if let Some(mut bridge) = lua.app_data_mut::<Bridge>()
+        && let Some(callback) = bridge.callbacks.get_mut(&id)
+    {
+        callback.file = Some(pending);
+    }
+    Ok(id)
+}
+pub(crate) fn register_watch(lua: &Lua, callback: Function, handle: u64) -> mlua::Result<u64> {
+    let id = register(lua, callback, true, None, None)?;
+    if let Some(mut bridge) = lua.app_data_mut::<Bridge>()
+        && let Some(callback) = bridge.callbacks.get_mut(&id)
+    {
+        callback.watch = Some(handle);
+    }
+    Ok(id)
+}
+pub(crate) fn cancel_token(lua: &Lua, id: u64) -> mlua::Result<bool> {
+    let (key, file, watch) = {
+        let mut bridge = lua
+            .app_data_mut::<Bridge>()
+            .ok_or_else(|| error("app missing"))?;
+        if matches!(bridge.phase, Phase::ReadOnly) {
+            return Err(error("cancel is not allowed in views"));
+        }
+        if bridge.pending.len() >= MAX_PENDING {
+            return Err(error("app pending operation limit exceeded"));
+        }
+        let Some(callback) = bridge.callbacks.remove(&id) else {
+            return Ok(false);
+        };
+        bridge.pending.push(Command::Cancel(id));
+        (callback.key, callback.file, callback.watch)
+    };
+    if let Some(pending) = file {
+        super::files::cancel(lua, pending, id);
+    }
+    if let Some(handle) = watch {
+        super::files::cancel_watch(lua, handle, id);
+    }
+    lua.remove_registry_value(key)?;
+    Ok(true)
+}
 fn subscribe(lua: &Lua, topic: String, callback: Function) -> mlua::Result<u64> {
     if !crate::services::valid_topic(&topic) {
         return Err(error(format!("unknown service {topic:?}")));
@@ -89,6 +155,7 @@ pub(crate) fn install(lua: &Lua, root: &Path) -> mlua::Result<()> {
         return Ok(());
     }
     lua.set_app_data(Bridge {
+        invoked: false,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         next: 0,
         phase: Phase::ReadOnly,
@@ -152,26 +219,7 @@ pub(crate) fn install(lua: &Lua, root: &Path) -> mlua::Result<()> {
     )?;
     methods.set(
         "cancel",
-        lua.create_function(|lua, (_app, id): (Table, u64)| {
-            let key = {
-                let mut bridge = lua
-                    .app_data_mut::<Bridge>()
-                    .ok_or_else(|| error("app missing"))?;
-                if matches!(bridge.phase, Phase::ReadOnly) {
-                    return Err(error("cancel is not allowed in views"));
-                }
-                if bridge.pending.len() >= MAX_PENDING {
-                    return Err(error("app pending operation limit exceeded"));
-                }
-                let Some(callback) = bridge.callbacks.remove(&id) else {
-                    return Ok(false);
-                };
-                bridge.pending.push(Command::Cancel(id));
-                callback.key
-            };
-            lua.remove_registry_value(key)?;
-            Ok(true)
-        })?,
+        lua.create_function(|lua, (_app, id): (Table, u64)| cancel_token(lua, id))?,
     )?;
     lua.set_named_registry_value("riced.managed_methods", methods)?;
     let riced: Table = lua.globals().get("riced")?;
@@ -197,7 +245,8 @@ pub(crate) fn install(lua: &Lua, root: &Path) -> mlua::Result<()> {
             )?;
             Ok(service)
         })?,
-    )
+    )?;
+    super::files::install(lua, root)
 }
 pub(crate) fn attach(lua: &Lua, app: &Table) -> mlua::Result<()> {
     if lua.app_data_ref::<Bridge>().is_none() {
@@ -222,9 +271,21 @@ pub(crate) fn generation(lua: &Lua) -> Option<u64> {
     lua.app_data_ref::<Bridge>().map(|bridge| bridge.generation)
 }
 pub(crate) fn commands(lua: &Lua) -> Vec<Command> {
-    lua.app_data_mut::<Bridge>()
+    let mut commands = lua
+        .app_data_mut::<Bridge>()
         .map(|mut bridge| std::mem::take(&mut bridge.pending))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    commands.extend(super::files::schedule(lua));
+    commands
+}
+pub(crate) fn reset_delivery(lua: &Lua) {
+    if let Some(mut bridge) = lua.app_data_mut::<Bridge>() {
+        bridge.invoked = false;
+    }
+}
+pub(crate) fn was_invoked(lua: &Lua) -> bool {
+    lua.app_data_ref::<Bridge>()
+        .is_some_and(|bridge| bridge.invoked)
 }
 pub(crate) fn poll(lua: &Lua) -> mlua::Result<Vec<Delivery>> {
     let topics: Vec<_> = lua
@@ -263,7 +324,8 @@ pub(crate) fn poll(lua: &Lua) -> mlua::Result<Vec<Delivery>> {
     Ok(deliveries)
 }
 pub(crate) fn invoke(lua: &Lua, delivery: &Delivery) -> mlua::Result<Value> {
-    let function: Function = {
+    reset_delivery(lua);
+    let (function, file, watch): (Function, Option<super::files::Pending>, Option<u64>) = {
         let mut bridge = lua
             .app_data_mut::<Bridge>()
             .ok_or_else(|| error("app missing"))?;
@@ -280,13 +342,28 @@ pub(crate) fn invoke(lua: &Lua, delivery: &Delivery) -> mlua::Result<Value> {
             return Ok(Value::Nil);
         }
         callback.delivered = delivery.revision;
+        let file = callback.file.take();
+        let watch = callback.watch;
         let function = lua.registry_value(&callback.key)?;
         if !callback.repeat {
             bridge.callbacks.remove(&delivery.id);
         }
-        function
+        (function, file, watch)
     };
-    function.call(lua.to_value(&delivery.payload)?)
+    let payload = if let Some(handle) = watch {
+        let Some(payload) = super::files::observed(lua, handle, delivery) else {
+            return Ok(Value::Nil);
+        };
+        payload
+    } else if let Some(pending) = file {
+        super::files::complete(lua, pending, delivery)
+    } else {
+        delivery.payload.clone()
+    };
+    if let Some(mut bridge) = lua.app_data_mut::<Bridge>() {
+        bridge.invoked = true;
+    }
+    function.call(lua.to_value(&payload)?)
 }
 pub(crate) fn accepts(lua: &Lua, delivery: &Delivery) -> bool {
     lua.app_data_ref::<Bridge>().is_some_and(|bridge| {

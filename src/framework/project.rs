@@ -71,7 +71,7 @@ impl Project {
     pub fn source(&self, name: &str) -> PathBuf {
         self.app_root(name).join("app.lua")
     }
-    /// Snapshot Lua dependencies by content, so edits with identical mtimes reload too.
+    /// Snapshot code, not generated data files, so saving preferences cannot reload the app.
     pub fn sources(&self, name: &str) -> Result<Vec<(PathBuf, String)>, String> {
         fn visit(path: &Path, out: &mut Vec<(PathBuf, String)>) -> Result<(), String> {
             let mut entries = std::fs::read_dir(path)
@@ -92,13 +92,15 @@ impl Project {
             }
             Ok(())
         }
-        let mut sources = Vec::new();
-        visit(&self.app_root(name), &mut sources)?;
-        if !sources.iter().any(|(path, _)| *path == self.source(name)) {
-            return Err(format!(
-                "{}: app entry point missing",
-                self.source(name).display()
-            ));
+        let entry = self.source(name);
+        let source =
+            std::fs::read_to_string(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+        let mut sources = vec![(entry, source)];
+        let components = self.app_root(name).join("components");
+        match std::fs::metadata(&components) {
+            Ok(_) => visit(&components, &mut sources)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", components.display())),
         }
         Ok(sources)
     }

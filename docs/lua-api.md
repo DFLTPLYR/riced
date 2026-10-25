@@ -6,6 +6,9 @@ Experimental framework applications can return `iced.layer({...})` as a native
 surface root; see [Framework apps](framework.md) for configuration and lifecycle.
 Framework app tables also expose managed `spawn`, `after`, `every`, `subscribe`,
 and `cancel` methods, plus `riced.service(name)` for cached snapshots and subscriptions.
+`riced.file({...})` adds cached structured documents, managed asynchronous
+reload/save, and lifecycle-owned `file:watch()` subscriptions; see
+[Structured file persistence](persistence.md).
 Rust owns delivery, policy, and validation; Lua owns presentation. ◪
 
 ## App contract

@@ -225,7 +225,9 @@ Shared pure `iced.define` registrations continue to load in sorted order.
 Use `riced.path("assets/icon.png")` for a path relative to the app directory;
 the process working directory is never changed.
 
-The host polls app-local Lua sources and shared definitions. A changed source
+The host polls `app.lua`, app-local `components/**/*.lua`, and shared definitions.
+Other files, including generated Lua preferences, are not application source.
+A changed source
 loads in a fresh VM, mounts, and validates its first layer view before replacing
 the active runtime. Syntax, mount, and decode failures preserve the previous
 surface. Corrected sources are retried. Successful reload resets app state;
@@ -237,9 +239,11 @@ your project and merge the example `apps` entry into your existing config.
 
 ## Subsequent milestones
 
-Structured file persistence (`riced.file`) comes next, followed by a versioned
-Rust extension SDK, generic service registration/commands, and standard Cargo
-crates under `extensions/<name>/`.
+The [structured persistence API](persistence.md) provides `riced.file()` with
+cached edits, managed reload/save operations, conflict detection, and coalesced
+file watching. A versioned Rust extension SDK, generic
+service registration/commands, and standard Cargo crates under
+`extensions/<name>/` follow the persistence milestone.
 Compiled-in extensions will require rebuilding/restarting; supervised process
 extensions will follow for independently restartable service workloads. Rust
 dynamic-library loading is intentionally not part of the initial design.
