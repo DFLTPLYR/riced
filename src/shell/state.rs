@@ -790,12 +790,14 @@ impl Plots {
                     )));
                 }
                 // Background fullscreen per output for selection (delegated to Background layer)
-                if let Some(cmd) = Background::ensure_for_output(
-                    &mut self.windows.backgrounds,
-                    &mut self.windows.background_ids,
-                    &mut self.windows.ids,
-                    output_id,
-                ) {
+                if !self.config.background.disabled
+                    && let Some(cmd) = Background::ensure_for_output(
+                        &mut self.windows.backgrounds,
+                        &mut self.windows.background_ids,
+                        &mut self.windows.ids,
+                        output_id,
+                    )
+                {
                     cmds.push(cmd);
                     cmds.push(Self::repaint_burst());
                 }

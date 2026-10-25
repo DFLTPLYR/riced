@@ -100,6 +100,63 @@ return {
 "#;
 
 #[test]
+fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
+    let fixture = Fixture::new(include_str!(
+        "../../../config/riced/example/apps/background/app.lua"
+    ));
+    std::fs::write(
+        fixture.project.app_root("bar").join("components/menu.lua"),
+        include_str!("../../../config/riced/example/apps/background/components/menu.lua"),
+    )
+    .unwrap();
+    let mut app = instance("DP-1");
+    app.context["output"] = json!({"name":"DP-1","x":0,"y":0,"width":1920,"height":1080});
+    app.props["output"] = app.context["output"].clone();
+    fixture.render(&mut app, false).unwrap();
+    assert!(app.root.as_ref().unwrap().surface.pointer_events);
+    for (state, button, x, y) in [
+        ("press", Some("left"), 10.0, 20.0),
+        ("move", None, 100.0, 200.0),
+        ("release", Some("left"), 100.0, 200.0),
+        ("press", Some("right"), 1900.0, 1070.0),
+    ] {
+        let action = Action {
+            key: String::new(),
+            value: None,
+            event: crate::ui::action::Event::Mouse {
+                state: state.into(),
+                button: button.map(str::to_string),
+                position: Some(iced::Point::new(x, y)),
+                origin: None,
+                bounds: None,
+            },
+        };
+        with_services(|services| {
+            app.runtime.as_mut().unwrap().app_event(
+                services,
+                &app.output_name,
+                &app.context,
+                &app.props,
+                AppEvent::Action(&action),
+            )
+        })
+        .unwrap();
+        fixture.render(&mut app, false).unwrap();
+    }
+    let config =
+        crate::config::test_parse_config(include_str!("../../../config/riced/example/config.lua"))
+            .unwrap();
+    assert!(config.background.disabled);
+    let roundtrip = crate::config::test_format_config(&config).unwrap();
+    assert!(
+        crate::config::test_parse_config(&roundtrip)
+            .unwrap()
+            .background
+            .disabled
+    );
+}
+
+#[test]
 fn instances_mount_once_keep_independent_state_and_tick_only_on_poll() {
     let fixture = Fixture::new(COUNTER);
     let mut first = instance("DP-1");

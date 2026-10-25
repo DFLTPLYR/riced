@@ -586,6 +586,8 @@ pub enum SlotWidgets {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "super::format::Background", into = "super::format::Background")]
 pub struct BackgroundConfig {
+    /// Disable the legacy native background when a framework app replaces it.
+    pub disabled: bool,
     pub mode: WallpaperMode,
     /// Optional post-processing of the baked wallpaper, below desktop widgets.
     pub shader: Option<WallpaperShader>,

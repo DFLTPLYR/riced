@@ -170,6 +170,7 @@ fn monitor_assignments_are_isolated_persisted_and_restored_by_output_name() {
     );
     let mut request = request(vec![]);
     request.images = BackgroundConfig {
+        disabled: false,
         shader: None,
         mode: WallpaperMode::PerMonitor,
         image: vec![BackgroundImage {

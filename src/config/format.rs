@@ -259,6 +259,8 @@ impl From<TopConfig> for Bar {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Background {
+    #[serde(skip_serializing_if = "is_default")]
+    disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     shader: Option<WallpaperShader>,
     #[serde(skip_serializing_if = "is_default")]
@@ -278,6 +280,7 @@ struct Wallpaper {
 impl From<Background> for BackgroundConfig {
     fn from(value: Background) -> Self {
         Self {
+            disabled: value.disabled,
             shader: value.shader,
             mode: value.mode,
             image: value.images,
@@ -296,6 +299,7 @@ impl From<Background> for BackgroundConfig {
 impl From<BackgroundConfig> for Background {
     fn from(value: BackgroundConfig) -> Self {
         Self {
+            disabled: value.disabled,
             shader: value.shader,
             mode: value.mode,
             images: value.image,

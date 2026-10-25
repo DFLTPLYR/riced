@@ -36,6 +36,7 @@ pub(crate) struct Surface {
     pub margin: Margin,
     pub keyboard: String,
     pub input: String,
+    pub pointer_events: bool,
 }
 impl Default for Surface {
     fn default() -> Self {
@@ -49,6 +50,7 @@ impl Default for Surface {
             margin: Margin::default(),
             keyboard: "none".into(),
             input: "all".into(),
+            pointer_events: false,
         }
     }
 }

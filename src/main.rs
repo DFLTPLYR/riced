@@ -23,7 +23,11 @@ use shell::{Plots, redraw_scope};
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
     let _ = tracing_log::LogTracer::init();
-    let command = cli::parse();
+    let cli = cli::parse();
+    if let Some(root) = cli.project_root()? {
+        config::set_project_root(root)?;
+    }
+    let command = cli.command;
     if let Some(cli::Commands::LuaDemo { script }) = command {
         lua::demo::run(script)?;
         return Ok(());

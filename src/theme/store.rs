@@ -34,9 +34,7 @@ pub fn builtin_text(name: &str) -> Option<&'static str> {
 }
 
 pub fn theme_dir() -> PathBuf {
-    dirs::config_dir()
-        .map(|d| d.join("riced").join("theme"))
-        .unwrap_or_else(|| PathBuf::from("theme"))
+    crate::config::config_path().with_file_name("theme")
 }
 
 pub(crate) fn user_file(name: &str) -> PathBuf {

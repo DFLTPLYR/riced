@@ -24,6 +24,12 @@ themes/
 
 Enable applications explicitly in `config.lua`:
 
+Select a project with `riced -p PATH` (the directory containing `config.lua`).
+`riced -c NAME` resolves `./config/riced/NAME` first, then
+`$XDG_CONFIG_HOME/riced/NAME`. Without either option, the normal XDG config is
+used. Selected projects keep libraries, themes, and preferences in their own
+directory; the process working directory is unchanged. IPC remains session-wide.
+
 ```lua
 return {
     apps = {
@@ -249,6 +255,7 @@ without discarding application state. Layer roots cannot appear in widget trees.
 | `margin` | Named integers `top`, `right`, `bottom`, `left`, default zero. |
 | `keyboard` | `"none"` (default), `"on_demand"`, or `"exclusive"`. |
 | `input` | `"all"` (default) or `"none"`; partial measured input regions are not exposed yet. |
+| `pointer_events` | Boolean, default false. Deliver unconsumed layer-local pointer gestures to `actions`; child controls handle input first. |
 | `content` | Required ordinary `iced.*` widget tree. |
 
 Unknown fields and invalid geometry fail before native creation. Layout, focus,
@@ -275,6 +282,13 @@ persistent state migration is not implemented yet.
 See `examples/framework/` for a Lua bar with a local component, clock, and
 independent click counter on each output. Copy its `apps/bar/` directory into
 your project and merge the example `apps` entry into your existing config.
+
+Run `riced -c example` from the repository root for the background migration
+sample in `config/riced/example/`. It demonstrates wallpaper preferences, file
+watching, a context menu, and local selection with a fade. Its README lists
+remaining native-only features. `background = { disabled = true }` disables
+legacy background creation on startup; restart after changing it. This also
+disables the legacy desktop-widget host, not just its wallpaper rendering.
 
 ## Subsequent milestones
 

@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "riced", about = "Riced Wayland shell", version)]
 pub struct Cli {
+    /// Project directory containing config.lua.
+    #[arg(short = 'p', long, global = true, conflicts_with = "config")]
+    pub project: Option<PathBuf>,
+    /// Named project: ./config/riced/NAME, then $XDG_CONFIG_HOME/riced/NAME.
+    #[arg(short = 'c', long, global = true)]
+    pub config: Option<String>,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -61,8 +67,47 @@ pub enum Commands {
 }
 
 /// Parse `std::env::args`. Returns the requested client command, if any.
-pub fn parse() -> Option<Commands> {
-    Cli::parse().command
+pub fn parse() -> Cli {
+    Cli::parse()
+}
+
+impl Cli {
+    pub fn project_root(&self) -> Result<Option<PathBuf>, String> {
+        let candidates = if let Some(path) = &self.project {
+            vec![path.clone()]
+        } else if let Some(name) = &self.config {
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            {
+                return Err("config name must contain only letters, digits, '_' or '-'".into());
+            }
+            let mut paths = vec![PathBuf::from("config/riced").join(name)];
+            if let Some(config) = dirs::config_dir() {
+                paths.push(config.join("riced").join(name));
+            }
+            paths
+        } else {
+            return Ok(None);
+        };
+        for path in &candidates {
+            if path.join("config.lua").is_file() {
+                return path
+                    .canonicalize()
+                    .map(Some)
+                    .map_err(|e| format!("{}: {e}", path.display()));
+            }
+        }
+        Err(format!(
+            "no config.lua found in {}",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ))
+    }
 }
 
 /// File the CLI writes and the daemon drains (250ms poll in
@@ -124,6 +169,43 @@ fn take_at(path: &Path) -> Option<QueuedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_path_is_validated_and_made_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.lua"), "return {}").unwrap();
+        let cli = Cli::try_parse_from(["riced", "-p", dir.path().to_str().unwrap()]).unwrap();
+        assert_eq!(
+            cli.project_root().unwrap(),
+            Some(dir.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn named_example_resolves_from_repository_root() {
+        let cli = Cli::try_parse_from(["riced", "-c", "example"]).unwrap();
+        assert_eq!(
+            cli.project_root().unwrap(),
+            Some(Path::new("config/riced/example").canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_missing_projects_unsafe_names_and_conflicting_selectors() {
+        assert!(
+            Cli::try_parse_from(["riced", "-p", "/nonexistent/riced-project"])
+                .unwrap()
+                .project_root()
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["riced", "-c", "../example"])
+                .unwrap()
+                .project_root()
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["riced", "-p", ".", "-c", "example"]).is_err());
+    }
 
     #[test]
     fn parses_lua_demo_override() {

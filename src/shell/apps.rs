@@ -542,11 +542,18 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
             entered,
         })
     });
-    match instance
-        .lists
-        .build(&root.content, &plots.animation.motion, sender, Some(hover))
-    {
+    match instance.lists.build(
+        &root.content,
+        &plots.animation.motion,
+        sender.clone(),
+        Some(hover),
+    ) {
         Ok(element) => {
+            let element = if root.surface.pointer_events {
+                crate::ui::widgets::input::input(element, sender)
+            } else {
+                element
+            };
             let revision = instance.revision;
             measured::root(
                 element,

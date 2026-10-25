@@ -1,0 +1,9 @@
+# Seeded libraries and runtime state belong to this project, not the user config.
+/apps/background/state/
+/components/
+/widgets/
+/shaders/
+/theme/
+/templates/
+/widgets.toml*
+/.*-initialized

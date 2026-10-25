@@ -24,6 +24,7 @@ pub(crate) fn test_format_config(config: &Config) -> Result<String, String> {
 }
 pub mod migrate;
 mod paths;
+pub(crate) use paths::set_project_root;
 mod schema;
 mod seed;
 pub mod util;
