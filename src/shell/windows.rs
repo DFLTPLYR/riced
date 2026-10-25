@@ -12,6 +12,7 @@ pub(crate) enum PlotInfo {
     Top(OutputId),
     Popup(OutputId),
     Overlay(OutputId),
+    App(OutputId),
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +73,7 @@ impl WindowState {
                 | PlotInfo::Top(owner)
                 | PlotInfo::Popup(owner)
                 | PlotInfo::Overlay(owner)
+                | PlotInfo::App(owner)
                     if *owner == output =>
                 {
                     Some(*id)

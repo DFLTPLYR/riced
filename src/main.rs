@@ -3,6 +3,7 @@ use wayland_client::Connection;
 
 mod cli;
 mod config;
+mod framework;
 mod icons;
 mod lua;
 mod notify;

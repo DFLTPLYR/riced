@@ -15,6 +15,7 @@ use serde_json::Value as Json;
 /// fields of `value` in read order and re-emits them canonically — giving
 /// stable diffs regardless of which profile inserted the key first.
 const CANON: &[&str] = &[
+    "apps",
     "component_defaults",
     "desktop",
     "composable",

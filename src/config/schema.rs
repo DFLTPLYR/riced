@@ -74,6 +74,12 @@ pub(crate) use util::decode_handle;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::framework::deserialize_apps"
+    )]
+    pub(crate) apps: Vec<crate::framework::AppConfig>,
     #[serde(skip_serializing_if = "crate::ui::settings::ComponentDefaults::is_empty")]
     pub component_defaults: crate::ui::settings::ComponentDefaults,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -1,6 +1,9 @@
 # Lua API reference
 
 Every Lua global available to widgets, popups, overlay scenes, and composables.
+
+Experimental framework applications can return `iced.layer({...})` as a native
+surface root; see [Framework apps](framework.md) for configuration and lifecycle.
 Rust owns delivery, policy, and validation; Lua owns presentation. ◪
 
 ## App contract

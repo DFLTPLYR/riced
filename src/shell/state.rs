@@ -63,6 +63,7 @@ fn throttled_graft(
 
 #[derive(Debug)]
 pub struct Plots {
+    pub(crate) apps: super::apps::State,
     pub(crate) windows: super::windows::WindowState,
     pub(crate) shell_events: ShellReceiver,
     // per-window cursor
@@ -122,6 +123,7 @@ impl Plots {
     /// Detach surface resources; native close commands and saved-bar changes
     /// remain host operations so compositor removal does not delete config.
     pub(crate) fn forget_window(&mut self, id: iced::window::Id) -> Option<PlotInfo> {
+        super::apps::forget(self, id);
         super::desktop_widgets::forget_settings(self, id);
         if let Some(PlotInfo::Overlay(output)) = self.windows.ids.get(&id).copied()
             && self.windows.overlays.get(&output) == Some(&id)
@@ -150,6 +152,7 @@ impl Plots {
         let desktop = super::desktop::DesktopState::default();
         let widgets = Top::discover_widget_defs();
         let mut plots = Self {
+            apps: Default::default(),
             windows: Default::default(),
             shell_events,
             input: Default::default(),
@@ -440,6 +443,13 @@ impl Plots {
             );
         }
 
+        if !self.config.apps.is_empty() {
+            subs.push(
+                iced::time::every(Duration::from_millis(500))
+                    .map(|_| Plant::App(super::apps::AppMessage::Tick)),
+            );
+        }
+
         // List enter/exit transitions tick at 60fps only while a
         // motion is active (aura runtime idles to zero wakeups).
         if self.animation.motion.has_active()
@@ -449,6 +459,7 @@ impl Plots {
                 .values()
                 .any(crate::ui::listview::ListView::has_callbacks)
             || self.desktop.overlays.has_callbacks()
+            || self.apps.has_callbacks()
         {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
@@ -577,6 +588,7 @@ impl Plots {
                 .map(|p| p.view(self))
                 .unwrap_or_else(|| Space::new().into()),
             Some(PlotInfo::Overlay(output)) => super::overlay::view(self, output),
+            Some(PlotInfo::App(_)) => super::apps::view(self, id),
             Some(PlotInfo::Setting) => Space::new().into(), // unreachable: handled above
             None => Space::new().into(),                    // daemon's 1x1 tiny window
         }
@@ -680,6 +692,7 @@ impl Plots {
         self.theme_mtime = crate::theme::poll(&self.config.theme, &None).unwrap_or(None);
         Top::refresh_services(self);
         Command::batch([
+            super::apps::refresh(self, false),
             super::overlay::refresh(self, true),
             Popup::refresh_bodies(self),
             self.reclaim_image_memory(false),
@@ -698,6 +711,7 @@ impl Plots {
                 Some(action)
             }
             Plant::Overlay(super::overlay::OverlayEvent::Action { action, .. }) => Some(action),
+            Plant::App(super::apps::AppMessage::Action { action, .. }) => Some(action),
             _ => None,
         };
         if frame_action.is_some_and(crate::ui::action::Action::is_animation_frame) {
@@ -738,6 +752,7 @@ impl Plots {
             self.services.wayland_changes.notify();
         }
         match message {
+            Plant::App(event) => super::apps::update(self, event),
             Plant::Desktop(event) => super::desktop_widgets::update(self, event),
             Plant::Overlay(event) => super::overlay::update(self, event),
             Plant::Uproot(id) => self.close_surface(id, true),
@@ -766,6 +781,7 @@ impl Plots {
                 // arrival then updates an existing renderer/layer instead of
                 // mapping a new surface over the focused fullscreen app.
                 cmds.push(super::overlay::refresh(self, true));
+                cmds.push(super::apps::refresh(self, false));
                 // sentinel Top cleanup (delegated to Top layer)
                 for sentinel_id in self.windows.sentinel_bars() {
                     self.forget_window(sentinel_id);
@@ -868,6 +884,7 @@ impl Plots {
                         Self::repaint_burst(),
                         Top::reapply_for_output(self, output_id),
                         super::overlay::refresh(self, true),
+                        super::apps::refresh(self, false),
                     ])
                 } else {
                     wallpaper
@@ -901,6 +918,7 @@ impl Plots {
                 }
             }
             Plant::Wayland(LandEvent::NewShell(info)) => match self.id_info(info.window) {
+                Some(PlotInfo::App(_)) => super::apps::opened(self, info.window),
                 Some(PlotInfo::Background(_)) => Self::repaint_burst(),
                 Some(PlotInfo::Overlay(output)) => {
                     // Fresh native surface: force the mask reinstall and
@@ -1146,6 +1164,7 @@ impl Plots {
                 } else {
                     cmds.push(self.refresh_theme());
                 }
+                cmds.push(super::apps::refresh(self, false));
                 if cmds.is_empty() {
                     Command::none()
                 } else {
@@ -1401,13 +1420,17 @@ impl Plots {
             Plant::TopPlot(TopEvent::Remove(id)) => Top::handle_remove(self, id),
             Plant::TrayChanged => {
                 Top::refresh_services(self);
-                Popup::refresh_bodies(self)
+                Command::batch([
+                    Popup::refresh_bodies(self),
+                    super::apps::refresh(self, false),
+                ])
             }
             Plant::WaylandChanged => {
                 self.services.wayland_changes.acknowledge();
                 Top::refresh_wayland(self);
                 Command::batch([
                     Popup::refresh_service_bodies(self),
+                    super::apps::refresh(self, false),
                     super::desktop_widgets::refresh_services(self),
                     super::overlay::refresh(self, true),
                 ])
@@ -1624,6 +1647,9 @@ impl Plots {
 
 pub fn redraw_scope(message: &Plant) -> Scope {
     match message {
+        Plant::App(super::apps::AppMessage::Tick | super::apps::AppMessage::Measured { .. }) => Scope::None,
+        Plant::App(super::apps::AppMessage::Action { surface, .. }) => Scope::Window(*surface),
+        Plant::App(_) => Scope::All,
         Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellAction(id,_,action)
             | WidgetEvent::PopupSelect(id,action))) if action.is_animation_frame() => Scope::Window(*id),
         Plant::Overlay(super::overlay::OverlayEvent::Action {surface,action,..})
@@ -1742,6 +1768,7 @@ mod tests {
     fn wallpaper_test_plots() -> Plots {
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
         Plots {
+            apps: Default::default(),
             windows: Default::default(),
             shell_events: receiver,
             input: Default::default(),
@@ -2852,6 +2879,7 @@ mod tests {
         };
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
         let mut plots = Plots {
+            apps: Default::default(),
             windows: Default::default(),
             shell_events: receiver,
             input: Default::default(),

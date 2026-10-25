@@ -1,6 +1,7 @@
 //! Wayland window lifecycle, host messages, and per-surface behavior.
 mod actions;
 mod animation;
+pub(crate) mod apps;
 mod catalog;
 mod context;
 mod desktop;

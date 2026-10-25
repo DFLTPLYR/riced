@@ -47,6 +47,13 @@ fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u64);
 
+pub(crate) enum AppEvent<'a> {
+    Mount,
+    Unmount(&'a str),
+    Tick,
+    Action(&'a crate::ui::action::Action),
+}
+
 /// Owned boundary messages, including native control keys and typed values.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -107,7 +114,12 @@ impl LuaRuntime {
         api.set(
             "component",
             lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
-                let path = composable::source_path(&src);
+                let root: Option<String> = lua.named_registry_value("riced.app_root").ok();
+                let local =
+                    root.map(|root| std::path::PathBuf::from(root).join("components").join(&src));
+                let path = local
+                    .filter(|path| path.is_file())
+                    .unwrap_or_else(|| composable::source_path(&src));
                 let modules: Table = lua.named_registry_value("riced.component_modules")?;
                 let cached: Option<Table> = modules.get(src.as_str())?;
                 // Snapshot each source once per host entry. Repeated cards see
@@ -168,6 +180,20 @@ impl LuaRuntime {
             lua.create_function(|lua, ()| {
                 let effects: Table = lua.named_registry_value("riced.effects")?;
                 effects.set(effects.raw_len() + 1, "invalidate")
+            })?,
+        )?;
+        api.set(
+            "path",
+            lua.create_function(|lua, relative: String| {
+                let root: String = lua.named_registry_value("riced.app_root").map_err(|_| {
+                    mlua::Error::RuntimeError(
+                        "riced.path is available inside framework apps".into(),
+                    )
+                })?;
+                Ok(std::path::PathBuf::from(root)
+                    .join(relative)
+                    .to_string_lossy()
+                    .into_owned())
             })?,
         )?;
         lua.globals().set("riced", api)?;
@@ -246,6 +272,22 @@ impl LuaRuntime {
                 .eval()?;
             let _: Function = app.get("view")?;
             super::widgets::validate_actions(&app)?;
+            if self
+                .lua
+                .named_registry_value::<String>("riced.app_root")
+                .is_ok()
+            {
+                for handler in ["mount", "unmount", "on_tick"] {
+                    if !matches!(
+                        app.raw_get::<Value>(handler)?,
+                        Value::Nil | Value::Function(_)
+                    ) {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "app.{handler} must be a function"
+                        )));
+                    }
+                }
+            }
             self.lua.create_registry_value(app)
         })();
         let key = self.finish("load", result)?;
@@ -346,6 +388,19 @@ impl LuaRuntime {
         props: impl FnOnce(&Lua) -> mlua::Result<Table>,
         hover: &crate::ui::hover::HoverSet,
     ) -> mlua::Result<Node> {
+        self.scene_render(services, output, props, hover, |_, value| {
+            parse_node_hovered(&value, hover).map_err(mlua::Error::RuntimeError)
+        })
+    }
+
+    fn scene_render<T>(
+        &mut self,
+        services: &crate::services::ServiceCtx<'_>,
+        output: &str,
+        props: impl FnOnce(&Lua) -> mlua::Result<Table>,
+        hover: &crate::ui::hover::HoverSet,
+        decode: impl FnOnce(&Lua, Value) -> mlua::Result<T>,
+    ) -> mlua::Result<T> {
         let result = (|| {
             self.begin()?;
             self.lua.set_app_data(hover.clone());
@@ -371,12 +426,94 @@ impl LuaRuntime {
                 "view",
                 mlua::MultiValue::from_vec(vec![Value::Table(props)]),
             )?;
-            let node = parse_node_hovered(&value, hover).map_err(mlua::Error::RuntimeError)?;
+            let node = decode(&self.lua, value)?;
             self.clear_entry_props()?;
             self.lua.gc_collect()?;
             Ok(node)
         })();
         self.finish("view", result)
+    }
+
+    pub(crate) fn set_app_root(&self, root: &Path) -> mlua::Result<()> {
+        self.lua
+            .set_named_registry_value("riced.app_root", root.to_string_lossy().into_owned())
+    }
+
+    pub(crate) fn layer_view(
+        &mut self,
+        services: &crate::services::ServiceCtx<'_>,
+        output: &str,
+        props: &serde_json::Value,
+        context: &serde_json::Value,
+        hover: &crate::ui::hover::HoverSet,
+    ) -> mlua::Result<Option<crate::framework::LayerRoot>> {
+        let app: Table = self.lua.registry_value(
+            self.app
+                .as_ref()
+                .ok_or_else(|| mlua::Error::RuntimeError("app missing".into()))?,
+        )?;
+        app.set("context", self.lua.to_value(context)?)?;
+        self.scene_render(
+            services,
+            output,
+            |lua| match lua.to_value(props)? {
+                Value::Table(table) => Ok(table),
+                _ => Err(mlua::Error::RuntimeError(
+                    "app props must be a table".into(),
+                )),
+            },
+            hover,
+            |lua, value| crate::framework::LayerRoot::parse(lua, value, hover),
+        )
+    }
+
+    pub(crate) fn app_event(
+        &mut self,
+        services: &crate::services::ServiceCtx<'_>,
+        output: &str,
+        context: &serde_json::Value,
+        props: &serde_json::Value,
+        event: AppEvent<'_>,
+    ) -> mlua::Result<Value> {
+        let handler = match event {
+            AppEvent::Mount => "mount",
+            AppEvent::Unmount(_) => "unmount",
+            AppEvent::Tick => "on_tick",
+            AppEvent::Action(_) => "actions",
+        };
+        let result = (|| {
+            self.begin()?;
+            crate::services::publish_all(services, &self.lua)?;
+            crate::services::publish_bar(&self.lua, output)?;
+            let app: Table = self.lua.registry_value(
+                self.app
+                    .as_ref()
+                    .ok_or_else(|| mlua::Error::RuntimeError("app missing".into()))?,
+            )?;
+            let resolved = component_props(&self.lua, &app, self.lua.to_value(props)?, Value::Nil)?;
+            app.set("props", resolved)?;
+            app.set("context", self.lua.to_value(context)?)?;
+            let function = match app.get::<Value>(handler)? {
+                Value::Nil => return Ok(Value::Nil),
+                Value::Function(function) => function,
+                _ => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.{handler} must be a function"
+                    )));
+                }
+            };
+            let mut arguments = match event {
+                AppEvent::Mount => mlua::MultiValue::from_vec(vec![self.lua.to_value(context)?]),
+                AppEvent::Unmount(reason) => {
+                    mlua::MultiValue::from_vec(vec![reason.into_lua(&self.lua)?])
+                }
+                AppEvent::Tick => mlua::MultiValue::new(),
+                AppEvent::Action(action) => action.arguments(&self.lua)?,
+            };
+            arguments.push_front(Value::Table(app));
+            function.call(arguments)
+        })();
+        self.finish(handler, result)
     }
 
     pub(crate) fn scene_action(

@@ -1777,6 +1777,7 @@ mod tests {
     fn held_drag_survives_focus_exit_foreign_buttons_and_stale_releases() {
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
         let mut plots = Plots {
+            apps: Default::default(),
             windows: Default::default(),
             shell_events: receiver,
             input: Default::default(),

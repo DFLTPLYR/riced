@@ -497,7 +497,10 @@ pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
         .animation
         .widgets
         .finish_retirements(&mut plots.animation.motion);
-    super::animation::complete(plots, callbacks)
+    Task::batch([
+        super::animation::complete(plots, callbacks),
+        super::apps::sweep(plots),
+    ])
 }
 pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {
     match event {

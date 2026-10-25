@@ -16,6 +16,14 @@ reviews, and tests every change — prompts in, review before merge.
 - **Smooth input** — `hoverEnabled: selecting` via `AtomicBool SELECTING` `src/app/app.rs:105`, `CursorMoved` throttled at source `16ms ~60fps` `src/app/app.rs:107` + `16ms` in `update` `src/app/app.rs:490`, filtered to `Event::Mouse` only (drops `RedrawRequested` flood), `SelectionTick` drives `All` redraw; `canvas` `SelCanvas` `src/app/app.rs:52` single `fill/stroke` vs `container+stack` layout
 - **Context menu** — `Right` `ButtonPressed` `src/app/app.rs:525` `contextMenu {x,y,open}` `src/app/app.rs:42`, clipped to screen, `Left` press closes
 
+## Experimental framework apps
+
+Build opt-in Lua applications under `apps/<name>/app.lua` and enable them with
+`apps = { { name = "bar" } }` in `config.lua`. Apps can return `iced.layer({...})`
+to declare native surfaces with independent per-output state and lifecycle hooks.
+See [the framework guide](docs/framework.md) and [example project](examples/framework/).
+Existing shell configuration remains supported. Rust extensions are a subsequent milestone.
+
 ## Requirements
 
 - Wayland compositor with `wlr-layer-shell` (Hyprland, Sway, Niri, etc.)

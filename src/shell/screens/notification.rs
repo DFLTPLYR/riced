@@ -315,6 +315,7 @@ mod tests {
     fn plots() -> Plots {
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
         Plots {
+            apps: Default::default(),
             windows: Default::default(),
             shell_events: receiver,
             input: Default::default(),

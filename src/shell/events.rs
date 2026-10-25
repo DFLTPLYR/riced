@@ -318,6 +318,7 @@ pub enum SettingEvent {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 pub enum Plant {
+    App(super::apps::AppMessage),
     Desktop(super::desktop_widgets::DesktopEvent),
     // Create,Update, Delete
     Tend,
