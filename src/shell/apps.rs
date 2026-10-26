@@ -22,8 +22,10 @@ use std::{
     time::Duration,
 };
 
+mod popup;
 #[cfg(test)]
 mod tests;
+pub(crate) use popup::{close_children, dismiss as dismiss_popup, is_popup};
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
@@ -31,6 +33,10 @@ pub enum AppMessage {
     Tick,
     Changed,
     Redraw(window::Id),
+    DismissPopup {
+        surface: window::Id,
+        reason: &'static str,
+    },
     Action {
         surface: window::Id,
         action: Action,
@@ -52,6 +58,7 @@ type Sources = Vec<(PathBuf, String)>;
 #[derive(Default)]
 pub(crate) struct State {
     instances: BTreeMap<(OutputId, String), Instance>,
+    pending_closes: Vec<window::Id>,
 }
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,20 +73,55 @@ struct Instance {
     runtime: Option<LuaRuntime>,
     accepted: Option<Sources>,
     attempted: Option<(Sources, Value)>,
-    root: Option<LayerRoot>,
-    surface: Option<window::Id>,
-    applied: Option<Surface>,
     context: Value,
     props: Value,
     output_name: String,
-    lists: Lists,
-    frame: SharedFrame,
     hover: crate::ui::hover::HoverSet,
-    revision: u64,
     error: Option<String>,
     service_error: Option<String>,
+    popup: Option<popup::Popup>,
+    dismissed_popup: Option<String>,
+    /// Declared layers, keyed by surface id. One entry per native surface the
+    /// app owns; each carries its own list state and measurement frame.
+    roots: BTreeMap<String, Root>,
+    /// Surfaces whose layer the app stopped declaring; reconcile closes them.
+    retired: Vec<window::Id>,
 }
+
+/// One declared layer and the native state that belongs to its surface.
+struct Root {
+    root: LayerRoot,
+    surface: Option<window::Id>,
+    applied: Option<Surface>,
+    lists: Lists,
+    revision: u64,
+    frame: SharedFrame,
+}
+
 impl Instance {
+    fn owns(&self, surface: window::Id) -> bool {
+        self.root_by_surface(surface).is_some()
+            || self.popup.as_ref().is_some_and(|p| p.surface == surface)
+    }
+    fn root_by_surface(&self, surface: window::Id) -> Option<&Root> {
+        self.roots
+            .values()
+            .find(|root| root.surface == Some(surface))
+    }
+    fn surfaces(&self) -> Vec<window::Id> {
+        self.roots
+            .values()
+            .filter_map(|root| root.surface)
+            .chain(self.popup.as_ref().map(|p| p.surface))
+            .collect()
+    }
+    /// Instance identity from its context, used to scope per-layer list state.
+    fn identity(&self) -> &str {
+        self.context
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&self.output_name)
+    }
     fn unmount(&mut self, services: &ServiceCtx<'_>, reason: &str) {
         self.managed.cancel_all();
         if let Some(runtime) = &mut self.runtime
@@ -168,14 +210,14 @@ impl Instance {
                 )
                 .map_err(|e| e.to_string())?;
         }
-        let root = match runtime.layer_view(
+        let roots = match runtime.layer_view(
             services,
             &self.output_name,
             &self.props,
             &self.context,
             &self.hover,
         ) {
-            Ok(root) => root,
+            Ok(roots) => roots,
             Err(error) => {
                 if let Some(runtime) = candidate.as_mut() {
                     let _ = runtime.app_event(
@@ -189,7 +231,7 @@ impl Instance {
                 return Err(error.to_string());
             }
         };
-        let modified = match self.update_root(root, motion, replaced) {
+        let modified = match self.update_roots(roots, motion, replaced) {
             Ok(modified) => modified,
             Err(error) => {
                 if let Some(runtime) = candidate.as_mut() {
@@ -209,40 +251,96 @@ impl Instance {
             self.runtime = Some(runtime);
             self.accepted = Some(signature);
             self.error = None;
+            self.dismissed_popup = None;
         }
         Ok(modified)
     }
 
-    fn update_root(
+    /// Adopt the layers the app declared this render.
+    ///
+    /// Layers keep their native surface and list state across renders; a layer
+    /// the app stopped declaring has its surface retired for reconcile to close.
+    fn update_roots(
         &mut self,
-        root: Option<LayerRoot>,
+        roots: Vec<LayerRoot>,
         motion: &mut crate::ui::anim::AnimRuntime,
         replaced: bool,
     ) -> Result<bool, String> {
-        let modified = replaced || self.root != root;
-        if modified {
-            if let Some(root) = &root {
-                let frame = self
-                    .frame
-                    .lock()
-                    .map_err(|_| "app measurement lock")?
-                    .last
-                    .clone()
-                    .unwrap_or_default();
-                let synchronized = self.lists.synchronize(
-                    self.root.as_ref().map(|r| &r.content),
-                    &root.content,
-                    &frame,
-                    motion,
-                    Duration::from_millis(250),
-                );
-                synchronized?;
-            } else {
-                self.lists.clear(motion);
-                self.hover.clear();
+        let mut modified = replaced;
+        let mut declared: BTreeMap<String, LayerRoot> = BTreeMap::new();
+        for root in roots {
+            declared.insert(root.surface.id.clone(), root);
+        }
+        let scope = format!("app:{}:{}", self.output_name, self.identity());
+        let stale: Vec<String> = self
+            .roots
+            .keys()
+            .filter(|id| !declared.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in stale {
+            if let Some(mut root) = self.roots.remove(&id) {
+                root.lists.clear(motion);
+                self.retired.extend(root.surface);
+                if self.popup.as_ref().is_some_and(|popup| popup.owner == id)
+                    && let Some(mut popup) = self.popup.take()
+                {
+                    popup.lists.clear(motion);
+                    self.retired.push(popup.surface);
+                }
+                modified = true;
             }
-            self.root = root;
-            self.revision = self.revision.wrapping_add(1);
+        }
+        for (id, root) in declared {
+            match self.roots.get_mut(&id) {
+                Some(existing) => {
+                    if existing.root == root {
+                        continue;
+                    }
+                    let frame = existing
+                        .frame
+                        .lock()
+                        .map_err(|_| "app measurement lock")?
+                        .last
+                        .clone()
+                        .unwrap_or_default();
+                    existing.lists.synchronize(
+                        Some(&existing.root.content),
+                        &root.content,
+                        &frame,
+                        motion,
+                        Duration::from_millis(250),
+                    )?;
+                    existing.root = root;
+                    existing.revision = existing.revision.wrapping_add(1);
+                }
+                None => {
+                    let mut lists = Lists::default();
+                    lists.scope = format!("{scope}:{id}");
+                    lists.synchronize(
+                        None,
+                        &root.content,
+                        &Default::default(),
+                        motion,
+                        Duration::from_millis(250),
+                    )?;
+                    self.roots.insert(
+                        id,
+                        Root {
+                            root,
+                            surface: None,
+                            applied: None,
+                            lists,
+                            revision: 0,
+                            frame: Default::default(),
+                        },
+                    );
+                }
+            }
+            modified = true;
+        }
+        if modified && self.roots.is_empty() {
+            self.hover.clear();
         }
         Ok(modified)
     }
@@ -313,9 +411,43 @@ struct Request<'a> {
     services: &'a ServiceCtx<'a>,
 }
 
+/// Single-layer accessors so tests that assert one root stay readable.
+#[cfg(test)]
+impl Instance {
+    fn root(&self) -> Option<&LayerRoot> {
+        self.roots.values().next().map(|root| &root.root)
+    }
+    fn root_mut(&mut self) -> Option<&mut LayerRoot> {
+        self.roots.values_mut().next().map(|root| &mut root.root)
+    }
+    fn surface(&self) -> Option<window::Id> {
+        self.roots.values().next().and_then(|root| root.surface)
+    }
+    /// Place the single declared layer on a chosen surface.
+    fn set_surface(&mut self, surface: window::Id) {
+        if let Some(root) = self.roots.values_mut().next() {
+            root.surface = Some(surface);
+        }
+    }
+    fn revision(&self) -> u64 {
+        self.roots
+            .values()
+            .map(|root| root.revision)
+            .max()
+            .unwrap_or_default()
+    }
+    /// Stop declaring every layer through the real path, so surfaces retire.
+    fn drop_roots(&mut self, motion: &mut crate::ui::anim::AnimRuntime) {
+        let _ = self.update_roots(Vec::new(), motion, false);
+    }
+}
+
 impl State {
     pub fn has_callbacks(&self) -> bool {
-        self.instances.values().any(|i| i.lists.has_callbacks())
+        self.instances.values().any(|i| {
+            i.roots.values().any(|root| root.lists.has_callbacks())
+                || i.popup.as_ref().is_some_and(|p| p.lists.has_callbacks())
+        })
     }
     pub fn forget(
         &mut self,
@@ -323,12 +455,29 @@ impl State {
         services: &ServiceCtx<'_>,
         motion: &mut crate::ui::anim::AnimRuntime,
     ) {
+        let pending = &mut self.pending_closes;
         self.instances.retain(|_, instance| {
-            if instance.surface == Some(surface) {
+            // Closing any declared layer closes the whole app, as before: the
+            // app declares its layers, so a partial set has no meaning.
+            if instance.root_by_surface(surface).is_some() {
+                if let Some(child) = popup::detach(instance, motion) {
+                    pending.push(child);
+                }
                 instance.unmount(services, "closed");
-                instance.lists.clear(motion);
+                for root in instance.roots.values_mut() {
+                    root.lists.clear(motion);
+                }
                 false
             } else {
+                if instance
+                    .popup
+                    .as_ref()
+                    .is_some_and(|p| p.surface == surface)
+                {
+                    instance.dismissed_popup =
+                        instance.popup.as_ref().map(|p| p.root.geometry.id.clone());
+                    popup::detach(instance, motion);
+                }
                 true
             }
         });
@@ -351,11 +500,7 @@ fn refresh_surface(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
     let mut state = std::mem::take(&mut plots.apps);
     let mut commands = Vec::new();
     let mut modified = false;
-    if let Some(instance) = state
-        .instances
-        .values_mut()
-        .find(|i| i.surface == Some(surface))
-    {
+    if let Some(instance) = state.instances.values_mut().find(|i| i.owns(surface)) {
         let result = instance.runtime.as_mut().map(|runtime| {
             runtime.layer_view(
                 &services(plots),
@@ -368,7 +513,7 @@ fn refresh_surface(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
         if let Some(result) = result {
             match result
                 .map_err(|e| e.to_string())
-                .and_then(|root| instance.update_root(root, &mut plots.animation.motion, false))
+                .and_then(|roots| instance.update_roots(roots, &mut plots.animation.motion, false))
             {
                 Ok(changed) => modified = changed,
                 Err(error) => {
@@ -383,7 +528,14 @@ fn refresh_surface(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
     if lifecycle_changed {
         commands.push(Task::done(Plant::App(AppMessage::Changed)));
     } else if modified {
-        commands.push(Task::done(Plant::App(AppMessage::Redraw(surface))));
+        for instance in plots.apps.instances.values().filter(|i| i.owns(surface)) {
+            commands.extend(
+                instance
+                    .surfaces()
+                    .into_iter()
+                    .map(|surface| Task::done(Plant::App(AppMessage::Redraw(surface)))),
+            );
+        }
     }
     Task::batch(commands)
 }
@@ -393,7 +545,10 @@ fn refresh_target(
     tick: bool,
     target: Option<u64>,
 ) -> Task<Plant> {
-    if plots.config.apps.is_empty() && plots.apps.instances.is_empty() {
+    if plots.config.apps.is_empty()
+        && plots.apps.instances.is_empty()
+        && plots.apps.pending_closes.is_empty()
+    {
         return Task::none();
     }
     let mut state = std::mem::take(&mut plots.apps);
@@ -427,7 +582,6 @@ fn refresh_target(
             instance.props = serde_json::to_value(&config.props).unwrap_or_else(|_| json!({}));
             instance.props["output"] = output_context;
             instance.output_name = name.to_string();
-            instance.lists.scope = format!("app:{}:{}", output.0, config.identity());
             let service_ctx = ServiceCtx {
                 sys: &plots.services.system,
                 gpu: plots.services.gpu(),
@@ -449,9 +603,7 @@ fn refresh_target(
             };
             match instance.render(&request, &mut plots.animation.motion, tick) {
                 Ok(true) => {
-                    if let Some(surface) = instance.surface {
-                        redraws.push(surface);
-                    }
+                    redraws.extend(instance.surfaces());
                 }
                 Ok(false) => {}
                 Err(error) => crate::lua::error::report_once(
@@ -471,10 +623,17 @@ fn refresh_target(
         .collect();
     for key in obsolete {
         if let Some(mut instance) = state.instances.remove(&key) {
+            if let Some(child) = popup::detach(&mut instance, &mut plots.animation.motion) {
+                commands.push(close(plots, child));
+            }
             instance.unmount(&services(plots), "removed");
-            instance.lists.clear(&mut plots.animation.motion);
-            if let Some(surface) = instance.surface.take() {
-                commands.push(close(plots, surface));
+            for surface in instance.surfaces() {
+                if plots.windows.ids.contains_key(&surface) {
+                    commands.push(close(plots, surface));
+                }
+            }
+            for root in instance.roots.values_mut() {
+                root.lists.clear(&mut plots.animation.motion);
             }
             changed = true;
         }
@@ -494,72 +653,89 @@ fn refresh_target(
 }
 fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant>>) -> bool {
     let mut changed = false;
+    for surface in state.pending_closes.drain(..) {
+        if plots.windows.ids.contains_key(&surface) {
+            commands.push(close(plots, surface));
+            changed = true;
+        }
+    }
     for ((output, id), instance) in &mut state.instances {
-        let Some(root) = &instance.root else {
-            if let Some(surface) = instance.surface.take() {
+        for surface in instance.retired.drain(..) {
+            if plots.windows.ids.contains_key(&surface) {
                 commands.push(close(plots, surface));
                 changed = true;
             }
-            instance.applied = None;
-            continue;
-        };
-        // Changing the declared identity creates a new native surface, not a new VM.
-        if instance
-            .applied
-            .as_ref()
-            .is_some_and(|old| old.id != root.surface.id)
-            && let Some(surface) = instance.surface.take()
-        {
-            commands.push(close(plots, surface));
         }
-        let settings = root
-            .surface
-            .settings(output.0, format!("riced:app:{id}:{}", root.surface.id));
-        if let Some(surface) = instance.surface {
-            if instance.applied.as_ref() != Some(&root.surface) {
+        if instance.roots.is_empty() {
+            if let Some(child) = popup::detach(instance, &mut plots.animation.motion) {
+                commands.push(close(plots, child));
                 changed = true;
-                commands.extend([
-                    Task::done(Plant::LayoutChange {
-                        id: surface,
-                        anchor: settings.anchor,
-                        size: settings.size,
-                    }),
-                    Task::done(Plant::LayerChange {
-                        id: surface,
-                        layer: settings.layer,
-                    }),
-                    Task::done(Plant::ExclusiveZoneChange {
-                        id: surface,
-                        zone_size: root.surface.exclusive_zone,
-                    }),
-                    Task::done(Plant::MarginChange {
-                        id: surface,
-                        margin: settings.margin.unwrap_or_default(),
-                    }),
-                    Task::done(Plant::KeyboardInteractivityChange {
-                        id: surface,
-                        keyboard_interactivity: settings.keyboard_interactivity,
-                    }),
-                    input_region(surface, &root.surface),
-                ]);
             }
-        } else {
-            let surface = window::Id::unique();
-            instance.surface = Some(surface);
-            plots.windows.ids.insert(surface, PlotInfo::App(*output));
-            commands.push(Task::done(Plant::NewLayerShell {
-                id: surface,
-                settings,
-            }));
-            changed = true;
+            instance.dismissed_popup = None;
         }
-        instance.applied = Some(root.surface.clone());
-        for id in instance.lists.take_resets() {
-            commands.push(iced::widget::operation::scroll_to(
-                id,
-                iced::widget::operation::AbsoluteOffset { x: 0.0, y: 0.0 },
-            ));
+        for (root_id, layer) in &mut instance.roots {
+            let surface_desc = layer.root.surface.clone();
+            // Changing the declared identity creates a new native surface, not
+            // a new VM.
+            if layer
+                .applied
+                .as_ref()
+                .is_some_and(|old| old.id != surface_desc.id)
+                && layer.surface.take().is_some()
+            {
+                changed = true;
+            }
+            let settings = surface_desc.settings(output.0, format!("riced:app:{id}:{root_id}"));
+            match layer.surface {
+                Some(surface) => {
+                    if layer.applied.as_ref() != Some(&surface_desc) {
+                        changed = true;
+                        commands.extend([
+                            Task::done(Plant::LayoutChange {
+                                id: surface,
+                                anchor: settings.anchor,
+                                size: settings.size,
+                            }),
+                            Task::done(Plant::LayerChange {
+                                id: surface,
+                                layer: settings.layer,
+                            }),
+                            Task::done(Plant::ExclusiveZoneChange {
+                                id: surface,
+                                zone_size: surface_desc.exclusive_zone,
+                            }),
+                            Task::done(Plant::MarginChange {
+                                id: surface,
+                                margin: settings.margin.unwrap_or_default(),
+                            }),
+                            Task::done(Plant::KeyboardInteractivityChange {
+                                id: surface,
+                                keyboard_interactivity: settings.keyboard_interactivity,
+                            }),
+                            input_region(surface, &surface_desc),
+                        ]);
+                    }
+                }
+                None => {
+                    let surface = window::Id::unique();
+                    layer.surface = Some(surface);
+                    plots.windows.ids.insert(surface, PlotInfo::App(*output));
+                    commands.push(Task::done(Plant::NewLayerShell {
+                        id: surface,
+                        settings,
+                    }));
+                    changed = true;
+                }
+            }
+            layer.applied = Some(surface_desc);
+            for id in layer.lists.take_resets() {
+                commands.push(iced::widget::operation::scroll_to(
+                    id,
+                    iced::widget::operation::AbsoluteOffset { x: 0.0, y: 0.0 },
+                ));
+            }
         }
+        changed |= popup::reconcile(plots, instance, *output, id, commands);
     }
     changed
 }
@@ -581,24 +757,55 @@ fn input_region(surface: window::Id, settings: &Surface) -> Task<Plant> {
     })
 }
 pub(crate) fn opened(plots: &Plots, surface: window::Id) -> Task<Plant> {
+    if is_popup(plots, surface) {
+        return input_region(surface, &Surface::default());
+    }
     plots
         .apps
         .instances
         .values()
-        .find(|i| i.surface == Some(surface))
-        .and_then(|i| i.root.as_ref())
-        .map_or_else(Task::none, |root| input_region(surface, &root.surface))
+        .find(|i| i.owns(surface))
+        .and_then(|i| i.root_by_surface(surface))
+        .map_or_else(Task::none, |root| input_region(surface, &root.root.surface))
 }
+/// Host slots a framework layer can embed. `desktop-widgets` composites the
+/// legacy desktop host, which has no description equivalent: widget instances,
+/// service snapshots, hold-drag and placement all stay native.
+fn app_native<'a>(
+    plots: &'a Plots,
+    output: Option<OutputId>,
+) -> impl FnMut(&str) -> Result<Element<'static, Plant>, String> + 'a {
+    move |id| match (id, output) {
+        ("desktop-widgets", Some(output)) => {
+            crate::shell::desktop_widgets::retain(plots);
+            let mut stack = iced::widget::Stack::with_capacity(1);
+            for view in crate::shell::desktop_widgets::views(plots, output, true) {
+                stack = stack.push(view);
+            }
+            Ok(stack
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into())
+        }
+        ("desktop-widgets", None) => {
+            Err("iced.native(\"desktop-widgets\") needs an output-bound app".into())
+        }
+        (other, _) => Err(format!(
+            "iced.native({other:?}) is not a framework host slot"
+        )),
+    }
+}
+
 pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant> {
-    let Some(instance) = plots
-        .apps
-        .instances
-        .values()
-        .find(|i| i.surface == Some(surface))
-    else {
+    let Some(instance) = plots.apps.instances.values().find(|i| i.owns(surface)) else {
         return iced::widget::Space::new().into();
     };
-    let Some(root) = &instance.root else {
+    if let Some(popup) = &instance.popup
+        && popup.surface == surface
+    {
+        return popup::view(plots, instance, popup);
+    }
+    let Some(layer) = instance.root_by_surface(surface) else {
         return iced::widget::Space::new().into();
     };
     let sender = Arc::new(move |action| Plant::App(AppMessage::Action { surface, action }));
@@ -610,22 +817,31 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
             entered,
         })
     });
-    match instance.lists.build(
-        &root.content,
+    // Host slots a framework layer can embed. `desktop-widgets` composites the
+    // legacy desktop host, which has no description equivalent: widget
+    // instances, service snapshots, hold-drag and placement all stay native.
+    let output = match plots.windows.ids.get(&surface) {
+        Some(PlotInfo::App(output)) => Some(*output),
+        _ => None,
+    };
+    let mut native = app_native(plots, output);
+    match layer.lists.build(
+        &layer.root.content,
         &plots.animation.motion,
         sender.clone(),
         Some(hover),
+        &mut native,
     ) {
         Ok(element) => {
-            let element = if root.surface.pointer_events {
+            let element = if layer.root.surface.pointer_events {
                 crate::ui::widgets::input::frame_input(element, sender)
             } else {
                 element
             };
-            let revision = instance.revision;
+            let revision = layer.revision;
             measured::root(
                 element,
-                instance.frame.clone(),
+                layer.frame.clone(),
                 revision,
                 Arc::new(move |data| {
                     Plant::App(AppMessage::Measured {
@@ -645,8 +861,14 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
 pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
     let mut completed = Vec::new();
     for instance in plots.apps.instances.values_mut() {
-        instance.lists.sweep(&mut plots.animation.motion);
-        completed.extend(instance.lists.take_completed());
+        for root in instance.roots.values_mut() {
+            root.lists.sweep(&mut plots.animation.motion);
+            completed.extend(root.lists.take_completed());
+        }
+        if let Some(popup) = &mut instance.popup {
+            popup.lists.sweep(&mut plots.animation.motion);
+            completed.extend(popup.lists.take_completed());
+        }
     }
     super::animation::complete(plots, completed)
 }
@@ -655,7 +877,7 @@ pub(crate) fn forget(plots: &mut Plots, surface: window::Id) {
         .apps
         .instances
         .values()
-        .any(|instance| instance.surface == Some(surface))
+        .any(|instance| instance.owns(surface))
     {
         return;
     }
@@ -668,6 +890,7 @@ pub(crate) fn forget(plots: &mut Plots, surface: window::Id) {
 }
 pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
     match message {
+        AppMessage::DismissPopup { surface, reason } => dismiss_popup(plots, surface, reason, true),
         AppMessage::Managed(delivery) => {
             let mut state = std::mem::take(&mut plots.apps);
             let mut refresh = false;
@@ -721,15 +944,37 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
             revision,
             data,
         } => {
-            let Some(instance) = plots
+            if let Some(popup) = plots
                 .apps
                 .instances
                 .values_mut()
-                .find(|i| i.surface == Some(surface) && i.revision == revision)
+                .filter_map(|i| i.popup.as_mut())
+                .find(|p| p.surface == surface && p.revision == revision)
+            {
+                return if popup.lists.layout(
+                    &data,
+                    &mut plots.animation.motion,
+                    Duration::from_millis(250),
+                ) {
+                    Task::done(Plant::App(AppMessage::Redraw(surface)))
+                } else {
+                    Task::none()
+                };
+            }
+            let Some(layer) = plots
+                .apps
+                .instances
+                .values_mut()
+                .find(|i| i.root_by_surface(surface).is_some())
+                .and_then(|i| {
+                    i.roots
+                        .values_mut()
+                        .find(|root| root.surface == Some(surface) && root.revision == revision)
+                })
             else {
                 return Task::none();
             };
-            if instance.lists.layout(
+            if layer.lists.layout(
                 &data,
                 &mut plots.animation.motion,
                 Duration::from_millis(250),
@@ -745,12 +990,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
             key,
             entered,
         } => {
-            let Some(instance) = plots
-                .apps
-                .instances
-                .values_mut()
-                .find(|i| i.surface == Some(surface))
-            else {
+            let Some(instance) = plots.apps.instances.values_mut().find(|i| i.owns(surface)) else {
                 return Task::none();
             };
             let key = (list, key);
@@ -770,7 +1010,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
             let result = state
                 .instances
                 .values_mut()
-                .find(|i| i.surface == Some(surface))
+                .find(|i| i.owns(surface))
                 .and_then(|instance| {
                     instance.runtime.as_mut().map(|runtime| {
                         runtime.app_event(

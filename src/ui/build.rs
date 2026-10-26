@@ -28,12 +28,14 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         | WidgetNode::Radio { size, .. }
         | WidgetNode::Toggler { size, .. } => size.unwrap_or(base).max(base * 1.4),
         WidgetNode::Slider { height, .. } => height.unwrap_or(22.0),
+        WidgetNode::SpinBox { height, .. } => height.unwrap_or(30.0).max(base),
         WidgetNode::TextInput { size, padding, .. }
         | WidgetNode::PickList { size, padding, .. } => {
             size.unwrap_or(base) * 1.4 + padding.unwrap_or_else(|| 6.0.into()).vertical()
         }
         WidgetNode::Text { size: own, .. } => own.unwrap_or(base).max(1.0) * 1.4,
         WidgetNode::Icon { .. } | WidgetNode::Spinner => base * 1.5,
+        WidgetNode::Native { .. } => base,
         WidgetNode::Separator { height, .. } => height.max(1.0),
         WidgetNode::Button { padding, .. } => {
             base * 1.4 + padding.unwrap_or_else(|| 6.0.into()).vertical()
@@ -57,6 +59,15 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
                 .first()
                 .map_or(base, |child| estimate_height(child, base)),
         },
+        WidgetNode::Masonry {
+            children, spacing, ..
+        } => {
+            children
+                .iter()
+                .map(|child| estimate_height(child, base))
+                .sum::<f32>()
+                + spacing * children.len().saturating_sub(1) as f32
+        }
         WidgetNode::Column {
             children, spacing, ..
         } => {
@@ -116,7 +127,85 @@ pub(crate) fn build_node_opacity_aligned(
         interactive,
         opacity,
         align,
+        &mut unavailable,
     )
+}
+
+/// [`build_node_opacity_aligned`] with an `iced.native(id)` slot resolver.
+pub(crate) fn build_node_opacity_aligned_with_native(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Option<Sender>,
+    opacity: f32,
+    align: Align,
+    native: NativeSlots<'_, Plant>,
+) -> Result<Element<'static, Plant>, String> {
+    let interactive = button_msg.is_some();
+    realize_aligned(
+        node,
+        size,
+        button_msg.unwrap_or_else(|| std::sync::Arc::new(|_| Plant::Tend)),
+        interactive,
+        opacity,
+        align,
+        native,
+    )
+}
+
+/// Realize a description whose `iced.native(id)` slots are filled by `native`.
+/// Slots exist so Lua-authored layouts can embed host-owned widgets (live
+/// previews, canvases) that have no description equivalent.
+pub(crate) fn build_node_with_native(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Option<Sender>,
+    native: NativeSlots<'_, Plant>,
+) -> Result<Element<'static, Plant>, String> {
+    let interactive = button_msg.is_some();
+    realize_with_native(
+        node,
+        size,
+        button_msg.unwrap_or_else(|| std::sync::Arc::new(|_| Plant::Tend)),
+        interactive,
+        1.0,
+        native,
+    )
+}
+
+/// [`realize`] with an `iced.native(id)` slot resolver.
+pub(crate) fn realize_with_native<M: Clone + 'static>(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Sender<M>,
+    interactive: bool,
+    opacity: f32,
+    native: NativeSlots<'_, M>,
+) -> Result<Element<'static, M>, String> {
+    realize_aligned(
+        node,
+        size,
+        button_msg,
+        interactive,
+        opacity,
+        Align::default(),
+        native,
+    )
+}
+
+/// Resolver for `iced.native(id)` slots during realization.
+pub(crate) type NativeSlots<'a, M> = &'a mut dyn FnMut(&str) -> Result<Element<'static, M>, String>;
+
+/// Resolver for hosts that provide no `iced.native(id)` slots.
+pub(crate) fn no_native_slots<M: Clone + 'static>()
+-> impl FnMut(&str) -> Result<Element<'static, M>, String> {
+    |id: &str| unavailable(id)
+}
+
+/// Default resolver: descriptions without a host must not silently drop slots.
+pub(crate) fn unavailable<M: Clone + 'static>(id: &str) -> Result<Element<'static, M>, String> {
+    Err(format!(
+        "iced.native({id:?}) needs a host-provided slot resolver"
+    ))
 }
 
 /// Realize a description for any host message type. The owned sender captures
@@ -135,6 +224,7 @@ pub(crate) fn realize<M: Clone + 'static>(
         interactive,
         opacity,
         Align::default(),
+        &mut unavailable,
     )
 }
 
@@ -145,8 +235,10 @@ fn realize_aligned<M: Clone + 'static>(
     interactive: bool,
     opacity: f32,
     align: Align,
+    native: NativeSlots<'_, M>,
 ) -> Result<Element<'static, M>, String> {
     match node {
+        WidgetNode::Native { id } => native(id),
         WidgetNode::Animated { child, spec } => {
             super::animations::realize(spec, button_msg(Action::animation_frame()), |values| {
                 realize_aligned(
@@ -156,6 +248,7 @@ fn realize_aligned<M: Clone + 'static>(
                     interactive,
                     opacity * values[2],
                     align,
+                    &mut *native,
                 )
             })
         }
@@ -164,12 +257,28 @@ fn realize_aligned<M: Clone + 'static>(
             placement,
             margin,
         } => Ok(super::widgets::anchored::placed(
-            realize(child, size, button_msg, interactive, opacity)?,
+            realize_aligned(
+                child,
+                size,
+                button_msg,
+                interactive,
+                opacity,
+                Align::default(),
+                &mut *native,
+            )?,
             *placement,
             *margin,
         )),
         WidgetNode::Clickable { child, action } => {
-            let element = realize(child, size, button_msg.clone(), interactive, opacity)?;
+            let element = realize_aligned(
+                child,
+                size,
+                button_msg.clone(),
+                interactive,
+                opacity,
+                Align::default(),
+                &mut *native,
+            )?;
             let mut item = iced::widget::mouse_area(element);
             if interactive {
                 item = item.on_press(button_msg(action.clone().into()));
@@ -197,6 +306,7 @@ fn realize_aligned<M: Clone + 'static>(
                     x: *align_x,
                     y: *align_y,
                 },
+                &mut *native,
             )
         }
         WidgetNode::Raster {
@@ -221,10 +331,18 @@ fn realize_aligned<M: Clone + 'static>(
         } => {
             // Realize borrowed descriptions directly instead of cloning an
             // entire subtree just to construct a temporary layout node.
-            let children = items
-                .iter()
-                .map(|(_, child)| realize(child, size, button_msg.clone(), interactive, opacity))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut children = Vec::with_capacity(items.len());
+            for (_, child) in items {
+                children.push(realize_aligned(
+                    child,
+                    size,
+                    button_msg.clone(),
+                    interactive,
+                    opacity,
+                    Align::default(),
+                    &mut *native,
+                )?);
+            }
             if *horizontal {
                 let layout = iced::widget::Row::with_children(children)
                     .spacing(*spacing)
@@ -270,7 +388,15 @@ fn realize_aligned<M: Clone + 'static>(
             let radius = *radius;
             let border = border.map(|c| c.scale_alpha(opacity));
             let border_width = *border_width;
-            let mut content = container(realize(child, size, button_msg, interactive, opacity)?);
+            let mut content = container(realize_aligned(
+                child,
+                size,
+                button_msg,
+                interactive,
+                opacity,
+                Align::default(),
+                &mut *native,
+            )?);
             if let Some(align) = align.x {
                 content = content.align_x(align);
             }
@@ -299,8 +425,15 @@ fn realize_aligned<M: Clone + 'static>(
             height,
             scrollbar_hidden,
         } => {
-            let mut content =
-                iced::widget::scrollable(realize(child, size, button_msg, interactive, opacity)?);
+            let mut content = iced::widget::scrollable(realize_aligned(
+                child,
+                size,
+                button_msg,
+                interactive,
+                opacity,
+                Align::default(),
+                &mut *native,
+            )?);
             if *scrollbar_hidden {
                 content = content.direction(iced::widget::scrollable::Direction::Vertical(
                     iced::widget::scrollable::Scrollbar::hidden(),
@@ -367,7 +500,7 @@ fn realize_aligned<M: Clone + 'static>(
         }
         WidgetNode::Icon { name, color } => {
             let base: Element<'static, M> = match icon_bytes(name) {
-                Some(bytes) => crate::ui::icons::themed_icon(bytes, size.max(1.0)),
+                Some(bytes) => super::icons::themed_icon(bytes, size.max(1.0)),
                 None => text(format!("{{icon:{name}}}")).size(size.max(1.0)).into(),
             };
             if color.is_some() || opacity < 1.0 {
@@ -394,12 +527,14 @@ fn realize_aligned<M: Clone + 'static>(
                 .spacing(spacing.max(0.0))
                 .align_y(align.y.unwrap_or(iced::Alignment::Center));
             for child in children {
-                row = row.push(realize(
+                row = row.push(realize_aligned(
                     child,
                     size,
                     button_msg.clone(),
                     interactive,
                     opacity,
+                    Align::default(),
+                    &mut *native,
                 )?);
             }
             let hints = iced::advanced::Widget::size(&row);
@@ -418,12 +553,14 @@ fn realize_aligned<M: Clone + 'static>(
                 .spacing(spacing.max(0.0))
                 .align_x(align.x.unwrap_or(iced::Alignment::Center));
             for child in children {
-                column = column.push(realize(
+                column = column.push(realize_aligned(
                     child,
                     size,
                     button_msg.clone(),
                     interactive,
                     opacity,
+                    Align::default(),
+                    &mut *native,
                 )?);
             }
             let hints = iced::advanced::Widget::size(&column);
@@ -432,6 +569,29 @@ fn realize_aligned<M: Clone + 'static>(
                 .height(height.resolve(hints.height))
                 .into())
         }
+        WidgetNode::Masonry {
+            children,
+            column_width,
+            spacing,
+        } => {
+            let mut elements = Vec::with_capacity(children.len());
+            for child in children {
+                elements.push(realize_aligned(
+                    child,
+                    size,
+                    button_msg.clone(),
+                    interactive,
+                    opacity,
+                    Align::default(),
+                    &mut *native,
+                )?);
+            }
+            Ok(super::widgets::masonry::masonry(
+                elements,
+                *column_width,
+                *spacing,
+            ))
+        }
         WidgetNode::Stack {
             children,
             width,
@@ -439,12 +599,14 @@ fn realize_aligned<M: Clone + 'static>(
         } => {
             let mut stack = iced::widget::Stack::with_capacity(children.len());
             for child in children {
-                stack = stack.push(realize(
+                stack = stack.push(realize_aligned(
                     child,
                     size,
                     button_msg.clone(),
                     interactive,
                     opacity,
+                    Align::default(),
+                    &mut *native,
                 )?);
             }
             let hints = iced::advanced::Widget::size(&stack);
@@ -622,6 +784,75 @@ fn realize_aligned<M: Clone + 'static>(
             }
             let element = item.into();
             Ok(if interactive && on_change.is_some() {
+                element
+            } else {
+                super::motion::shifted(element, 0.0, 0.0, false)
+            })
+        }
+        WidgetNode::SpinBox {
+            value,
+            min,
+            max,
+            step,
+            decimals,
+            on_change,
+            width,
+            height,
+        } => {
+            let interactive = interactive && on_change.is_some();
+            let (min, max) = (*min, *max);
+            let clamp = move |value: f32| value.clamp(min, max);
+            let shown = format!("{:.*}", *decimals, clamp(*value));
+            let key = on_change.clone().unwrap_or_default();
+            let mut input = iced::widget::text_input("", &shown)
+                .size(12)
+                .width(iced::Length::Fill)
+                .padding(6)
+                .style(crate::ui::style::input_style);
+            if interactive {
+                let sender = button_msg.clone();
+                let key = key.clone();
+                let fallback = clamp(*value);
+                input = input.on_input(move |typed| {
+                    let value = typed
+                        .trim()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .map(clamp)
+                        .unwrap_or(fallback);
+                    sender(Action::change(key.clone(), ActionValue::Number(value)))
+                });
+            }
+            let stepper = |icon: &'static [u8], delta: f32| {
+                let mut item = iced::widget::button(super::icons::themed_icon(icon, 8.0))
+                    .width(iced::Length::Fixed(30.0))
+                    .height(iced::Length::Fixed(30.0))
+                    .padding(4)
+                    .style(theme::menu_button(theme::RADIUS));
+                if interactive {
+                    item = item.on_press(button_msg(Action::change(
+                        key.clone(),
+                        ActionValue::Number(clamp(*value + delta)),
+                    )));
+                }
+                item
+            };
+            let mut item = row![
+                stepper(super::icons::MINUS, -*step),
+                input,
+                stepper(super::icons::PLUS, *step)
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
+            if let Some(width) = width {
+                item = item.width(width.clone().iced());
+            }
+            if let Some(height) = height {
+                item = item.height(*height);
+            }
+            let element: Element<'static, M> = item.into();
+            Ok(if interactive {
                 element
             } else {
                 super::motion::shifted(element, 0.0, 0.0, false)
@@ -828,8 +1059,8 @@ fn realize_aligned<M: Clone + 'static>(
             height.resolve(iced::Length::Fixed(100.0)),
             opacity,
         )),
-        WidgetNode::Spinner => Ok(crate::ui::icons::ThemedIcon::new(
-            iced::advanced::svg::Handle::from_memory(crate::ui::icons::LOADER_CIRCLE),
+        WidgetNode::Spinner => Ok(super::icons::ThemedIcon::new(
+            iced::advanced::svg::Handle::from_memory(super::icons::LOADER_CIRCLE),
             size.max(1.0) * 1.5,
         )
         .opacity(opacity)
@@ -905,6 +1136,7 @@ mod tests {
                             &crate::ui::anim::AnimRuntime::default(),
                             std::sync::Arc::new(|_| Plant::Tend),
                             None,
+                            &mut no_native_slots::<Plant>(),
                         )
                         .unwrap(),
                     "animated" => crate::shell::screens::top::build_with_lists(
@@ -963,6 +1195,7 @@ mod tests {
                     &crate::ui::anim::AnimRuntime::default(),
                     std::sync::Arc::new(|_| Plant::Tend),
                     None,
+                    &mut no_native_slots::<Plant>(),
                 )
                 .unwrap(),
             "animated" => crate::shell::screens::top::build_with_lists(
@@ -1053,6 +1286,7 @@ mod tests {
                     &crate::ui::anim::AnimRuntime::default(),
                     std::sync::Arc::new(|_| Plant::Tend),
                     None,
+                    &mut no_native_slots::<Plant>(),
                 )
                 .unwrap();
             crate::shell::screens::top::build_with_lists(
@@ -1126,6 +1360,7 @@ mod tests {
                             &crate::ui::anim::AnimRuntime::default(),
                             std::sync::Arc::new(|_| Plant::Tend),
                             None,
+                            &mut no_native_slots::<Plant>(),
                         )
                         .unwrap(),
                     "animated" => crate::shell::screens::top::build_with_lists(

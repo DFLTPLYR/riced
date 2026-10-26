@@ -461,6 +461,7 @@ fn default_notification_scene_composes_scoped_data_and_routes_structured_actions
             &motion,
             Arc::new(|_| Plant::Tend),
             None,
+            &mut crate::ui::build::no_native_slots::<Plant>(),
         )
         .unwrap();
     let mut body = measured::root(

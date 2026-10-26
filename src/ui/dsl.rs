@@ -75,6 +75,7 @@ pub(super) fn node(
 pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     crate::lua::notifications::install(lua)?;
     crate::lua::tray::install(lua)?;
+    crate::lua::shell::install(lua)?;
     crate::lua::callbacks::install(lua)?;
     let iced = lua.create_table()?;
     super::animations::install(lua, &iced)?;
@@ -124,8 +125,10 @@ pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
                         "iced.shader needs exactly one WGSL path".into(),
                     ));
                 }
-                if matches!(kind, "row" | "column" | "stack" | "listview" | "pick_list")
-                    && !matches!(args.front(), Some(Value::Table(_)))
+                if matches!(
+                    kind,
+                    "row" | "column" | "stack" | "masonry" | "listview" | "pick_list"
+                ) && !matches!(args.front(), Some(Value::Table(_)))
                 {
                     return Err(mlua::Error::RuntimeError(format!(
                         "iced.{kind} needs an array table"
@@ -638,6 +641,65 @@ mod tests {
             .eval::<Value>()
             .unwrap_err();
         assert!(error.to_string().contains("__t_bad"), "{error}");
+    }
+
+    #[test]
+    fn spin_box_decodes_chains_builds_and_roundtrips() {
+        let lua = Lua::new();
+        inject_ui_base(&lua).unwrap();
+        let parse = |source: &str| parse_node(&lua.load(source).eval::<Value>().unwrap());
+        let expected = WidgetNode::SpinBox {
+            value: 8.0,
+            min: 0.0,
+            max: 256.0,
+            step: 1.0,
+            decimals: 0,
+            on_change: Some("margin".into()),
+            width: None,
+            height: None,
+        };
+        assert_eq!(
+            parse("return iced.spin_box(8, 0, 256):on_change('margin')").unwrap(),
+            expected
+        );
+        // Later setters win, defaults fill the rest, and the value clamps.
+        let node = parse(
+            "return iced.spin_box(8, 0, 256):step(2):step(4):decimals(1):width(120):value(999)",
+        )
+        .unwrap();
+        assert!(matches!(
+            &node,
+            WidgetNode::SpinBox {
+                value,
+                step: 4.0,
+                decimals: 1,
+                width: Some(NodeLength::Fixed(120.0)),
+                ..
+            } if (*value - 256.0).abs() < f32::EPSILON
+        ));
+        // Realizes in the native host and round-trips through encode.
+        crate::ui::build::build_node(&node, 13.0, None).unwrap();
+        let encoded = super::super::encode::to_table(&lua, &node).unwrap();
+        assert_eq!(parse_node(&Value::Table(encoded)).unwrap(), node);
+        // Invalid ranges, decimals, and heights are rejected at decode.
+        for source in [
+            "iced.spin_box(0, 10, 0)",
+            "iced.spin_box(0, 5, 5)",
+            "iced.spin_box(5, 0, 10):step(0)",
+            "iced.spin_box(5, 0, 10):decimals(9)",
+            "iced.spin_box(5, 0, 10):decimals(1.5)",
+            "iced.spin_box(5, 0, 10):height(-1)",
+            "iced.spin_box(5, 0, 10):min(20)",
+        ] {
+            let value: Value = lua.load(format!("return {source}")).eval().unwrap();
+            assert!(parse_node(&value).is_err(), "{source}");
+        }
+        assert!(
+            lua.load("return iced.spin_box(5, 0, 10):spacing(4)")
+                .eval::<Value>()
+                .is_err(),
+            "spacing is not a spin_box setter"
+        );
     }
 
     #[test]

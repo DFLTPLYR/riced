@@ -185,6 +185,95 @@ or app teardown silently suppresses late callbacks. Cancellation stops waiting;
 closing an already displayed native dialog is backend-dependent. There is no
 timeout while the user chooses a file. Picking does not read or save the file.
 
+## Native host slots
+
+A layer can embed host-owned content that has no description equivalent with
+`iced.native(id)`. The node carries only the slot id; the realizing host fills
+it during layout, and a description with no resolver fails instead of silently
+dropping the slot.
+
+```lua
+content = iced.stack({
+    iced.image(path):width(size.fill):height(size.fill),
+    iced.native("desktop-widgets"),
+})
+```
+
+| Slot | Host | Fills with |
+| --- | --- | --- |
+| `desktop-widgets` | framework layer | The legacy desktop-widget host for that output: every `desktop` placement, with service snapshots, hover, hold-drag, and persistence. |
+
+Only framework layers and the Settings hosts resolve slots; bar, scene, and
+overlay hosts reject them. An unknown id is a reported render error, and
+`desktop-widgets` needs an output-bound app (every layer app is). The slot is
+Fill-sized, so place it in a `stack` or `container` rather than a `row`.
+
+## Host shell commands
+
+An action handler can ask the daemon to perform a shell-level action by
+returning a value. Nothing runs during rendering: the value travels back through
+the same action boundary as tray and notification commands.
+
+```lua
+function app:actions(event)
+    if event.key == "open-settings" then
+        return shell.open_settings()
+    end
+end
+```
+
+| Call | Effect |
+| --- | --- |
+| `shell.open_settings()` | Toggle the Settings window (same as the CLI `open-settings` command). |
+
+Available to every Lua host — framework apps, bar widgets, scenes, and popups.
+Returning any other value, or `nil`, stays inert. A malformed command
+(`{shell={action="nope"}}`, extra fields, a non-table) is reported and ignored
+rather than executed. Apps cannot add new shell actions; the set is fixed by the
+host, and the daemon owns execution and validation.
+
+**Layer creation is deliberately not a shell action.** An app declares its
+layers in `view` and owns any layer *list* as its own data, so the runtime never
+invents a surface on request. See [App-owned layers](#app-owned-layers).
+
+### App-owned layers
+
+The layer set is not fixed by `config.lua`. An app can declare as many layers as
+it likes, including ones derived from its own state:
+
+```lua
+function app:mount()
+    self.bars = riced.file({ type = "lua", path = "bars.lua",
+                             write_mode = "generated", defaults = { bars = {} } })
+end
+
+function app:add_bar(edge)
+    local bars = self.bars:get("bars") or {}
+    table.insert(bars, { edge = edge, thickness = 32 })
+    self.bars:set("bars", bars)
+    self.bars:save()
+end
+
+function app:view(props)
+    local layers = { riced.layer("layers/wallpaper.lua", { output = props.output }) }
+    for index, bar in ipairs(self.bars:get("bars") or {}) do
+        layers[#layers + 1] = riced.layer("layers/bar.lua", {
+            id = "bar-" .. index, output = self.output,
+            edge = bar.edge, thickness = bar.thickness,
+        })
+    end
+    return layers
+end
+```
+
+"Add another bar" is now ordinary app state: append, save, re-declare. The
+daemon still owns validation, identity, persistence, and window creation — Lua
+owns the policy of *when* a layer appears and what it is told.
+
+A document opened with `riced.file` is data, not app code, so editing it never
+reloads the app. Keep it outside `apps/<name>/components/`, which is the app's
+source set.
+
 ## Unified service snapshots and subscriptions
 
 ```lua
@@ -228,22 +317,48 @@ with `self:cancel(token)`, or let app teardown release them automatically.
 ```lua
 local app = { defaults = { height = 32 } }
 function app:view(props)
-    return iced.layer({
-        id = "main",
-        layer = "top",
-        anchors = { top = true, left = true, right = true },
-        height = props.height,
-        exclusive_zone = props.height,
-        keyboard = "none",
-        input = "all",
-        content = iced.text("Hello " .. props.output.name),
-    })
+    return {
+        iced.layer({
+            id = "wallpaper",
+            layer = "background",
+            anchors = { top = true, right = true, bottom = true, left = true },
+            exclusive_zone = -1,
+            pointer_events = true,
+            content = iced.image(props.wallpaper):width(size.fill):height(size.fill),
+        }),
+        iced.layer({
+            id = "bar",
+            layer = "top",
+            anchors = { top = true, left = true, right = true },
+            height = props.height,
+            exclusive_zone = props.height,
+            keyboard = "none",
+            input = "all",
+            content = iced.text("Hello " .. props.output.name),
+        }),
+    }
 end
 return app
 ```
 
-One layer root is supported per app/output instance. Return `nil` to hide it
-without discarding application state. Layer roots cannot appear in widget trees.
+An app declares **one layer, an array of layers, or `nil`**. Each entry owns its
+own native surface, list state and measurement, so one app can cover the
+background, a bar and an overlay at once. `nil` hides every layer without
+discarding application state. Layer roots cannot appear in widget trees.
+
+A layer can also live in its own file: `riced.layer("layers/bar.lua", props)`
+resolves `<app>/components/layers/bar.lua` (or the shared `components/`), calls
+its `view(props)`, and returns its `iced.layer{...}` value for the list. The
+module owns its surface, not just its content, so it decides its own level,
+anchors and input semantics. A file that returns a widget tree is rejected by
+name. `riced.layer` is deliberately distinct from `riced.component`, which
+returns a subtree.
+
+Ids must be unique across the list: each one keys a native surface, and a
+duplicate is a reported render error. A layer that disappears from the list has
+its surface closed; a layer whose `id` changes gets a fresh surface without a new
+VM. Closing any declared layer closes the whole app, since the app declares the
+set.
 
 | Field | Contract |
 | --- | --- |
@@ -268,6 +383,67 @@ Unknown fields and invalid geometry fail before native creation. Layout, focus,
 layer, margins, input, and reserved space reconcile on the same native window.
 Native UI realization/animation uses cached owned trees, never per-frame Lua.
 
+## App-owned popups
+
+A framework layer can declare one named popup per app/output instance. Its
+content is an ordinary widget tree and shares the parent's Lua state:
+
+```lua
+function app:actions(event)
+    if event.type == "popup_closed" then
+        self.menu_open = false
+    elseif event.key == "menu" then
+        self.menu_open = not self.menu_open
+    end
+end
+
+function app:view(props)
+    local menu
+    if self.menu_open then
+        menu = {
+            id = "menu", x = 16, y = 48, width = 260, height = 160,
+            content = iced.container(iced.text("Shared app state"))
+                :width(size.fill):height(size.fill):padding(16)
+                :background(theme.surface):radius(12),
+        }
+    end
+    return iced.layer({
+        anchors = { top = true, left = true }, width = 180, height = 32,
+        content = iced.button("Menu", "menu"), popup = menu,
+    })
+end
+```
+
+- `id` defaults to `popup`: 1..64 ASCII letters/digits/`_`/`-`. `width` and
+  `height` are required integers in 1..32768. `x`/`y` default to zero and are
+  finite logical-pixel coordinates relative to the **output**, not the parent
+  layer or a widget. The card's size and position are clamped to that output.
+- `content` is required. It cannot contain `iced.layer` or `iced.popup` roots.
+  List IDs must be unique across the parent's and popup's widget trees.
+- The host uses a full-output, input-capturing overlay layer with exclusive
+  keyboard focus and no exclusive zone. Outside left/right/middle clicks and
+  Escape dismiss it; blank space inside the card consumes clicks. This is a
+  modal host-owned layer, not a native `xdg_popup` or compositor popup grab.
+- Dismissal invokes `actions` with
+  `{type="popup_closed", id="menu", reason="outside"|"escape"|"closed"}`.
+  Widget actions inside the card enter the same `actions` handler as the parent.
+  Action keys should distinguish the controls in both surfaces.
+- A dismissed ID stays suppressed even if the handler errors or leaves the
+  declaration unchanged. Return `popup=nil` on an accepted view before
+  reopening that ID. Removing the declaration closes it without a dismissal
+  event; changing its ID creates a fresh popup.
+- Parent hiding/identity changes, app removal, successful reload, output
+  removal, and parent native close release the child. Closing only the popup
+  does not unmount the parent. Stale child events cannot enter a replacement.
+  Invalid replacement views preserve the previous parent and popup.
+- Content updates reuse the child surface; list animation state, hover, and
+  measurements remain scoped to its owner. Popup open/close lifecycle
+  transitions, automatic widget anchoring/flipping, nested popups, and ordinary
+  application windows are not part of this step. Existing bar-widget popup
+  behavior is unchanged.
+
+See `examples/apps/popup/app.lua` for a runnable counter/menu example.
+
 ## Components, assets, and reload
 
 `riced.component("status.lua", props)` prefers
@@ -285,7 +461,7 @@ the active runtime. Syntax, mount, and decode failures preserve the previous
 surface. Corrected sources are retried. Successful reload resets app state;
 persistent state migration is not implemented yet.
 
-See `examples/framework/` for a Lua bar with a local component, clock, and
+See `examples/` for a Lua bar with a local component, clock, and
 independent click counter on each output. Copy its `apps/bar/` directory into
 your project and merge the example `apps` entry into your existing config.
 
@@ -307,9 +483,18 @@ in `config.lua`, and `riced build` generates the registration entry point plus
 a locked Cargo package under `.riced/`, so adding an extension no longer edits
 framework source. The palette extension demonstrates this owned-data interface
 without applying shell theme changes. Compiled-in extensions require
-rebuilding/restarting; supervised process extensions remain a later milestone
-for independently restartable workloads. Rust dynamic-library loading is
+rebuilding/restarting. Supervised process services now provide lazy executable
+startup, capability negotiation, bounded commands, cancellation/deadlines,
+crash detection, and restart-on-next-request through the same Lua service API.
+See [process configuration and limits](extensions.md#supervised-executable-services).
+Rust dynamic-library loading is
 intentionally not part of the initial design.
+
+The application-model work now includes one modal, named popup owned by each
+framework app/output instance. **Next: ordinary application-window roots** for
+apps such as Settings. Automatic widget anchoring/flipping, popup lifecycle
+transitions, nested popups, and explicit state restoration remain follow-ups;
+the existing native bar-popup host keeps its current capabilities.
 
 ### Later: Lua editor support (LuaLS)
 

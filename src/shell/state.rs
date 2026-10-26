@@ -619,6 +619,9 @@ impl Plots {
         id: iced::window::Id,
         request_native_close: bool,
     ) -> Command<Plant> {
+        if super::apps::is_popup(self, id) {
+            return super::apps::dismiss_popup(self, id, "closed", request_native_close);
+        }
         let info = self.windows.ids.get(&id).copied();
         // Compute before any detach drops the owning state. Only windows that
         // owned decoded images need the full-redraw reclaim; the rest stay
@@ -645,6 +648,7 @@ impl Plots {
             _ => false,
         };
         let mut commands = Vec::new();
+        commands.push(super::apps::close_children(self, id));
         if matches!(info, Some(PlotInfo::Top(_))) {
             let children: Vec<_> = self
                 .windows
@@ -949,6 +953,17 @@ impl Plots {
             Plant::Wayland(LandEvent::LockDenied) => Command::none(),
             Plant::Wayland(LandEvent::LockedFinished) => Command::none(),
             Plant::Graft(id, event) => {
+                if super::apps::is_popup(self, id)
+                    && matches!(
+                        &event,
+                        Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                            ..
+                        })
+                    )
+                {
+                    return super::apps::dismiss_popup(self, id, "escape", true);
+                }
                 if self
                     .windows
                     .popups

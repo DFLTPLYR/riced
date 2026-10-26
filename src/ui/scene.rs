@@ -58,7 +58,8 @@ fn declared<'a>(
         }
         WidgetNode::Row { children, .. }
         | WidgetNode::Column { children, .. }
-        | WidgetNode::Stack { children, .. } => {
+        | WidgetNode::Stack { children, .. }
+        | WidgetNode::Masonry { children, .. } => {
             for node in children {
                 declared(node, out)?;
             }
@@ -81,6 +82,16 @@ impl Lists {
     pub(crate) fn take_resets(&mut self) -> Vec<String> {
         std::mem::take(&mut self.resets)
     }
+    pub(crate) fn validate_roots<'a>(
+        roots: impl IntoIterator<Item = &'a WidgetNode>,
+    ) -> Result<(), String> {
+        let mut lists = HashMap::new();
+        for root in roots {
+            declared(root, &mut lists)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn synchronize(
         &mut self,
         old: Option<&WidgetNode>,
@@ -335,8 +346,9 @@ impl Lists {
         runtime: &AnimRuntime,
         sender: Sender,
         hover: Option<super::action::HoverSender>,
+        native: super::build::NativeSlots<'_, Plant>,
     ) -> Result<Element<'static, Plant>, String> {
-        let live = self.node(node, runtime, sender, hover, true, 1.0)?;
+        let live = self.node(node, runtime, sender, hover, true, 1.0, native)?;
         let mut layer = iced::widget::stack![
             iced::widget::Space::new()
                 .width(Length::Fill)
@@ -366,6 +378,7 @@ impl Lists {
         }
         Ok(layer.into())
     }
+    #[allow(clippy::too_many_arguments)]
     fn node(
         &self,
         node: &WidgetNode,
@@ -374,6 +387,7 @@ impl Lists {
         hover: Option<super::action::HoverSender>,
         active: bool,
         opacity: f32,
+        native: super::build::NativeSlots<'_, Plant>,
     ) -> Result<Element<'static, Plant>, String> {
         self.node_aligned(
             node,
@@ -383,6 +397,7 @@ impl Lists {
             active,
             opacity,
             Align::default(),
+            native,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -395,6 +410,7 @@ impl Lists {
         active: bool,
         opacity: f32,
         align: Align,
+        native: super::build::NativeSlots<'_, Plant>,
     ) -> Result<Element<'static, Plant>, String> {
         match node {
             WidgetNode::Animated { child, spec } => super::animations::realize(
@@ -409,6 +425,7 @@ impl Lists {
                         active,
                         opacity * values[2],
                         align,
+                        native,
                     )
                 },
             ),
@@ -417,7 +434,15 @@ impl Lists {
                 placement,
                 margin,
             } => Ok(super::widgets::anchored::placed(
-                self.node(child, runtime, sender, hover.clone(), active, opacity)?,
+                self.node(
+                    child,
+                    runtime,
+                    sender,
+                    hover.clone(),
+                    active,
+                    opacity,
+                    &mut *native,
+                )?,
                 *placement,
                 *margin,
             )),
@@ -443,6 +468,7 @@ impl Lists {
                         x: *align_x,
                         y: *align_y,
                     },
+                    native,
                 )
             }
             WidgetNode::Clickable { child, action } => {
@@ -453,6 +479,7 @@ impl Lists {
                     hover.clone(),
                     active,
                     opacity,
+                    &mut *native,
                 )?;
                 let element = iced::widget::mouse_area(body)
                     .on_press(sender(action.clone().into()))
@@ -495,6 +522,7 @@ impl Lists {
                     hover.clone(),
                     active,
                     opacity,
+                    &mut *native,
                 )?);
                 if let Some(align) = align.x {
                     element = element.align_x(align);
@@ -531,6 +559,7 @@ impl Lists {
                     hover.clone(),
                     active,
                     opacity,
+                    &mut *native,
                 )?);
                 if *scrollbar_hidden {
                     item = item.direction(iced::widget::scrollable::Direction::Vertical(
@@ -565,6 +594,7 @@ impl Lists {
                             hover.clone(),
                             active,
                             opacity,
+                            &mut *native,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -588,6 +618,31 @@ impl Lists {
                         .into())
                 }
             }
+            WidgetNode::Masonry {
+                children,
+                column_width,
+                spacing,
+            } => {
+                let children = children
+                    .iter()
+                    .map(|child| {
+                        self.node(
+                            child,
+                            runtime,
+                            sender.clone(),
+                            hover.clone(),
+                            active,
+                            opacity,
+                            &mut *native,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(super::widgets::masonry::masonry(
+                    children,
+                    *column_width,
+                    *spacing,
+                ))
+            }
             WidgetNode::Stack {
                 children,
                 width,
@@ -602,6 +657,7 @@ impl Lists {
                         hover.clone(),
                         active,
                         opacity,
+                        &mut *native,
                     )?);
                 }
                 let hints = iced::advanced::Widget::size(&stack);
@@ -643,6 +699,7 @@ impl Lists {
                         hover.clone(),
                         active,
                         opacity * motion.opacity,
+                        &mut *native,
                     )?;
                     let child = measured::marked(child, Marker::Item(item_id(id, key)));
                     // Live rows report hover so the host can re-parse with
@@ -735,12 +792,13 @@ impl Lists {
                 ))
             }
             _ => {
-                let element = super::build::build_node_opacity_aligned(
+                let element = super::build::build_node_opacity_aligned_with_native(
                     node,
                     13.0,
                     active.then_some(sender),
                     opacity,
                     align,
+                    native,
                 )?;
                 let interactive = matches!(
                     node,
@@ -754,6 +812,10 @@ impl Lists {
                             ..
                         }
                         | WidgetNode::Slider {
+                            on_change: Some(_),
+                            ..
+                        }
+                        | WidgetNode::SpinBox {
                             on_change: Some(_),
                             ..
                         }

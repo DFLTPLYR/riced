@@ -228,6 +228,11 @@ fn naturalize_width(node: &mut WidgetNode) {
                 naturalize_width(child);
             }
         }
+        WidgetNode::Masonry { children, .. } => {
+            for child in children {
+                naturalize_width(child);
+            }
+        }
         WidgetNode::ListView { items, width, .. } => {
             natural(width);
             for (_, child) in items {
@@ -239,6 +244,7 @@ fn naturalize_width(node: &mut WidgetNode) {
         | WidgetNode::Checkbox { width, .. }
         | WidgetNode::Toggler { width, .. }
         | WidgetNode::Slider { width, .. }
+        | WidgetNode::SpinBox { width, .. }
         | WidgetNode::TextInput { width, .. }
         | WidgetNode::PickList { width, .. }
         | WidgetNode::Radio { width, .. } => {
@@ -283,6 +289,11 @@ fn naturalize_height(node: &mut WidgetNode) {
             children, height, ..
         } => {
             natural(height);
+            for child in children {
+                naturalize_height(child);
+            }
+        }
+        WidgetNode::Masonry { children, .. } => {
             for child in children {
                 naturalize_height(child);
             }

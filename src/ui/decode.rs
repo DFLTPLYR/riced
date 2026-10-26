@@ -400,7 +400,7 @@ fn parse_component(
         }
     };
     match kind.as_str() {
-        "checkbox" | "toggler" | "slider" | "text_input" | "pick_list" | "radio" => {
+        "checkbox" | "toggler" | "slider" | "text_input" | "pick_list" | "radio" | "spin_box" => {
             parse_control(t, &kind)
         }
         "listview" => {
@@ -724,7 +724,7 @@ fn parse_component(
                 lua_value_kind(&other)
             )),
         },
-        "row" | "column" | "stack" => {
+        "row" | "column" | "stack" | "masonry" => {
             let children = match t.get::<Value>("children").map_err(|e| e.to_string())? {
                 Value::Table(list) => list
                     .sequence_values::<Value>()
@@ -745,6 +745,18 @@ fn parse_component(
                     ));
                 }
             };
+            if kind == "masonry" {
+                let column_width =
+                    opt_number(t, "column_width", "iced.masonry()")?.unwrap_or(260.0);
+                if column_width <= 0.0 {
+                    return Err("iced.masonry() column_width must be positive".into());
+                }
+                return Ok(WidgetNode::Masonry {
+                    children,
+                    column_width,
+                    spacing: opt_number(t, "spacing", "iced.masonry()")?.unwrap_or(12.0),
+                });
+            }
             if kind == "stack" {
                 return Ok(WidgetNode::Stack {
                     children,
@@ -803,6 +815,17 @@ fn parse_component(
                 background: opt_color(t, "background", "iced.progress()")?,
             })
         }
+        "native" => match t.get::<Value>("id").map_err(|e| e.to_string())? {
+            Value::String(s) if !s.to_string_lossy().trim().is_empty() => Ok(WidgetNode::Native {
+                id: s.to_string_lossy(),
+            }),
+            Value::String(_) => Err("iced.native() needs a non-empty slot id".into()),
+            Value::Nil => Err("iced.native() needs a slot id".into()),
+            other => Err(format!(
+                "iced.native() id must be a string, got {}",
+                lua_value_kind(&other)
+            )),
+        },
         "canvas" => parse_canvas(t),
         "shader" => super::shader::parse(t),
         "spinner" => Ok(WidgetNode::Spinner),
@@ -1006,6 +1029,52 @@ fn parse_control(t: &Table, kind: &str) -> Result<WidgetNode, String> {
             spacing,
         }
         .into()),
+        "spin_box" => {
+            let min = control_number(t, "min", &what)?
+                .ok_or_else(|| format!("{what} needs a minimum"))?;
+            let max = control_number(t, "max", &what)?
+                .ok_or_else(|| format!("{what} needs a maximum"))?;
+            let step = control_number(t, "step", &what)?.unwrap_or(1.0);
+            if min >= max || !(max - min).is_finite() || step <= 0.0 {
+                return Err(format!(
+                    "{what} needs min < max and a positive step with finite range"
+                ));
+            }
+            let decimals = match node_property(t, "decimals").map_err(|e| e.to_string())? {
+                Value::Nil => 0,
+                Value::Integer(n) if (0..=6).contains(&n) => n as usize,
+                Value::Number(n)
+                    if n.is_finite() && n.fract() == 0.0 && (0.0..=6.0).contains(&n) =>
+                {
+                    n as usize
+                }
+                other => {
+                    return Err(format!(
+                        "{what} decimals must be an integer between 0 and 6, got {}",
+                        lua_value_kind(&other)
+                    ));
+                }
+            };
+            let value = control_number(t, "value", &what)?
+                .unwrap_or(min)
+                .clamp(min, max);
+            let height = control_number(t, "height", &what)?;
+            if height.is_some_and(|value| value <= 0.0) {
+                return Err(format!("{what} height must be positive"));
+            }
+            Ok(SpinBoxNode {
+                layout: Default::default(),
+                value,
+                min,
+                max,
+                step,
+                decimals,
+                on_change: string("on_change")?,
+                width,
+                height,
+            }
+            .into())
+        }
         _ => Err(format!("unknown iced control {kind}")),
     }
 }

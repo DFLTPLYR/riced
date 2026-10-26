@@ -181,6 +181,17 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 fields!("children" => lua.create_sequence_from(nodes)?, "spacing" => *spacing);
                 sizes!(Some(width), Some(height));
             }
+            WidgetNode::Masonry {
+                children,
+                column_width,
+                spacing,
+            } => {
+                let nodes = children
+                    .iter()
+                    .map(|node| to_table(lua, node))
+                    .collect::<mlua::Result<Vec<_>>>()?;
+                fields!("children" => lua.create_sequence_from(nodes)?, "column_width" => *column_width, "spacing" => *spacing);
+            }
             WidgetNode::Stack {
                 children,
                 width,
@@ -319,6 +330,9 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 sizes!(Some(width), Some(height));
             }
             WidgetNode::Spinner => {}
+            WidgetNode::Native { id } => {
+                table.set("id", id.as_str())?;
+            }
             WidgetNode::Shader {
                 source,
                 speed,
@@ -379,6 +393,19 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 height,
             } => {
                 fields!("min" => *min, "max" => *max, "value" => *value, "step" => *step, "on_change" => on_change.as_deref(), "on_release" => on_release.as_deref(), "height" => *height);
+                set_length(lua, table, "width", width.as_ref())?;
+            }
+            WidgetNode::SpinBox {
+                value,
+                min,
+                max,
+                step,
+                decimals,
+                on_change,
+                width,
+                height,
+            } => {
+                fields!("value" => *value, "min" => *min, "max" => *max, "step" => *step, "decimals" => *decimals, "on_change" => on_change.as_deref(), "height" => *height);
                 set_length(lua, table, "width", width.as_ref())?;
             }
             WidgetNode::TextInput {

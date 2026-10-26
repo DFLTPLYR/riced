@@ -271,6 +271,7 @@ fn shaders_build_in_every_host_and_software_rendering_does_not_schedule_frames()
                 &Default::default(),
                 Arc::new(|_| crate::shell::Plant::Tend),
                 None,
+                &mut crate::ui::build::no_native_slots::<crate::shell::Plant>(),
             )
             .unwrap(),
         crate::shell::screens::top::build_with_lists(

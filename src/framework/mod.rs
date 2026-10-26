@@ -6,6 +6,7 @@ mod project;
 pub(crate) mod storage;
 pub(crate) mod tasks;
 
+pub(crate) use layer::AppPopup;
 pub(crate) use layer::{LayerRoot, Surface, install};
 pub(crate) use project::{
     AppConfig, ExtensionConfig, Project, deserialize_apps, deserialize_extensions,

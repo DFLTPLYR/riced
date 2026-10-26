@@ -72,12 +72,55 @@ fn instance(output: &str) -> Instance {
     }
 }
 fn text(instance: &Instance) -> &str {
-    let crate::ui::node::WidgetNode::Text { content, .. } =
-        &instance.root.as_ref().unwrap().content
+    let crate::ui::node::WidgetNode::Text { content, .. } = &instance.root().unwrap().content
     else {
         panic!("text root")
     };
     content
+}
+/// Native slot ids anywhere in a widget tree.
+fn native_slots(node: &crate::ui::node::WidgetNode, out: &mut Vec<String>) {
+    use crate::ui::node::WidgetNode;
+    match node {
+        WidgetNode::Native { id } => out.push(id.clone()),
+        WidgetNode::Column { children, .. }
+        | WidgetNode::Row { children, .. }
+        | WidgetNode::Stack { children, .. }
+        | WidgetNode::Masonry { children, .. } => {
+            for child in children {
+                native_slots(child, out);
+            }
+        }
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => native_slots(child, out),
+        _ => {}
+    }
+}
+/// Button labels anywhere in a widget tree.
+fn buttons(node: &crate::ui::node::WidgetNode, out: &mut Vec<String>) {
+    use crate::ui::node::WidgetNode;
+    match node {
+        WidgetNode::Button { label, .. } => out.push(label.clone()),
+        WidgetNode::Column { children, .. }
+        | WidgetNode::Row { children, .. }
+        | WidgetNode::Stack { children, .. }
+        | WidgetNode::Masonry { children, .. } => {
+            for child in children {
+                buttons(child, out);
+            }
+        }
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. } => buttons(child, out),
+        _ => {}
+    }
 }
 fn messages(task: Task<Plant>) -> Vec<iced_runtime::Action<Plant>> {
     iced_runtime::task::into_stream(task)
@@ -99,6 +142,281 @@ return {
 }
 "#;
 
+const POPUP_APP: &str = r#"
+return {
+    mount=function(self) self.count=0; self.open=true; self.reason='none' end,
+    actions=function(self,event)
+        if event.type=='popup_closed' then self.reason=event.reason; self.open=false
+        elseif event.key=='increment' then self.count=self.count+1
+        elseif event.key=='show' then self.open=true
+        elseif event.key=='hide' then self.open=false end
+    end,
+    view=function(self)
+        return iced.layer({width=100,height=32,content=iced.text(self.count..':'..self.reason),
+            popup=self.open and {id='menu',x=12,y=48,width=200,height=100,
+                content=iced.button('Increment','increment')} or nil})
+    end,
+}
+"#;
+
+fn popup_fixture(source: &str) -> (Fixture, Plots, window::Id, window::Id) {
+    let fixture = Fixture::new(source);
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let mut state = State::default();
+    state.instances.insert((OutputId(1), "bar".into()), app);
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    let app = &state.instances[&(OutputId(1), "bar".into())];
+    let parent = app.surface().unwrap();
+    let child = app.popup.as_ref().unwrap().surface;
+    plots.apps = state;
+    (fixture, plots, parent, child)
+}
+
+#[test]
+fn app_popup_actions_share_parent_state_and_reuse_the_child_surface() {
+    let (_fixture, mut plots, parent, child) = popup_fixture(POPUP_APP);
+    let _ = view(&plots, child);
+    let actions = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface: child,
+            action: "increment".into(),
+        },
+    ));
+    let app = &plots.apps.instances[&(OutputId(1), "bar".into())];
+    assert_eq!(text(app), "1:none");
+    assert_eq!(app.popup.as_ref().unwrap().surface, child);
+    assert!(actions.iter().any(|a| matches!(a, iced_runtime::Action::Output(Plant::App(AppMessage::Redraw(id))) if *id == parent)));
+    assert!(actions.iter().any(|a| matches!(a, iced_runtime::Action::Output(Plant::App(AppMessage::Redraw(id))) if *id == child)));
+}
+
+#[test]
+fn app_popup_dismissal_notifies_only_the_owner_and_stale_events_are_ignored() {
+    let (_fixture, mut plots, parent, child) = popup_fixture(POPUP_APP);
+    let _ = messages(update(
+        &mut plots,
+        AppMessage::DismissPopup {
+            surface: child,
+            reason: "outside",
+        },
+    ));
+    let app = &plots.apps.instances[&(OutputId(1), "bar".into())];
+    assert_eq!(text(app), "0:outside");
+    assert!(app.popup.is_none());
+    assert!(app.runtime.is_some());
+    assert!(!plots.windows.ids.contains_key(&child));
+    assert!(
+        messages(update(
+            &mut plots,
+            AppMessage::Action {
+                surface: child,
+                action: "increment".into()
+            }
+        ))
+        .is_empty()
+    );
+    let _ = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface: parent,
+            action: "show".into(),
+        },
+    ));
+    let replacement = plots.apps.instances[&(OutputId(1), "bar".into())]
+        .popup
+        .as_ref()
+        .unwrap()
+        .surface;
+    assert_ne!(replacement, child);
+    assert!(
+        messages(update(
+            &mut plots,
+            AppMessage::DismissPopup {
+                surface: child,
+                reason: "escape"
+            }
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn app_popup_stays_closed_even_if_the_dismissal_handler_fails() {
+    let source = POPUP_APP.replace(
+        "self.reason=event.reason; self.open=false",
+        "error('dismissal failed')",
+    );
+    let (_fixture, mut plots, parent, child) = popup_fixture(&source);
+    let _ = messages(update(
+        &mut plots,
+        AppMessage::DismissPopup {
+            surface: child,
+            reason: "escape",
+        },
+    ));
+    let _ = messages(refresh_surface(&mut plots, parent));
+    let app = &plots.apps.instances[&(OutputId(1), "bar".into())];
+    assert!(app.root().unwrap().popup.is_some());
+    assert!(app.popup.is_none());
+    assert_eq!(app.dismissed_popup.as_deref(), Some("menu"));
+}
+
+#[test]
+fn app_popup_native_close_does_not_unmount_the_parent() {
+    let (_fixture, mut plots, parent, child) = popup_fixture(POPUP_APP);
+    let _ = messages(plots.update(Plant::Wayland(crate::shell::LandEvent::Closed(child))));
+    let app = &plots.apps.instances[&(OutputId(1), "bar".into())];
+    assert_eq!(app.surface(), Some(parent));
+    assert_eq!(text(app), "0:closed");
+    assert!(app.popup.is_none());
+}
+
+#[test]
+fn escape_key_dismisses_only_the_framework_popup() {
+    use iced::keyboard::{self, Key, key};
+    let (_fixture, mut plots, parent, child) = popup_fixture(POPUP_APP);
+    let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        key: Key::Named(key::Named::Escape),
+        modified_key: Key::Named(key::Named::Escape),
+        physical_key: key::Physical::Code(key::Code::Escape),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::default(),
+        text: None,
+        repeat: false,
+    });
+    let _ = messages(plots.update(Plant::Graft(child, event)));
+    let app = &plots.apps.instances[&(OutputId(1), "bar".into())];
+    assert_eq!(text(app), "0:escape");
+    assert!(app.popup.is_none());
+    assert!(plots.windows.ids.contains_key(&parent));
+}
+
+#[test]
+fn closing_the_parent_closes_its_overlay_child_and_retires_the_vm() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (_fixture, mut plots, parent, child) = popup_fixture(POPUP_APP);
+    let actions: Vec<_> = runtime.block_on(async {
+        iced_runtime::task::into_stream(
+            plots.update(Plant::Wayland(crate::shell::LandEvent::Closed(parent))),
+        )
+        .unwrap()
+        .collect()
+        .await
+    });
+    assert!(plots.apps.instances.is_empty());
+    assert!(!plots.windows.ids.contains_key(&parent));
+    assert!(!plots.windows.ids.contains_key(&child));
+    assert!(actions.iter().any(|a| matches!(a, iced_runtime::Action::Window(iced_runtime::window::Action::Close(id)) if *id == child)));
+}
+
+#[test]
+fn app_reload_replaces_popup_identity_and_invalid_candidates_preserve_the_old_popup() {
+    let (fixture, mut plots, _parent, child) = popup_fixture(POPUP_APP);
+    let mut state = std::mem::take(&mut plots.apps);
+    let app = state
+        .instances
+        .get_mut(&(OutputId(1), "bar".into()))
+        .unwrap();
+    fixture.write(&POPUP_APP.replace("width=200,height=100", "width=0,height=100"));
+    assert!(fixture.render(app, false).is_err());
+    assert_eq!(app.popup.as_ref().unwrap().surface, child);
+    fixture.write(&POPUP_APP.replace("self.count=0", "self.count=10"));
+    fixture.render(app, false).unwrap();
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    assert_ne!(
+        state.instances[&(OutputId(1), "bar".into())]
+            .popup
+            .as_ref()
+            .unwrap()
+            .surface,
+        child
+    );
+    assert!(!plots.windows.ids.contains_key(&child));
+    plots.apps = state;
+}
+
+#[test]
+fn popup_instances_on_other_outputs_are_unaffected_by_dismissal() {
+    let (fixture, mut plots, _parent, child) = popup_fixture(POPUP_APP);
+    let mut other = instance("DP-2");
+    fixture.render(&mut other, false).unwrap();
+    let mut state = std::mem::take(&mut plots.apps);
+    state.instances.insert((OutputId(2), "bar".into()), other);
+    reconcile(&mut plots, &mut state, &mut Vec::new());
+    let peer = state.instances[&(OutputId(2), "bar".into())]
+        .popup
+        .as_ref()
+        .unwrap()
+        .surface;
+    plots.apps = state;
+    let _ = messages(update(
+        &mut plots,
+        AppMessage::DismissPopup {
+            surface: child,
+            reason: "outside",
+        },
+    ));
+    assert!(is_popup(&plots, peer));
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(2), "bar".into())]),
+        "0:none"
+    );
+}
+
+#[test]
+fn hiding_a_parent_releases_its_child_without_unmounting_the_app() {
+    let (_fixture, mut plots, parent, child) = popup_fixture(POPUP_APP);
+    let mut state = std::mem::take(&mut plots.apps);
+    let mut motion = std::mem::take(&mut plots.animation.motion);
+    state
+        .instances
+        .get_mut(&(OutputId(1), "bar".into()))
+        .unwrap()
+        .drop_roots(&mut motion);
+    plots.animation.motion = motion;
+    reconcile(&mut plots, &mut state, &mut Vec::new());
+    let app = &state.instances[&(OutputId(1), "bar".into())];
+    assert!(app.runtime.is_some());
+    assert!(app.popup.is_none());
+    assert!(!plots.windows.ids.contains_key(&parent));
+    assert!(!plots.windows.ids.contains_key(&child));
+    plots.apps = state;
+}
+
+#[test]
+fn bundled_popup_example_opens_a_child_and_builds_its_content() {
+    let source = include_str!("../../../examples/apps/popup/app.lua");
+    let fixture = Fixture::new(source);
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    assert!(app.root().unwrap().popup.is_none());
+    with_services(|services| {
+        app.runtime
+            .as_mut()
+            .unwrap()
+            .app_event(
+                services,
+                &app.output_name,
+                &app.context,
+                &app.props,
+                AppEvent::Action(&"toggle".into()),
+            )
+            .unwrap()
+    });
+    fixture.render(&mut app, false).unwrap();
+    let popup = app.root().unwrap().popup.as_ref().unwrap();
+    assert_eq!(popup.geometry.id, "counter");
+    crate::ui::build::build_node(&popup.content, 13.0, None).unwrap();
+}
+
 #[test]
 fn input_refreshes_only_the_owning_instance_and_redraws_its_surface() {
     let fixture =
@@ -115,10 +433,10 @@ fn input_refreshes_only_the_owning_instance_and_redraws_its_surface() {
     }
     reconcile(&mut plots, &mut state, &mut Vec::new());
     let surface = state.instances[&(OutputId(1), "bar".into())]
-        .surface
+        .surface()
         .unwrap();
     // Every view increments count, making unrelated executions observable.
-    let other_revision = state.instances[&(OutputId(2), "bar".into())].revision;
+    let other_revision = state.instances[&(OutputId(2), "bar".into())].revision();
     plots.apps = state;
     let actions = messages(update(
         &mut plots,
@@ -132,7 +450,7 @@ fn input_refreshes_only_the_owning_instance_and_redraws_its_surface() {
         "DP-1:3:0"
     );
     assert_eq!(
-        plots.apps.instances[&(OutputId(2), "bar".into())].revision,
+        plots.apps.instances[&(OutputId(2), "bar".into())].revision(),
         other_revision
     );
     assert_eq!(
@@ -150,12 +468,10 @@ fn input_refreshes_only_the_owning_instance_and_redraws_its_surface() {
 
 #[test]
 fn palette_example_renders_before_and_after_native_generation() {
-    let fixture = Fixture::new(include_str!(
-        "../../../examples/framework/apps/palette/app.lua"
-    ));
+    let fixture = Fixture::new(include_str!("../../../examples/apps/palette/app.lua"));
     let mut app = instance("DP-1");
     fixture.render(&mut app, false).unwrap();
-    assert_eq!(app.root.as_ref().unwrap().surface.width, Some(300));
+    assert_eq!(app.root().unwrap().surface.width, Some(300));
     let runtime = app.runtime.as_ref().unwrap();
     let mut owner = Owner::default();
     owner.reset(runtime.managed_generation().unwrap());
@@ -183,7 +499,7 @@ fn palette_example_renders_before_and_after_native_generation() {
             .unwrap()
     });
     fixture.render(&mut app, false).unwrap();
-    crate::ui::build::build_node(&app.root.as_ref().unwrap().content, 13.0, None).unwrap();
+    crate::ui::build::build_node(&app.root().unwrap().content, 13.0, None).unwrap();
 }
 
 #[test]
@@ -191,16 +507,36 @@ fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
     let fixture = Fixture::new(include_str!(
         "../../../config/riced/example/apps/background/app.lua"
     ));
-    std::fs::write(
-        fixture.project.app_root("bar").join("components/menu.lua"),
-        include_str!("../../../config/riced/example/apps/background/components/menu.lua"),
-    )
-    .unwrap();
+    // The app composes its layers from its own component library.
+    for (relative, source) in [
+        (
+            "menu.lua",
+            include_str!("../../../config/riced/example/apps/background/components/menu.lua"),
+        ),
+        (
+            "layers/wallpaper.lua",
+            include_str!(
+                "../../../config/riced/example/apps/background/components/layers/wallpaper.lua"
+            ),
+        ),
+        (
+            "layers/bar.lua",
+            include_str!("../../../config/riced/example/apps/background/components/layers/bar.lua"),
+        ),
+    ] {
+        let target = fixture
+            .project
+            .app_root("bar")
+            .join("components")
+            .join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, source).unwrap();
+    }
     let mut app = instance("DP-1");
     app.context["output"] = json!({"name":"DP-1","x":0,"y":0,"width":1920,"height":1080});
     app.props["output"] = app.context["output"].clone();
     fixture.render(&mut app, false).unwrap();
-    assert!(app.root.as_ref().unwrap().surface.pointer_events);
+    assert!(app.roots["background"].root.surface.pointer_events);
     for (state, button, x, y) in [
         ("press", Some("left"), 10.0, 20.0),
         ("move", None, 100.0, 200.0),
@@ -230,6 +566,75 @@ fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
         .unwrap();
         fixture.render(&mut app, false).unwrap();
     }
+    // The context menu offers the same host commands the native menu had.
+    let mut labels = Vec::new();
+    buttons(&app.roots["background"].root.content, &mut labels);
+    assert!(labels.iter().any(|label| label == "Add Top"), "{labels:?}");
+    assert!(
+        labels.iter().any(|label| label == "Open Settings"),
+        "{labels:?}"
+    );
+    // The layer embeds the host's desktop-widget slot.
+    let mut slots = Vec::new();
+    native_slots(&app.roots["background"].root.content, &mut slots);
+    assert_eq!(slots, ["desktop-widgets"]);
+    // The app owns its layer set: "Add Top" appends to app state and the next
+    // view declares an extra bar layer. No host command is involved.
+    assert!(!app.roots.contains_key("bar-1"), "{:?}", app.roots.keys());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            // Let the app's own documents load, then add a bar through state.
+            for delivery in managed_deliveries(&mut app).await {
+                with_services(|services| app.deliver(services, &delivery).unwrap().unwrap());
+            }
+            with_services(|services| {
+                app.runtime.as_mut().unwrap().app_event(
+                    services,
+                    &app.output_name,
+                    &app.context,
+                    &app.props,
+                    AppEvent::Action(&Action::from("add-top".to_string())),
+                )
+            })
+            .unwrap();
+            for delivery in managed_deliveries(&mut app).await {
+                with_services(|services| app.deliver(services, &delivery).unwrap().unwrap());
+            }
+        });
+    fixture.render(&mut app, false).unwrap();
+    let bar = app.roots.get("bar-1").expect("bar layer");
+    // The right-click was at (1900, 1070) on a 1920x1080 output, so the Lua
+    // policy docks the new bar to the bottom edge.
+    assert_eq!(bar.root.surface.layer, "top");
+    assert!(bar.root.surface.anchors.bottom);
+    assert_eq!(bar.root.surface.exclusive_zone, 32);
+
+    // "Open Settings" is still a host shell command.
+    let value = with_services(|services| {
+        app.runtime.as_mut().unwrap().app_event(
+            services,
+            &app.output_name,
+            &app.context,
+            &app.props,
+            AppEvent::Action(&Action::from("open-settings".to_string())),
+        )
+    })
+    .unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let plants = messages(crate::shell::actions::command_from_action(
+        &value, &mut plots,
+    ));
+    assert!(
+        matches!(
+            plants.as_slice(),
+            [iced_runtime::Action::Output(Plant::Sprout)]
+        ),
+        "{plants:?}"
+    );
     let config =
         crate::config::test_parse_config(include_str!("../../../config/riced/example/config.lua"))
             .unwrap();
@@ -369,7 +774,7 @@ fn native_reconciliation_reuses_surfaces_and_updates_layout_without_restarting_a
         2
     );
     let first = state.instances[&(OutputId(1), "bar".into())]
-        .surface
+        .surface()
         .unwrap();
     let mut commands = Vec::new();
     assert!(!reconcile(&mut plots, &mut state, &mut commands));
@@ -378,8 +783,7 @@ fn native_reconciliation_reuses_surfaces_and_updates_layout_without_restarting_a
         .instances
         .get_mut(&(OutputId(1), "bar".into()))
         .unwrap()
-        .root
-        .as_mut()
+        .root_mut()
         .unwrap()
         .surface
         .height = Some(48);
@@ -413,12 +817,12 @@ fn hiding_and_stale_events_do_not_resurrect_or_invoke_retired_instances() {
     let fixture = Fixture::new(COUNTER);
     let mut app = instance("DP-1");
     fixture.render(&mut app, false).unwrap();
-    app.surface = Some(surface);
+    app.set_surface(surface);
     plots
         .windows
         .ids
         .insert(surface, PlotInfo::App(OutputId(1)));
-    app.root = None;
+    app.drop_roots(&mut plots.animation.motion);
     let mut state = State::default();
     state.instances.insert((OutputId(1), "bar".into()), app);
     let mut commands = Vec::new();
@@ -434,7 +838,7 @@ fn hiding_and_stale_events_do_not_resurrect_or_invoke_retired_instances() {
 #[test]
 fn bundled_bar_loads_and_builds_without_a_special_rust_bar_host() {
     let project = Project {
-        root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/framework"),
+        root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples"),
     };
     let sources = project.sources("bar").unwrap();
     let config = AppConfig {
@@ -456,16 +860,293 @@ fn bundled_bar_loads_and_builds_without_a_special_rust_bar_host() {
         )
     })
     .unwrap();
-    assert_eq!(app.root.as_ref().unwrap().surface.exclusive_zone, 32);
+    assert_eq!(app.root().unwrap().surface.exclusive_zone, 32);
     let (_, receiver) = iced_wayland_subscriber::shell::channel();
     let mut plots = Plots::new(receiver);
     let surface = window::Id::unique();
-    app.surface = Some(surface);
+    app.set_surface(surface);
     plots
         .apps
         .instances
         .insert((OutputId(1), "bar".into()), app);
     let _element = view(&plots, surface);
+}
+
+#[test]
+fn bundled_editors_app_builds_and_spin_box_actions_update_its_layout() {
+    fn collect_texts(node: &crate::ui::node::WidgetNode, out: &mut Vec<String>) {
+        use crate::ui::node::WidgetNode;
+        match node {
+            WidgetNode::Text { content, .. } => out.push(content.clone()),
+            WidgetNode::Column { children, .. }
+            | WidgetNode::Row { children, .. }
+            | WidgetNode::Stack { children, .. }
+            | WidgetNode::Masonry { children, .. } => {
+                for child in children {
+                    collect_texts(child, out);
+                }
+            }
+            WidgetNode::Container { child, .. }
+            | WidgetNode::Scrollable { child, .. }
+            | WidgetNode::Clickable { child, .. }
+            | WidgetNode::Anchored { child, .. }
+            | WidgetNode::Aligned { child, .. }
+            | WidgetNode::Animated { child, .. } => collect_texts(child, out),
+            _ => {}
+        }
+    }
+    let project = Project {
+        root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples"),
+    };
+    let sources = project.sources("editors").unwrap();
+    let config = AppConfig {
+        name: "editors".into(),
+        ..Default::default()
+    };
+    let mut app = instance("DP-1");
+    with_services(|services| {
+        app.render(
+            &Request {
+                project: &project,
+                config: &config,
+                sources: &Ok(sources),
+                components: &[],
+                services,
+            },
+            &mut Default::default(),
+            false,
+        )
+    })
+    .unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let surface = window::Id::unique();
+    app.set_surface(surface);
+    plots
+        .apps
+        .instances
+        .insert((OutputId(1), "editors".into()), app);
+    let _element = view(&plots, surface);
+    let mut texts = Vec::new();
+    collect_texts(
+        &plots.apps.instances[&(OutputId(1), "editors".into())]
+            .root()
+            .unwrap()
+            .content,
+        &mut texts,
+    );
+    assert!(texts.iter().any(|text| text == "140 px"), "{texts:?}");
+
+    // `iced.spin_box(...):on_change(key)` emits a numeric action; the app owns
+    // the value and re-renders its masonry layout from it.
+    let _ = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface,
+            action: Action::change(
+                "column_width".into(),
+                crate::ui::action::ActionValue::Number(220.0),
+            ),
+        },
+    ));
+    let mut texts = Vec::new();
+    collect_texts(
+        &plots.apps.instances[&(OutputId(1), "editors".into())]
+            .root()
+            .unwrap()
+            .content,
+        &mut texts,
+    );
+    assert!(texts.iter().any(|text| text == "220 px"), "{texts:?}");
+}
+
+#[test]
+fn framework_host_slots_resolve_desktop_widgets_and_reject_unknown_ids() {
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let plots = Plots::new(receiver);
+    // The legacy desktop host has no description equivalent, so it is a slot.
+    let mut native = app_native(&plots, Some(OutputId(1)));
+    let element = native("desktop-widgets").unwrap();
+    drop(element);
+    // Without an output there is nothing to composite.
+    let mut native = app_native(&plots, None);
+    let error = native("desktop-widgets").err().unwrap();
+    assert!(error.contains("output-bound"), "{error}");
+    // Unknown ids are reported, never silently dropped.
+    let mut native = app_native(&plots, Some(OutputId(1)));
+    let error = native("wallpaper-map").err().unwrap();
+    assert!(error.contains("not a framework host slot"), "{error}");
+}
+
+#[test]
+fn framework_apps_build_a_layer_that_embeds_the_desktop_widget_slot() {
+    let fixture = Fixture::new(
+        "return {view=function() return iced.layer({width=200,height=100,\
+         content=iced.native('desktop-widgets')}) end}",
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let surface = window::Id::unique();
+    app.set_surface(surface);
+    plots
+        .apps
+        .instances
+        .insert((OutputId(1), "bar".into()), app);
+    plots
+        .windows
+        .ids
+        .insert(surface, PlotInfo::App(OutputId(1)));
+    let _element = view(&plots, surface);
+}
+
+#[test]
+fn an_app_can_declare_several_layers_and_each_gets_its_own_surface() {
+    let fixture = Fixture::new(
+        r#"
+        return {
+            view = function(self)
+                return {
+                    iced.layer({ id = "wallpaper", layer = "background",
+                        anchors = { top = true, right = true, bottom = true, left = true },
+                        exclusive_zone = -1, content = iced.text("wallpaper") }),
+                    iced.layer({ id = "bar", layer = "top",
+                        anchors = { top = true, left = true, right = true },
+                        height = 32, exclusive_zone = 32, content = iced.text("bar") }),
+                    iced.layer({ id = "hud", layer = "overlay", input = "none",
+                        anchors = { bottom = true, left = true },
+                        width = 120, height = 40, content = iced.text("hud") }),
+                }
+            end,
+        }
+        "#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    assert_eq!(app.roots.len(), 3, "{:?}", app.roots.keys());
+    let mut state = State::default();
+    state.instances.insert((OutputId(1), "bar".into()), app);
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let mut commands = Vec::new();
+    assert!(reconcile(&mut plots, &mut state, &mut commands));
+    let app = &state.instances[&(OutputId(1), "bar".into())];
+    // One native surface per declared layer, each keyed by its layer id.
+    let surfaces: Vec<_> = app.roots.keys().cloned().collect();
+    assert_eq!(surfaces, ["bar", "hud", "wallpaper"]);
+    for root in app.roots.values() {
+        assert!(root.surface.is_some(), "{:?}", root.root.surface.id);
+        assert!(plots.windows.ids.contains_key(&root.surface.unwrap()));
+    }
+    // Each surface renders only its own layer's content.
+    for (id, layer) in &app.roots {
+        let crate::ui::node::WidgetNode::Text { content, .. } = &layer.root.content else {
+            panic!("{id} is not text")
+        };
+        assert_eq!(content, id);
+    }
+    // Dropping a layer retires exactly its surface.
+    let dropped = state
+        .instances
+        .get_mut(&(OutputId(1), "bar".into()))
+        .unwrap()
+        .roots
+        .remove("hud")
+        .unwrap()
+        .surface
+        .unwrap();
+    state
+        .instances
+        .get_mut(&(OutputId(1), "bar".into()))
+        .unwrap()
+        .retired
+        .push(dropped);
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    assert!(!plots.windows.ids.contains_key(&dropped));
+    assert_eq!(state.instances[&(OutputId(1), "bar".into())].roots.len(), 2);
+}
+
+#[test]
+fn an_app_composes_a_layer_from_its_own_file() {
+    let fixture = Fixture::new(
+        r#"
+        return {
+            view = function(self)
+                return {
+                    iced.layer({ id = "background", width = 100, height = 100,
+                        content = iced.text("own") }),
+                    riced.layer("layers/hud.lua", { label = "hud" }),
+                }
+            end,
+        }
+        "#,
+    );
+    let layer = fixture
+        .project
+        .app_root("bar")
+        .join("components/layers/hud.lua");
+    std::fs::create_dir_all(layer.parent().unwrap()).unwrap();
+    std::fs::write(
+        &layer,
+        r#"
+        return {
+            view = function(self, props)
+                return iced.layer({
+                    id = "hud", layer = "overlay", input = "none",
+                    anchors = { bottom = true, left = true },
+                    width = 120, height = 40,
+                    content = iced.text(props.label),
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    // The layer file owns its surface, not just its content.
+    assert_eq!(app.roots.len(), 2, "{:?}", app.roots.keys());
+    let hud = app.roots.get("hud").expect("hud layer");
+    assert_eq!(hud.root.surface.layer, "overlay");
+    assert_eq!(hud.root.surface.input, "none");
+    let crate::ui::node::WidgetNode::Text { content, .. } = &hud.root.content else {
+        panic!("hud content")
+    };
+    assert_eq!(content, "hud");
+
+    // A layer file that returns a widget tree is rejected by name.
+    std::fs::write(
+        &layer,
+        "return { view = function(self) return iced.text('nope') end }",
+    )
+    .unwrap();
+    let mut app = instance("DP-1");
+    let error = fixture.render(&mut app, false).unwrap_err();
+    assert!(
+        error.contains("layers/hud.lua must return iced.layer"),
+        "{error}"
+    );
+}
+
+#[test]
+fn duplicate_layer_ids_and_duplicate_list_ids_are_rejected() {
+    let fixture = Fixture::new(
+        r#"
+        return {
+            view = function(self)
+                return {
+                    iced.layer({ id = "same", width = 10, height = 10, content = iced.text("a") }),
+                    iced.layer({ id = "same", width = 10, height = 10, content = iced.text("b") }),
+                }
+            end,
+        }
+        "#,
+    );
+    let mut app = instance("DP-1");
+    let error = fixture.render(&mut app, false).unwrap_err();
+    assert!(error.contains("duplicate layer id"), "{error}");
 }
 
 #[test]
@@ -503,7 +1184,7 @@ fn native_close_releases_the_instance_even_if_unmount_fails() {
     let (_, receiver) = iced_wayland_subscriber::shell::channel();
     let mut plots = Plots::new(receiver);
     let surface = window::Id::unique();
-    app.surface = Some(surface);
+    app.set_surface(surface);
     plots
         .apps
         .instances
@@ -785,7 +1466,7 @@ fn app_teardown_cancels_file_watch_work_and_rejects_retired_deliveries() {
     let (_, receiver) = iced_wayland_subscriber::shell::channel();
     let mut plots = Plots::new(receiver);
     let surface = window::Id::unique();
-    app.surface = Some(surface);
+    app.set_surface(surface);
     plots
         .apps
         .instances

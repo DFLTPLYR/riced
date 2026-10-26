@@ -6,6 +6,7 @@ use iced_exwlshell::reexport::{
 };
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -142,6 +143,83 @@ impl Surface {
 pub(crate) struct LayerRoot {
     pub surface: Surface,
     pub content: WidgetNode,
+    pub popup: Option<AppPopup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PopupGeometry {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: u32,
+    pub height: u32,
+}
+impl Default for PopupGeometry {
+    fn default() -> Self {
+        Self {
+            id: "popup".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 0,
+            height: 0,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AppPopup {
+    pub geometry: PopupGeometry,
+    pub content: WidgetNode,
+}
+impl AppPopup {
+    fn parse(
+        lua: &Lua,
+        value: Value,
+        hover: &crate::ui::hover::HoverSet,
+    ) -> mlua::Result<Option<Self>> {
+        if value.is_nil() {
+            return Ok(None);
+        }
+        let Value::Table(table) = value else {
+            return Err(mlua::Error::RuntimeError(
+                "layer.popup must be a table or nil".into(),
+            ));
+        };
+        let fields = lua.create_table()?;
+        for pair in table.clone().pairs::<String, Value>() {
+            let (key, value) = pair?;
+            if key != "content" {
+                fields.raw_set(key, value)?;
+            }
+        }
+        let geometry: PopupGeometry = lua.from_value(Value::Table(fields))?;
+        if geometry.id.is_empty()
+            || geometry.id.len() > 64
+            || !geometry
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            || !geometry.x.is_finite()
+            || !geometry.y.is_finite()
+            || geometry.x.abs() > 32768.0
+            || geometry.y.abs() > 32768.0
+            || !(1..=32768).contains(&geometry.width)
+            || !(1..=32768).contains(&geometry.height)
+        {
+            return Err(mlua::Error::RuntimeError(
+                "invalid layer.popup identity, position, or size (1..32768)".into(),
+            ));
+        }
+        let value = table.raw_get::<Value>("content")?;
+        if value.is_nil() {
+            return Err(mlua::Error::RuntimeError(
+                "layer.popup.content is required".into(),
+            ));
+        }
+        let content = parse_node_hovered(&value, hover)
+            .map_err(|e| mlua::Error::RuntimeError(format!("layer.popup.content: {e}")))?;
+        Ok(Some(Self { geometry, content }))
+    }
 }
 impl LayerRoot {
     pub fn parse(
@@ -165,7 +243,7 @@ impl LayerRoot {
         let fields = lua.create_table()?;
         for pair in table.clone().pairs::<String, Value>() {
             let (key, value) = pair?;
-            if key != "type" && key != "content" {
+            if key != "type" && key != "content" && key != "popup" {
                 fields.raw_set(key, value)?;
             }
         }
@@ -178,7 +256,62 @@ impl LayerRoot {
             ));
         }
         let content = parse_node_hovered(&value, hover).map_err(mlua::Error::RuntimeError)?;
-        Ok(Some(Self { surface, content }))
+        let popup = AppPopup::parse(lua, table.raw_get("popup")?, hover)?;
+        crate::ui::scene::Lists::validate_roots(
+            std::iter::once(&content).chain(popup.iter().map(|p| &p.content)),
+        )
+        .map_err(mlua::Error::RuntimeError)?;
+        Ok(Some(Self {
+            surface,
+            content,
+            popup,
+        }))
+    }
+
+    /// Every layer an app declares: one root, an array of roots, or nothing.
+    ///
+    /// `iced.layer{...}` carries its own `type`; a list is a plain array of
+    /// them. Ids must be unique across the list because each one owns a native
+    /// surface and its own list state.
+    pub fn parse_list(
+        lua: &Lua,
+        value: Value,
+        hover: &crate::ui::hover::HoverSet,
+    ) -> mlua::Result<Vec<Self>> {
+        if value.is_nil() {
+            return Ok(Vec::new());
+        }
+        let Value::Table(table) = &value else {
+            return Err(mlua::Error::RuntimeError(
+                "app:view must return iced.layer({...}), an array of layers, or nil".into(),
+            ));
+        };
+        if matches!(table.raw_get::<Value>("type")?, Value::String(ref tag) if tag == "layer") {
+            return Ok(Self::parse(lua, value, hover)?.into_iter().collect());
+        }
+        let mut roots = Vec::new();
+        for entry in table.clone().sequence_values::<Value>() {
+            let entry = entry?;
+            let root = Self::parse(lua, entry, hover)?.ok_or_else(|| {
+                mlua::Error::RuntimeError("app:view layer entries must not be nil".into())
+            })?;
+            roots.push(root);
+        }
+        if roots.is_empty() {
+            return Err(mlua::Error::RuntimeError(
+                "app:view must return iced.layer({...}) or a non-empty array of layers".into(),
+            ));
+        }
+        let mut ids = HashSet::new();
+        for root in &roots {
+            if !ids.insert(root.surface.id.as_str()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "duplicate layer id {:?}; every layer needs a unique id",
+                    root.surface.id
+                )));
+            }
+        }
+        Ok(roots)
     }
 }
 pub(crate) fn install(lua: &Lua, iced: &Table) -> mlua::Result<()> {
@@ -204,6 +337,38 @@ pub(crate) fn install(lua: &Lua, iced: &Table) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn app_popup_geometry_is_strict_and_content_cannot_contain_surfaces() {
+        let lua = Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let make = |fields: &str| {
+            format!(
+                "return iced.layer({{width=100,height=32,content=iced.text('parent'),popup={{{fields}}}}})"
+            )
+        };
+        let source = make("id='menu',x=-5,y=48,width=200,height=100,content=iced.text('menu')");
+        let value = lua.load(&source).eval().unwrap();
+        let root = LayerRoot::parse(&lua, value, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.popup.unwrap().geometry.id, "menu");
+        for fields in [
+            "width=0,height=100,content=iced.text('x')",
+            "width=200,content=iced.text('x')",
+            "id='../menu',width=200,height=100,content=iced.text('x')",
+            "x=math.huge,width=200,height=100,content=iced.text('x')",
+            "width=200,height=100,typo=true,content=iced.text('x')",
+            "width=200,height=100",
+            "width=200,height=100,content=iced.layer({width=1,height=1,content=iced.text('x')})",
+        ] {
+            let value = lua.load(make(fields)).eval().unwrap();
+            assert!(
+                LayerRoot::parse(&lua, value, &Default::default()).is_err(),
+                "{fields}"
+            );
+        }
+    }
+
     #[test]
     fn roots_validate_protocol_constraints_and_cannot_nest() {
         let lua = Lua::new();

@@ -104,7 +104,8 @@ fn declared_lists<'a>(
         }
         WidgetNode::Row { children, .. }
         | WidgetNode::Column { children, .. }
-        | WidgetNode::Stack { children, .. } => {
+        | WidgetNode::Stack { children, .. }
+        | WidgetNode::Masonry { children, .. } => {
             for child in children {
                 declared_lists(child, out)?;
             }

@@ -314,9 +314,8 @@ impl From<&crate::config::TopConfig> for TopLocal {
 /// Lucide icon bytes by name (`{icon:cpu}` in widget text). Lookup is
 /// case-insensitive and ignores `-_ ` separators, so `memory-stick`,
 /// `memory_stick` and `MemoryStick` all resolve. Covers the full
-/// Lucide set via the build-generated lookup (same fresh-icons
-/// guarantee as lucide-iced itself — no hand list, no checked-in
-/// table) plus short aliases (`mem`, `vol`, `up`...). Unknown names
+/// pinned Lucide set via the build-generated lookup from checked-in SVGs,
+/// plus short aliases (`mem`, `vol`, `up`...). Unknown names
 /// render as literal text so typos stay visible.
 /// Build a top-level row/column with QML-style transitions: direct
 /// button children (keyed by action) shift by their live motion
@@ -720,6 +719,32 @@ pub(crate) fn build_with_lists_opacity(
                 .width(width.resolve(hints.width))
                 .height(height.resolve(hints.height))
                 .into())
+        }
+        WidgetNode::Masonry {
+            children,
+            column_width,
+            spacing,
+        } => {
+            let elements = children
+                .iter()
+                .map(|child| {
+                    build_with_lists_opacity(
+                        child,
+                        widget,
+                        size,
+                        message.clone(),
+                        runtime,
+                        lists,
+                        hover.clone(),
+                        opacity,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(crate::ui::widgets::masonry::masonry(
+                elements,
+                *column_width,
+                *spacing,
+            ))
         }
         WidgetNode::Stack {
             children,

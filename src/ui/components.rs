@@ -14,6 +14,9 @@ macro_rules! components {
         pub(crate) enum WidgetNode {
             $($variant { $($field: $ty),* },)*
             Spinner,
+            /// Host-filled placeholder: the realizing host substitutes a
+            /// native element for this slot id. Never nested content.
+            Native { id: String },
             Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: Insets },
             Clickable { child: Box<WidgetNode>, action: String },
             Animated { child: Box<WidgetNode>, spec: super::animations::Spec },
@@ -51,10 +54,11 @@ macro_rules! components {
         pub(crate) const COMPONENTS: &[Component] = &[
             $(Component { name: $lua, rust_type: stringify!($name), arguments: &[$($arg),*], setters: &[$($setter),*] },)*
             Component { name: "spinner", rust_type: "SpinnerNode", arguments: &[], setters: &[] },
+            Component { name: "native", rust_type: "WidgetNode", arguments: &["id"], setters: &[] },
         ];
         impl WidgetNode {
             pub(crate) fn kind(&self) -> &'static str {
-                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Animated { child, .. } | Self::Aligned { child, .. } => child.kind() }
+                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Native { .. } => "native", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Animated { child, .. } | Self::Aligned { child, .. } => child.kind() }
             }
         }
     };
@@ -169,6 +173,9 @@ components! {
     Stack => StackNode, "stack", ["children"], ["width", "height"] {
         children: Vec<WidgetNode>, width: NodeLength, height: NodeLength
     }
+    Masonry => MasonryNode, "masonry", ["children"], ["column_width", "spacing"] {
+        children: Vec<WidgetNode>, column_width: f32, spacing: f32
+    }
     Button => ButtonNode, "button", ["label", "action"], ["action", "width", "height", "padding", "radius", "background", "color"] {
         label: String, action: String, width: Option<NodeLength>, height: Option<NodeLength>,
         padding: Option<Insets>, color: Option<iced::Color>, background: Option<iced::Color>, radius: Option<Corners>
@@ -194,6 +201,9 @@ components! {
     }
     Radio => RadioNode, "radio", ["label", "value", "selected"], ["selected", "on_select", "width", "size", "spacing"] {
         label: String, value: String, selected: Option<String>, on_select: Option<String>, width: Option<NodeLength>, size: Option<f32>, spacing: f32
+    }
+    SpinBox => SpinBoxNode, "spin_box", ["value", "min", "max"], ["value", "min", "max", "step", "decimals", "on_change", "width", "height"] {
+        value: f32, min: f32, max: f32, step: f32, decimals: usize, on_change: Option<String>, width: Option<NodeLength>, height: Option<f32>
     }
     Canvas => CanvasNode, "canvas", ["drawing"], ["width", "height"] {
         drawing: super::canvas::CanvasDrawing, width: NodeLength, height: NodeLength

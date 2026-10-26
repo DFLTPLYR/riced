@@ -20,6 +20,8 @@ const EXAMPLES: &[&str] = &[
     "iced.row({iced.text('x'), iced.button('go','go')}, 3)",
     "iced.column({iced.space(), iced.spinner()}):width(size.fill)",
     "iced.stack({iced.space():width(100):height(40), iced.text('on top')}):width(120):height(60)",
+    "iced.masonry({iced.text('one'),iced.text('two')}):column_width(260):spacing(12)",
+    "iced.native('preview')",
     "iced.button('go','go'):padding(8):radius(3)",
     "iced.progress(0.4):height(8)",
     "iced.separator():height(2)",
@@ -28,6 +30,7 @@ const EXAMPLES: &[&str] = &[
     "iced.checkbox('Enable',false):checked(true):on_toggle('check')",
     "iced.toggler('Enable',true):on_toggle('toggle'):size(24)",
     "iced.slider(0,100,40):step(0.5):on_change('volume'):on_release('released'):height(24)",
+    "iced.spin_box(8, 0, 256):step(2):decimals(1):on_change('margin'):width(120)",
     "iced.text_input('Search','hello'):on_input('query'):on_submit('search'):secure(false)",
     "iced.pick_list({'one','two'},'two'):on_select('pick'):placeholder('Choose')",
     "iced.radio('Two','two','one'):on_select('radio'):spacing(12)",
@@ -79,8 +82,18 @@ fn every_schema_constructs_round_trips_and_has_native_layout() {
             node,
             "{source}"
         );
-        let mut element =
-            realize(&node, 13.0, std::sync::Arc::new(|action| action), true, 1.0).unwrap();
+        let mut element = super::build::realize_with_native(
+            &node,
+            13.0,
+            std::sync::Arc::new(|action| action),
+            true,
+            1.0,
+            &mut |id| {
+                assert_eq!(id, "preview");
+                Ok(iced::widget::text("native slot").into())
+            },
+        )
+        .unwrap();
         let mut tree = Tree::new(&element);
         let layout = element.as_widget_mut().layout(
             &mut tree,
@@ -128,6 +141,231 @@ fn canvas_drawings_are_strict_and_blank_by_default() {
         "return iced.canvas({rects={{x=0,y=0,width=2,height=2}}})",
     ] {
         assert!(parse(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn masonry_is_strict_and_preserves_responsive_layout_in_every_host() {
+    let lua = lua();
+    let renderer = renderer();
+    for source in [
+        "iced.masonry({}):column_width(0)",
+        "iced.masonry({}):column_width(0/0)",
+        "iced.masonry({}):spacing(-1)",
+        "iced.masonry({iced.popup(iced.text('nested'))})",
+    ] {
+        let value = lua.load(format!("return {source}")).eval().unwrap();
+        assert!(parse_node(&value).is_err(), "{source}");
+    }
+    let node = parse_node(&lua.load("return iced.masonry({iced.space():height(40),iced.space():height(80),iced.space():height(20)}):column_width(260):spacing(12)").eval().unwrap()).unwrap();
+    for host in ["native", "scene", "animated"] {
+        for (width, expected_height) in [(600.0, 80.0), (240.0, 164.0)] {
+            let mut element = match host {
+                "scene" => crate::ui::scene::Lists::default()
+                    .build(
+                        &node,
+                        &crate::ui::anim::AnimRuntime::default(),
+                        std::sync::Arc::new(|_| crate::shell::Plant::Tend),
+                        None,
+                        &mut crate::ui::build::no_native_slots::<crate::shell::Plant>(),
+                    )
+                    .unwrap(),
+                "animated" => crate::shell::screens::top::build_with_lists(
+                    &node,
+                    "fixture",
+                    13.0,
+                    None,
+                    &crate::ui::anim::AnimRuntime::default(),
+                    &Default::default(),
+                    None,
+                )
+                .unwrap(),
+                _ => crate::ui::build::build_node(&node, 13.0, None).unwrap(),
+            };
+            let mut tree = Tree::new(&element);
+            let layout = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, 1000.0)),
+            );
+            let layout = if host == "scene" {
+                &layout.children()[1]
+            } else {
+                &layout
+            };
+            assert_eq!(layout.size().height, expected_height, "{host} at {width}");
+        }
+    }
+}
+
+#[test]
+fn lua_editor_components_decode_roundtrip_and_build() {
+    let lua = lua();
+    lua.load("theme={primary='#89b4fa'}").exec().unwrap();
+    lua.load(include_str!("../../scripts/components/06-editors.lua"))
+        .exec()
+        .unwrap();
+    for source in [
+        "iced.color_swatch({color='#123456',action='select'})",
+        "iced.color_row({label='Primary',color='#123456'})",
+        "iced.image_preview({})",
+        "iced.image_preview({path='missing-preview.png',width=160,height=90})",
+        "iced.image_preview({image=_owned_image})",
+        "iced.file_row({path='/wallpaper.png',action='choose'})",
+        "iced.page_tabs({pages={{id='theme'},{id='animation'}},selected='theme'})",
+        "iced.page_tabs({pages={{id='theme'}},vertical=true})",
+    ] {
+        let value = lua.load(format!("return {source}")).eval().unwrap();
+        let node = parse_node(&value).unwrap();
+        let encoded = super::encode::to_table(&lua, &node).unwrap();
+        assert_eq!(
+            parse_node(&Value::Table(encoded)).unwrap(),
+            node,
+            "{source}"
+        );
+        realize(&node, 13.0, std::sync::Arc::new(|action| action), true, 1.0).unwrap();
+    }
+    for pages in ["{{id='same'},{id='same'}}", "{{id=''}}", "{{id=1}}"] {
+        assert!(
+            lua.load(format!("return iced.page_tabs({{pages={pages}}})"))
+                .eval::<Value>()
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn spin_box_buttons_clamp_values_and_missing_handlers_are_inert() {
+    let lua = lua();
+    let renderer = renderer();
+    for (handler, enabled) in [(":on_change('number')", true), ("", false)] {
+        let node = parse_node(
+            &lua.load(format!(
+                "return iced.spin_box(9,0,10):step(4):width(200){handler}"
+            ))
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+        for (index, expected) in [(0, 5.0), (2, 10.0)] {
+            let mut element =
+                realize(&node, 13.0, std::sync::Arc::new(|action| action), true, 1.0).unwrap();
+            let mut tree = Tree::new(&element);
+            let layout = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(300.0, 300.0)),
+            );
+            let mut messages = Vec::new();
+            click(
+                &mut element,
+                &mut tree,
+                &layout,
+                &renderer,
+                layout.children()[index].bounds().center(),
+                &mut messages,
+            );
+            if enabled {
+                assert_eq!(
+                    messages,
+                    [Action::change(
+                        "number".into(),
+                        ActionValue::Number(expected)
+                    )]
+                );
+            } else {
+                assert!(messages.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn spin_box_typed_values_are_finite_and_clamped() {
+    use iced::keyboard::{
+        Key, Location, Modifiers,
+        key::{Code, Physical},
+    };
+    struct Paste(String);
+    impl iced::advanced::Clipboard for Paste {
+        fn read(&self, _: clipboard::Kind) -> Option<String> {
+            Some(self.0.clone())
+        }
+        fn write(&mut self, _: clipboard::Kind, _: String) {}
+    }
+    let lua = lua();
+    let renderer = renderer();
+    let node = parse_node(
+        &lua.load("return iced.spin_box(5,0,10):width(200):on_change('number')")
+            .eval()
+            .unwrap(),
+    )
+    .unwrap();
+    for (typed, expected) in [
+        ("NaN", 5.0),
+        ("inf", 5.0),
+        ("999", 10.0),
+        ("-3", 0.0),
+        ("oops", 5.0),
+    ] {
+        let mut element =
+            realize(&node, 13.0, std::sync::Arc::new(|action| action), true, 1.0).unwrap();
+        let mut tree = Tree::new(&element);
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(300.0, 300.0)),
+        );
+        let point = layout.children()[1].bounds().center();
+        let mut messages = Vec::new();
+        click(
+            &mut element,
+            &mut tree,
+            &layout,
+            &renderer,
+            point,
+            &mut messages,
+        );
+        let mut paste = Paste(typed.into());
+        for (text, modifiers) in [("a", Modifiers::CTRL), ("v", Modifiers::CTRL)] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)),
+                Layout::new(&layout),
+                mouse::Cursor::Available(point),
+                &renderer,
+                &mut clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(300.0, 300.0)),
+            );
+            let event = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: Key::Character(text.into()),
+                modified_key: Key::Character(text.into()),
+                physical_key: Physical::Code(if text == "a" { Code::KeyA } else { Code::KeyV }),
+                location: Location::Standard,
+                modifiers,
+                text: Some(text.into()),
+                repeat: false,
+            });
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&layout),
+                mouse::Cursor::Available(point),
+                &renderer,
+                &mut paste,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(300.0, 300.0)),
+            );
+        }
+        assert_eq!(
+            messages.last(),
+            Some(&Action::change(
+                "number".into(),
+                ActionValue::Number(expected)
+            )),
+            "{typed}"
+        );
     }
 }
 

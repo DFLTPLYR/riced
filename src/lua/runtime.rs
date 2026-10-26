@@ -15,6 +15,108 @@ use crate::ui::{
 use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+/// Resolve, snapshot and cache one app-local or shared component module.
+///
+/// `build` runs against the resolved module; when a reload fails it runs again
+/// against the cached last-good module, so one broken file cannot take a whole
+/// app down.
+fn with_module<T>(
+    lua: &Lua,
+    src: &str,
+    build: impl Fn(&Table) -> mlua::Result<T>,
+) -> mlua::Result<T> {
+    let root: Option<String> = lua.named_registry_value("riced.app_root").ok();
+    let local = root.map(|root| std::path::PathBuf::from(root).join("components").join(src));
+    let path = local
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| composable::source_path(src));
+    let modules: Table = lua.named_registry_value("riced.component_modules")?;
+    let cached: Option<Table> = modules.get(src)?;
+    // Snapshot each source once per host entry. Repeated cards see the same
+    // source, while the next entry still observes edits.
+    let sources: Table = lua.named_registry_value("riced.component_sources")?;
+    let source = (|| -> mlua::Result<String> {
+        if let Some(source) = sources.raw_get::<Option<String>>(src)? {
+            return Ok(source);
+        }
+        let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
+        sources.raw_set(src, source.as_str())?;
+        Ok(source)
+    })();
+    let attempt = (|| -> mlua::Result<(Table, T, String)> {
+        let source = source?;
+        let app: Table = if let Some(cached) = &cached
+            && cached.get::<String>("source")? == source
+        {
+            cached.get("app")?
+        } else {
+            let env = lua.create_table()?;
+            let meta = lua.create_table()?;
+            meta.set("__index", lua.globals())?;
+            env.set_metatable(Some(meta))?;
+            env.set("_G", env.clone())?;
+            lua.load(&source)
+                .set_name(format!("@{}", path.display()))
+                .set_environment(env)
+                .eval()?
+        };
+        let built = build(&app)?;
+        Ok((app, built, source))
+    })();
+    match attempt {
+        Ok((app, built, source)) => {
+            let entry = lua.create_table()?;
+            entry.set("source", source)?;
+            entry.set("app", app)?;
+            modules.set(src, entry)?;
+            Ok(built)
+        }
+        Err(error) => {
+            let Some(cached) = cached else {
+                return Err(error);
+            };
+            let message = error.to_string();
+            if cached.get::<Option<String>>("error")?.as_deref() != Some(&message) {
+                eprintln!("component {}: {message}", path.display());
+                cached.set("error", message)?;
+            }
+            build(&cached.get::<Table>("app")?)
+        }
+    }
+}
+
+/// One layer declared by its own file: `riced.layer("layers/bar.lua", props)`.
+///
+/// Returns the module's `iced.layer{...}` value for the parent's layer list.
+/// The surface, not just the content, belongs to the file, so a layer owns its
+/// anchors, level and input semantics.
+fn layer_value(lua: &Lua, src: &str, app: &Table, overrides: Value) -> mlua::Result<Value> {
+    let props = component_props(lua, app, overrides, Value::Nil)?;
+    app.set("props", props.clone())?;
+    let result = (|| {
+        let value = super::entry::invoke(
+            lua,
+            app.clone(),
+            "view",
+            mlua::MultiValue::from_vec(vec![Value::Table(props)]),
+        )?;
+        let is_layer = match &value {
+            Value::Table(table) => {
+                matches!(table.raw_get::<Value>("type")?, Value::String(ref tag) if tag == "layer")
+            }
+            _ => false,
+        };
+        if !is_layer {
+            return Err(mlua::Error::RuntimeError(format!(
+                "{src} must return iced.layer({{...}})"
+            )));
+        }
+        Ok(value)
+    })();
+    app.raw_set("props", Value::Nil)?;
+    result
+}
+
 fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua::Result<Value> {
     let props = component_props(lua, app, overrides, host)?;
     app.set("props", props.clone())?;
@@ -53,6 +155,7 @@ pub(crate) enum AppEvent<'a> {
     Tick,
     Action(&'a crate::ui::action::Action),
     Managed(&'a crate::framework::tasks::Delivery),
+    PopupClosed { id: &'a str, reason: &'a str },
 }
 
 /// Owned boundary messages, including native control keys and typed values.
@@ -115,65 +218,19 @@ impl LuaRuntime {
         api.set(
             "component",
             lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
-                let root: Option<String> = lua.named_registry_value("riced.app_root").ok();
-                let local =
-                    root.map(|root| std::path::PathBuf::from(root).join("components").join(&src));
-                let path = local
-                    .filter(|path| path.is_file())
-                    .unwrap_or_else(|| composable::source_path(&src));
-                let modules: Table = lua.named_registry_value("riced.component_modules")?;
-                let cached: Option<Table> = modules.get(src.as_str())?;
-                // Snapshot each source once per host entry. Repeated cards see
-                // the same source, while the next entry still observes edits.
-                let sources: Table = lua.named_registry_value("riced.component_sources")?;
-                let source = (|| -> mlua::Result<String> {
-                    if let Some(source) = sources.raw_get::<Option<String>>(src.as_str())? {
-                        return Ok(source);
-                    }
-                    let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
-                    sources.raw_set(src.as_str(), source.as_str())?;
-                    Ok(source)
-                })();
-                let attempt = (|| -> mlua::Result<(Table, Value, String)> {
-                    let source = source?;
-                    let app: Table = if let Some(cached) = &cached
-                        && cached.get::<String>("source")? == source
-                    {
-                        cached.get("app")?
-                    } else {
-                        let env = lua.create_table()?;
-                        let meta = lua.create_table()?;
-                        meta.set("__index", lua.globals())?;
-                        env.set_metatable(Some(meta))?;
-                        env.set("_G", env.clone())?;
-                        lua.load(&source)
-                            .set_name(format!("@{}", path.display()))
-                            .set_environment(env)
-                            .eval()?
-                    };
-                    let node = component_node(lua, &app, overrides.clone(), host.clone())?;
-                    Ok((app, node, source))
-                })();
-                match attempt {
-                    Ok((app, node, source)) => {
-                        let entry = lua.create_table()?;
-                        entry.set("source", source)?;
-                        entry.set("app", app)?;
-                        modules.set(src, entry)?;
-                        Ok(node)
-                    }
-                    Err(error) => {
-                        let Some(cached) = cached else {
-                            return Err(error);
-                        };
-                        let message = error.to_string();
-                        if cached.get::<Option<String>>("error")?.as_deref() != Some(&message) {
-                            eprintln!("component {}: {message}", path.display());
-                            cached.set("error", message)?;
-                        }
-                        component_node(lua, &cached.get::<Table>("app")?, overrides, host)
-                    }
-                }
+                with_module(lua, &src, |app| {
+                    component_node(lua, app, overrides.clone(), host.clone())
+                })
+            })?,
+        )?;
+        // A layer file owns a whole surface, not just a subtree, so it is a
+        // distinct primitive from `riced.component`.
+        api.set(
+            "layer",
+            lua.create_function(|lua, (src, overrides): (String, Value)| {
+                with_module(lua, &src, |app| {
+                    layer_value(lua, &src, app, overrides.clone())
+                })
             })?,
         )?;
         api.set(
@@ -449,6 +506,7 @@ impl LuaRuntime {
             .set_named_registry_value("riced.app_root", root.to_string_lossy().into_owned())
     }
 
+    /// Every layer the app declares this render, in declaration order.
     pub(crate) fn layer_view(
         &mut self,
         services: &crate::services::ServiceCtx<'_>,
@@ -456,7 +514,7 @@ impl LuaRuntime {
         props: &serde_json::Value,
         context: &serde_json::Value,
         hover: &crate::ui::hover::HoverSet,
-    ) -> mlua::Result<Option<crate::framework::LayerRoot>> {
+    ) -> mlua::Result<Vec<crate::framework::LayerRoot>> {
         let app: Table = self.lua.registry_value(
             self.app
                 .as_ref()
@@ -473,7 +531,7 @@ impl LuaRuntime {
                 )),
             },
             hover,
-            |lua, value| crate::framework::LayerRoot::parse(lua, value, hover),
+            |lua, value| crate::framework::LayerRoot::parse_list(lua, value, hover),
         )
     }
 
@@ -491,6 +549,7 @@ impl LuaRuntime {
             AppEvent::Tick => "on_tick",
             AppEvent::Action(_) => "actions",
             AppEvent::Managed(_) => "callback",
+            AppEvent::PopupClosed { .. } => "actions",
         };
         let result = (|| {
             self.begin()?;
@@ -532,6 +591,11 @@ impl LuaRuntime {
                 AppEvent::Tick => mlua::MultiValue::new(),
                 AppEvent::Action(action) => action.arguments(&self.lua)?,
                 AppEvent::Managed(_) => mlua::MultiValue::new(),
+                AppEvent::PopupClosed { id, reason } => {
+                    mlua::MultiValue::from_vec(vec![self.lua.to_value(
+                        &serde_json::json!({"type":"popup_closed", "id":id, "reason":reason}),
+                    )?])
+                }
             };
             arguments.push_front(Value::Table(app));
             function.call(arguments)
@@ -614,6 +678,19 @@ impl LuaRuntime {
         theme: &crate::config::ThemeConfig,
         hovered: bool,
     ) -> mlua::Result<(Node, serde_json::Value)> {
+        self.component_view_with_images(overrides, host, theme, hovered, &[])
+    }
+
+    /// Host-owned image tokens are scoped to this entry and omitted from the
+    /// returned JSON props. Decoding retains only owned native image handles.
+    pub(crate) fn component_view_with_images(
+        &mut self,
+        overrides: &serde_json::Value,
+        host: &serde_json::Value,
+        theme: &crate::config::ThemeConfig,
+        hovered: bool,
+        images: &[(String, iced::widget::image::Handle)],
+    ) -> mlua::Result<(Node, serde_json::Value)> {
         let result = (|| {
             self.begin()?;
             self.publish_theme(theme)?;
@@ -633,6 +710,17 @@ impl LuaRuntime {
                 resolved.insert(key, self.lua.from_value(value)?);
             }
             let resolved = serde_json::Value::Object(resolved);
+            if !images.is_empty() {
+                let tokens = self.lua.create_table()?;
+                for (key, handle) in images {
+                    tokens.set(
+                        key.as_str(),
+                        self.lua
+                            .create_userdata(crate::ui::image_value::ImageValue(handle.clone()))?,
+                    )?;
+                }
+                props.set("images", tokens)?;
+            }
             app.set("props", props.clone())?;
             app.set("hovered", hovered)?;
             let returned = super::entry::invoke(
@@ -682,6 +770,37 @@ impl LuaRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn component_image_tokens_are_entry_scoped_and_decode_to_owned_handles() {
+        let mut runtime = super::LuaRuntime::with_components(Vec::new()).unwrap();
+        runtime.load_named("local app={} function app:view(props) if props.images then return iced.image_handle(props.images.icon):width(40):height(40) end return iced.text('no images') end return app", "fixture").unwrap();
+        let handle = iced::widget::image::Handle::from_rgba(1, 1, vec![255; 4]);
+        let (node, props) = runtime
+            .component_view_with_images(
+                &serde_json::json!({}),
+                &serde_json::json!({"name":"fixture"}),
+                &crate::config::ThemeConfig::default(),
+                false,
+                &[("icon".into(), handle.clone())],
+            )
+            .unwrap();
+        assert!(props.get("images").is_none());
+        let (next, _) = runtime
+            .component_view(
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                &crate::config::ThemeConfig::default(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(next, crate::ui::node::WidgetNode::Text { content, .. } if content == "no images")
+        );
+        drop(runtime);
+        assert!(
+            matches!(node, crate::ui::node::WidgetNode::Raster { handle: owned, .. } if owned.id() == handle.id())
+        );
+    }
     #[test]
     fn nested_list_delegates_run_once_and_keep_host_hover() {
         use super::*;

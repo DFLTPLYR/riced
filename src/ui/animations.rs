@@ -1208,7 +1208,13 @@ mod tests {
         match kind {
             0 => crate::ui::build::realize(node, 13.0, sender, true, 1.0).unwrap(),
             1 => crate::ui::scene::Lists::default()
-                .build(node, &Default::default(), sender, None)
+                .build(
+                    node,
+                    &Default::default(),
+                    sender,
+                    None,
+                    &mut crate::ui::build::no_native_slots::<crate::shell::Plant>(),
+                )
                 .unwrap(),
             _ => crate::shell::screens::top::build_with_lists(
                 node,

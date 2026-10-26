@@ -32,11 +32,23 @@ The sample uses `pointer_events = true` to opt into layer-local gestures; child
 buttons consume their own input before background selection starts.
 
 Selection is local to each output and ends on pointer exit. Cross-output drag,
-legacy desktop widgets, measured menu clamping, native Add Top / Settings
-commands, free-form wallpaper baking, cover-fit controls, and image-backed
-wallpaper shaders are not migrated. Images currently use contain fitting.
-Invalid preference types/colors are not an app-level schema: use valid strings.
-The first frame uses defaults while preferences load asynchronously.
+measured menu clamping, free-form wallpaper baking, cover-fit controls, and
+image-backed wallpaper shaders are not migrated. Images currently use contain
+fitting. Invalid preference types/colors are not an app-level schema: use valid
+strings. The first frame uses defaults while preferences load asynchronously.
+
+`desktop` placements keep working: the background embeds the host's
+`iced.native("desktop-widgets")` slot, so the legacy desktop-widget host
+renders, hovers and drags on top of the Lua wallpaper. See
+[Native host slots](../../docs/framework.md#native-host-slots).
+
+The app owns its whole layer set. `app.lua` declares the wallpaper surface plus
+one bar layer per entry in `apps/background/bars.lua`, its own managed document.
+**Add Top** appends to that document with the edge nearest the click, computed in
+Lua, and the next view declares the extra layer — no host command is involved.
+**Remove Top** drops the last entry. Layers live in
+`apps/background/components/layers/{wallpaper,bar}.lua`, each owning its own
+surface. See [App-owned layers](../../docs/framework.md#app-owned-layers).
 
 ## Picker troubleshooting
 

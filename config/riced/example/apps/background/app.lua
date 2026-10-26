@@ -1,19 +1,42 @@
-local app = { defaults = { menu_width = 190, fade_ms = 220 } }
+-- One entry point per output. This app owns its whole layer set: the wallpaper
+-- surface plus one bar layer per entry in its own managed document. `view` just
+-- declares them; the host creates one native surface per declared layer.
+--
+-- Adding a bar is app state, not a host command: `add-top` appends to
+-- `bars.lua` and the next view declares the extra layer.
+local app = { defaults = { menu_width = 190, fade_ms = 220, thickness = 32 } }
 
 function app:mount(context)
+    self.output = context.output.name
     -- Encode the connector bytes so even unusual output names cannot escape state/.
-    local output = context.output.name:gsub(".", function(c)
+    local encoded = context.output.name:gsub(".", function(c)
         return string.format("%02x", string.byte(c))
     end)
     self.prefs = riced.file({
         type = "json",
-        path = "state/" .. output .. ".json",
+        path = "state/" .. encoded .. ".json",
         create_parents = true,
         defaults = { wallpaper = "", color = "#181825" },
     })
     self.prefs:watch(function(event)
         if event.ok then self.error = nil
         else self.error = event.error.message end
+    end)
+    -- App-owned layer state. `bars.lua` is data, not app code, so editing it
+    -- never reloads the app.
+    self.bars = riced.file({
+        type = "lua",
+        path = "bars.lua",
+        write_mode = "generated",
+        defaults = { bars = {} },
+    })
+    self.bars:watch(function(event)
+        if event.ok then self.error = nil
+        else self.error = event.error.message end
+    end)
+    self.clock = os.date("%H:%M")
+    self:every(1000, function()
+        self.clock = os.date("%H:%M")
     end)
 end
 
@@ -41,8 +64,48 @@ function app:pick_wallpaper()
     end)
 end
 
+-- Screen edge nearest the given point, in output-local coordinates. Policy
+-- lives here in Lua; nothing asks the host to create a layer.
+function app:nearest_edge(x, y)
+    local output = self.props.output or {}
+    local width, height = output.width or 0, output.height or 0
+    local best, best_distance = "top", y
+    for _, candidate in ipairs({
+        { "bottom", height - y },
+        { "left", x },
+        { "right", width - x },
+    }) do
+        if candidate[2] < best_distance then
+            best, best_distance = candidate[1], candidate[2]
+        end
+    end
+    return best
+end
+
+function app:add_bar(edge)
+    local bars = self.bars:get("bars") or {}
+    table.insert(bars, { edge = edge, thickness = self.props.thickness })
+    self.bars:set("bars", bars)
+    self.bars:save(function(saved)
+        if saved.ok then self.error = nil
+        else self.error = saved.error.message end
+    end)
+end
+
+function app:remove_bar()
+    local bars = self.bars:get("bars") or {}
+    if #bars == 0 then return end
+    table.remove(bars)
+    self.bars:set("bars", bars)
+    self.bars:save(function(saved)
+        if saved.ok then self.error = nil
+        else self.error = saved.error.message end
+    end)
+end
+
 function app:actions(event)
     if event.type == "action" then
+        local menu = self.menu
         self.menu = nil
         if event.key == "pick-wallpaper" then
             self:pick_wallpaper()
@@ -52,6 +115,12 @@ function app:actions(event)
                 if result.ok then self.error = nil
                 else self.error = result.error.message end
             end)
+        elseif event.key == "add-top" then
+            self:add_bar(self:nearest_edge(menu and menu.x or 0, menu and menu.y or 0))
+        elseif event.key == "remove-bar" then
+            self:remove_bar()
+        elseif event.key == "open-settings" then
+            return shell.open_settings()
         end
         return
     end
@@ -77,53 +146,30 @@ function app:actions(event)
 end
 
 function app:view(props)
-    local output = props.output
     local layers = {
-        iced.container(iced.space()):width(size.fill):height(size.fill)
-            :background(self.prefs:get("color")),
+        riced.layer("layers/wallpaper.lua", {
+            output = props.output,
+            color = self.prefs:get("color"),
+            wallpaper = self.prefs:get("wallpaper"),
+            selecting = self.selecting,
+            selection = self.selection,
+            menu = self.menu,
+            menu_width = props.menu_width,
+            fade_ms = props.fade_ms,
+            picking = self.picking,
+            error = self.error,
+        }),
     }
-    local wallpaper = self.prefs:get("wallpaper")
-    if wallpaper ~= "" then
-        -- iced.image currently uses native contain fitting, not wallpaper cover.
-        layers[#layers + 1] = iced.image(wallpaper):width(size.fill):height(size.fill)
+    for index, bar in ipairs(self.bars:get("bars") or {}) do
+        layers[#layers + 1] = riced.layer("layers/bar.lua", {
+            id = "bar-" .. index,
+            output = self.output,
+            edge = bar.edge,
+            thickness = bar.thickness,
+            clock = self.clock,
+        })
     end
-    layers[#layers + 1] = iced.container(iced.column({
-        iced.text("Lua background · " .. output.name):size(24),
-        iced.text("Right-click for wallpaper options · drag to select"),
-        iced.button(self.picking and "Picker open…" or "Choose wallpaper", "pick-wallpaper"),
-        iced.text(self.error or "Preferences reload automatically when edited")
-            :color(self.error and theme.error or theme.on_surface),
-    }):spacing(10)):padding(24):anchor("top_left")
-
-    local s = self.selection
-    if s and s.width > 0 and s.height > 0 then
-        layers[#layers + 1] = iced.container(iced.space())
-            :width(s.width):height(s.height)
-            :background("#89b4fa22"):border("#89b4fa"):border_width(1)
-            :anchor("top_left"):margin({ left = s.x, top = s.y })
-            :animate({ id = "selection", opacity = iced.animations.opacity({
-                to = self.selecting and 1 or 0, duration = props.fade_ms,
-            }) })
-    end
-    if self.menu then
-        -- Reserve enough room for three rows; constrain to small outputs too.
-        local width = math.min(props.menu_width, output.width)
-        local height = math.min(150, output.height)
-        local x = math.max(0, math.min(self.menu.x, output.width - width))
-        local y = math.max(0, math.min(self.menu.y, output.height - height))
-        layers[#layers + 1] = riced.component("menu.lua", { width = width, height = height })
-            :anchor("top_left"):margin({ left = x, top = y })
-    end
-    return iced.layer({
-        id = "background",
-        layer = "background",
-        anchors = { top = true, right = true, bottom = true, left = true },
-        exclusive_zone = -1,
-        keyboard = "none",
-        input = "all",
-        pointer_events = true,
-        content = iced.stack(layers):width(size.fill):height(size.fill),
-    })
+    return layers
 end
 
 return app

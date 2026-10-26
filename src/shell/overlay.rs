@@ -423,10 +423,15 @@ pub(crate) fn view(plots: &Plots, output: OutputId) -> Element<'static, Plant> {
                 entered,
             })
         });
-        if let Ok(element) = scene
-            .lists
-            .build(node, &plots.animation.motion, sender, Some(hover))
-        {
+        // Overlay scenes are passive fullscreen layers: no host slots.
+        let mut native = crate::ui::build::no_native_slots::<Plant>();
+        if let Ok(element) = scene.lists.build(
+            node,
+            &plots.animation.motion,
+            sender,
+            Some(hover),
+            &mut native,
+        ) {
             let name = id.clone();
             let revision = scene.revision;
             layer = layer.push(measured::root(

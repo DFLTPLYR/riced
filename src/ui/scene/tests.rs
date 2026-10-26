@@ -48,6 +48,7 @@ fn element(
                 })
             }),
             None,
+            &mut crate::ui::build::no_native_slots::<Plant>(),
         )
         .unwrap();
     measured::root(body, frame, 1, Arc::new(|_| Plant::Tend))
