@@ -60,6 +60,15 @@ pub fn components_dir() -> PathBuf {
         .join("components")
 }
 
+/// Project-owned Settings page sources. Bundled copies are installed once;
+/// existing directories are adopted as user-owned.
+pub fn settings_dir() -> PathBuf {
+    widgets_dir()
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("settings")
+}
+
 pub fn shaders_dir() -> PathBuf {
     config_path().with_file_name("shaders")
 }

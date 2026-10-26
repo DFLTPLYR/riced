@@ -8,7 +8,7 @@ use crate::{
 };
 use iced::{
     Element, Length, Point, Task,
-    widget::{Space, button, column, container, mouse_area, row, stack, text},
+    widget::{Space, container, mouse_area, stack, text},
     window,
 };
 use iced_exwlshell::reexport::{
@@ -281,7 +281,7 @@ impl DragSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreviewTarget {
+pub(crate) enum PreviewTarget {
     Available(String),
     Placed(String),
 }
@@ -317,7 +317,11 @@ fn preview_widget(plots: &Plots, target: &PreviewTarget) -> Option<DesktopWidget
     }
 }
 
-fn preview_output(plots: &Plots, settings: window::Id, widget: &DesktopWidget) -> Option<OutputId> {
+pub(crate) fn preview_output(
+    plots: &Plots,
+    settings: window::Id,
+    widget: &DesktopWidget,
+) -> Option<OutputId> {
     preview_output_selected(plots, &plots.desktop.widgets.borrow(), settings, widget)
 }
 
@@ -585,7 +589,7 @@ fn app_view(
     ))
 }
 
-fn settings_preview(
+pub(crate) fn settings_preview(
     settings: window::Id,
     plots: &Plots,
     target: PreviewTarget,
@@ -799,202 +803,6 @@ fn refresh_previews(plots: &Plots) -> bool {
                 .map(|entry| entry.revision);
     }
     changed
-}
-
-pub(crate) fn settings(id: window::Id, plots: &Plots) -> Element<'static, Plant> {
-    use crate::config::{HoldDuration, HoldSpeed};
-    let current = plots.config.interaction.hold;
-    let mut speeds = row![text("Hold duration")].spacing(8);
-    for (label, duration) in [
-        ("Fast (250 ms)", HoldDuration::Preset(HoldSpeed::Fast)),
-        ("Medium (500 ms)", HoldDuration::Preset(HoldSpeed::Medium)),
-        ("Slow (1000 ms)", HoldDuration::Preset(HoldSpeed::Slow)),
-        ("Custom", HoldDuration::Custom(current.milliseconds())),
-    ] {
-        speeds = speeds.push(
-            button(label)
-                .on_press(Plant::Config(super::ConfigEvent::Patch(
-                    ConfigPatch::HoldDuration(duration),
-                )))
-                .style(crate::theme::nav_button(current == duration)),
-        );
-    }
-    let mut content = column![
-        speeds,
-        text("Applies to widget holds, including desktop drag pickup.")
-    ]
-    .spacing(12);
-    if let HoldDuration::Custom(ms) = current {
-        content = content.push(
-            row![
-                text("Milliseconds"),
-                crate::ui::widgets::spin_box::spin_box(
-                    ms as f64,
-                    1.0..=60000.0,
-                    25.0,
-                    0,
-                    |value| Plant::Config(super::ConfigEvent::Patch(ConfigPatch::HoldDuration(
-                        HoldDuration::Custom(value as u32)
-                    )))
-                )
-            ]
-            .spacing(8),
-        );
-    }
-    content = content.push(text("Available desktop widgets").size(18));
-    let mut outputs: Vec<_> = plots.windows.output_infos.iter().collect();
-    outputs.sort_by_key(|(output, _)| **output);
-    let mut choices = row![text("Preview display")].spacing(8);
-    let selected = preview_output(plots, id, &DesktopWidget::default());
-    for (output, info) in outputs {
-        choices = choices.push(
-            button(text(
-                info.name
-                    .clone()
-                    .unwrap_or_else(|| format!("Display {}", output.0)),
-            ))
-            .on_press(Plant::Desktop(DesktopEvent::PreviewOutput {
-                settings: id,
-                output: *output,
-            }))
-            .style(crate::theme::nav_button(selected == Some(*output))),
-        );
-    }
-    content = content.push(choices).push(text("Click inside a widget preview to pick it up at that point. Release, then click the desktop to place."));
-    let mut available = Vec::new();
-    for (name, _) in crate::config::discovery::discover_desktop_widget_files() {
-        let card = column![
-            button(text(format!("Place {name}"))).on_press(Plant::Desktop(DesktopEvent::Pick {
-                settings: id,
-                widget: name.clone(),
-            })),
-            settings_preview(id, plots, PreviewTarget::Available(name)),
-        ]
-        .spacing(8);
-        available.push(
-            container(card)
-                .padding(12)
-                .width(Length::Fill)
-                .style(crate::theme::menu_box)
-                .into(),
-        );
-    }
-    content = content.push(crate::ui::widgets::masonry::masonry(available, 344.0, 16.0));
-    content = content.push(text("Placed widgets").size(18));
-    let mut placed = Vec::new();
-    for (index, widget) in plots.config.desktop.iter().enumerate() {
-        let patch = |patch| Plant::Config(super::ConfigEvent::Patch(patch));
-        let mut card = column![settings_preview(
-            id,
-            plots,
-            PreviewTarget::Placed(widget.id.clone()),
-        )]
-        .spacing(8);
-        card = card.push(
-            text(format!(
-                "{} · {} · ({:.0}, {:.0})",
-                widget.widget,
-                if widget.output.is_empty() {
-                    "all outputs"
-                } else {
-                    &widget.output
-                },
-                widget.x,
-                widget.y
-            ))
-            .width(Length::Fill),
-        );
-        card = card.push(
-            row![
-                button("Reposition").on_press(Plant::Desktop(DesktopEvent::Reposition {
-                    settings: id,
-                    placement: widget.id.clone()
-                })),
-                button("Remove").on_press(patch(ConfigPatch::RemoveDesktopWidget { index })),
-            ]
-            .spacing(8),
-        );
-        let x = widget.x;
-        let y = widget.y;
-        card = card.push(
-            row![
-                text("X"),
-                crate::ui::widgets::spin_box::spin_box(
-                    x as f64,
-                    -32768.0..=32768.0,
-                    1.0,
-                    0,
-                    move |x| Plant::Config(super::ConfigEvent::Patch(
-                        ConfigPatch::MoveDesktopWidget {
-                            index,
-                            x: x as f32,
-                            y
-                        }
-                    ))
-                ),
-                text("Y"),
-                crate::ui::widgets::spin_box::spin_box(
-                    y as f64,
-                    -32768.0..=32768.0,
-                    1.0,
-                    0,
-                    move |y| Plant::Config(super::ConfigEvent::Patch(
-                        ConfigPatch::MoveDesktopWidget {
-                            index,
-                            x,
-                            y: y as f32
-                        }
-                    ))
-                ),
-            ]
-            .spacing(8),
-        );
-        let width = widget.width;
-        let height = widget.height;
-        card = card.push(text("Size overrides (0 = Lua)").size(12));
-        card = card.push(
-            row![
-                text("Width").size(12),
-                crate::ui::widgets::spin_box::spin_box(
-                    width as f64,
-                    0.0..=32768.0,
-                    1.0,
-                    0,
-                    move |width| Plant::Config(super::ConfigEvent::Patch(
-                        ConfigPatch::SetDesktopWidgetSize {
-                            index,
-                            width: width as f32,
-                            height
-                        }
-                    ))
-                ),
-                text("Height").size(12),
-                crate::ui::widgets::spin_box::spin_box(
-                    height as f64,
-                    0.0..=32768.0,
-                    1.0,
-                    0,
-                    move |height| Plant::Config(super::ConfigEvent::Patch(
-                        ConfigPatch::SetDesktopWidgetSize {
-                            index,
-                            width,
-                            height: height as f32
-                        }
-                    ))
-                ),
-            ]
-            .spacing(8),
-        );
-        placed.push(
-            container(card)
-                .padding(12)
-                .width(Length::Fill)
-                .style(crate::theme::menu_box)
-                .into(),
-        );
-    }
-    content = content.push(crate::ui::widgets::masonry::masonry(placed, 344.0, 16.0));
-    content.into()
 }
 
 pub(crate) fn finish(plots: &mut Plots) -> Task<Plant> {

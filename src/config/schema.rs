@@ -1428,13 +1428,13 @@ pub use paths::widgets_path;
 /// values folded into placements or Lua defaults.
 pub use paths::widgets_migrated_path;
 
+pub use paths::shaders_dir;
 /// Shared component library dir (`~/.config/riced/components/`):
 /// every `*.lua` file (sorted) is concatenated and executed in each
 /// widget state after `iced` is built, so `iced.define` components are
 /// available to widgets and overlay scenes. No
 /// `require` needed (and none available — the sandbox nils it).
-pub use paths::components_dir;
-pub use paths::shaders_dir;
+pub use paths::{components_dir, settings_dir};
 #[cfg(test)]
 pub(crate) use seed::SHADER_SEEDS;
 

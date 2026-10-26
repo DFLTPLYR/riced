@@ -121,11 +121,6 @@ pub fn card() -> Color {
     color(Class::BgSurface)
 }
 
-/// Button / menu-item label text: reshell `Menu` items paint `primary`.
-pub fn button_text() -> Color {
-    color(Class::TextPrimary)
-}
-
 /// Hairline border for every bordered surface/button.
 pub fn border_color() -> Color {
     color(Class::BorderOutline)
@@ -326,6 +321,7 @@ pub fn preview(name: &str, darkmode: bool) -> ActiveTheme {
 /// Preview card button: `surface` background, `on_surface` text, selected
 /// rows ringed in `primary` (2px, else a hairline `outline`). Captures the
 /// previewed theme so every row shows its own palette, not the active one.
+#[cfg(test)]
 pub fn preview_button(
     previewed: ActiveTheme,
     selected: bool,
@@ -353,18 +349,5 @@ pub fn preview_button(
             },
             ..Default::default()
         }
-    }
-}
-
-/// Single palette swatch box for preview rows.
-pub fn swatch(color: Color, border: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        background: Some(color.into()),
-        border: Border {
-            color: border,
-            width: BORDER_WIDTH,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
     }
 }

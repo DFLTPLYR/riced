@@ -128,10 +128,14 @@ at decode with the field named.
 | `iced.scrollable(child)`                                       | child                                                                                                      | `width`, `height`, `scrollbar`                                                                                                                    |
 | `iced.space()`                                                 | —                                                                                                          | `width`, `height`                                                                                                                                 |
 | `iced.image(path)`                                             | file path                                                                                                  | `width`, `height`                                                                                                                                 |
+| `iced.image_handle(image)`                                     | opaque image token (e.g. a service icon)                                                                    | `width`, `height`                                                                                                                                 |
 | `iced.listview(data)`                                          | data array                                                                                                 | `id` (required), `key` (required field name), `delegate`, `axis`, `pitch`, `spacing`, `width`, `height`, `onEntered`, `onExit`, `onDisplaced`     |
 | `iced.checkbox(label, checked)`                                | —                                                                                                          | `checked`, `on_toggle`, `width`, `size`, `spacing`                                                                                                |
 | `iced.toggler(label, enabled)`                                 | —                                                                                                          | `enabled`, `on_toggle`, `width`, `size`, `spacing`                                                                                                |
 | `iced.slider(min, max, value)`                                 | finite `min < max`, positive `step`                                                                        | `value`, `step`, `on_change`, `on_release`, `width`, `height`                                                                                     |
+| `iced.spin_box(value, min, max)`                               | finite `min < max`, positive `step`, integer `decimals` 0–6                                                | `value`, `min`, `max`, `step`, `decimals`, `on_change`, `width`, `height`                                                                         |
+| `iced.masonry(children)` | array of nodes; responsive shortest-column layout | `column_width` (positive, default 260), `spacing` (nonnegative, default 12) |
+| `iced.native(id)` | nonempty host slot id | — (filled by the realizing host; framework layers provide `desktop-widgets`, the Settings hosts provide their own slots; unsupported in bar, scene, and overlay hosts) |
 | `iced.text_input(placeholder, value)`                          | —                                                                                                          | `value`, `on_input`, `on_submit`, `width`, `size`, `padding`, `secure`                                                                            |
 | `iced.pick_list(options, selected)`                            | unique-string options; selected nil or member                                                              | `selected`, `on_select`, `width`, `placeholder`, `padding`, `size`                                                                                |
 | `iced.radio(label, value, selected)`                           | string value/selection                                                                                     | `selected`, `on_select`, `width`, `size`, `spacing`                                                                                               |
@@ -139,6 +143,63 @@ at decode with the field named.
 | `iced.shader(path)`                                            | WGSL fragment file (see below)                                                                             | `width`, `height`, `speed`, `params`, `animated`                                                                                                    |
 
 Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
+
+### Settings pages
+
+The bundled Settings pages are installed once into the project's `settings/`
+directory (`animation.lua`, `theme.lua`, `panel_bar.lua`, `placement.lua`,
+`components.lua`, `desktop.lua`, `context_menu.lua`, `wallpaper.lua`). Edit a
+copy to customize that page; saving reloads it. The host supplies each page's
+snapshot and validates its actions, so changing the shape of the props table or
+its action keys can break that page — a copy that fails to decode falls back to
+the bundled page. An existing `settings/` directory is adopted as user-owned,
+and deleting a page does not restore it. Because adoption is per-directory, a
+project that commits one page keeps the bundled sources for the rest;
+`examples/settings/animation.lua` does exactly that.
+
+### Bundled editor components
+
+`scripts/components/06-editors.lua` provides pure Lua components for Settings
+and other editors. Fresh libraries include it; existing user-owned libraries
+are not updated automatically. Copy this file into your project's `components/`
+directory to opt in (without replacing any existing file).
+
+| Component | Props |
+| --- | --- |
+| `iced.color_swatch(props)` | `color`, optional `action`, `width`, `height`, `radius` |
+| `iced.color_row(props)` | `label`, `color`, optional `action` on the swatch |
+| `iced.image_preview(props)` | `image` opaque token or `path`, `width`, `height`, `placeholder` |
+| `iced.file_row(props)` | `path`, button `label`, `action` (default `choose_file`) |
+| `iced.page_tabs(props)` | `pages = {{id, label?}, ...}`, `selected`, `prefix` (default `page:`), `vertical` |
+
+Tabs emit ordinary button action keys such as `page:theme`. The app owns the
+selected page and renders its body; the component does not store state.
+Page IDs must be unique, nonempty strings. Swatches display/select colors;
+they are not color-picker dialogs. Image previews use the existing path-image
+cache or opaque native token. An absent path displays a placeholder; a missing
+or undecodable file follows `iced.image` behavior (empty space).
+
+File rows only emit an action. Framework apps can handle it using the existing
+managed picker; no I/O runs during component rendering:
+
+```lua
+function app:actions(event)
+    if event.key == "choose_file" then
+        self:pick_file({ extensions = { "png", "jpg", "webp" } }, function(result)
+            if result.ok and not result.cancelled then self.path = result.path end
+        end)
+    elseif event.key == "page:theme" then
+        self.page = "theme"
+    end
+end
+-- In view: iced.file_row({path=self.path}), iced.image_preview({path=self.path})
+```
+
+`iced.spin_box(value, min, max):on_change('number')` emits the standard numeric
+change event. Step defaults to 1 and decimals to 0. Typing commits finite,
+clamped values; invalid text restores the current value. Without `on_change`,
+the control is inert. `examples/apps/editors/app.lua` drives an
+`iced.masonry` layout from two spin boxes, showing the numeric event end to end.
 
 ### Popup roots
 
@@ -772,6 +833,7 @@ styling stays as the default; read the flag only to style surrounding content.
 | Function                                    | Purpose                                                                                                                             |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `riced.component(src[, overrides][, host])` | Render a `components/` module inline. Frame pattern: `riced.component(props.item_component.src, props.item_component.props, item)`. |
+| `riced.layer(src[, overrides])`             | Compose a whole layer from a `components/` module whose `view` returns `iced.layer({...})`. Returns it for the parent's layer list; a module that returns a widget tree is rejected. |
 | `riced.invalidate()`                        | Mark the view dirty.                                                                                                                |
 
 ## `notification.*` (scenes, widgets, popups, callbacks)

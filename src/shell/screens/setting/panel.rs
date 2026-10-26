@@ -1,27 +1,25 @@
-//! Read-only inputs required by the Panel page and placement editor.
-use super::editors::plant_slider_row;
+//! Read-only inputs required by the Panel page, its Lua controls, and the
+//! native arrangement preview.
 use super::{Setting, hint, section, section_heading};
 use crate::{
     config::WidgetDefinition,
-    shell::{screens::Top, state::Plots, windows::PlotInfo},
-};
-use crate::{
     shell::{
-        BarEvent, Corner, Edge, Plant, SettingEvent, StyleEvent, TopEvent,
-        screens::top::{SlotAlign, TopLocal},
+        Plant, SettingEvent, screens::Top, screens::top::TopLocal, state::Plots, windows::PlotInfo,
     },
     theme,
-    ui::widgets::{panel_preview::Preview, spin_box::spin_box},
+    ui::widgets::panel_preview::Preview,
 };
 use iced::window;
 use iced::{
     Element, Length,
-    widget::{Checkbox, Space, button, column, row, rule, scrollable, text},
+    widget::{Space, button, column, row, scrollable, text},
 };
 use iced_wayland_subscriber::{OutputId, OutputInfo};
 use std::collections::HashMap;
 
 pub(super) struct PanelContext<'a> {
+    pub theme: &'a crate::config::ThemeConfig,
+    pub defaults: &'a crate::ui::settings::ComponentDefaults,
     pub ids: &'a HashMap<window::Id, PlotInfo>,
     pub tops: &'a HashMap<window::Id, Top>,
     pub output_infos: &'a HashMap<OutputId, OutputInfo>,
@@ -31,6 +29,8 @@ pub(super) struct PanelContext<'a> {
 impl<'a> From<&'a Plots> for PanelContext<'a> {
     fn from(plots: &'a Plots) -> Self {
         Self {
+            theme: &plots.config.theme,
+            defaults: &plots.config.component_defaults,
             ids: &plots.windows.ids,
             tops: &plots.windows.tops,
             output_infos: &plots.windows.output_infos,
@@ -113,19 +113,6 @@ pub(super) fn view<'a>(
             scrollable::Scrollbar::default(),
         )),
     );
-    let remove_label = context
-        .tops
-        .get(&selected)
-        .map(|top| format!("Remove {} bar", top.anchor_label()))
-        .unwrap_or_else(|| "Remove bar".into());
-    let remove = button(text(remove_label).size(13).color(theme::active().error))
-        .on_press(Plant::TopPlot(TopEvent::Remove(selected)))
-        .padding(8)
-        .style(theme::menu_button_tinted(
-            theme::RADIUS,
-            theme::active().error,
-        ))
-        .width(Length::Shrink);
     let output = bars
         .iter()
         .find_map(|(wid, output)| (*wid == selected).then_some(*output));
@@ -155,118 +142,26 @@ pub(super) fn view<'a>(
         })
         .unwrap_or(if horizontal { 1080.0 } else { 1920.0 })
         .max(1.0);
-    let length = top.local.length_pct.clamp(1.0, 100.0);
-    let thickness = top.local.thickness_px.clamp(1.0, thick_max as f32);
-    col = col.push(section_heading(
-        "Size & appearance",
-        "Length is a percentage of the display edge; thickness is measured in pixels.",
-    ));
-    col = col.push(plant_slider_row(
-        format!("Length {length:.0}%"),
-        length as f64,
-        1.0..=100.0,
-        1.0,
-        move |value| Plant::TopPlot(TopEvent::Bar(BarEvent::Length(wid, value as f32))),
-        None,
-    ));
-    col = col.push(plant_slider_row(
-        format!("Thickness {thickness:.0}px"),
-        thickness as f64,
-        1.0..=thick_max,
-        1.0,
-        move |value| Plant::TopPlot(TopEvent::Bar(BarEvent::Thickness(wid, value as f32))),
-        None,
-    ));
-    let current = TopLocal::snap_opacity(top.local.opacity);
-    let mut opacity = row![text("Opacity").width(Length::Fill)].spacing(8);
-    for step in TopLocal::OPACITY_STEPS {
-        opacity = opacity.push(
-            button(
-                text(format!("{:.0}%", step * 100.0))
-                    .size(12)
-                    .color(theme::text()),
-            )
-            .on_press(Plant::TopPlot(TopEvent::Style(StyleEvent::Opacity(
-                wid, step,
-            ))))
-            .padding(6)
-            .style(theme::nav_button(current == step)),
-        );
-    }
-    col = col.push(opacity);
-    col = col.push(section_heading(
-        "Slots & widgets",
-        "Slots divide the bar into regions. Select a slot to edit its alignment and widgets.",
-    ));
-    col = col.push(
-        row![
-            text(format!("Slots ({})", top.local.slots)).width(Length::FillPortion(7)),
-            spin_box(
-                top.local.slots as f64,
-                1.0..=TopLocal::MAX_SLOTS as f64,
-                1.0,
-                0,
-                move |value| Plant::TopPlot(TopEvent::Bar(BarEvent::Slots(wid, value as u32)))
-            )
-            .width(Length::Fixed(120.0))
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
-    );
-    let padding = top.local.slot_padding.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-    let spacing = top.local.slot_spacing.clamp(0.0, TopLocal::MAX_SLOT_GAP);
-    col = col.push(plant_slider_row(
-        format!("Slot padding {padding:.0}px"),
-        padding as f64,
-        0.0..=32.0,
-        1.0,
-        move |value| Plant::TopPlot(TopEvent::Bar(BarEvent::SlotPadding(wid, value as f32))),
-        None,
-    ));
-    col = col.push(plant_slider_row(
-        format!("Slot spacing {spacing:.0}px"),
-        spacing as f64,
-        0.0..=32.0,
-        1.0,
-        move |value| Plant::TopPlot(TopEvent::Bar(BarEvent::SlotSpacing(wid, value as f32))),
-        None,
-    ));
-    let count = top.local.slots.clamp(1, TopLocal::MAX_SLOTS) as usize;
+    let count = top
+        .local
+        .slots
+        .clamp(1, crate::shell::screens::top::TopLocal::MAX_SLOTS) as usize;
     let slot = setting
         .selected_slot
         .filter(|slot| *slot < count)
         .unwrap_or(0);
-    let mut slots_picker = row![].spacing(8);
-    for position in 0..count {
-        slots_picker = slots_picker.push(
-            button(
-                text(format!("Slot {}", position + 1))
-                    .size(12)
-                    .color(theme::text()),
-            )
-            .on_press(Plant::SettingPlot(SettingEvent::SelectSlot(id, position)))
-            .padding(6)
-            .style(theme::nav_button(position == slot)),
-        );
-    }
-    col = col.push(
-        scrollable(slots_picker).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::default(),
-        )),
-    );
-    let current = top.local.align_at(slot);
-    let mut alignments = row![].spacing(8);
-    for align in [SlotAlign::Start, SlotAlign::Center, SlotAlign::End] {
-        alignments = alignments.push(
-            button(text(align.as_str()).size(12).color(theme::text()))
-                .on_press(Plant::TopPlot(TopEvent::Bar(BarEvent::SlotAlign(
-                    wid, slot, align,
-                ))))
-                .padding(6)
-                .style(theme::nav_button(current == align)),
-        );
-    }
-    col = col.push(alignments);
+    col = col.push(setting.panel_bar.borrow_mut().view(
+        super::panel_bar::Section::Layout,
+        super::panel_bar::Context {
+            setting: id,
+            bar: wid,
+            top,
+            thick_max,
+            selected_slot: slot,
+            theme: context.theme,
+            defaults: context.defaults,
+        },
+    ));
     let slots = top.local.widgets.clone();
     let names: Vec<_> = context
         .widgets
@@ -296,96 +191,31 @@ pub(super) fn view<'a>(
             "Add .lua files to your widgets directory to fill the available-widget pool.",
         ));
     }
-    col = col.push(super::placement::view(
-        wid,
-        context.output_name(wid),
-        top,
-        setting.selected_placement.as_deref(),
-        context.widgets,
-    ));
-    col = col.push(section_heading(
-        "Floating & corners",
-        "Inset the bar from the display edge and soften its corners.",
-    ));
     col = col.push(
-        Checkbox::new(top.local.floating)
-            .label("Floating bar")
-            .on_toggle(move |value| {
-                Plant::TopPlot(TopEvent::Style(StyleEvent::Floating(wid, value)))
+        setting
+            .placement_editor
+            .borrow_mut()
+            .view(super::placement::Context {
+                bar: wid,
+                output: &context.output_name(wid),
+                top,
+                selected: setting.selected_placement.as_deref(),
+                catalog: context.widgets,
+                theme: context.theme,
+                defaults: context.defaults,
             }),
     );
-    col = col.push(hint(
-        "Floating adds space around the bar; the reserved desktop area stays unchanged.",
+    col = col.push(setting.panel_bar.borrow_mut().view(
+        super::panel_bar::Section::Appearance,
+        super::panel_bar::Context {
+            setting: id,
+            bar: wid,
+            top,
+            thick_max,
+            selected_slot: slot,
+            theme: context.theme,
+            defaults: context.defaults,
+        },
     ));
-    if top.local.floating {
-        for (label, edge, value) in [
-            ("Margin top (px)", Edge::Top, top.local.margins.top),
-            ("Margin bottom (px)", Edge::Bottom, top.local.margins.bottom),
-            ("Margin right (px)", Edge::Right, top.local.margins.right),
-            ("Margin left (px)", Edge::Left, top.local.margins.left),
-        ] {
-            col = col.push(
-                row![
-                    text(label).width(Length::FillPortion(7)),
-                    spin_box(value as f64, 0.0..=256.0, 1.0, 0, move |value| {
-                        Plant::TopPlot(TopEvent::Style(StyleEvent::Margin(wid, edge, value as i32)))
-                    })
-                    .width(Length::Fixed(120.0))
-                ]
-                .spacing(8),
-            );
-        }
-    } else {
-        col = col.push(text("Enable Floating to adjust margins.").size(11));
-    }
-    col = col.push(rule::horizontal(2));
-    for corners in [
-        [
-            ("Round top-left", Corner::TopLeft, top.local.radius.top_left),
-            (
-                "Round top-right",
-                Corner::TopRight,
-                top.local.radius.top_right,
-            ),
-        ],
-        [
-            (
-                "Round bottom-left",
-                Corner::BottomLeft,
-                top.local.radius.bottom_left,
-            ),
-            (
-                "Round bottom-right",
-                Corner::BottomRight,
-                top.local.radius.bottom_right,
-            ),
-        ],
-    ] {
-        let mut group = row![].spacing(8);
-        for (label, corner, value) in corners {
-            group = group.push(plant_slider_row(
-                format!("{label} {value:.0}"),
-                value as f64,
-                0.0..=32.0,
-                1.0,
-                move |value| {
-                    Plant::TopPlot(TopEvent::Style(StyleEvent::Radius(
-                        wid,
-                        corner,
-                        value as f32,
-                    )))
-                },
-                None,
-            ));
-        }
-        col = col.push(group);
-    }
-    col.push(section(
-        "Remove this bar",
-        "Remove the selected bar from the display and saved configuration.",
-        remove.into(),
-    ))
-    .spacing(16)
-    .width(Length::Fill)
-    .into()
+    col.spacing(16).width(Length::Fill).into()
 }

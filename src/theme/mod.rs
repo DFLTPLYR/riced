@@ -21,12 +21,12 @@ use schema::VariantRaw;
 use store::resolve;
 pub use store::{available_themes, builtin_text, ensure_user_themes, theme_dir, to_palette};
 pub use style::{
-    BORDER_WIDTH, RADIUS, bar, border_color, button_text, card, grid, map_label, menu_box,
-    menu_button, menu_button_tinted, nav_button, output_border, output_wash, overlap_wash, preview,
-    preview_button, selection_box, swatch, text, text_dim,
+    BORDER_WIDTH, RADIUS, bar, border_color, card, grid, map_label, menu_box, menu_button,
+    menu_button_tinted, nav_button, output_border, output_wash, overlap_wash, preview,
+    selection_box, text, text_dim,
 };
 #[cfg(test)]
-use style::{Class, color, container_style};
+use style::{Class, color, container_style, preview_button};
 
 use iced::{Color, Theme};
 

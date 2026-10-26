@@ -1,9 +1,12 @@
+mod animation;
 pub(crate) mod components;
 mod context_menu;
-mod editors;
-mod pages;
+mod desktop_page;
 mod panel;
+mod panel_bar;
 mod placement;
+mod sources;
+mod theme_page;
 mod wallpaper;
 use crate::config::BackgroundImage;
 use crate::shell::Plant;
@@ -25,6 +28,14 @@ pub(crate) type IconPreviews = Vec<(String, Vec<Option<iced::widget::image::Hand
 /// Mirrors `Top` / `Background`: spawn + view live here, `Plots` just delegates.
 #[derive(Debug, Default)]
 pub struct Setting {
+    animation_page: std::cell::RefCell<animation::Page>,
+    theme_page: std::cell::RefCell<theme_page::Page>,
+    placement_editor: std::cell::RefCell<placement::Editor>,
+    panel_bar: std::cell::RefCell<panel_bar::Page>,
+    components_page: std::cell::RefCell<components::Page>,
+    desktop_page: std::cell::RefCell<desktop_page::Page>,
+    wallpaper_page: std::cell::RefCell<wallpaper::Page>,
+    context_menu_page: std::cell::RefCell<context_menu::Page>,
     icon_previews: Option<Result<IconPreviews, String>>,
     icon_previews_loading: bool,
     pub(crate) wallpaper_draft: Option<crate::wallpaper::draft::Draft>,
@@ -210,8 +221,22 @@ impl Setting {
     fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
         match self.page {
             SettingPage::Info => column![].spacing(0).width(Length::Fill).into(),
-            SettingPage::Desktop => crate::shell::desktop_widgets::settings(id, plots),
-            SettingPage::Components => components::view(id, self, &plots.config.component_defaults),
+            SettingPage::Desktop => {
+                self.desktop_page
+                    .borrow_mut()
+                    .view(id, plots, &plots.config.theme)
+            }
+            SettingPage::Components => self.components_page.borrow_mut().view(
+                id,
+                components::Selection {
+                    component: self.selected_component,
+                    property: self.selected_property,
+                    draft: self.component_draft.as_deref(),
+                    error: self.component_error.as_deref(),
+                },
+                &plots.config.component_defaults,
+                &plots.config.theme,
+            ),
             SettingPage::Panel => self.panel_content(id, panel::PanelContext::from(plots)),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),
@@ -222,7 +247,9 @@ impl Setting {
     }
 
     fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        context_menu::view(context_menu::Context::from(plots))
+        self.context_menu_page
+            .borrow_mut()
+            .view(plots, &plots.config.theme)
     }
 
     /// Panel page: picker row of bars on top, controls for the picked bar
@@ -237,7 +264,11 @@ impl Setting {
     /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
     /// and persists the choice to `config.lua`.
     fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        pages::theme_page(&plots.config.theme, self.icon_previews.as_ref())
+        self.theme_page.borrow_mut().view(
+            &plots.config.theme,
+            self.icon_previews.as_ref(),
+            &plots.config.component_defaults,
+        )
     }
 
     /// Animation speed picker: one global speed for every animated
@@ -245,11 +276,27 @@ impl Setting {
     /// change). Writes back via `ConfigEvent::Patch`, so the daemon
     /// re-times on the next redraw and persists the choice to `config.lua`.
     fn animation_content(&self, plots: &Plots) -> Element<'_, Plant> {
-        pages::animation_page(plots.config.animation.speed)
+        self.animation_page.borrow_mut().view(
+            plots.config.animation.speed,
+            &plots.config.theme,
+            &plots.config.component_defaults,
+        )
     }
 
     fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        wallpaper::view(self, id, plots)
+        self.wallpaper_page.borrow_mut().view(
+            wallpaper::Context {
+                id,
+                plots,
+                draft: self
+                    .wallpaper_draft
+                    .as_ref()
+                    .expect("wallpaper page requires a draft"),
+                map_view: self.map_view,
+                selected_image: self.selected_image,
+            },
+            &plots.config.theme,
+        )
     }
 
     /// Replace the map pan/zoom/drag view (`MapViewChanged`). Field stays
@@ -284,7 +331,7 @@ impl Setting {
                 let current = plots.config.theme.icon_theme.clone();
                 return Command::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || pages::load_icon_previews(current))
+                        tokio::task::spawn_blocking(move || theme_page::load_icon_previews(current))
                             .await
                             .map_err(|error| error.to_string())
                     },
@@ -530,18 +577,6 @@ fn section<'a>(title: &str, description: &str, body: Element<'a, Plant>) -> Elem
         .width(Length::Fill)
         .style(theme::menu_box)
         .into()
-}
-
-/// Single palette swatch box for theme preview rows: fixed-size tile
-/// painted with the previewed theme's own color.
-fn swatch(color: iced::Color, border: iced::Color) -> Element<'static, Plant> {
-    container(
-        Space::new()
-            .width(Length::Fixed(18.0))
-            .height(Length::Fixed(18.0)),
-    )
-    .style(theme::swatch(color, border))
-    .into()
 }
 
 /// Short file name for an image entry (`"(empty path)"` for sparse entries).

@@ -46,6 +46,8 @@ pub(crate) const SEED_COMPONENT_DEFINE: &str =
     include_str!("../../scripts/components/00-define.lua");
 pub(crate) const SEED_COMPONENT_STYLED: &str =
     include_str!("../../scripts/components/05-styled.lua");
+pub(crate) const SEED_COMPONENT_EDITORS: &str =
+    include_str!("../../scripts/components/06-editors.lua");
 pub(crate) const SEED_SELECTION_RECT: &str =
     include_str!("../../scripts/components/selection_rect.lua");
 pub(crate) const SEED_CONTEXT_MENU: &str =
@@ -139,11 +141,55 @@ fn seed_component(dir: &std::path::Path, name: &str, content: &str) {
     }
 }
 
+/// Bundled Settings pages, installed once so users can edit them.
+pub(super) const SETTINGS_SEEDS: &[(&str, &str)] = &[
+    (
+        "animation.lua",
+        include_str!("../../scripts/settings/animation.lua"),
+    ),
+    (
+        "theme.lua",
+        include_str!("../../scripts/settings/theme.lua"),
+    ),
+    (
+        "panel_bar.lua",
+        include_str!("../../scripts/settings/panel_bar.lua"),
+    ),
+    (
+        "placement.lua",
+        include_str!("../../scripts/settings/placement.lua"),
+    ),
+    (
+        "components.lua",
+        include_str!("../../scripts/settings/components.lua"),
+    ),
+    (
+        "desktop.lua",
+        include_str!("../../scripts/settings/desktop.lua"),
+    ),
+    (
+        "context_menu.lua",
+        include_str!("../../scripts/settings/context_menu.lua"),
+    ),
+    (
+        "wallpaper.lua",
+        include_str!("../../scripts/settings/wallpaper.lua"),
+    ),
+];
+
+/// Populate a fresh Settings directory without overwriting existing files.
+pub(super) fn seed_settings_in(dir: &std::path::Path) {
+    for (name, content) in SETTINGS_SEEDS {
+        seed_component(dir, name, content);
+    }
+}
+
 /// Populate a fresh component library without overwriting existing files.
 pub(super) fn seed_components_in(dir: &std::path::Path) {
     for (name, content) in [
         ("00-define.lua", SEED_COMPONENT_DEFINE),
         ("05-styled.lua", SEED_COMPONENT_STYLED),
+        ("06-editors.lua", SEED_COMPONENT_EDITORS),
         ("10-card.lua", SEED_COMPONENT_CARD),
         ("20-menu.lua", SEED_COMPONENT_MENU),
         ("30-graph.lua", SEED_COMPONENT_GRAPH),
@@ -183,6 +229,7 @@ impl super::WidgetsFile {
         initialize_scripts_in(&widgets_dir(), seed_widgets_in);
         seed_components();
         initialize_scripts_in(&super::paths::shaders_dir(), seed_shaders_in);
+        initialize_scripts_in(&super::paths::settings_dir(), seed_settings_in);
         let root = super::paths::config_path()
             .parent()
             .expect("config directory")
@@ -260,6 +307,11 @@ mod tests {
                 seed_components_in as fn(&std::path::Path),
                 "10-card.lua",
             ),
+            (
+                "settings",
+                seed_settings_in as fn(&std::path::Path),
+                "wallpaper.lua",
+            ),
         ] {
             let dir = root.join(name);
             initialize_scripts_in(&dir, seed);
@@ -302,6 +354,18 @@ mod tests {
         initialize_scripts_in(&components, seed_components_in);
         assert!(shared_component_files_in(&components).is_empty());
         assert!(component_files_in(&components).is_empty());
+        // A committed `settings/` directory (like the framework example) is
+        // adopted as-is: the pages it omits keep their bundled sources.
+        let settings = root.join("settings");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(settings.join("animation.lua"), "-- my animation").unwrap();
+        initialize_scripts_in(&settings, seed_settings_in);
+        assert!(!settings.join("wallpaper.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(settings.join("animation.lua")).unwrap(),
+            "-- my animation"
+        );
+        assert!(seed_marker(&settings).exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
