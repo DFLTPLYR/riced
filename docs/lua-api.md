@@ -10,6 +10,9 @@ dialogs and `riced.service(name)` for cached snapshots and subscriptions.
 `riced.file({...})` adds cached structured documents, managed asynchronous
 reload/save, and lifecycle-owned `file:watch()` subscriptions; see
 [Structured file persistence](persistence.md).
+Compiled-in extensions expose cached snapshots, subscriptions, and managed
+`service:command(name, args, callback)` through `riced.service(name)`; see
+[Rust extensions](extensions.md). Built-in services remain read-only here.
 Rust owns delivery, policy, and validation; Lua owns presentation. ◪
 
 ## App contract

@@ -29,6 +29,10 @@ impl Default for ProcessOptions {
 }
 #[derive(Debug, Clone)]
 pub(crate) enum Operation {
+    Extension {
+        service: String,
+        request: riced_extension_sdk::Request,
+    },
     PickFile(super::dialog::FileOptions),
     File(super::storage::Request),
     Process {
@@ -150,6 +154,17 @@ impl Owner {
         {
             return false;
         }
+        if let Some(Running {
+            operation: Operation::Extension { service, .. },
+            ..
+        }) = self.active.get(&delivery.id)
+            && delivery.payload["ok"] == true
+            && let Some(snapshot) = delivery.payload.get("snapshot")
+            && let Err(error) = super::extensions::registry()
+                .and_then(|registry| registry.publish(service, snapshot.clone()))
+        {
+            tracing::error!(%error, %service, "extension snapshot publication failed");
+        }
         let repeat = self
             .active
             .get(&delivery.id)
@@ -181,6 +196,9 @@ impl Job {
             failure("cancelled", "operation cancelled before starting")
         } else {
             match self.operation {
+                Operation::Extension { request, .. } => {
+                    super::extensions::run(request, self.receiver).await
+                }
                 Operation::PickFile(options) => super::dialog::run(options, self.receiver).await,
                 Operation::File(request) => super::storage::run(request, self.receiver).await,
                 Operation::Timer { millis, .. } => match select(

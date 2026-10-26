@@ -10,6 +10,10 @@ pub fn set_project_root(root: PathBuf) -> Result<(), String> {
         .set(root)
         .map_err(|_| "project root already selected".into())
 }
+/// The selected project directory, if one was set before startup.
+pub fn project_root() -> Option<PathBuf> {
+    PROJECT_ROOT.get().cloned()
+}
 /// `~/.config/riced/config.lua`: the only shell config the runtime reads
 /// (`$XDG_CONFIG_HOME` aware). Migrated once from `config.toml`.
 pub fn config_path() -> PathBuf {

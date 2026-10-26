@@ -300,9 +300,57 @@ disables the legacy desktop-widget host, not just its wallpaper rendering.
 
 The [structured persistence API](persistence.md) provides `riced.file()` with
 cached edits, managed reload/save operations, conflict detection, and coalesced
-file watching. A versioned Rust extension SDK, generic
-service registration/commands, and standard Cargo crates under
-`extensions/<name>/` follow the persistence milestone.
-Compiled-in extensions will require rebuilding/restarting; supervised process
-extensions will follow for independently restartable service workloads. Rust
-dynamic-library loading is intentionally not part of the initial design.
+file watching. The [experimental Rust extension SDK](extensions.md) provides
+versioned registration, cached service snapshots, and managed service commands
+for compiled-in Cargo crates under `extensions/<name>/`. Extensions are enabled
+in `config.lua`, and `riced build` generates the registration entry point plus
+a locked Cargo package under `.riced/`, so adding an extension no longer edits
+framework source. The palette extension demonstrates this owned-data interface
+without applying shell theme changes. Compiled-in extensions require
+rebuilding/restarting; supervised process extensions remain a later milestone
+for independently restartable workloads. Rust dynamic-library loading is
+intentionally not part of the initial design.
+
+### Later: Lua editor support (LuaLS)
+
+Provide completion, signatures, hover documentation, and lightweight type
+checking through `lua-language-server` and LuaCATS definitions, without a custom
+language server or changes to runtime behavior. Schedule full coverage after
+the extension SDK's public Lua surface stabilizes; core `iced.*` definitions
+can land earlier.
+
+Planned work:
+
+1. **API definitions:** add `types/riced.lua` as a `---@meta` library covering
+   widget constructors and chainable setters; layer roots; animations and
+   components; app lifecycle, managed methods, and events; persistence handles;
+   service snapshots; and notification/tray commands. Derive names and fields
+   from Rust schemas and publication code rather than documentation alone.
+2. **Editor setup:** add a Lua 5.4 `.luarc.json` with `types` as a workspace
+   library, plus configuration for opening `config/riced/example/` directly.
+   Document Neovim and VS Code setup in the Lua API guide.
+3. **Example annotations:** describe the background app's custom state with a
+   class extending `RicedApp`, and annotate component props and delegate items
+   where useful. Explain that runtime-defined components need explicit type
+   declarations or annotations; `iced.use` can provide a statically described
+   entry point but cannot infer arbitrary component props or return types.
+4. **Drift checks:** test that every Rust component constructor and setter has
+   a corresponding declaration. Introduce generation from schema metadata if
+   maintaining the definitions manually becomes cumbersome.
+5. **Optional distribution:** later consider `riced lua-stubs [PATH]` to export
+   definitions and editor configuration for standalone projects. Define an
+   explicit overwrite policy before writing user-owned configuration.
+
+Acceptance criteria:
+
+- Opening the repository or background example provides constructor, setter,
+  and service completion; chained setters preserve the widget's specific type.
+- The annotated example passes LuaLS checks without undefined-global or
+  setter-type errors, and representative invalid calls produce diagnostics.
+- Adding a constructor or setter without updating definitions fails a test.
+- Documentation distinguishes inferred API types from app-specific annotations.
+
+Validate LuaLS's generic/self-preserving return behavior before choosing the
+shared-setter model. If unreliable, declare setters separately per widget class
+to preserve chaining. Arbitrary runtime component discovery, automatic typing of
+all app state, and replacing Rust runtime validation are explicitly out of scope.

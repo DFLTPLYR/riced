@@ -261,6 +261,17 @@ pub(crate) fn install(lua: &Lua, root: &Path) -> mlua::Result<()> {
                 return Err(error(format!("unknown service {topic:?}")));
             }
             let service = lua.create_table()?;
+            let command_topic = topic.clone();
+            service.set(
+                "command",
+                lua.create_function(move |lua, (_service, method, args, callback): (Table, String, Value, Function)| {
+                    let args: Json = lua.from_value(args)?;
+                    let request = crate::framework::extensions::registry()
+                        .and_then(|registry| registry.request(&command_topic, &method, args))
+                        .map_err(mlua::Error::external)?;
+                    register(lua, callback, false, None, Some(Operation::Extension { service: command_topic.clone(), request }))
+                })?,
+            )?;
             let name = topic.clone();
             service.set(
                 "snapshot",
@@ -474,6 +485,46 @@ mod tests {
             .exec()
             .unwrap();
         assert!(poll(&lua).unwrap().is_empty());
+    }
+    #[test]
+    fn extension_commands_are_managed_and_reject_invalid_calls() {
+        let lua = lua();
+        assert!(
+            lua.load(
+                "riced.service('palette'):command('generate',{seed='#123456'},function() end)"
+            )
+            .exec()
+            .is_err()
+        );
+        phase(&lua, Phase::Active);
+        for source in [
+            "riced.service('palette'):command('missing',{},function() end)",
+            "riced.service('system'):command('generate',{},function() end)",
+            "riced.service('palette'):command('generate',{seed=function() end},function() end)",
+        ] {
+            assert!(lua.load(source).exec().is_err(), "{source}");
+        }
+        lua.load("token=riced.service('palette'):command('generate',{seed='#123456'},function(result) calls=(calls or 0)+1; data=result.data end)").exec().unwrap();
+        assert!(
+            matches!(&commands(&lua)[..], [Command::Start {operation: Operation::Extension {service, ..}, ..}] if service == "palette")
+        );
+        let delivery = Delivery {
+            kind: DeliveryKind::Job,
+            generation: generation(&lua).unwrap(),
+            id: lua.globals().get("token").unwrap(),
+            revision: 1,
+            payload: serde_json::json!({"ok":true,"data":{"seed":"#123456"}}),
+        };
+        invoke(&lua, &delivery).unwrap();
+        invoke(&lua, &delivery).unwrap();
+        assert_eq!(lua.globals().get::<u32>("calls").unwrap(), 1);
+        lua.load("token=riced.service('palette'):command('generate',{seed='#abcdef'},function() error('cancelled callback') end); assert(app:cancel(token))").exec().unwrap();
+        let cancelled = Delivery {
+            id: lua.globals().get("token").unwrap(),
+            ..delivery
+        };
+        assert!(!accepts(&lua, &cancelled));
+        invoke(&lua, &cancelled).unwrap();
     }
     #[test]
     fn file_pickers_stage_owned_options_deliver_once_and_cancel_silently() {

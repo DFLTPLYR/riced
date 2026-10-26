@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+pub mod build;
 pub mod commands;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,23 @@ pub enum Commands {
         /// Skip template rendering entirely.
         #[arg(long)]
         no_templates: bool,
+    },
+    /// Generate and build a project shell from the extensions enabled in
+    /// `config.lua`.
+    Build {
+        /// Build with optimizations.
+        #[arg(long)]
+        release: bool,
+        /// Require the generated Cargo.lock to be current instead of updating it.
+        #[arg(long)]
+        locked: bool,
+        /// Riced framework source directory. Defaults to `RICED_FRAMEWORK`,
+        /// then the source tree this binary was built from.
+        #[arg(long)]
+        framework: Option<PathBuf>,
+        /// Cargo target directory. Defaults to `<project>/target/riced-shell`.
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
     },
     /// Re-render a `[templates]` dir with a stored theme object (sys
     /// `change_theme` equivalent): find-and-replace `{{vars}}` without

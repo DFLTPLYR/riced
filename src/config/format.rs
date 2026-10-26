@@ -549,6 +549,27 @@ mod tests {
     }
 
     #[test]
+    fn extensions_roundtrip_and_reject_invalid_names() {
+        let config: Config = parse(
+            "return { extensions = { { name = 'palette' }, { name = 'custom', path = 'vendor/custom' } } }",
+        )
+        .unwrap();
+        let saved = save(&config).unwrap();
+        assert!(saved.contains("extensions"));
+        assert!(saved.contains("name = \"palette\""));
+        assert!(saved.contains("path = \"vendor/custom\""));
+        let reloaded: Config = parse(&saved).unwrap();
+        assert_eq!(reloaded.extensions, config.extensions);
+        for source in [
+            "return { extensions = { { name = 'Bad' } } }",
+            "return { extensions = { { name = 'demo' }, { name = 'demo' } } }",
+            "return { extensions = { { name = 'demo', unknown = true } } }",
+        ] {
+            assert!(parse(source).is_err(), "accepted {source}");
+        }
+    }
+
+    #[test]
     fn identical_slot_layouts_share_saved_form_and_omit_defaults() {
         let source = "return { bar = { { output = 'DP-1', slots = { { align = 'start', widgets = { 'clock', { name = 'stats', size = 17 } } }, { align = 'end', widgets = {} } } } } }";
         let config: Config = parse(source).unwrap();

@@ -80,6 +80,14 @@ pub struct Config {
         deserialize_with = "crate::framework::deserialize_apps"
     )]
     pub(crate) apps: Vec<crate::framework::AppConfig>,
+    /// Compiled-in Rust extensions enabled for this project. `riced build`
+    /// generates a shell binary from this list.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::framework::deserialize_extensions"
+    )]
+    pub extensions: Vec<crate::framework::ExtensionConfig>,
     #[serde(skip_serializing_if = "crate::ui::settings::ComponentDefaults::is_empty")]
     pub component_defaults: crate::ui::settings::ComponentDefaults,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

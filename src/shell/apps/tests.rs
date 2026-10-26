@@ -149,6 +149,44 @@ fn input_refreshes_only_the_owning_instance_and_redraws_its_surface() {
 }
 
 #[test]
+fn palette_example_renders_before_and_after_native_generation() {
+    let fixture = Fixture::new(include_str!(
+        "../../../examples/framework/apps/palette/app.lua"
+    ));
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    assert_eq!(app.root.as_ref().unwrap().surface.width, Some(300));
+    let runtime = app.runtime.as_ref().unwrap();
+    let mut owner = Owner::default();
+    owner.reset(runtime.managed_generation().unwrap());
+    owner.apply(runtime.managed_commands());
+    let job = owner.jobs().pop().unwrap();
+    let delivery = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(job.run());
+    assert_eq!(delivery.payload["ok"], true);
+    // Deliver the callback without committing shared state; owner publication
+    // is covered separately, keeping this UI test independent of other apps.
+    with_services(|services| {
+        app.runtime
+            .as_mut()
+            .unwrap()
+            .app_event(
+                services,
+                &app.output_name,
+                &app.context,
+                &app.props,
+                AppEvent::Managed(&delivery),
+            )
+            .unwrap()
+    });
+    fixture.render(&mut app, false).unwrap();
+    crate::ui::build::build_node(&app.root.as_ref().unwrap().content, 13.0, None).unwrap();
+}
+
+#[test]
 fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
     let fixture = Fixture::new(include_str!(
         "../../../config/riced/example/apps/background/app.lua"

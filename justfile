@@ -7,8 +7,8 @@ default:
 # Required checks for structural changes (uses the same system libraries as build).
 check:
     {{nix}} cargo fmt --all -- --check
-    {{nix}} cargo test
-    {{nix}} cargo clippy --all-targets
+    {{nix}} cargo test --workspace
+    {{nix}} cargo clippy --workspace --all-targets
     git diff --check
 
 # Build release inside the flake dev shell with runtime library paths.

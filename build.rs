@@ -9,20 +9,11 @@
 // referenced icons compile in.
 //
 // Aliases (`mem`, `vol`, `up`, `robot`...) are emitted first and win.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn main() {
-    // Find lucide-iced's OUT_DIR: the newest generated.rs under
-    // target/<profile>/build/lucide-iced-*/out. Cargo sets OUT_DIR for
-    // this script, so sibling crate dirs are next to it.
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let target_dir = out_dir
-        .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "build"))
-        .and_then(|p| p.parent())
-        .expect("OUT_DIR under target/<profile>/build");
+fn find_generated(target_dir: &Path) -> Option<PathBuf> {
     let mut generated: Vec<PathBuf> = std::fs::read_dir(target_dir.join("build"))
-        .expect("read target build dir")
+        .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name()
@@ -38,7 +29,36 @@ fn main() {
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
-    let generated = generated.last().expect("lucide-iced generated.rs");
+    generated.pop()
+}
+
+fn main() {
+    // Find lucide-iced's OUT_DIR: the newest generated.rs under
+    // target/<profile>/build/lucide-iced-*/out. Cargo sets OUT_DIR for
+    // this script, so sibling crate dirs are next to it.
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let target_dir = out_dir
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "build"))
+        .and_then(|p| p.parent())
+        .expect("OUT_DIR under target/<profile>/build");
+    // Cargo may run this script in parallel with lucide-iced's own build
+    // script (which downloads icons and writes generated.rs). Wait for it
+    // instead of racing, so clean target directories and generated shells
+    // build reliably.
+    let generated = (0..12_000)
+        .find_map(|attempt| {
+            let found = find_generated(target_dir);
+            if found.is_none() {
+                if attempt == 100 {
+                    eprintln!("riced: waiting for lucide-iced icon generation...");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            found
+        })
+        .expect("lucide-iced generated.rs (timed out after 10 minutes)");
+    let generated = &generated;
     let icons_dir = generated.parent().unwrap().join("lucide-icons");
     println!("cargo:rerun-if-changed={}", generated.display());
     println!("cargo:rerun-if-changed={}", icons_dir.display());

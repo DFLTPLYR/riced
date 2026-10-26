@@ -52,6 +52,55 @@ pub(crate) fn deserialize_apps<'de, D: serde::Deserializer<'de>>(
     Ok(apps)
 }
 
+/// One compiled-in extension enabled for a project.
+///
+/// `path` is relative to the project root and defaults to
+/// `extensions/<name>` when omitted. The crate must expose
+/// `pub fn register(&mut Registry, &[&str]) -> Result<(), Error>`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExtensionConfig {
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub path: String,
+}
+
+fn valid_extension_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+}
+
+pub(crate) fn deserialize_extensions<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ExtensionConfig>, D::Error> {
+    let extensions = Vec::<ExtensionConfig>::deserialize(deserializer)?;
+    let mut names = HashSet::new();
+    for extension in &extensions {
+        if !valid_extension_name(&extension.name) {
+            return Err(serde::de::Error::custom(format!(
+                "extension name {:?} must start with a lowercase letter and contain only lowercase letters, digits, or '_'",
+                extension.name
+            )));
+        }
+        if extension.path.contains('\0') {
+            return Err(serde::de::Error::custom(
+                "extension path must not contain NUL bytes",
+            ));
+        }
+        if !names.insert(extension.name.as_str()) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicate extension {:?}",
+                extension.name
+            )));
+        }
+    }
+    Ok(extensions)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Project {
     pub root: PathBuf,

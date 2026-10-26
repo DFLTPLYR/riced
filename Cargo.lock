@@ -4082,6 +4082,8 @@ dependencies = [
  "regex",
  "resvg",
  "rfd",
+ "riced-extension-palette",
+ "riced-extension-sdk",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -4096,6 +4098,24 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "zbus",
+]
+
+[[package]]
+name = "riced-extension-palette"
+version = "0.1.0"
+dependencies = [
+ "material-colors",
+ "riced-extension-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "riced-extension-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

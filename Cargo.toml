@@ -3,7 +3,14 @@ name = "riced"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["crates/riced-extension-sdk", "extensions/palette"]
+resolver = "3"
+
+
 [dependencies]
+riced-extension-sdk = { path = "crates/riced-extension-sdk" }
+riced-extension-palette = { path = "extensions/palette" }
 iced = { version = "0.14.0", features = [
   "tokio",
   "advanced",

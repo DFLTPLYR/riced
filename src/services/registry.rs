@@ -94,6 +94,7 @@ const SERVICES: &[&dyn Service] = &[
 /// Framework topics share the existing publishers; no extra polling or IPC here.
 pub(crate) fn valid_topic(name: &str) -> bool {
     SERVICES.iter().any(|service| service.namespace() == name)
+        || crate::framework::extensions::registry().is_ok_and(|registry| registry.contains(name))
         || matches!(
             name,
             "wayland.workspaces" | "wayland.outputs" | "wayland.toplevels"
@@ -102,6 +103,11 @@ pub(crate) fn valid_topic(name: &str) -> bool {
 
 pub(crate) fn snapshot(lua: &mlua::Lua, name: &str) -> mlua::Result<serde_json::Value> {
     use mlua::LuaSerdeExt;
+    let registry = crate::framework::extensions::registry().map_err(mlua::Error::external)?;
+    if registry.contains(name) {
+        let data = registry.snapshot(name).map_err(mlua::Error::external)?;
+        return Ok(serde_json::json!({"name":name,"available":true,"data":data}));
+    }
     if !valid_topic(name) {
         return Err(mlua::Error::RuntimeError(format!(
             "unknown service {name:?}"

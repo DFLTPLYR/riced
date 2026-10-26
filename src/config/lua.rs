@@ -16,6 +16,7 @@ use serde_json::Value as Json;
 /// stable diffs regardless of which profile inserted the key first.
 const CANON: &[&str] = &[
     "apps",
+    "extensions",
     "component_defaults",
     "desktop",
     "composable",
