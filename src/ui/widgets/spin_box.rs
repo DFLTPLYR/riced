@@ -49,13 +49,13 @@ pub fn spin_box(
 
     // Icons inherit the button text color and recolor with its states.
     let commit_down = on_commit.clone();
-    let down = button(lucide_iced::themed_icon(lucide_iced::bytes::MINUS, 8.0))
+    let down = button(crate::ui::icons::themed_icon(crate::ui::icons::MINUS, 8.0))
         .width(Length::Fixed(30.0))
         .height(Length::Fixed(30.0))
         .padding(4)
         .style(theme::menu_button(theme::RADIUS))
         .on_press(commit_down((value - step).clamp(min, max)));
-    let up = button(lucide_iced::themed_icon(lucide_iced::bytes::PLUS, 8.0))
+    let up = button(crate::ui::icons::themed_icon(crate::ui::icons::PLUS, 8.0))
         .width(Length::Fixed(30.0))
         .height(Length::Fixed(30.0))
         .padding(4)

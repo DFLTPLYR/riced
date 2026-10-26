@@ -1,9 +1,11 @@
 //! Generated icon lookup and rich-text placeholders, shared by all surfaces.
+mod themed;
 use crate::shell::Plant;
 use iced::{
     Element,
     widget::{row, text},
 };
+pub(crate) use themed::{ThemedIcon, themed_icon};
 
 pub(crate) fn icon_bytes(name: &str) -> Option<&'static [u8]> {
     let key = name
@@ -66,7 +68,7 @@ pub(crate) fn rich_text_for<M: 'static>(
         match segment {
             Segment::Text(t) if !t.is_empty() => row = row.push(text(t.to_owned()).size(size)),
             Segment::Icon(name) => match icon_bytes(name) {
-                Some(bytes) => row = row.push(lucide_iced::themed_icon(bytes, size)),
+                Some(bytes) => row = row.push(themed_icon(bytes, size)),
                 None => row = row.push(text(format!("{{icon:{name}}}")).size(size)),
             },
             _ => {}
@@ -119,6 +121,19 @@ mod tests {
             "robot-vacuum",
             "house",
             "power",
+            "avocado",
+            "bacon",
+            "brain-off",
+            "circle-chevrons-down",
+            "circle-chevrons-left",
+            "circle-chevrons-right",
+            "circle-chevrons-up",
+            "graph-hub",
+            "letter-spacing",
+            "line-height",
+            "smartphone-user-round",
+            "tombstone",
+            "table",
         ] {
             assert!(icon_bytes(name).is_some(), "{name}");
         }

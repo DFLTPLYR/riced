@@ -1,139 +1,15 @@
-// Build-time Lucide name table: maps a normalized (lowercase,
-// alphanumeric-only) icon name to its `lucide_iced::icon::<fn>`
-// constructor, so `{icon:bot}` / `ui.icon("robot-vacuum")` resolve
-// without a hand-maintained match or a checked-in table.
-//
-// Reads the SVG filenames from lucide-iced's own build output dir
-// (same fresh-icons guarantee as the crate itself), emits a `match`
-// over the `icon::` functions — tree-shaking preserved, since only
-// referenced icons compile in.
-//
-// Aliases (`mem`, `vol`, `up`, `robot`...) are emitted first and win.
-use std::path::{Path, PathBuf};
+//! Generate icon lookup exclusively from the checked-in, pinned SVG catalog.
+#[path = "scripts/lucide_codegen.rs"]
+mod lucide_codegen;
 
-fn find_generated(target_dir: &Path) -> Option<PathBuf> {
-    let mut generated: Vec<PathBuf> = std::fs::read_dir(target_dir.join("build"))
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("lucide-iced-"))
-        })
-        .map(|p| p.join("out").join("generated.rs"))
-        .filter(|p| p.is_file())
-        .collect();
-    // Newest first: lucide-iced rebuilds fetch fresh icons, so the
-    // latest generated.rs is the current set.
-    generated.sort_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-    });
-    generated.pop()
-}
-
-fn main() {
-    // Find lucide-iced's OUT_DIR: the newest generated.rs under
-    // target/<profile>/build/lucide-iced-*/out. Cargo sets OUT_DIR for
-    // this script, so sibling crate dirs are next to it.
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let target_dir = out_dir
-        .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "build"))
-        .and_then(|p| p.parent())
-        .expect("OUT_DIR under target/<profile>/build");
-    // Cargo may run this script in parallel with lucide-iced's own build
-    // script (which downloads icons and writes generated.rs). Wait for it
-    // instead of racing, so clean target directories and generated shells
-    // build reliably.
-    let generated = (0..12_000)
-        .find_map(|attempt| {
-            let found = find_generated(target_dir);
-            if found.is_none() {
-                if attempt == 100 {
-                    eprintln!("riced: waiting for lucide-iced icon generation...");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            found
-        })
-        .expect("lucide-iced generated.rs (timed out after 10 minutes)");
-    let generated = &generated;
-    let icons_dir = generated.parent().unwrap().join("lucide-icons");
-    println!("cargo:rerun-if-changed={}", generated.display());
-    println!("cargo:rerun-if-changed={}", icons_dir.display());
-
-    let mut names: Vec<String> = std::fs::read_dir(&icons_dir)
-        .expect("read lucide-icons dir")
-        .filter_map(|e| e.ok())
-        .map(|p| p.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "svg"))
-        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .collect();
-    names.sort();
-
-    // kebab-name -> SCREAMING bytes const, mirroring lucide-iced's
-    // own naming (hyphens to underscores, uppercased).
-    let to_const = |name: &str| name.replace('-', "_").to_uppercase();
-    let norm = |name: &str| {
-        name.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_lowercase()
-    };
-    // First normalized name wins on collision (e.g. `table` icon vs
-    // the `TABLE` const — none collide today, but stay deterministic).
-    let mut seen = std::collections::HashSet::new();
-    let mut arms = String::new();
-    for name in &names {
-        let key = norm(name);
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        let c = to_const(name);
-        // TABLE is itself an icon (table.svg) — but TABLE is also the
-        // const name pattern's only collision, skipped explicitly.
-        if c == "TABLE" {
-            continue;
-        }
-        arms.push_str(&format!("\"{key}\" => lucide_iced::bytes::{c},\n"));
-    }
-    // Short aliases, emitted first so they win the match. Targets
-    // are bytes consts. Aliases shadowing a real icon name are
-    // dropped (the icon wins — e.g. "volume" is a real icon).
-    let aliases = [
-        ("robot", "BOT"),
-        ("mem", "MEMORY_STICK"),
-        ("ram", "MEMORY_STICK"),
-        ("temp", "THERMOMETER"),
-        ("disk", "HARD_DRIVE"),
-        ("chart", "CHART_LINE"),
-        ("vol", "VOLUME_2"),
-        ("mute", "VOLUME_X"),
-        ("up", "ARROW_UP"),
-        ("down", "ARROW_DOWN"),
-    ];
-    // Real icon keys, so aliases never shadow them.
-    let real: std::collections::HashSet<String> = names.iter().map(|n| norm(n)).collect();
-    let mut alias_arms = String::new();
-    for (alias, target) in aliases {
-        if real.contains(alias) {
-            continue;
-        }
-        alias_arms.push_str(&format!("\"{alias}\" => lucide_iced::bytes::{target},\n"));
-    }
-
-    let code = format!(
-        "// @generated by riced build.rs from lucide-iced output — do not edit.\n\
-         // Source set: {} ({} icons).\n\
-         #[allow(clippy::all)]\n\
-         pub(crate) fn generated_icon_bytes(name: &str) -> Option<&'static [u8]> {{\n\
-         Some(match name {{\n\
-         {alias_arms}{arms}_ => return None,\n\
-         }})\n\
-         }}\n",
-        icons_dir.display(),
-        names.len(),
-    );
-    std::fs::write(out_dir.join("lucide_lookup.rs"), code).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=assets/lucide/icons.json");
+    println!("cargo:rerun-if-changed=scripts/lucide_codegen.rs");
+    let catalog: serde_json::Value =
+        serde_json::from_str(include_str!("assets/lucide/icons.json"))?;
+    let icons = serde_json::from_value(catalog["icons"].clone())?;
+    let code = lucide_codegen::generate(&icons)?;
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").ok_or("missing OUT_DIR")?);
+    std::fs::write(out.join("lucide_lookup.rs"), code)?;
+    Ok(())
 }

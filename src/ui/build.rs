@@ -367,7 +367,7 @@ fn realize_aligned<M: Clone + 'static>(
         }
         WidgetNode::Icon { name, color } => {
             let base: Element<'static, M> = match icon_bytes(name) {
-                Some(bytes) => lucide_iced::themed_icon(bytes, size.max(1.0)),
+                Some(bytes) => crate::ui::icons::themed_icon(bytes, size.max(1.0)),
                 None => text(format!("{{icon:{name}}}")).size(size.max(1.0)).into(),
             };
             if color.is_some() || opacity < 1.0 {
@@ -828,8 +828,8 @@ fn realize_aligned<M: Clone + 'static>(
             height.resolve(iced::Length::Fixed(100.0)),
             opacity,
         )),
-        WidgetNode::Spinner => Ok(lucide_iced::ThemedIcon::new(
-            iced::advanced::svg::Handle::from_memory(lucide_iced::bytes::LOADER_CIRCLE),
+        WidgetNode::Spinner => Ok(crate::ui::icons::ThemedIcon::new(
+            iced::advanced::svg::Handle::from_memory(crate::ui::icons::LOADER_CIRCLE),
             size.max(1.0) * 1.5,
         )
         .opacity(opacity)
