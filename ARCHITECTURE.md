@@ -6,6 +6,8 @@
 src/
   main.rs              CLI dispatch and daemon bootstrap
   cli/                 arguments, IPC, headless command execution
+                       (build.rs generates a project shell; extension.rs
+                       compiles the crates config.lua enables)
   shell/
     state.rs           domain coordination and event dispatch
     windows.rs         surface registries, output identity and idempotent detachment
@@ -19,6 +21,8 @@ src/
     overlay.rs         shared fullscreen surfaces, source runtimes, measured input masks
     events.rs          host messages
     jobs.rs            persistence and theme-regeneration job ownership
+    apps.rs            framework app instances and their declared layer roots
+    apps/popup.rs      app-owned modal child surfaces
     screens/           bar, wallpaper/menu, popup, notification, settings hosts
       top/             bar host
         scheduling.rs  due placement selection and execution with an injected clock
@@ -31,13 +35,18 @@ src/
       popup/
         surface.rs     popup geometry, list synchronization and registration
       setting/         Settings host, explicit page snapshots and shared controls
-        context_menu.rs source-backed chrome property page
-        wallpaper.rs   wallpaper map and image-property composition
+        animation.rs   cached Lua Animation page and validated speed actions
+        theme_page.rs  cached Lua Theme page, native icon loading and validated actions
+        panel_bar.rs   cached Lua bar-level Panel controls and typed bar/style actions
+        components.rs  cached Lua Components editor; native literal parsing and validation
+        desktop_page.rs cached Lua Desktop page with host-filled widget preview slots
+        context_menu.rs cached Lua context-menu source page
+        wallpaper.rs   cached Lua wallpaper editor with a native map-canvas slot
         panel.rs       Panel composition and immutable bar/catalog/output context
-        placement.rs   placement properties and catalog-based editor
-        editors.rs     schema-driven scalar/choice controls and reset rows
+        placement.rs   cached Lua placement editor, catalog snapshots and typed action validation
+        sources.rs     project/bundled Settings page resolution and hot-reload stamps
   ui/
-    scene.rs           measured keyed lists, native layout, inert full-canvas exits
+    scene.rs           measured keyed lists, native layout, host slot resolution, inert full-canvas exits
     placement.rs       reusable parent-local anchor geometry
     layout_props.rs    common anchor/margin/press modifiers for all components
     image_value.rs     opaque Lua image tokens decoded to owned native handles
@@ -64,6 +73,7 @@ src/
     widgets.rs         placement VMs, entry publication and per-window render caches
     metadata.rs        widget author defaults and property-schema decoding
     notifications.rs   notification app entries, metadata and owned action decoding
+    shell.rs           Lua-requested host shell commands (add top, open settings)
     transitions.rs     transition decoding
     value.rs           scalar coercion and diagnostics
     demo.rs            development host
