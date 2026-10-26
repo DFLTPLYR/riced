@@ -34,6 +34,7 @@ pub(crate) fn install(registry: Registry) {
 pub(crate) fn default_registry() -> Result<Registry, Error> {
     let mut registry = Registry::default();
     riced_extension_palette::register(&mut registry, BUILTIN_TOPICS)?;
+    riced_extension_theme_gen::register(&mut registry, BUILTIN_TOPICS)?;
     Ok(registry)
 }
 

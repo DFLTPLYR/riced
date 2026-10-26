@@ -52,17 +52,36 @@ pub(crate) fn deserialize_apps<'de, D: serde::Deserializer<'de>>(
     Ok(apps)
 }
 
-/// One compiled-in extension enabled for a project.
+/// One compiled-in or executable extension enabled for a project.
 ///
-/// `path` is relative to the project root and defaults to
-/// `extensions/<name>` when omitted. The crate must expose
-/// `pub fn register(&mut Registry, &[&str]) -> Result<(), Error>`.
+/// `path` locates the extension crate relative to the project root and
+/// defaults to `extensions/<name>` when omitted. A compiled-in crate must
+/// expose `pub fn register(&mut Registry, &[&str]) -> Result<(), Error>` and is
+/// linked into the shell. An executable extension sets `process` instead and is
+/// not linked; its `path` is only used by `riced extension build` to compile the
+/// crate.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExtensionConfig {
     pub name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessConfig>,
+}
+
+/// Executable service capabilities captured by a generated shell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessConfig {
+    pub argv: Vec<String>,
+    pub service: String,
+    pub commands: Vec<String>,
+    #[serde(default = "process_timeout")]
+    pub timeout_ms: u64,
+}
+fn process_timeout() -> u64 {
+    30_000
 }
 
 fn valid_extension_name(name: &str) -> bool {
@@ -90,6 +109,28 @@ pub(crate) fn deserialize_extensions<'de, D: serde::Deserializer<'de>>(
             return Err(serde::de::Error::custom(
                 "extension path must not contain NUL bytes",
             ));
+        }
+        if let Some(process) = &extension.process {
+            let mut commands = HashSet::new();
+            if !valid_extension_name(&process.service)
+                || process.commands.len() > 64
+                || process
+                    .commands
+                    .iter()
+                    .any(|name| !valid_extension_name(name) || !commands.insert(name))
+                || process.argv.is_empty()
+                || process.argv.len() > 64
+                || process.argv[0].is_empty()
+                || process
+                    .argv
+                    .iter()
+                    .any(|s| s.contains('\0') || s.len() > 4096)
+                || !(10..=300_000).contains(&process.timeout_ms)
+            {
+                return Err(serde::de::Error::custom(
+                    "invalid process extension options",
+                ));
+            }
         }
         if !names.insert(extension.name.as_str()) {
             return Err(serde::de::Error::custom(format!(
@@ -170,6 +211,30 @@ mod tests {
             "return {apps={{name='bar'},{name='bar'}}}",
             "return {apps={{name='bar',typo=true}}}",
             "return {apps={{}}}",
+        ] {
+            assert!(
+                crate::config::test_parse_config(source).is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_extensions_may_name_their_crate_for_building() {
+        // `path` locates the crate `riced extension build` compiles; it does not
+        // link the extension into the shell.
+        let config = crate::config::test_parse_config(
+            "return {extensions={{name='hello',path='extensions/hello',process={argv={'bin'},service='hello',commands={'greet'},timeout_ms=5000}}}}",
+        )
+        .unwrap();
+        let extension = &config.extensions[0];
+        assert_eq!(extension.path, "extensions/hello");
+        assert_eq!(extension.process.as_ref().unwrap().service, "hello");
+        let text = crate::config::test_format_config(&config).unwrap();
+        assert_eq!(crate::config::test_parse_config(&text).unwrap(), config);
+        for source in [
+            "return {extensions={{name='hello',path='a\\0b',process={argv={'bin'},service='hello',commands={'greet'},timeout_ms=5000}}}}",
+            "return {extensions={{name='hello',process={argv={},service='hello',commands={'greet'},timeout_ms=5000}}}}",
         ] {
             assert!(
                 crate::config::test_parse_config(source).is_err(),

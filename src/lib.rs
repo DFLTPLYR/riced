@@ -28,6 +28,8 @@ use shell::{Plots, redraw_scope};
 
 /// Re-exported registry type for generated shell entry points.
 pub use riced_extension_sdk::Registry;
+/// Process service registration types for generated shell entry points.
+pub use riced_extension_sdk::{Descriptor, process::ProcessExtension};
 
 /// Host topics reserved from extension services.
 ///
@@ -63,6 +65,15 @@ fn run_with(
     default_project_root: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     framework::extensions::install(registry);
+    struct Shutdown;
+    impl Drop for Shutdown {
+        fn drop(&mut self) {
+            if let Ok(registry) = framework::extensions::registry() {
+                registry.shutdown();
+            }
+        }
+    }
+    let _shutdown = Shutdown;
     tracing_subscriber::fmt().init();
     let _ = tracing_log::LogTracer::init();
     let cli = cli::parse();
@@ -108,6 +119,34 @@ fn run_with(
             locked,
             framework,
             target_dir,
+        }),
+        Some(cli::Commands::Extension(command)) => cli::extension::run(match command {
+            cli::ExtensionCommand::Build {
+                name,
+                release,
+                locked,
+            } => cli::extension::Options {
+                name,
+                release,
+                locked,
+                shell: false,
+                framework: None,
+                target_dir: None,
+            },
+            cli::ExtensionCommand::Update {
+                name,
+                release,
+                locked,
+                framework,
+                target_dir,
+            } => cli::extension::Options {
+                name,
+                release,
+                locked,
+                shell: true,
+                framework,
+                target_dir,
+            },
         }),
         // No subcommand: run the shell daemon.
         None => run_daemon().map_err(Into::into),

@@ -1041,6 +1041,17 @@ impl Plots {
                 Background::handle_hover(self, id, instance, hovered)
             }
             Plant::Config(ConfigEvent::ConfigTick) => {
+                // Compiled-in services may publish unsolicited snapshots; poll
+                // them on this same cheap tick so subscriptions observe them.
+                let services_changed = match crate::framework::extensions::registry()
+                    .and_then(|registry| registry.refresh())
+                {
+                    Ok(changed) => !changed.is_empty(),
+                    Err(error) => {
+                        tracing::error!(%error, "extension service refresh failed");
+                        false
+                    }
+                };
                 // mtime check only; the reload itself redraws via ConfigReloaded
                 if let Some((cfg, mtime)) = Config::poll(&self.config_mtime) {
                     self.config_mtime = mtime;
@@ -1091,7 +1102,11 @@ impl Plots {
                         self.notify_parse_error(),
                     ]);
                 }
-                self.notify_parse_error()
+                let mut commands = vec![self.notify_parse_error()];
+                if services_changed {
+                    commands.push(Command::done(Plant::ServicesChanged));
+                }
+                Command::batch(commands)
             }
             Plant::Config(ConfigEvent::ConfigReloaded(mut cfg)) => {
                 if serde_json::to_value(&cfg.desktop).ok()
@@ -1437,6 +1452,13 @@ impl Plots {
                     super::overlay::refresh(self, true),
                 ])
             }
+            // Unsolicited extension snapshots reach subscriptions through the
+            // registry, so refresh the same consumers as any service change.
+            Plant::ServicesChanged => Command::batch([
+                super::apps::refresh(self, false),
+                super::desktop_widgets::refresh_services(self),
+                super::overlay::refresh(self, true),
+            ]),
             Plant::Notify(NotifyEvent::Arrived(n)) => Notification::handle_arrived(self, *n),
             Plant::Notify(NotifyEvent::Dismissed(id)) => Notification::handle_dismissed(self, id),
             Plant::Notify(NotifyEvent::PeerClosed(id)) => {
@@ -1691,7 +1713,7 @@ pub fn redraw_scope(message: &Plant) -> Scope {
         | Plant::Notify(NotifyEvent::Invoke(..))
         | Plant::Notify(NotifyEvent::Tick) => Scope::All,
         Plant::Notify(NotifyEvent::DBusUp) => Scope::None,
-        Plant::TrayChanged | Plant::WaylandChanged => Scope::All,
+        Plant::TrayChanged | Plant::WaylandChanged | Plant::ServicesChanged => Scope::All,
         Plant::Overlay(super::overlay::OverlayEvent::Tick | super::overlay::OverlayEvent::Measured { .. }) => Scope::None,
         Plant::Overlay(_) => Scope::All,
         // Widget press only records; every other widget event repaints

@@ -4,13 +4,24 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["crates/riced-extension-sdk", "extensions/palette"]
+members = [
+    "crates/riced-extension-sdk",
+    "extensions/palette",
+    "extensions/palette-worker",
+    "extensions/theme-gen",
+    "extensions/wayland-toplevels",
+    "extensions/wayland-workspaces",
+    "examples/extensions/hello",
+]
 resolver = "3"
 
 
 [dependencies]
-riced-extension-sdk = { path = "crates/riced-extension-sdk" }
+riced-extension-sdk = { path = "crates/riced-extension-sdk", features = ["process"] }
 riced-extension-palette = { path = "extensions/palette" }
+riced-extension-theme-gen = { path = "extensions/theme-gen" }
+riced-extension-wayland-toplevels = { path = "extensions/wayland-toplevels" }
+riced-extension-wayland-workspaces = { path = "extensions/wayland-workspaces" }
 iced = { version = "0.14.0", features = [
   "tokio",
   "advanced",

@@ -1,10 +1,13 @@
--- Optional SDK demonstration: enable { name = "palette" } in config.lua.
+-- Uses the same Lua API for compiled-in and supervised palette services.
 local app = {}
 
 function app:mount()
     self.palette = riced.service("palette")
-    self.colors = self.palette:snapshot().data.colors
+    local snapshot = self.palette:snapshot()
+    self.available = snapshot.available
+    self.colors = snapshot.data.colors
     self.palette:subscribe(function(snapshot)
+        self.available = snapshot.available
         self.colors = snapshot.data.colors
     end)
     self:generate()
@@ -34,10 +37,12 @@ function app:view()
         layer = "top",
         anchors = { top = true, right = true },
         width = 300,
-        height = 160,
+        height = 190,
         margin = { top = 64, right = 16 },
         content = iced.container(iced.column({
-            iced.text(self.error or "Compiled-in palette extension"):color(colors.on_surface),
+            iced.text(self.error or "Palette service"):color(colors.on_surface),
+            iced.text(self.available and "Service available" or "Unavailable — Generate retries")
+                :color(colors.on_surface),
             iced.text("Material primary"):color(colors.primary),
             iced.button("Generate palette", "generate"),
         }):spacing(12)):padding(16):width(size.fill):height(size.fill)

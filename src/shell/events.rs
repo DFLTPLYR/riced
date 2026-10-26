@@ -338,6 +338,8 @@ pub enum Plant {
     TrayChanged,
     /// Native workspace/toplevel caches or output geometry changed.
     WaylandChanged,
+    /// An extension service published an unsolicited snapshot update.
+    ServicesChanged,
     Overlay(super::overlay::OverlayEvent),
     // Config
     Config(ConfigEvent),

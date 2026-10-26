@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 pub mod build;
 pub mod commands;
+pub mod extension;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -70,6 +71,9 @@ pub enum Commands {
         #[arg(long)]
         target_dir: Option<PathBuf>,
     },
+    /// Compile the extension crates a project enables.
+    #[command(subcommand)]
+    Extension(ExtensionCommand),
     /// Re-render a `[templates]` dir with a stored theme object (sys
     /// `change_theme` equivalent): find-and-replace `{{vars}}` without
     /// regenerating. Defaults to the configured theme + `[theme]
@@ -81,6 +85,41 @@ pub enum Commands {
         /// Theme object to pass. Defaults to `[theme] name`.
         #[arg(long)]
         name: Option<String>,
+    },
+}
+
+/// `riced extension` subcommands.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ExtensionCommand {
+    /// Compile the extension crates enabled by the project.
+    Build {
+        /// Extension name; defaults to every extension in the project.
+        name: Option<String>,
+        /// Build with optimizations.
+        #[arg(long)]
+        release: bool,
+        /// Require the recorded lockfile instead of updating it.
+        #[arg(long)]
+        locked: bool,
+    },
+    /// Compile the extension crates, then rebuild the generated shell so
+    /// compiled-in changes are linked.
+    Update {
+        /// Extension name; defaults to every extension in the project.
+        name: Option<String>,
+        /// Build with optimizations.
+        #[arg(long)]
+        release: bool,
+        /// Require the recorded lockfiles instead of updating them.
+        #[arg(long)]
+        locked: bool,
+        /// Riced framework source directory. Defaults to `RICED_FRAMEWORK`,
+        /// then the source tree this binary was built from.
+        #[arg(long)]
+        framework: Option<PathBuf>,
+        /// Cargo target directory. Defaults to `<project>/target/riced-shell`.
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
     },
 }
 
@@ -250,6 +289,32 @@ mod tests {
             Some(Commands::OpenSettings)
         );
         assert_eq!(Cli::try_parse_from(["riced"]).unwrap().command, None);
+    }
+
+    #[test]
+    fn parses_extension_build_and_update() {
+        assert_eq!(
+            Cli::try_parse_from(["riced", "extension", "build", "hello", "--release"])
+                .unwrap()
+                .command,
+            Some(Commands::Extension(ExtensionCommand::Build {
+                name: Some("hello".into()),
+                release: true,
+                locked: false,
+            }))
+        );
+        assert_eq!(
+            Cli::try_parse_from(["riced", "extension", "update"])
+                .unwrap()
+                .command,
+            Some(Commands::Extension(ExtensionCommand::Update {
+                name: None,
+                release: false,
+                locked: false,
+                framework: None,
+                target_dir: None,
+            }))
+        );
     }
 
     #[test]

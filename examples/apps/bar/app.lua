@@ -15,6 +15,7 @@ function app:actions(event)
 end
 
 function app:view(props)
+	-- Three aligned slots like the legacy bar: start, flexible center, end.
 	return iced.layer({
 		id = "main",
 		layer = "top",
@@ -24,10 +25,17 @@ function app:view(props)
 		keyboard = "none",
 		input = "all",
 		content = iced.container(iced.row({
-			riced.component("status.lua", { output = self.output }),
+			iced.row({
+				riced.component("status.lua", { output = self.output }),
+			}):spacing(8),
 			iced.space():width(size.fill),
-			iced.button("Clicks: " .. self.clicks, "increment"),
-			iced.text(self.clock),
+			iced.row({
+				iced.text(self.clock),
+			}):spacing(8),
+			iced.space():width(size.fill),
+			iced.row({
+				iced.button("Clicks: " .. self.clicks, "increment"),
+			}):spacing(8),
 		})
 			:spacing(12)
 			:height(size.fill)

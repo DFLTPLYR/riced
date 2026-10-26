@@ -22,8 +22,8 @@ impl ServiceState {
         let wayland_changes = super::changes::Changes::default();
         Self {
             system,
-            toplevels: ToplevelCache::spawn(wayland_changes.clone()),
-            workspaces: WorkspaceCache::spawn(wayland_changes.clone()),
+            toplevels: super::toplevels::spawn(wayland_changes.clone()),
+            workspaces: super::workspaces::spawn(wayland_changes.clone()),
             wayland_changes,
             tray: Default::default(),
             started: Instant::now(),

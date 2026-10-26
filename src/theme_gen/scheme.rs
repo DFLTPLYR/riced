@@ -1,10 +1,14 @@
 //! Scheme construction, reshell JSON output, and stored-theme reads.
+//!
+//! The pure scheme and color-map logic lives in `riced-extension-theme-gen`
+//! and is re-exported here; this module keeps wallpaper sampling and the
+//! theme-file writes.
 use super::templates::process_templates;
-use super::variant::parse_variant;
-use material_colors::{color::Argb, image::ImageReader, scheme::Scheme, theme::ThemeBuilder};
-use std::collections::HashMap;
+use material_colors::image::{Image, ImageReader};
 use std::io;
 use std::path::{Path, PathBuf};
+
+pub(crate) use riced_extension_theme_gen::{Generated, generate_from_seed, variables_for_theme};
 
 // ---------------------------------------------------------------------------
 // Generation: wallpaper views → reshell {light, dark} JSON
@@ -31,17 +35,7 @@ pub(crate) fn trim_memory() {
 
 /// Build the dynamic theme from rasterized wallpaper views (see
 /// [`render_views`]): downscale the stitched strip to 128x128, extract the
-/// seed color, and build both M3 schemes. Returns the reshell-format payload
-/// plus `{{var}}` template variables for the `darkmode` scheme (mirrors the
-/// `generate` invokable; QML `error(...)` strings become `Err`).
-#[derive(Debug)]
-pub struct Generated {
-    /// Reshell-format `{light, dark}` JSON (`scheme_json`, same as sys).
-    pub payload: serde_json::Value,
-    /// Template variables for the active scheme (`build_color_map`).
-    pub variables: HashMap<String, String>,
-}
-
+/// seed color, and delegate the M3 scheme build to the theme-gen extension.
 pub fn generate_from_views(
     views: &[image::RgbImage],
     variant: &str,
@@ -71,31 +65,15 @@ fn generate_from_sample(
         let pixel = sample.get_pixel(x, y);
         image::Rgba([pixel[0], pixel[1], pixel[2], 255])
     });
-    let data = material_colors::image::Image::new(rgba);
-    let theme = ThemeBuilder::with_source(ImageReader::extract_color(&data))
-        .variant(parse_variant(variant))
-        .build();
-
-    let scheme = if darkmode {
-        &theme.schemes.dark
-    } else {
-        &theme.schemes.light
-    };
+    let data = Image::new(rgba);
+    let seed = ImageReader::extract_color(&data);
     // Preserve the historical image label without encoding and re-decoding a
     // full wallpaper strip; that temporary file was already removed before use.
     let image = std::env::temp_dir()
         .join("riced_combined_wallpaper.png")
         .display()
         .to_string();
-    let variables = build_color_map(scheme, darkmode, &image);
-
-    Ok(Generated {
-        payload: serde_json::json!({
-            "light": scheme_json(&theme.schemes.light),
-            "dark": scheme_json(&theme.schemes.dark),
-        }),
-        variables,
-    })
+    Ok(generate_from_seed(seed, variant, darkmode, &image))
 }
 
 /// Persist a generated payload as the `dynamic` theme in the user theme
@@ -111,199 +89,6 @@ pub fn write_dynamic_theme(payload: &serde_json::Value) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn hex(color: Argb) -> String {
-    format!("#{:02x}{:02x}{:02x}", color.red, color.green, color.blue)
-}
-
-fn terminal_json(s: &Scheme) -> serde_json::Value {
-    serde_json::json!({
-        "normal": {
-            "black": hex(s.surface_container_high),
-            "red": hex(s.error),
-            "green": hex(s.secondary),
-            "yellow": hex(s.tertiary),
-            "blue": hex(s.primary),
-            "magenta": hex(s.tertiary_fixed_dim),
-            "cyan": hex(s.secondary_fixed_dim),
-            "white": hex(s.surface_bright),
-        },
-        "bright": {
-            "black": hex(s.outline_variant),
-            "red": hex(s.error_container),
-            "green": hex(s.secondary_container),
-            "yellow": hex(s.tertiary_container),
-            "blue": hex(s.primary_fixed_dim),
-            "magenta": hex(s.tertiary_fixed),
-            "cyan": hex(s.secondary_fixed),
-            "white": hex(s.on_surface),
-        },
-        "foreground": hex(s.on_surface),
-        "background": hex(s.surface),
-        "selectionFg": hex(s.surface),
-        "selectionBg": hex(s.primary),
-        "cursorText": hex(s.surface),
-        "cursor": hex(s.primary),
-    })
-}
-
-/// One reshell theme variant object (same keys/values as sys).
-pub fn scheme_json(s: &Scheme) -> serde_json::Value {
-    serde_json::json!({
-        "primary": hex(s.primary),
-        "on_primary": hex(s.on_primary),
-        "secondary": hex(s.secondary),
-        "on_secondary": hex(s.on_secondary),
-        "tertiary": hex(s.tertiary),
-        "on_tertiary": hex(s.on_tertiary),
-        "error": hex(s.error),
-        "on_error": hex(s.on_error),
-        "surface": hex(s.surface),
-        "on_surface": hex(s.on_surface),
-        "surface_variant": hex(s.surface_variant),
-        "on_surface_variant": hex(s.on_surface_variant),
-        "outline": hex(s.outline),
-        "shadow": hex(s.shadow),
-        "hover": hex(s.tertiary),
-        "on_hover": hex(s.on_tertiary),
-        "terminal": terminal_json(s),
-    })
-}
-
-/// `{{var}}` variables for an M3 scheme: `colors.<name>[.hex|.default.hex]`
-/// for every role, terminal mappings, `hover`/`mode`/`image` — same as sys.
-/// Used when a templates dir is passed explicitly (sys runs these against
-/// reshell's `core/theme/`; riced only runs user-requested dirs).
-pub fn build_color_map(scheme: &Scheme, is_dark: bool, image: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
-    let fields: &[(&str, Argb)] = &[
-        ("primary", scheme.primary),
-        ("on_primary", scheme.on_primary),
-        ("primary_container", scheme.primary_container),
-        ("on_primary_container", scheme.on_primary_container),
-        ("inverse_primary", scheme.inverse_primary),
-        ("primary_fixed", scheme.primary_fixed),
-        ("primary_fixed_dim", scheme.primary_fixed_dim),
-        ("on_primary_fixed", scheme.on_primary_fixed),
-        ("on_primary_fixed_variant", scheme.on_primary_fixed_variant),
-        ("secondary", scheme.secondary),
-        ("on_secondary", scheme.on_secondary),
-        ("secondary_container", scheme.secondary_container),
-        ("on_secondary_container", scheme.on_secondary_container),
-        ("secondary_fixed", scheme.secondary_fixed),
-        ("secondary_fixed_dim", scheme.secondary_fixed_dim),
-        ("on_secondary_fixed", scheme.on_secondary_fixed),
-        (
-            "on_secondary_fixed_variant",
-            scheme.on_secondary_fixed_variant,
-        ),
-        ("tertiary", scheme.tertiary),
-        ("on_tertiary", scheme.on_tertiary),
-        ("tertiary_container", scheme.tertiary_container),
-        ("on_tertiary_container", scheme.on_tertiary_container),
-        ("tertiary_fixed", scheme.tertiary_fixed),
-        ("tertiary_fixed_dim", scheme.tertiary_fixed_dim),
-        ("on_tertiary_fixed", scheme.on_tertiary_fixed),
-        (
-            "on_tertiary_fixed_variant",
-            scheme.on_tertiary_fixed_variant,
-        ),
-        ("error", scheme.error),
-        ("on_error", scheme.on_error),
-        ("error_container", scheme.error_container),
-        ("on_error_container", scheme.on_error_container),
-        ("surface_dim", scheme.surface_dim),
-        ("surface", scheme.surface),
-        ("surface_tint", scheme.surface_tint),
-        ("surface_bright", scheme.surface_bright),
-        ("surface_container_lowest", scheme.surface_container_lowest),
-        ("surface_container_low", scheme.surface_container_low),
-        ("surface_container", scheme.surface_container),
-        ("surface_container_high", scheme.surface_container_high),
-        (
-            "surface_container_highest",
-            scheme.surface_container_highest,
-        ),
-        ("on_surface", scheme.on_surface),
-        ("on_surface_variant", scheme.on_surface_variant),
-        ("outline", scheme.outline),
-        ("outline_variant", scheme.outline_variant),
-        ("inverse_surface", scheme.inverse_surface),
-        ("inverse_on_surface", scheme.inverse_on_surface),
-        ("surface_variant", scheme.surface_variant),
-        ("background", scheme.background),
-        ("on_background", scheme.on_background),
-        ("shadow", scheme.shadow),
-        ("scrim", scheme.scrim),
-    ];
-
-    for (name, color) in fields {
-        let hex = hex(*color);
-        map.insert(format!("colors.{name}.default.hex"), hex.clone());
-        map.insert(format!("colors.{name}.hex"), hex.clone());
-        map.insert(format!("colors.{name}"), hex);
-    }
-
-    map.insert(
-        "mode".to_string(),
-        if is_dark { "dark" } else { "light" }.to_string(),
-    );
-    map.insert("image".to_string(), image.to_string());
-
-    let terminal_colors: &[(&str, Argb)] = &[
-        ("terminal.normal.black", scheme.surface_container_high),
-        ("terminal.normal.red", scheme.error),
-        ("terminal.normal.green", scheme.secondary),
-        ("terminal.normal.yellow", scheme.tertiary),
-        ("terminal.normal.blue", scheme.primary),
-        ("terminal.normal.magenta", scheme.tertiary_fixed_dim),
-        ("terminal.normal.cyan", scheme.secondary_fixed_dim),
-        ("terminal.normal.white", scheme.surface_bright),
-        ("terminal.bright.black", scheme.outline_variant),
-        ("terminal.bright.red", scheme.error_container),
-        ("terminal.bright.green", scheme.secondary_container),
-        ("terminal.bright.yellow", scheme.tertiary_container),
-        ("terminal.bright.blue", scheme.primary_fixed_dim),
-        ("terminal.bright.magenta", scheme.tertiary_fixed),
-        ("terminal.bright.cyan", scheme.secondary_fixed),
-        ("terminal.bright.white", scheme.on_surface),
-    ];
-
-    for (key, color) in terminal_colors {
-        let hex = hex(*color);
-        map.insert(key.to_string(), hex.clone());
-        map.insert(format!("colors.{key}"), hex);
-    }
-
-    let pairs: &[(&str, Argb)] = &[
-        ("terminal.foreground", scheme.on_surface),
-        ("terminal.background", scheme.surface),
-        ("terminal.selectionfg", scheme.surface),
-        ("terminal.selectionFg", scheme.surface),
-        ("terminal.selectionbg", scheme.primary),
-        ("terminal.selectionBg", scheme.primary),
-        ("terminal.cursortext", scheme.surface),
-        ("terminal.cursorText", scheme.surface),
-        ("terminal.cursor", scheme.primary),
-    ];
-    for (key, color) in pairs {
-        let hex = hex(*color);
-        map.insert(key.to_string(), hex.clone());
-        map.insert(format!("colors.{key}"), hex);
-    }
-
-    map.insert("hover".to_string(), hex(scheme.tertiary));
-    map.insert("colors.hover".to_string(), hex(scheme.tertiary));
-    map.insert("on_hover".to_string(), hex(scheme.on_tertiary));
-    map.insert("colors.on_hover".to_string(), hex(scheme.on_tertiary));
-
-    map
-}
-
-// ---------------------------------------------------------------------------
-// change_theme path: stored theme JSON → template variables
-// ---------------------------------------------------------------------------
-
 /// Expand a leading `~` to `$HOME` (template dirs are user paths).
 pub fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
@@ -312,140 +97,6 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
-}
-
-/// Template variables from a stored reshell theme variant: reads both
-/// `snake_case` and unseparated (`onprimary`, as in `ayu-blue.json`) keys,
-/// plus the `terminal` block.
-pub fn build_color_map_from_json(scheme: &serde_json::Value) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
-    let color_keys: &[(&str, &str)] = &[
-        ("primary", "primary"),
-        ("on_primary", "onprimary"),
-        ("primary_container", "primarycontainer"),
-        ("on_primary_container", "onprimarycontainer"),
-        ("inverse_primary", "inverseprimary"),
-        ("primary_fixed", "primaryfixed"),
-        ("primary_fixed_dim", "primaryfixeddim"),
-        ("on_primary_fixed", "onprimaryfixed"),
-        ("on_primary_fixed_variant", "onprimaryfixedvariant"),
-        ("secondary", "secondary"),
-        ("on_secondary", "onsecondary"),
-        ("secondary_container", "secondarycontainer"),
-        ("on_secondary_container", "onsecondarycontainer"),
-        ("secondary_fixed", "secondaryfixed"),
-        ("secondary_fixed_dim", "secondaryfixeddim"),
-        ("on_secondary_fixed", "onsecondaryfixed"),
-        ("on_secondary_fixed_variant", "onsecondaryfixedvariant"),
-        ("tertiary", "tertiary"),
-        ("on_tertiary", "ontertiary"),
-        ("tertiary_container", "tertiarycontainer"),
-        ("on_tertiary_container", "ontertiarycontainer"),
-        ("tertiary_fixed", "tertiaryfixed"),
-        ("tertiary_fixed_dim", "tertiaryfixeddim"),
-        ("on_tertiary_fixed", "ontertiaryfixed"),
-        ("on_tertiary_fixed_variant", "ontertiaryfixedvariant"),
-        ("error", "error"),
-        ("on_error", "onerror"),
-        ("error_container", "errorcontainer"),
-        ("on_error_container", "onerrorcontainer"),
-        ("surface_dim", "surfacedim"),
-        ("surface", "surface"),
-        ("surface_tint", "surfacetint"),
-        ("surface_bright", "surfacebright"),
-        ("surface_container_lowest", "surfacecontainerlowest"),
-        ("surface_container_low", "surfacecontainerlow"),
-        ("surface_container", "surfacecontainer"),
-        ("surface_container_high", "surfacecontainerhigh"),
-        ("surface_container_highest", "surfacecontainerhighest"),
-        ("on_surface", "onsurface"),
-        ("on_surface_variant", "onsurfacevariant"),
-        ("outline", "outline"),
-        ("outline_variant", "outlinevariant"),
-        ("inverse_surface", "inversesurface"),
-        ("inverse_on_surface", "inverseonsurface"),
-        ("surface_variant", "surfacevariant"),
-        ("background", "background"),
-        ("on_background", "onbackground"),
-        ("shadow", "shadow"),
-        ("scrim", "scrim"),
-        ("hover", "hover"),
-        ("on_hover", "onhover"),
-    ];
-
-    for &(snake, camel) in color_keys {
-        let val = scheme.get(snake).or_else(|| scheme.get(camel));
-        if let Some(v) = val {
-            let hex = v.as_str().unwrap_or("");
-            map.insert(format!("colors.{snake}.default.hex"), hex.to_string());
-            map.insert(format!("colors.{snake}.hex"), hex.to_string());
-            map.insert(format!("colors.{snake}"), hex.to_string());
-        }
-    }
-
-    if let Some(terminal) = scheme.get("terminal") {
-        for section in &["normal", "bright"] {
-            if let Some(obj) = terminal.get(*section) {
-                for color in &[
-                    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-                ] {
-                    if let Some(val) = obj.get(*color) {
-                        let hex = val.as_str().unwrap_or("");
-                        map.insert(format!("terminal.{section}.{color}"), hex.to_string());
-                        map.insert(
-                            format!("colors.terminal.{section}.{color}"),
-                            hex.to_string(),
-                        );
-                    }
-                }
-            }
-        }
-
-        let terminal_keys: &[(&str, &[&str])] = &[
-            ("foreground", &["foreground"]),
-            ("background", &["background"]),
-            ("selectionFg", &["selectionFg", "selectionfg"]),
-            ("selectionBg", &["selectionBg", "selectionbg"]),
-            ("cursorText", &["cursorText", "cursortext"]),
-            ("cursor", &["cursor"]),
-        ];
-
-        for &(camel_name, aliases) in terminal_keys {
-            for alias in aliases {
-                if let Some(val) = terminal.get(*alias) {
-                    let hex = val.as_str().unwrap_or("");
-                    map.insert(format!("terminal.{camel_name}"), hex.to_string());
-                    map.insert(format!("colors.terminal.{camel_name}"), hex.to_string());
-                }
-            }
-        }
-    }
-
-    map
-}
-
-/// Template variables for a stored theme OBJECT (sys's `change_theme`
-/// `json` argument): trim/BOM-strip, parse (with a 50-char preview on
-/// error), pick the `dark`/`light` variant, and build the map. Mirrors the
-/// QML validation messages as `Err`.
-pub fn variables_for_theme(
-    json_text: &str,
-    darkmode: bool,
-) -> Result<HashMap<String, String>, String> {
-    let trimmed = json_text.trim().trim_start_matches('\u{feff}');
-    let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
-        let preview: String = trimmed.chars().take(50).collect();
-        format!("invalid JSON: {e} | preview: {preview}")
-    })?;
-    let mode_key = if darkmode { "dark" } else { "light" };
-    let scheme = value.get(mode_key).ok_or_else(|| {
-        format!(
-            "missing \"{mode_key}\" key in JSON | keys: {:?}",
-            value.as_object().map(|o| o.keys().collect::<Vec<_>>())
-        )
-    })?;
-    Ok(build_color_map_from_json(scheme))
 }
 
 /// Full `change_theme` equivalent: variables from the stored theme object,
@@ -483,6 +134,8 @@ pub fn stored_theme_text(name: &str) -> Result<String, String> {
 mod tests {
     use super::super::views::{render_views, test_image};
     use super::*;
+    use material_colors::{color::Argb, theme::ThemeBuilder};
+    use riced_extension_theme_gen::{build_color_map, build_color_map_from_json};
 
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

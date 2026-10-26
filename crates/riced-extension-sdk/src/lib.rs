@@ -1,6 +1,10 @@
 //! Versioned, owned-data boundary for compiled-in riced extensions.
-//! No Lua VM, UI toolkit, or asynchronous runtime is required by the SDK.
+//! No Lua VM or UI toolkit is required. The optional `process` feature adds
+//! a Tokio-based executable supervisor; the default SDK needs no async runtime.
 #![deny(missing_docs)]
+
+#[cfg(feature = "process")]
+pub mod process;
 
 use serde_json::Value;
 use std::{
@@ -20,8 +24,9 @@ pub const MAX_COMMAND_BYTES: usize = 65_536;
 pub const MAX_SNAPSHOT_BYTES: usize = 1_048_576;
 
 /// Structured error exposed to Lua as `{code, message}`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[error("{message}")]
+#[serde(deny_unknown_fields)]
 pub struct Error {
     /// Machine-readable error identifier.
     pub code: String,
@@ -69,6 +74,8 @@ impl Cancellation {
 }
 
 /// Owned result of a command. The host commits snapshots only on accepted delivery.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Output {
     /// Callback result data.
     pub data: Value,
@@ -81,10 +88,27 @@ pub struct Output {
 /// Do not mutate published state from `command`: return a replacement snapshot
 /// instead. External side effects cannot be rolled back by cancellation.
 pub trait Service: Send + Sync {
+    /// Cached availability, without performing I/O on the calling thread.
+    fn available(&self) -> bool {
+        true
+    }
+    /// Stop background resources before host exit. Must be idempotent.
+    fn shutdown(&self) {}
     /// Declare the topic and supported commands.
     fn descriptor(&self) -> Descriptor;
     /// Initial cached state. Called once during registration, not during rendering.
     fn initial_snapshot(&self) -> Result<Value, Error>;
+    /// Optional unsolicited cached-state update, polled by the host on its
+    /// service tick. Return `Some` only when the published snapshot changed.
+    ///
+    /// Must be quick and non-blocking: it runs on the host update thread, not
+    /// on a worker. Long-lived services keep their own listener resources and
+    /// expose their latest state here. Defaults to no unsolicited updates, so
+    /// request/response services (including supervised process services) are
+    /// unaffected.
+    fn refresh(&self) -> Result<Option<Value>, Error> {
+        Ok(None)
+    }
     /// Execute a command without access to Lua or shell state.
     fn command(&self, method: &str, args: Value, cancel: &Cancellation) -> Result<Output, Error>;
 }
@@ -164,6 +188,16 @@ pub fn validate(value: &Value, max_bytes: usize) -> Result<(), Error> {
 }
 
 impl Registry {
+    /// Cached service availability. Unavailable process services can still accept requests.
+    pub fn available(&self, name: &str) -> Result<bool, Error> {
+        Ok(self.entry(name)?.service.available())
+    }
+    /// Stop all extension-owned resources before the host exits.
+    pub fn shutdown(&self) {
+        for entry in self.services.values() {
+            entry.service.shutdown();
+        }
+    }
     /// Register all services, rejecting incompatible versions and collisions.
     /// Reserved names are host globals/topics unavailable to extensions.
     pub fn register(&mut self, extension: &dyn Extension, reserved: &[&str]) -> Result<(), Error> {
@@ -254,6 +288,32 @@ impl Registry {
             args,
         })
     }
+    /// Poll every service for an unsolicited update and publish changed
+    /// snapshots. Returns the topics whose published state changed, sorted for
+    /// determinism. Services that report no change are left untouched.
+    ///
+    /// A service error aborts the tick; the host logs it and retries on the
+    /// next tick. This runs on the host update thread, so services must not
+    /// block here.
+    pub fn refresh(&self) -> Result<Vec<String>, Error> {
+        let mut changed = Vec::new();
+        for (name, entry) in &self.services {
+            let Some(next) = entry.service.refresh()? else {
+                continue;
+            };
+            validate(&next, MAX_SNAPSHOT_BYTES)?;
+            let mut snapshot = entry
+                .snapshot
+                .lock()
+                .map_err(|_| Error::new("state", "extension snapshot lock poisoned"))?;
+            if *snapshot != next {
+                *snapshot = next;
+                changed.push(name.clone());
+            }
+        }
+        changed.sort_unstable();
+        Ok(changed)
+    }
     /// Replace published state after the host accepts a live command delivery.
     pub fn publish(&self, name: &str, snapshot: Value) -> Result<(), Error> {
         validate(&snapshot, MAX_SNAPSHOT_BYTES)?;
@@ -295,5 +355,130 @@ impl Request {
             validate(snapshot, MAX_SNAPSHOT_BYTES)?;
         }
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A service whose owner can stage one unsolicited snapshot at a time.
+    #[derive(Clone, Default)]
+    struct Pusher(Arc<Mutex<Option<Value>>>);
+    impl Pusher {
+        fn push(&self, value: Value) {
+            *self.0.lock().unwrap() = Some(value);
+        }
+    }
+    impl Service for Pusher {
+        fn descriptor(&self) -> Descriptor {
+            Descriptor {
+                name: "pusher",
+                commands: &[],
+            }
+        }
+        fn initial_snapshot(&self) -> Result<Value, Error> {
+            Ok(Value::Null)
+        }
+        fn refresh(&self) -> Result<Option<Value>, Error> {
+            Ok(self.0.lock().unwrap().take())
+        }
+        fn command(&self, _: &str, _: Value, _: &Cancellation) -> Result<Output, Error> {
+            Err(Error::new("command", "no commands"))
+        }
+    }
+    impl Extension for Pusher {
+        fn manifest(&self) -> Manifest {
+            Manifest {
+                name: "pusher",
+                sdk_version: SDK_VERSION,
+            }
+        }
+        fn services(&self) -> Vec<Arc<dyn Service>> {
+            vec![Arc::new(self.clone())]
+        }
+    }
+
+    /// A request/response service that never pushes.
+    struct Static;
+    impl Service for Static {
+        fn descriptor(&self) -> Descriptor {
+            Descriptor {
+                name: "static",
+                commands: &[],
+            }
+        }
+        fn initial_snapshot(&self) -> Result<Value, Error> {
+            Ok(serde_json::json!({"n": 1}))
+        }
+        fn command(&self, _: &str, _: Value, _: &Cancellation) -> Result<Output, Error> {
+            Err(Error::new("command", "no commands"))
+        }
+    }
+    impl Extension for Static {
+        fn manifest(&self) -> Manifest {
+            Manifest {
+                name: "static",
+                sdk_version: SDK_VERSION,
+            }
+        }
+        fn services(&self) -> Vec<Arc<dyn Service>> {
+            vec![Arc::new(Self)]
+        }
+    }
+
+    #[test]
+    fn refresh_publishes_only_changed_snapshots() {
+        let mut registry = Registry::default();
+        registry.register(&Static, &[]).unwrap();
+        // Default `refresh` never reports a change.
+        assert_eq!(registry.refresh().unwrap(), Vec::<String>::new());
+        assert_eq!(registry.snapshot("static").unwrap()["n"], 1);
+
+        let pusher = Pusher::default();
+        registry.register(&pusher, &[]).unwrap();
+        pusher.push(serde_json::json!({"n": 2}));
+        assert_eq!(registry.refresh().unwrap(), vec!["pusher".to_string()]);
+        assert_eq!(registry.snapshot("pusher").unwrap()["n"], 2);
+        // The staged value was consumed, so a second poll is a no-op.
+        assert_eq!(registry.refresh().unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn refresh_rejects_oversized_snapshots_and_keeps_previous_state() {
+        struct Huge;
+        impl Service for Huge {
+            fn descriptor(&self) -> Descriptor {
+                Descriptor {
+                    name: "huge",
+                    commands: &[],
+                }
+            }
+            fn initial_snapshot(&self) -> Result<Value, Error> {
+                Ok(serde_json::json!({"ok": true}))
+            }
+            fn refresh(&self) -> Result<Option<Value>, Error> {
+                Ok(Some(Value::String("x".repeat(MAX_SNAPSHOT_BYTES + 1))))
+            }
+            fn command(&self, _: &str, _: Value, _: &Cancellation) -> Result<Output, Error> {
+                Err(Error::new("command", "no commands"))
+            }
+        }
+        impl Extension for Huge {
+            fn manifest(&self) -> Manifest {
+                Manifest {
+                    name: "huge",
+                    sdk_version: SDK_VERSION,
+                }
+            }
+            fn services(&self) -> Vec<Arc<dyn Service>> {
+                vec![Arc::new(Self)]
+            }
+        }
+        let mut registry = Registry::default();
+        registry.register(&Huge, &[]).unwrap();
+        assert_eq!(registry.refresh().unwrap_err().code, "limit");
+        assert_eq!(registry.snapshot("huge").unwrap()["ok"], true);
     }
 }

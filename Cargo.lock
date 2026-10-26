@@ -4028,6 +4028,9 @@ dependencies = [
  "rfd",
  "riced-extension-palette",
  "riced-extension-sdk",
+ "riced-extension-theme-gen",
+ "riced-extension-wayland-toplevels",
+ "riced-extension-wayland-workspaces",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -4045,6 +4048,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "riced-extension-hello"
+version = "0.1.0"
+dependencies = [
+ "riced-extension-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "riced-extension-palette"
 version = "0.1.0"
 dependencies = [
@@ -4055,11 +4067,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "riced-extension-palette-worker"
+version = "0.1.0"
+dependencies = [
+ "riced-extension-palette",
+ "riced-extension-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "riced-extension-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "riced-extension-theme-gen"
+version = "0.1.0"
+dependencies = [
+ "material-colors",
+ "riced-extension-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "riced-extension-wayland-toplevels"
+version = "0.1.0"
+dependencies = [
+ "riced-extension-sdk",
+ "serde_json",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
+name = "riced-extension-wayland-workspaces"
+version = "0.1.0"
+dependencies = [
+ "riced-extension-sdk",
+ "serde_json",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

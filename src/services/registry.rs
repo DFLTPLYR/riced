@@ -106,7 +106,8 @@ pub(crate) fn snapshot(lua: &mlua::Lua, name: &str) -> mlua::Result<serde_json::
     let registry = crate::framework::extensions::registry().map_err(mlua::Error::external)?;
     if registry.contains(name) {
         let data = registry.snapshot(name).map_err(mlua::Error::external)?;
-        return Ok(serde_json::json!({"name":name,"available":true,"data":data}));
+        let available = registry.available(name).map_err(mlua::Error::external)?;
+        return Ok(serde_json::json!({"name":name,"available":available,"data":data}));
     }
     if !valid_topic(name) {
         return Err(mlua::Error::RuntimeError(format!(

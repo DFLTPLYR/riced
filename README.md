@@ -21,11 +21,11 @@ reviews, and tests every change — prompts in, review before merge.
 Build opt-in Lua applications under `apps/<name>/app.lua` and enable them with
 `apps = { { name = "bar" } }` in `config.lua`. Apps can return `iced.layer({...})`
 to declare native surfaces with independent per-output state and lifecycle hooks.
-See [the framework guide](docs/framework.md) and [example project](examples/framework/).
+See [the framework guide](docs/framework.md) and [example project](examples/).
 Existing shell configuration remains supported. The [experimental Rust extension
-SDK](docs/extensions.md) supports compiled-in Cargo services enabled from
+SDK](docs/extensions.md) supports compiled-in and supervised executable services enabled from
 `config.lua`; `riced build` generates the registration and a locked build, with
-a palette extension as an example.
+a palette extension and isolated palette worker as examples.
 
 ## Requirements
 
