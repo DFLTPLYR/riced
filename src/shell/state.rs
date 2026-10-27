@@ -614,7 +614,7 @@ impl Plots {
         Notification::handle_arrived(self, n)
     }
 
-    fn close_surface(
+    pub(crate) fn close_surface(
         &mut self,
         id: iced::window::Id,
         request_native_close: bool,
@@ -765,16 +765,16 @@ impl Plots {
                 // Toggle: spawn when none open, else close the current panel.
                 Setting::handle_toggle(self)
             }
-            Plant::IpcPoll => {
-                // CLI client queued a request (`riced open-settings`).
-                match crate::cli::take_queued_command() {
-                    Some(crate::cli::QueuedCommand::OpenSettings) => {
-                        let cleanup = super::desktop_widgets::finish(self);
-                        Command::batch([cleanup, Setting::handle_toggle(self)])
-                    }
-                    None => Command::none(),
+            Plant::IpcPoll => match crate::cli::take_queued_command() {
+                Some(crate::cli::QueuedCommand::OpenSettings) => {
+                    super::apps::ipc(self, "settings", &[])
                 }
-            }
+                Some(crate::cli::QueuedCommand::Ipc { command, args }) => {
+                    super::apps::ipc(self, &command, &args)
+                }
+                None => Command::none(),
+            },
+            Plant::Ipc { command, args } => super::apps::ipc(self, &command, &args),
             Plant::Wayland(LandEvent::OutputAdded(output)) => {
                 let output_id = OutputId::from(&output);
                 // store geometry for panel.screen clipping
@@ -805,61 +805,7 @@ impl Plots {
                     cmds.push(cmd);
                     cmds.push(Self::repaint_burst());
                 }
-                // Declarative bars: one per `[[bar]]` entry on this
-                // output, skipped when that edge already has a bar (user
-                // additions and re-added outputs never duplicate).
-                // File order is spawn order (deterministic).
-                let bars = self.config.bar.clone();
-                for (index, cfg) in bars.iter().enumerate() {
-                    let Some(anchor) = Top::parse_anchor(&cfg.anchor) else {
-                        eprintln!(
-                            "riced: [[bar]] #{index}: unknown anchor {:?}, skipping",
-                            cfg.anchor
-                        );
-                        continue;
-                    };
-                    // Named output only (`""` = every output): compare
-                    // against the connector name (`DP-1`, …).
-                    if !cfg.output.trim().is_empty() {
-                        let here = self
-                            .windows
-                            .output_infos
-                            .get(&output_id)
-                            .and_then(|info| info.name.clone())
-                            .unwrap_or_default();
-                        if !here.eq_ignore_ascii_case(cfg.output.trim()) {
-                            continue;
-                        }
-                    }
-                    let taken = self.windows.ids.iter().any(|(wid, info)| match info {
-                        PlotInfo::Top(o) if *o == output_id => self
-                            .windows
-                            .tops
-                            .get(wid)
-                            .is_some_and(|t| t.anchor() == anchor),
-                        _ => false,
-                    });
-                    if taken {
-                        continue;
-                    }
-                    let top = Top::with_config(index, anchor, cfg.into());
-                    let (sw, sh) = self
-                        .windows
-                        .output_infos
-                        .get(&output_id)
-                        .map(Background::output_geometry)
-                        .map(|(_, _, w, h)| (w, h))
-                        .unwrap_or((1920.0, 1080.0));
-                    let (w, h) = top.local.px_size(sw, sh, top.is_horizontal());
-                    let (win_id, settings) = top.open(output_id.0, w, h);
-                    self.windows.tops.insert(win_id, top);
-                    self.windows.ids.insert(win_id, PlotInfo::Top(output_id));
-                    Top::render_bar_widgets(self, win_id);
-                    cmds.push(Command::done(Plant::NewLayerShell {
-                        settings,
-                        id: win_id,
-                    }));
-                }
+                cmds.push(Top::spawn_configured(self, output_id));
                 if cmds.is_empty() {
                     Command::none()
                 } else {

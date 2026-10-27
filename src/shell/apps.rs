@@ -484,6 +484,24 @@ impl State {
     }
 }
 
+/// A complete bar shape for apps.
+///
+/// `TopConfig` serializes through the file format, which omits fields equal to
+/// their default, so serializing it directly hands Lua a partial object with a
+/// nil `anchor`. Apps get every field they may read instead.
+fn bar_json(bar: &crate::config::TopConfig) -> serde_json::Value {
+    json!({
+        "anchor": bar.anchor,
+        "output": bar.output,
+        "length": bar.length,
+        "thickness": bar.thickness,
+        "slots": bar.slots,
+        "aligns": bar.aligns,
+        "opacity": bar.opacity,
+        "floating": bar.floating,
+    })
+}
+
 fn services(plots: &Plots) -> ServiceCtx<'_> {
     ServiceCtx::from_plots(plots, plots.services.gpu())
 }
@@ -539,15 +557,75 @@ fn refresh_surface(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
     }
     Task::batch(commands)
 }
+/// Reconcile every app against the project after a config edit, so a changed
+/// `config.bar` re-declares the app's layers.
+pub(crate) fn reload(plots: &mut Plots) -> Task<Plant> {
+    refresh_target(plots, &Project::installed(), false, None)
+}
+
+/// IPC is a shell command, delivered once rather than once per output.
+pub(crate) fn ipc(plots: &mut Plots, command: &str, args: &[String]) -> Task<Plant> {
+    let mut state = std::mem::take(&mut plots.apps);
+    let selected = state
+        .instances
+        .iter()
+        .filter(|(_, instance)| {
+            instance
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_ipc_handler(command))
+        })
+        .min_by_key(|((_, id), instance)| (id.as_str(), instance.output_name.as_str()))
+        .map(|(key, _)| key.clone());
+    let result = selected.and_then(|key| {
+        let instance = state.instances.get_mut(&key)?;
+        instance.runtime.as_mut().map(|runtime| {
+            runtime.app_event(
+                &services(plots),
+                &instance.output_name,
+                &instance.context,
+                &instance.props,
+                AppEvent::Ipc { command, args },
+            )
+        })
+    });
+    plots.apps = state;
+    match result {
+        Some(Ok(value)) => {
+            let action = super::actions::command_from_action(&value, plots);
+            Task::batch([action, reload(plots)])
+        }
+        Some(Err(error)) => {
+            tracing::warn!(%command, %error, "IPC handler failed");
+            Task::none()
+        }
+        None => {
+            // Projects predating root.lua still use the native Settings host.
+            // Root projects must explicitly register their opening policy.
+            if command == "settings" && !Project::installed().root.join("root.lua").is_file() {
+                return Task::done(Plant::Sprout);
+            }
+            tracing::warn!(%command, "No Lua IPC handler registered");
+            Task::none()
+        }
+    }
+}
+
 fn refresh_target(
     plots: &mut Plots,
     project: &Project,
     tick: bool,
     target: Option<u64>,
 ) -> Task<Plant> {
-    if plots.config.apps.is_empty()
-        && plots.apps.instances.is_empty()
-        && plots.apps.pending_closes.is_empty()
+    let configs = if project.root.join("root.lua").is_file() {
+        vec![AppConfig {
+            name: "root".into(),
+            ..Default::default()
+        }]
+    } else {
+        plots.config.apps.clone()
+    };
+    if configs.is_empty() && plots.apps.instances.is_empty() && plots.apps.pending_closes.is_empty()
     {
         return Task::none();
     }
@@ -557,7 +635,7 @@ fn refresh_target(
     let mut commands = Vec::new();
     let mut changed = false;
     let mut redraws = Vec::new();
-    for config in &plots.config.apps {
+    for config in &configs {
         let sources = project.sources(&config.name);
         for (&output, info) in &plots.windows.output_infos {
             let name = info.name.as_deref().unwrap_or("");
@@ -581,6 +659,40 @@ fn refresh_target(
             instance.context = json!({"id":config.identity(),"name":config.name,"root":project.app_root(&config.name),"output":output_context});
             instance.props = serde_json::to_value(&config.props).unwrap_or_else(|_| json!({}));
             instance.props["output"] = output_context;
+            // The configured wallpaper source for this output. The layer draws
+            // it immediately, so a background is visible before (and without) a
+            // successful bake; the baked tile still draws over it.
+            instance.props["wallpaper"] = json!(
+                match plots.config.background.mode {
+                    crate::config::WallpaperMode::PerMonitor => plots
+                        .config
+                        .background
+                        .monitor
+                        .iter()
+                        .find(|entry| entry.output.trim().eq_ignore_ascii_case(name))
+                        .map(|entry| entry.path.clone()),
+                    crate::config::WallpaperMode::FreeForm => plots
+                        .config
+                        .background
+                        .image
+                        .first()
+                        .map(|image| image.path.clone()),
+                }
+                .unwrap_or_default()
+            );
+            // The single source of truth for bars: Settings edits `config.bar`
+            // and the app renders the entries that match this output.
+            instance.props["bars"] = json!(
+                plots
+                    .config
+                    .bar
+                    .iter()
+                    .filter(|bar| {
+                        bar.output.trim().is_empty() || bar.output.trim().eq_ignore_ascii_case(name)
+                    })
+                    .map(bar_json)
+                    .collect::<Vec<_>>()
+            );
             instance.output_name = name.to_string();
             let service_ctx = ServiceCtx {
                 sys: &plots.services.system,
@@ -776,6 +888,13 @@ fn app_native<'a>(
     output: Option<OutputId>,
 ) -> impl FnMut(&str) -> Result<Element<'static, Plant>, String> + 'a {
     move |id| match (id, output) {
+        ("wallpaper", Some(output)) => Ok(iced::widget::Stack::with_children(
+            super::screens::Background::wallpaper_views(plots, output),
+        )
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+        .into()),
+        ("wallpaper", None) => Err("iced.native(\"wallpaper\") needs an output-bound app".into()),
         ("desktop-widgets", Some(output)) => {
             crate::shell::desktop_widgets::retain(plots);
             let mut stack = iced::widget::Stack::with_capacity(1);
@@ -1007,21 +1126,30 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                 return Task::none();
             }
             let mut state = std::mem::take(&mut plots.apps);
-            let result = state
-                .instances
-                .values_mut()
-                .find(|i| i.owns(surface))
-                .and_then(|instance| {
-                    instance.runtime.as_mut().map(|runtime| {
-                        runtime.app_event(
-                            &services(plots),
-                            &instance.output_name,
-                            &instance.context,
-                            &instance.props,
-                            AppEvent::Action(&action),
-                        )
-                    })
-                });
+            let result =
+                state
+                    .instances
+                    .values_mut()
+                    .find(|i| i.owns(surface))
+                    .and_then(|instance| {
+                        instance.runtime.as_mut().map(|runtime| {
+                            let mut context = instance.context.clone();
+                            if let Some(layer) = instance.roots.iter().find_map(|(id, root)| {
+                                (root.surface == Some(surface)).then_some(id)
+                            }) {
+                                context["layer"] = json!(layer);
+                            } else if let Some(popup) = &instance.popup {
+                                context["layer"] = json!(popup.owner);
+                            }
+                            runtime.app_event(
+                                &services(plots),
+                                &instance.output_name,
+                                &context,
+                                &instance.props,
+                                AppEvent::Action(&action),
+                            )
+                        })
+                    });
             plots.apps = state;
             let command = match result {
                 Some(Ok(value)) => super::actions::command_from_action(&value, plots),

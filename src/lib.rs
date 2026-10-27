@@ -91,6 +91,10 @@ fn run_with(
     }
 
     match command {
+        Some(cli::Commands::Ipc { command, args }) => {
+            cli::queue_ipc(command, args)?;
+            Ok(())
+        }
         Some(cli::Commands::LuaDemo { .. }) => unreachable!("Lua demo handled above"),
         Some(cli::Commands::OpenSettings) => {
             if let Err(e) = cli::queue_open_settings() {

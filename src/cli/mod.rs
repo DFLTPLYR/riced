@@ -23,6 +23,13 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Commands {
+    /// Send a command and its arguments to the Lua shell.
+    Ipc {
+        command: String,
+        /// Arguments are passed verbatim to the Lua handler.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run the M0 declarative Lua app in a plain iced window.
     LuaDemo {
         /// Override the embedded main.lua (file edits reload live).
@@ -149,7 +156,7 @@ impl Cli {
             return Ok(None);
         };
         for path in &candidates {
-            if path.join("config.lua").is_file() {
+            if path.join("config.lua").is_file() || path.join("root.lua").is_file() {
                 return path
                     .canonicalize()
                     .map(Some)
@@ -157,7 +164,7 @@ impl Cli {
             }
         }
         Err(format!(
-            "no config.lua found in {}",
+            "no root.lua or config.lua found in {}",
             candidates
                 .iter()
                 .map(|p| p.display().to_string())
@@ -178,22 +185,21 @@ pub fn ipc_path() -> PathBuf {
 }
 
 /// Commands the daemon understands, one per line in [`ipc_path`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QueuedCommand {
     OpenSettings,
+    Ipc { command: String, args: Vec<String> },
 }
 
 impl QueuedCommand {
-    fn serialize(self) -> &'static str {
-        match self {
-            QueuedCommand::OpenSettings => "open-settings",
-        }
+    fn serialize(&self) -> io::Result<String> {
+        serde_json::to_string(self).map_err(io::Error::other)
     }
 
     fn parse(line: &str) -> Option<Self> {
         match line.trim() {
             "open-settings" => Some(QueuedCommand::OpenSettings),
-            _ => None,
+            other => serde_json::from_str(other).ok(),
         }
     }
 }
@@ -201,12 +207,25 @@ impl QueuedCommand {
 /// Client side: queue `open-settings` for the daemon (atomic temp+rename
 /// so the daemon never reads a half-written file).
 pub fn queue_open_settings() -> io::Result<()> {
-    queue_at(&ipc_path(), QueuedCommand::OpenSettings)
+    queue_ipc("settings".into(), Vec::new())
 }
 
+/// Publish each request separately so concurrent clients cannot overwrite it.
+pub fn queue_ipc(command: String, args: Vec<String>) -> io::Result<()> {
+    use std::io::Write;
+    let directory = ipc_path().with_extension("queue");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+    file.write_all(QueuedCommand::Ipc { command, args }.serialize()?.as_bytes())?;
+    let ready = file.path().with_extension("ready");
+    file.persist(ready).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(test)]
 fn queue_at(path: &Path, cmd: QueuedCommand) -> io::Result<()> {
     let tmp = path.with_extension("cmd.tmp");
-    std::fs::write(&tmp, format!("{}\n", cmd.serialize()))?;
+    std::fs::write(&tmp, format!("{}\n", cmd.serialize()?))?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -214,6 +233,16 @@ fn queue_at(path: &Path, cmd: QueuedCommand) -> io::Result<()> {
 /// Daemon side: take one queued command, if any. Always clears the file
 /// when it exists so a request is delivered at most once.
 pub fn take_queued_command() -> Option<QueuedCommand> {
+    if let Ok(entries) = std::fs::read_dir(ipc_path().with_extension("queue")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "ready")
+                && let Some(command) = take_at(&path)
+            {
+                return Some(command);
+            }
+        }
+    }
     take_at(&ipc_path())
 }
 
@@ -226,6 +255,33 @@ fn take_at(path: &Path) -> Option<QueuedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipc_preserves_flags_spaces_and_empty_arguments() {
+        let cli =
+            Cli::try_parse_from(["riced", "ipc", "remove", "--id", "bar main", "--custom", ""])
+                .unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Commands::Ipc {
+                command: "remove".into(),
+                args: vec![
+                    "--id".into(),
+                    "bar main".into(),
+                    "--custom".into(),
+                    "".into()
+                ],
+            })
+        );
+        let request = QueuedCommand::Ipc {
+            command: "remove".into(),
+            args: vec!["line\nbreak".into()],
+        };
+        assert_eq!(
+            QueuedCommand::parse(&request.serialize().unwrap()),
+            Some(request)
+        );
+    }
 
     #[test]
     fn project_path_is_validated_and_made_absolute() {

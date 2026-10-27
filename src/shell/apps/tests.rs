@@ -5,6 +5,126 @@ use std::sync::atomic::{AtomicU64, Ordering};
 struct Fixture {
     project: Project,
 }
+
+#[test]
+fn root_state_module_registers_ipc_and_failed_reload_keeps_handlers() {
+    let directory = tempfile::tempdir_in("/tmp/opencode").unwrap();
+    std::fs::write(
+        directory.path().join("state.lua"),
+        r#"
+        riced.ipc({ remove = function(self, args)
+            self.seen = args[2]
+            return shell.remove_bar({anchor='top', output=args[2]})
+        end })
+        return {}
+    "#,
+    )
+    .unwrap();
+    let mut runtime =
+        LuaRuntime::with_profile(crate::lua::sandbox::Profile::Widget, vec![]).unwrap();
+    runtime.set_app_root(directory.path()).unwrap();
+    runtime
+        .load("local state = require('state'); return {view=function() return nil end}")
+        .unwrap();
+    assert!(runtime.has_ipc_handler("remove"));
+    assert!(!runtime.has_ipc_handler("unknown"));
+    assert!(
+        runtime
+            .load("riced.ipc({bad=function() end}); error('broken')")
+            .is_err()
+    );
+    assert!(runtime.has_ipc_handler("remove"));
+    assert!(!runtime.has_ipc_handler("bad"));
+    runtime
+        .load("local state = require('state'); return {view=function() return nil end}")
+        .unwrap();
+    assert!(runtime.has_ipc_handler("remove"));
+    let result = with_services(|services| {
+        runtime.app_event(
+            services,
+            "DP-1",
+            &json!({}),
+            &json!({}),
+            AppEvent::Ipc {
+                command: "remove",
+                args: &["--output".into(), "Display with spaces".into()],
+            },
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        crate::lua::shell::parse(&result).unwrap(),
+        Some(crate::lua::shell::ShellCommand::RemoveBar {
+            anchor: "top".into(),
+            output: "Display with spaces".into(),
+        })
+    );
+}
+
+#[test]
+fn framework_actions_include_the_identity_of_the_source_layer() {
+    let fixture = Fixture::new(
+        r#"
+        return {
+            actions=function(self,event) self.source=event.layer end,
+            view=function(self) return {
+                iced.layer({id='one',width=100,height=32,content=iced.text(self.source or '')}),
+                iced.layer({id='two',width=100,height=32,content=iced.text(self.source or '')}),
+            } end,
+        }
+    "#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let first = window::Id::unique();
+    let second = window::Id::unique();
+    app.roots.get_mut("one").unwrap().surface = Some(first);
+    app.roots.get_mut("two").unwrap().surface = Some(second);
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    plots
+        .apps
+        .instances
+        .insert((OutputId(1), "bar".into()), app);
+    let _ = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface: second,
+            action: "clicked".into(),
+        },
+    ));
+    let content = &plots.apps.instances[&(OutputId(1), "bar".into())].roots["one"]
+        .root
+        .content;
+    assert!(matches!(content, crate::ui::node::WidgetNode::Text {content,..} if content == "two"));
+}
+
+#[test]
+fn framework_wallpaper_slot_uses_settings_tiles_when_native_background_is_disabled() {
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    plots.config.background.disabled = true;
+    let output = OutputId(1);
+    assert!(crate::shell::screens::Background::wallpaper_views(&plots, output).is_empty());
+    plots.desktop.wallpaper.applied.insert(
+        output,
+        crate::wallpaper::Tile {
+            spec: crate::wallpaper::OutputSpec {
+                key: "DP-1".into(),
+                rect: (0.0, 0.0, 1.0, 1.0),
+                pixels: (1, 1),
+            },
+            path: PathBuf::from("test-tile.png"),
+            handle: iced::widget::image::Handle::from_rgba(1, 1, vec![255; 4]),
+        },
+    );
+    assert_eq!(
+        crate::shell::screens::Background::wallpaper_views(&plots, output).len(),
+        1
+    );
+    assert!(app_native(&plots, Some(output))("wallpaper").is_ok());
+    assert!(app_native(&plots, None)("wallpaper").is_err());
+}
 impl Fixture {
     fn new(source: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);

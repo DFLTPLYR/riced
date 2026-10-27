@@ -14,6 +14,16 @@ use mlua::{Lua, Table, Value};
 pub(crate) enum ShellCommand {
     /// Toggle the Settings window, like the CLI `open-settings` command.
     OpenSettings,
+    /// Append a bar placement to `config.bar`, the list Settings edits.
+    AddBar {
+        /// `top`, `bottom`, `left`, or `right`.
+        anchor: String,
+        /// Connector name; empty means every output.
+        output: String,
+        thickness: u32,
+    },
+    /// Remove a bar placement: the first entry matching this output and anchor.
+    RemoveBar { anchor: String, output: String },
 }
 
 fn command(lua: &Lua, action: &str) -> mlua::Result<Table> {
@@ -24,11 +34,61 @@ fn command(lua: &Lua, action: &str) -> mlua::Result<Table> {
     Ok(outer)
 }
 
+fn anchor_ok(anchor: &str) -> bool {
+    matches!(anchor, "top" | "bottom" | "left" | "right")
+}
+
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let api = lua.create_table()?;
     api.set(
         "open_settings",
         lua.create_function(|lua, ()| command(lua, "open-settings"))?,
+    )?;
+    api.set(
+        "add_bar",
+        lua.create_function(|lua, fields: Table| {
+            let anchor: String = fields.get("anchor").unwrap_or_else(|_| "top".into());
+            let output: String = fields.get("output").unwrap_or_default();
+            let thickness: u32 = fields.get("thickness").unwrap_or(34);
+            if !anchor_ok(&anchor) {
+                return Err(mlua::Error::RuntimeError(
+                    "shell.add_bar anchor must be top, bottom, left, or right".into(),
+                ));
+            }
+            if output.len() > 64 || output.contains('\0') {
+                return Err(mlua::Error::RuntimeError(
+                    "shell.add_bar output must be at most 64 bytes".into(),
+                ));
+            }
+            if !(8..=512).contains(&thickness) {
+                return Err(mlua::Error::RuntimeError(
+                    "shell.add_bar thickness must be in 8..=512".into(),
+                ));
+            }
+            let inner = command(lua, "add-bar")?;
+            let payload: Table = inner.raw_get("shell")?;
+            payload.set("anchor", anchor)?;
+            payload.set("output", output)?;
+            payload.set("thickness", thickness)?;
+            Ok(inner)
+        })?,
+    )?;
+    api.set(
+        "remove_bar",
+        lua.create_function(|lua, fields: Table| {
+            let anchor: String = fields.get("anchor").unwrap_or_else(|_| "top".into());
+            let output: String = fields.get("output").unwrap_or_default();
+            if !anchor_ok(&anchor) {
+                return Err(mlua::Error::RuntimeError(
+                    "shell.remove_bar anchor must be top, bottom, left, or right".into(),
+                ));
+            }
+            let inner = command(lua, "remove-bar")?;
+            let payload: Table = inner.raw_get("shell")?;
+            payload.set("anchor", anchor)?;
+            payload.set("output", output)?;
+            Ok(inner)
+        })?,
     )?;
     lua.globals().set("shell", api)
 }
@@ -48,16 +108,68 @@ pub(crate) fn parse(value: &Value) -> mlua::Result<Option<ShellCommand>> {
         ));
     };
     let action: String = inner.get("action")?;
+    let allowed: &[&str] = match action.as_str() {
+        "open-settings" => &[],
+        "add-bar" => &["anchor", "output", "thickness"],
+        "remove-bar" => &["anchor", "output"],
+        _ => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "unknown shell command {action}"
+            )));
+        }
+    };
     for pair in inner.clone().pairs::<String, Value>() {
         let (key, _) = pair?;
-        if key != "action" {
+        if key != "action" && !allowed.contains(&key.as_str()) {
             return Err(mlua::Error::RuntimeError(format!(
                 "unknown shell command field {key}"
             )));
         }
     }
+    let string = |name: &str| -> mlua::Result<String> {
+        match inner.get::<Value>(name)? {
+            Value::Nil => Ok(String::new()),
+            Value::String(value) => Ok(value.to_str()?.to_owned()),
+            _ => Err(mlua::Error::RuntimeError(format!(
+                "shell command {name} must be a string"
+            ))),
+        }
+    };
     match action.as_str() {
         "open-settings" => Ok(Some(ShellCommand::OpenSettings)),
+        "add-bar" => {
+            let anchor = string("anchor")?;
+            if !anchor_ok(&anchor) {
+                return Err(mlua::Error::RuntimeError(
+                    "shell.add_bar anchor must be top, bottom, left, or right".into(),
+                ));
+            }
+            let thickness = match inner.get::<Value>("thickness")? {
+                Value::Integer(value) if (8..=512).contains(&value) => value as u32,
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "shell.add_bar thickness must be in 8..=512".into(),
+                    ));
+                }
+            };
+            Ok(Some(ShellCommand::AddBar {
+                anchor,
+                output: string("output")?,
+                thickness,
+            }))
+        }
+        "remove-bar" => {
+            let anchor = string("anchor")?;
+            if !anchor_ok(&anchor) {
+                return Err(mlua::Error::RuntimeError(
+                    "shell.remove_bar anchor must be top, bottom, left, or right".into(),
+                ));
+            }
+            Ok(Some(ShellCommand::RemoveBar {
+                anchor,
+                output: string("output")?,
+            }))
+        }
         _ => Err(mlua::Error::RuntimeError(format!(
             "unknown shell command {action}"
         ))),

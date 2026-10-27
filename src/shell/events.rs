@@ -327,6 +327,11 @@ pub enum Plant {
     Graft(Id, Event),
     // File IPC poll tick (see `cli`): drains `riced.cmd` queued by CLI clients.
     IpcPoll,
+    /// Internal UI requests use the same command dispatch as CLI clients.
+    Ipc {
+        command: String,
+        args: Vec<String>,
+    },
     // Wayland
     Wayland(LandEvent),
     // Layers/Plots

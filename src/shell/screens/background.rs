@@ -128,7 +128,8 @@ mod tests {
             }
             assert!(matches!(
                 &messages[..],
-                [Plant::TopPlot(TopEvent::Sow), Plant::Sprout]
+                [Plant::TopPlot(TopEvent::Sow), Plant::Ipc { command, args }]
+                    if command == "settings" && args.is_empty()
             ));
             assert!(context_menu_message("unknown").is_none());
         }
@@ -241,7 +242,8 @@ mod tests {
                 }
                 assert!(matches!(
                     &messages[..],
-                    [Plant::TopPlot(TopEvent::Sow), Plant::Sprout]
+                    [Plant::TopPlot(TopEvent::Sow), Plant::Ipc { command, args }]
+                        if command == "settings" && args.is_empty()
                 ));
             }
         }
@@ -339,7 +341,10 @@ pub(crate) fn context_menu_host(item: &str) -> serde_json::Value {
 fn context_menu_message(action: &str) -> Option<Plant> {
     match action {
         "add-top" => Some(Plant::TopPlot(TopEvent::Sow)),
-        "open-settings" => Some(Plant::Sprout),
+        "open-settings" => Some(Plant::Ipc {
+            command: "settings".into(),
+            args: Vec::new(),
+        }),
         _ => None,
     }
 }
@@ -990,7 +995,7 @@ impl Background {
 
     /// One original-quality, baked image per output; source images live only
     /// in the editor or the bake worker, not in every desktop surface.
-    fn wallpaper_views(plots: &Plots, output: OutputId) -> Vec<Element<'_, Plant>> {
+    pub(crate) fn wallpaper_views(plots: &Plots, output: OutputId) -> Vec<Element<'static, Plant>> {
         match plots.desktop.wallpaper.applied.get(&output) {
             Some(tile) => vec![match &plots.config.background.shader {
                 Some(effect) => crate::ui::shader::wallpaper(tile.handle.clone(), effect),

@@ -71,9 +71,14 @@ pub(crate) use util::decode_handle;
 /// Bars added via the context menu are appended here on creation and
 /// panel edits update the entry by index (coalesced save), so bars survive
 /// restarts. Same entry spawns on several outputs when `output = ""`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Disable the legacy native bar host. `bar` entries stay the single source
+    /// of truth (Settings edits them), but a framework app renders them as Lua
+    /// layers instead, so the two never draw the same edge twice.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub bar_host: bool,
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -104,6 +109,26 @@ pub struct Config {
     /// Bar presets as a direct array (`bar`), no redundant key name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bar: Vec<TopConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            apps: Vec::new(),
+            extensions: Vec::new(),
+            component_defaults: Default::default(),
+            desktop: Vec::new(),
+            composable: Default::default(),
+            background: Default::default(),
+            theme: Default::default(),
+            animation: Default::default(),
+            interaction: Default::default(),
+            notifications: Default::default(),
+            overlays: Vec::new(),
+            bar_host: true,
+            bar: Vec::new(),
+        }
+    }
 }
 
 /// One output-local desktop app placement. Appearance defaults stay in Lua.
@@ -291,6 +316,9 @@ pub struct NotificationConfig {
 }
 fn is_true(value: &bool) -> bool {
     *value
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for NotificationConfig {

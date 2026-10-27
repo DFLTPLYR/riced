@@ -16,8 +16,6 @@ use iced::{Element, Point, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, BlurOption, Layer, LayerSize, NewLayerShellSettings, OutputOption,
 };
-use iced_runtime::Action;
-use iced_runtime::window::Action as WindowAction;
 use iced_wayland_subscriber::{OutputId, OutputInfo};
 use mlua::Value;
 use std::collections::HashMap;
@@ -1536,6 +1534,73 @@ impl Top {
         bars
     }
 
+    /// Spawn missing configured bars using the same host as output discovery.
+    pub(crate) fn spawn_configured(plots: &mut Plots, output: OutputId) -> Command<Plant> {
+        if !plots.config.bar_host {
+            return Command::none();
+        }
+        let Some(info) = plots.windows.output_infos.get(&output) else {
+            return Command::none();
+        };
+        let name = info.name.clone().unwrap_or_default();
+        let (_, _, width, height) = Background::output_geometry(info);
+        let mut commands = Vec::new();
+        for (index, config) in plots.config.bar.clone().iter().enumerate() {
+            if !config.output.trim().is_empty() && !config.output.trim().eq_ignore_ascii_case(&name)
+            {
+                continue;
+            }
+            let Some(anchor) = Self::parse_anchor(&config.anchor) else {
+                continue;
+            };
+            let taken = plots.windows.tops.iter().any(|(id, top)| {
+                plots.windows.ids.get(id) == Some(&PlotInfo::Top(output)) && top.anchor() == anchor
+            });
+            if taken {
+                continue;
+            }
+            let top = Self::with_config(index, anchor, config.into());
+            let (w, h) = top.local.px_size(width, height, top.is_horizontal());
+            let (id, settings) = top.open(output.0, w, h);
+            plots.windows.tops.insert(id, top);
+            plots.windows.ids.insert(id, PlotInfo::Top(output));
+            Self::render_bar_widgets(plots, id);
+            commands.push(Command::done(Plant::NewLayerShell { settings, id }));
+        }
+        Command::batch(commands)
+    }
+
+    /// Remove one saved recipe and every surface it owns, including other outputs.
+    pub(crate) fn remove_configured(plots: &mut Plots, index: usize) -> Command<Plant> {
+        if index >= plots.config.bar.len() {
+            return Command::none();
+        }
+        let ids: Vec<_> = plots
+            .windows
+            .tops
+            .iter()
+            .filter_map(|(id, top)| (top.bar_index == index).then_some(*id))
+            .collect();
+        plots.config.bar.remove(index);
+        // Close cleanup normally flushes pending preferences. Publish this edit
+        // once, after all owners and indices have been reconciled.
+        plots.config_jobs.dirty = false;
+        // Close owners before shifting indices, so unrelated bars keep their state.
+        let mut commands: Vec<_> = ids
+            .into_iter()
+            .map(|id| plots.close_surface(id, true))
+            .collect();
+        for top in plots.windows.tops.values_mut() {
+            if top.bar_index != usize::MAX && top.bar_index > index {
+                top.bar_index -= 1;
+            }
+        }
+        plots.config_jobs.dirty = true;
+        commands.push(plots.arm_config_save());
+        commands.push(crate::shell::apps::reload(plots));
+        Command::batch(commands)
+    }
+
     /// (Re)build runtimes for every placement and render once, so
     /// bars populate immediately. Called at startup and after every
     /// definition rescan (which clears the old states).
@@ -2057,40 +2122,14 @@ impl Top {
     }
 
     /// Remove a bar (`TopEvent::Remove`): drop tracking + cursor state,
-    /// close its window, and delete its `[[bar]]` entry (persisted
-    /// immediately) so it stays gone after restart.
+    /// close its window, and stage deletion of its saved bar entry.
     pub(crate) fn handle_remove(plots: &mut Plots, bar_id: window::Id) -> Command<Plant> {
-        let mut cmds = Vec::new();
-        // A bar going away takes its popup with it.
-        let popup_id = plots
-            .windows
-            .popups
-            .iter()
-            .find(|(_, p)| p.bar_id == bar_id)
-            .map(|(id, _)| *id);
-        if let Some(pid) = popup_id {
-            cmds.push(super::Popup::handle_dismiss(plots, pid));
+        if let Some(top) = plots.windows.tops.get(&bar_id)
+            && top.bar_index < plots.config.bar.len()
+        {
+            return Self::remove_configured(plots, top.bar_index);
         }
-        if let Some(top) = plots.windows.tops.remove(&bar_id) {
-            if top.bar_index < plots.config.bar.len() {
-                plots.config.bar.remove(top.bar_index);
-                // Indices after the hole shift down by one.
-                for other in plots.windows.tops.values_mut() {
-                    if other.bar_index > top.bar_index {
-                        other.bar_index -= 1;
-                    }
-                }
-            }
-            // flush_config_save only writes when dirty — mark it first
-            // (same for persist_new below).
-            plots.config_jobs.dirty = true;
-            plots.flush_config_save();
-        }
-        plots.forget_window(bar_id);
-        cmds.push(iced_runtime::task::effect(Action::Window(
-            WindowAction::Close(bar_id),
-        )));
-        Command::batch(cmds)
+        plots.close_surface(bar_id, true)
     }
 
     /// Push the bar's current size/exclusive/margins to its live window.

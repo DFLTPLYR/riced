@@ -25,10 +25,25 @@ fn with_module<T>(
     src: &str,
     build: impl Fn(&Table) -> mlua::Result<T>,
 ) -> mlua::Result<T> {
-    let root: Option<String> = lua.named_registry_value("riced.app_root").ok();
-    let local = root.map(|root| std::path::PathBuf::from(root).join("components").join(src));
-    let path = local
-        .filter(|path| path.is_file())
+    // App-local `components/` first, then the project directory (which owns the
+    // shared `layers/`), then the shared `components/` library. The project is
+    // derived from the app root so resolution never depends on a process-global
+    // path: `apps/<name>` -> `apps` -> project.
+    let root: Option<std::path::PathBuf> = lua
+        .named_registry_value::<String>("riced.app_root")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(root) = &root {
+        candidates.push(root.join(src));
+        candidates.push(root.join("components").join(src));
+        if let Some(project) = root.parent().and_then(std::path::Path::parent) {
+            candidates.push(project.join(src));
+        }
+    }
+    let path = candidates
+        .into_iter()
+        .find(|path| path.is_file())
         .unwrap_or_else(|| composable::source_path(src));
     let modules: Table = lua.named_registry_value("riced.component_modules")?;
     let cached: Option<Table> = modules.get(src)?;
@@ -153,9 +168,16 @@ pub(crate) enum AppEvent<'a> {
     Mount,
     Unmount(&'a str),
     Tick,
+    Ipc {
+        command: &'a str,
+        args: &'a [String],
+    },
     Action(&'a crate::ui::action::Action),
     Managed(&'a crate::framework::tasks::Delivery),
-    PopupClosed { id: &'a str, reason: &'a str },
+    PopupClosed {
+        id: &'a str,
+        reason: &'a str,
+    },
 }
 
 /// Owned boundary messages, including native control keys and typed values.
@@ -213,6 +235,35 @@ impl LuaRuntime {
         // definitions as the shell's module widgets.
         super::library::install(&lua, profile, components)?;
         let api = lua.create_table()?;
+        lua.set_named_registry_value("riced.ipc_handlers", lua.create_table()?)?;
+        lua.set_named_registry_value("riced.project_modules", lua.create_table()?)?;
+        api.set(
+            "ipc",
+            lua.create_function(|lua, handlers: Table| {
+                if !lua
+                    .named_registry_value::<bool>("riced.loading")
+                    .unwrap_or(false)
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        "register IPC handlers while loading root.lua or its modules".into(),
+                    ));
+                }
+                let registered: Table = lua.named_registry_value("riced.ipc_handlers")?;
+                for pair in handlers.clone().pairs::<String, Function>() {
+                    let (name, _) = pair?;
+                    if name.is_empty() || registered.contains_key(name.clone())? {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "invalid or duplicate IPC command: {name}"
+                        )));
+                    }
+                }
+                for pair in handlers.pairs::<String, Function>() {
+                    let (name, handler) = pair?;
+                    registered.set(name, handler)?;
+                }
+                Ok(())
+            })?,
+        )?;
         lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
         lua.set_named_registry_value("riced.component_sources", lua.create_table()?)?;
         api.set(
@@ -317,6 +368,13 @@ impl LuaRuntime {
     }
 
     pub fn load_named(&mut self, script: &str, label: &str) -> mlua::Result<()> {
+        let previous_handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
+        let previous_modules: Table = self.lua.named_registry_value("riced.project_modules")?;
+        self.lua
+            .set_named_registry_value("riced.ipc_handlers", self.lua.create_table()?)?;
+        self.lua
+            .set_named_registry_value("riced.project_modules", self.lua.create_table()?)?;
+        self.lua.set_named_registry_value("riced.loading", true)?;
         let result = (|| {
             self.begin()?;
             let env = self.lua.create_table()?;
@@ -352,6 +410,13 @@ impl LuaRuntime {
             }
             self.lua.create_registry_value(app)
         })();
+        if result.is_err() {
+            self.lua
+                .set_named_registry_value("riced.ipc_handlers", previous_handlers)?;
+            self.lua
+                .set_named_registry_value("riced.project_modules", previous_modules)?;
+        }
+        self.lua.set_named_registry_value("riced.loading", false)?;
         let key = self.finish("load", result)?;
         if let Some(previous) = self.app.replace(key) {
             self.lua.remove_registry_value(previous)?;
@@ -502,6 +567,46 @@ impl LuaRuntime {
 
     pub(crate) fn set_app_root(&self, root: &Path) -> mlua::Result<()> {
         super::managed::install(&self.lua, root)?;
+        let directory = root.to_path_buf();
+        let loading = self.lua.create_table()?;
+        self.lua.globals().set(
+            "require",
+            self.lua.create_function(move |lua, name: String| {
+                let modules: Table = lua.named_registry_value("riced.project_modules")?;
+                if name.split('.').any(|part| {
+                    part.is_empty() || !part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                }) {
+                    return Err(mlua::Error::RuntimeError(
+                        "invalid project module name".into(),
+                    ));
+                }
+                let cached: Value = modules.raw_get(name.as_str())?;
+                if cached != Value::Nil {
+                    return Ok(cached);
+                }
+                if loading.raw_get::<bool>(name.as_str()).unwrap_or(false) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "circular project module: {name}"
+                    )));
+                }
+                let path = directory.join(name.replace('.', "/")).with_extension("lua");
+                let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
+                loading.raw_set(name.as_str(), true)?;
+                let result = lua
+                    .load(&source)
+                    .set_name(format!("@{}", path.display()))
+                    .eval::<Value>();
+                loading.raw_set(name.as_str(), Value::Nil)?;
+                let value = result?;
+                let value = if value == Value::Nil {
+                    Value::Boolean(true)
+                } else {
+                    value
+                };
+                modules.raw_set(name, value.clone())?;
+                Ok(value)
+            })?,
+        )?;
         self.lua
             .set_named_registry_value("riced.app_root", root.to_string_lossy().into_owned())
     }
@@ -547,6 +652,7 @@ impl LuaRuntime {
             AppEvent::Mount => "mount",
             AppEvent::Unmount(_) => "unmount",
             AppEvent::Tick => "on_tick",
+            AppEvent::Ipc { .. } => "ipc",
             AppEvent::Action(_) => "actions",
             AppEvent::Managed(_) => "callback",
             AppEvent::PopupClosed { .. } => "actions",
@@ -574,6 +680,11 @@ impl LuaRuntime {
             if let AppEvent::Managed(delivery) = event {
                 return super::managed::invoke(&self.lua, delivery);
             }
+            if let AppEvent::Ipc { command, args } = event {
+                let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
+                let function: Function = handlers.get(command)?;
+                return function.call((app, self.lua.to_value(args)?));
+            }
             let function = match app.get::<Value>(handler)? {
                 Value::Nil => return Ok(Value::Nil),
                 Value::Function(function) => function,
@@ -589,8 +700,17 @@ impl LuaRuntime {
                     mlua::MultiValue::from_vec(vec![reason.into_lua(&self.lua)?])
                 }
                 AppEvent::Tick => mlua::MultiValue::new(),
-                AppEvent::Action(action) => action.arguments(&self.lua)?,
+                AppEvent::Action(action) => {
+                    let arguments = action.arguments(&self.lua)?;
+                    if let Some(Value::Table(event)) = arguments.front()
+                        && let Some(layer) = context.get("layer").and_then(|value| value.as_str())
+                    {
+                        event.raw_set("layer", layer)?;
+                    }
+                    arguments
+                }
                 AppEvent::Managed(_) => mlua::MultiValue::new(),
+                AppEvent::Ipc { .. } => mlua::MultiValue::new(),
                 AppEvent::PopupClosed { id, reason } => {
                     mlua::MultiValue::from_vec(vec![self.lua.to_value(
                         &serde_json::json!({"type":"popup_closed", "id":id, "reason":reason}),
@@ -605,6 +725,13 @@ impl LuaRuntime {
 
     pub(crate) fn managed_generation(&self) -> Option<u64> {
         super::managed::generation(&self.lua)
+    }
+
+    pub(crate) fn has_ipc_handler(&self, command: &str) -> bool {
+        self.lua
+            .named_registry_value::<Table>("riced.ipc_handlers")
+            .and_then(|handlers| handlers.contains_key(command))
+            .unwrap_or(false)
     }
     pub(crate) fn managed_commands(&self) -> Vec<crate::framework::tasks::Command> {
         super::managed::commands(&self.lua)
