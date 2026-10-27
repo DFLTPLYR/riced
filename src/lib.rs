@@ -75,7 +75,12 @@ fn run_with(
     }
     let _shutdown = Shutdown;
     tracing_subscriber::fmt().init();
-    let _ = tracing_log::LogTracer::init();
+    // usvg's generic attribute parser warns about valid `marker-*: none`
+    // declarations, which third-party SVG icons use freely. The tree still
+    // parses and rasterizes; keep the per-icon warning spam out of the log.
+    let _ = tracing_log::LogTracer::builder()
+        .ignore_crate("usvg::parser::svgtree")
+        .init();
     let cli = cli::parse();
     let project_root = match cli.project_root()? {
         Some(root) => Some(root),
