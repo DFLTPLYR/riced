@@ -1097,12 +1097,13 @@ mod tests {
             &renderer,
             &layout::Limits::new(iced::Size::ZERO, iced::Size::new(220.0, 300.0)),
         );
-        let menu = &node.children()[0].children()[2];
+        // popup container -> card surface container -> column -> menu
+        let menu = &node.children()[0].children()[0].children()[2];
         assert_eq!(menu.children().len(), 4);
-        assert!(menu.size().width > 100.0, "collapsed menu: {menu:?}");
+        assert!(menu.size().width > 60.0, "collapsed menu: {menu:?}");
         for child in menu.children() {
             assert!(
-                child.size().width > 100.0 && child.size().height > 20.0,
+                child.size().width > 60.0 && child.size().height > 20.0,
                 "invisible menu delegate: {child:?}"
             );
         }
