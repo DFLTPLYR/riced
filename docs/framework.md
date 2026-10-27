@@ -7,6 +7,63 @@ extension SDK.
 
 ## Project layout
 
+### Root entry point and commands
+
+When a project contains `root.lua`, it is the frontend entry point and takes
+precedence over the legacy `config.lua` `apps` list. It returns the existing app
+contract (`view`, optional `mount`/`actions`/`unmount`) and composes its surfaces
+with `riced.layer`. New installations put this file directly in the project
+directory. `config.lua` retains preferences and extension configuration.
+
+Register shell commands during module loading, in `root.lua` or a module such
+as `state.lua` loaded with `require("state")`:
+
+```lua
+riced.ipc({
+    settings = function(self, args)
+        return shell.open_settings()
+    end,
+    remove = function(self, args)
+        -- args is the original CLI argument array, including flags.
+        -- Update root-owned state or return a host action here.
+    end,
+})
+```
+
+```sh
+riced ipc settings
+riced ipc remove --anchor top --output DP-1
+```
+
+The installed frontend registers handlers in `state.lua` for `settings`, `add`,
+and `remove`. `add` accepts `--anchor`, optional `--output` and `--thickness`;
+`remove` accepts `--anchor` and optional `--output`. The command namespace is
+user-defined; `settings` opens Settings, it is not a settings CRUD namespace.
+`open-settings` and its old `settings` alias now queue the `settings` command.
+Handlers receive the owning app as `self` and run under the normal event budget,
+with current props/context and managed resources available. They may return the
+same host actions as `actions`. Registration rejects duplicate command names.
+
+Commands are delivered once: if multiple output instances register a handler,
+the first instance sorted by app id and output name receives it. IPC remains
+session-wide. Requests are queued independently so concurrent clients cannot
+overwrite one another. CLI success acknowledges queueing, not handler completion;
+unknown commands and handler errors are reported by the daemon.
+Legacy projects without `root.lua` retain native Settings opening when they
+have no registered `settings` handler.
+
+Project `require` caches modules per VM, resolves dotted names relative to the
+app root, and rejects circular imports. `state.lua`, `shell/`, `components/`, and
+shared `layers/` participate in source reload detection. Failed candidate reloads
+retain the working frontend and its handlers. Settings currently retains its
+native window host and Lua pages; its opening policy is now a Lua IPC handler.
+
+The default root declares no replacement surfaces: the original Rust bar and
+desktop hosts provide slot layouts, editing, widget popups, selection and drag
+gestures. Preferences enable `bar_host` and leave `background.disabled` false.
+The installed `layers/` files are optional examples, not the default shell.
+Desktop Settings requests dispatch `settings` through the same handler as IPC.
+
 The project root is the directory containing the installed `config.lua`
 (`$XDG_CONFIG_HOME/riced`, normally `~/.config/riced`).
 
@@ -194,19 +251,40 @@ dropping the slot.
 
 ```lua
 content = iced.stack({
-    iced.image(path):width(size.fill):height(size.fill),
+    iced.native("wallpaper"),
     iced.native("desktop-widgets"),
 })
 ```
 
 | Slot | Host | Fills with |
 | --- | --- | --- |
+| `wallpaper` | framework layer | The baked wallpaper tile published after Apply (cover fit, shader-aware) — the same pixels the native background draws. Empty until the first bake succeeds. |
 | `desktop-widgets` | framework layer | The legacy desktop-widget host for that output: every `desktop` placement, with service snapshots, hover, hold-drag, and persistence. |
 
 Only framework layers and the Settings hosts resolve slots; bar, scene, and
-overlay hosts reject them. An unknown id is a reported render error, and
-`desktop-widgets` needs an output-bound app (every layer app is). The slot is
-Fill-sized, so place it in a `stack` or `container` rather than a `row`.
+overlay hosts reject them. An unknown id is a reported render error, and both
+slots need an output-bound app (every layer app is). Each slot is Fill-sized, so
+place it in a `stack` or `container` rather than a `row`.
+
+`wallpaper` is what lets a Lua background coexist with the native wallpaper
+pipeline: placement stays Lua, while baking, shader compilation, the theme
+regeneration prompt, and the decoded pixel resource stay native.
+
+Because the slot is empty until a bake succeeds, a background layer should not
+depend on it for being visible. The app also receives the *configured* source
+for its output as `props.wallpaper` (per-monitor entry first, then the first
+free-form image), so it can draw that path directly underneath:
+
+```lua
+if props.wallpaper ~= "" then
+    children[#children + 1] = iced.image(props.wallpaper):width(size.fill):height(size.fill)
+end
+children[#children + 1] = iced.native("wallpaper")
+```
+
+`iced.image` uses contain fitting, so the direct draw is a fallback, not the
+final look; the baked tile covers it once it exists. It also means a bake
+failure shows a wallpaper rather than a blank screen.
 
 ## Host shell commands
 
@@ -236,29 +314,74 @@ host, and the daemon owns execution and validation.
 layers in `view` and owns any layer *list* as its own data, so the runtime never
 invents a surface on request. See [App-owned layers](#app-owned-layers).
 
-### App-owned layers
+### Bars are config, not app state
 
-The layer set is not fixed by `config.lua`. An app can declare as many layers as
-it likes, including ones derived from its own state:
+A bar placement belongs to the configuration, not to the app that draws it:
+
+- `config.bar` is the single list. Settings → Panel edits it (including
+  **Remove this bar**), and a framework app receives the entries for its output
+  as `props.bars`.
+- The default uses `bar_host = true` for the full native slot/widget flow.
+  A custom frontend that replaces bars with Lua surfaces should set
+  `bar_host = false` to avoid duplicate surfaces.
+- `shell.add_bar{anchor, output?, thickness?}` appends an entry and
+  `shell.remove_bar{anchor, output?}` drops the matching one. Both go through
+  validated persistence. Add spawns missing native bars immediately; remove
+  closes all surfaces/popups for the recipe and fixes surviving bar indices.
+- Give each bar a **stable identity** from the config entry — one bar per
+  (output, edge), which is the rule the config and Settings already use — so
+  removing one never renumbers the others.
+- `props.bars` entries are always **complete**. `TopConfig` serializes through
+  the file format, which omits any field equal to its default, so serializing it
+  directly would hand Lua a partial object with a nil `anchor`. The host sends
+  an explicit shape (`anchor`, `output`, `length`, `thickness`, `slots`,
+  `aligns`, `opacity`, `floating`) instead, and a layer should still write
+  `bar.anchor or "top"` so a malformed document cannot take the frontend down.
+
+An action handler can therefore offer "add a bar" and "remove this bar" without
+owning a second list:
 
 ```lua
-function app:mount()
+function app:actions(event)
+    if event.key == "add-bar" then
+        return shell.add_bar({ anchor = "top", output = self.output, thickness = 34 })
+    elseif event.key == "remove-bar" then
+        return shell.remove_bar({ anchor = self.edge, output = self.output })
+    end
+end
+```
+
+### App-owned layers
+
+Layers that are *not* configuration — a background, a HUD, a widget board — are
+still the app's own. The layer set is not fixed by `config.lua`; an app can
+declare as many as it likes, including ones derived from its own state:
+
+An app is either `apps/<name>/app.lua` (a folder app, with app-local
+`components/`) or a single file `apps/<name>.lua`. Either way `layers/` at the
+project root is shared, so a layer module is
+`riced.layer("layers/bar.lua", props)`. A single-file app still gets
+`apps/<name>/` for owned data such as `state/`, never for its entry point.
+
+```lua
+function app:mount(context)
+    self.output = context.output.name
     self.bars = riced.file({ type = "lua", path = "bars.lua",
                              write_mode = "generated", defaults = { bars = {} } })
 end
 
 function app:add_bar(edge)
     local bars = self.bars:get("bars") or {}
-    table.insert(bars, { edge = edge, thickness = 32 })
+    table.insert(bars, { id = "bar-" .. (#bars + 1), edge = edge, thickness = 32 })
     self.bars:set("bars", bars)
     self.bars:save()
 end
 
 function app:view(props)
-    local layers = { riced.layer("layers/wallpaper.lua", { output = props.output }) }
-    for index, bar in ipairs(self.bars:get("bars") or {}) do
+    local layers = { riced.layer("layers/background.lua", { menu = self.menu }) }
+    for _, bar in ipairs(self.bars:get("bars") or {}) do
         layers[#layers + 1] = riced.layer("layers/bar.lua", {
-            id = "bar-" .. index, output = self.output,
+            id = bar.id, output = self.output,
             edge = bar.edge, thickness = bar.thickness,
         })
     end
@@ -270,9 +393,39 @@ end
 daemon still owns validation, identity, persistence, and window creation — Lua
 owns the policy of *when* a layer appears and what it is told.
 
+Store a **stable identity** in the document (here `bar.id`), never an array
+index: removing `bar-1` must not renumber `bar-2`, or the runtime closes and
+recreates unrelated surfaces. The same document can be edited by Settings and by
+the layer repeater, which is what keeps them consistent.
+
 A document opened with `riced.file` is data, not app code, so editing it never
 reloads the app. Keep it outside `apps/<name>/components/`, which is the app's
 source set.
+
+### Which layer sent an action
+
+Every layer of one app shares a Lua state, so an action handler must be able to
+tell them apart. The action event carries the id of the layer it came from:
+
+```lua
+function app:actions(event)
+    if event.type == "press" and event.button == "right" then
+        if event.layer == "background" then
+            self.menu = { x = event.x, y = event.y }
+        else
+            self.bar_menu = { id = event.layer, x = event.x, y = event.y }
+        end
+    elseif event.key == "remove:" .. tostring(event.layer) then
+        -- ...
+    end
+end
+```
+
+`event.layer` is the surface id of the layer that owns the surface the pointer
+hit. A right-click on a bar therefore reaches the app as
+`{type="press", button="right", layer="bar-2", x=…, y=…}`, which is enough to
+drop a per-bar menu without a native menu host: declare it as that layer's
+`popup`.
 
 ## Unified service snapshots and subscriptions
 

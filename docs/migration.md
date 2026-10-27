@@ -1,5 +1,22 @@
 # Migration: Lua-authored UI and plugin services
 
+## Current default: restored shell flow with Lua IPC
+
+The installed `root.lua` loads command handlers from `state.lua` and leaves the
+original Rust bar/desktop hosts enabled. It no longer substitutes the demo
+Settings-button/clock bar or the simplified background menu for the existing
+slot editor, widget popups, desktop selection and drag interactions. The
+`layers/` templates remain optional examples. Notifications and Settings keep
+their existing lifecycle and Apply/Discard behavior.
+
+`riced ipc settings` and the desktop Settings menu share the root's command
+handler. `riced ipc add --anchor EDGE [--output NAME] [--thickness PIXELS]`
+and `riced ipc remove --anchor EDGE [--output NAME]` use the native bar lifecycle,
+with removal closing every surface owned by the recipe, including other outputs.
+Existing user-authored project files are still preserved during initialization.
+The remaining Lua ownership migration must retain these interactions before
+replacing their hosts.
+
 This tracks moving the remaining Rust-authored shell UI into Lua and
 extracting optional hardcoded services into configurable plugins.
 
@@ -188,9 +205,12 @@ plumbing or per-surface context, not plugin candidates.
      adapter loads its project copy through `setting/sources.rs` and falls back
      to the embedded source when the copy is missing or fails to decode, so a
      bad edit cannot take Settings down. Source stamps are part of every page
-     cache key, so saving a page reloads it. The Settings *window* (nav pane,
-     page host, native slots) is still native; the pages are not yet ordinary
-     framework apps with their own surfaces. `examples/` commits one
+     cache key, so saving a page reloads it. The Settings *window* chrome now
+     renders `settings/shell.lua` through the same project-copy resolution: Lua
+     owns the page catalog, nav order, labels, descriptions, and hints, and Rust
+     maps `settings:page:<id>` actions to validated page ids and fills the
+     `settings-page` native slot with the selected page host. Pages are not yet
+     ordinary framework apps with their own surfaces. `examples/` commits one
      project-owned page (`settings/animation.lua`) with a contract test and
      ignores the other runtime-seeded libraries.
 6. **Remaining shell presentation** — desktop menus/overlays, notifications,
@@ -202,6 +222,41 @@ plumbing or per-surface context, not plugin candidates.
    services, drop dead dependencies, update docs, run `graphify update .`.
 
 ## Verification
+
+### Default frontend startup
+
+Plain daemon startup now installs `scripts/frontend/` into the default project
+when neither Lua nor legacy TOML configuration exists. `apps/shell/app.lua`
+owns the background, repeatable bars and a Lua layout editor. The editor and
+layer list use the same per-output managed JSON document; bar identities survive
+edits. Existing projects are preserved, not automatically converted. The starter
+does not reproduce the legacy seven-widget bar, wallpaper baking/map workflow,
+or native Settings pages. Those remain parity work before deleting old hosts.
+
+Installation uses atomic no-clobber file publication, an installation lock,
+a pending journal and a versioned completion marker. `riced init --repair`
+restores missing files only, without overwriting edits. Explicit projects skip
+automatic default installation. Tests exercise startup and repair with private
+XDG directories and render the installed frontend through the real app host.
+
+The installed frontend is a single file, `apps/root.lua`, with its layer
+modules in the shared project `layers/`; `riced.layer` resolves the app's
+`components/` first, then the project directory, then the shared library. A `TopConfig` cannot be sent to Lua directly: it serializes through the file
+format, which drops default-valued fields, so the app saw a nil `anchor` and the
+whole view failed. The host now projects an explicit, complete bar shape. Bar
+removal and addition edit `config.bar` — the list Settings → Panel already
+owns — through `shell.add_bar`/`shell.remove_bar`, and `bar_host = false` stops
+the native bar host from drawing those same edges. **Settings** always opens the
+riced window, so there is exactly one Settings.
+
+The installed frontend renders the wallpaper published by Wallpaper Settings
+through an `iced.native("wallpaper")` slot, so Apply in Settings is visible on a
+Lua background without moving baking, shaders, theme regeneration, or the pixel
+cache out of Rust. That slot is empty until a bake succeeds, so the layer also
+draws `props.wallpaper` — the configured source for its output — underneath it;
+a failed or pending bake shows a wallpaper instead of a blank screen. Bar removal is a per-bar `popup` opened by a right-click on
+that bar; the action event carries `event.layer`, the id of the layer it came
+from, because every layer of one app shares a single Lua state.
 
 - Lua screen descriptions and action contracts.
 - Plugin snapshots, commands, availability, lifecycle, cancellation, crashes,

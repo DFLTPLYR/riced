@@ -36,6 +36,48 @@ a palette extension and isolated palette worker as examples.
 
 ## Install & Run
 
+Plain `riced` installs the default frontend into `$XDG_CONFIG_HOME/riced`
+(normally `~/.config/riced`) **only when no configuration exists**. `root.lua`
+is the entry point, with command handlers in `state.lua`:
+
+```
+config.lua                 preferences, bar slots and widget placements
+root.lua                   entry point; optional extra Lua surfaces
+state.lua                  riced.ipc command handlers
+layers/                    optional custom-layer examples
+settings/                  Settings window shell and pages (own folder)
+```
+
+The default restores the original Rust-backed shell flow: native bar slots,
+widget popups, the Panel editor, desktop selection/dragging and context menus,
+notifications, and the existing Settings Apply/Discard behavior. `bar_host = true`
+and `background.disabled = false` keep those hosts active; `root.lua` does not
+draw duplicate demo surfaces. Bars still live in `config.bar` and are edited
+through Settings → Panel. Right-click the desktop to add a bar at the nearest
+edge or open Settings. Settings requests use the same Lua IPC handler as the CLI:
+
+```sh
+riced ipc settings
+riced ipc add --anchor bottom --output DP-1 --thickness 34
+riced ipc remove --anchor bottom --output DP-1
+```
+
+Omit `--output` to address an all-output bar recipe. Add/remove updates native
+surfaces immediately, and removing a recipe closes its popups and surfaces on
+every affected output. Custom Lua layers remain opt-in.
+
+```sh
+riced init           # Install without starting Wayland; preserves existing configs
+riced init --repair  # Explicitly restore missing defaults; never overwrite files
+```
+
+Initialization is versioned, serialized and resumable after interruption.
+Ordinary startup does not restore deliberately deleted files or update your
+scripts. Existing Lua configs (even invalid ones) are left untouched; legacy
+TOML keeps its existing migration path. There is no destructive reset command.
+`riced -p PATH` and generated project shells do not populate the default XDG
+directory; an explicit `-p PATH init --repair` repairs only that project.
+
 ```bash
 # Nix (recommended, provides xkbcommon, wayland)
 nix develop # or direnv

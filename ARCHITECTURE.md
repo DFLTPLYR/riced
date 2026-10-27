@@ -73,7 +73,7 @@ src/
     widgets.rs         placement VMs, entry publication and per-window render caches
     metadata.rs        widget author defaults and property-schema decoding
     notifications.rs   notification app entries, metadata and owned action decoding
-    shell.rs           Lua-requested host shell commands (add top, open settings)
+    shell.rs           Lua-requested native Settings command (layers are app-owned)
     transitions.rs     transition decoding
     value.rs           scalar coercion and diagnostics
     demo.rs            development host
@@ -88,6 +88,7 @@ src/
     io.rs              loading, polling, persistence and parse diagnostics
     paths.rs           XDG-aware path resolution
     seed.rs            bundled assets and one-time initialization policy
+    initialize.rs      atomic non-overwriting Lua frontend installation and explicit repair
   theme/
     mod.rs             theme API, resolved palette and daemon hooks
     schema.rs          serialized theme-file schema
