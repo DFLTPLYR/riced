@@ -16,7 +16,7 @@ macro_rules! components {
             Spinner,
             /// Host-filled placeholder: the realizing host substitutes a
             /// native element for this slot id. Never nested content.
-            Native { id: String },
+            Native { id: String, args: Option<serde_json::Value> },
             Anchored { child: Box<WidgetNode>, placement: super::placement::Placement, margin: Insets },
             Clickable { child: Box<WidgetNode>, action: String },
             Animated { child: Box<WidgetNode>, spec: super::animations::Spec },

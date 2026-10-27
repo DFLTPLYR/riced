@@ -1,10 +1,10 @@
 //! `riced.widget` host: widget files embedded inside Lua-declared layers.
 //!
-//! A layer declares `riced.widget("clock", { ... }, "bar-top-clock")` and the
-//! host renders the widget with its own VM, services, popup contract, and
-//! action routing. The declaration is a placeholder; [`resolve`] replaces it
-//! with the rendered tree before the parent layer is decoded, so widget files
-//! stay ordinary `widgets/<name>.lua` modules.
+//! A layer declares `riced.widget("clock", { ... }, "bar-top-clock")`, which
+//! renders as an `iced.native("widget", ...)` slot. The render path builds the
+//! widget leaf with its own input wrapper and prefixed action sender, so clicks
+//! and popups behave like native bar widgets. This module owns the shared
+//! request registry, widget VM state, popup resolution, and action routing.
 use crate::{
     config::PropValue,
     lua::widgets::{EntryContext, ResolvedWidget, WidgetState},
@@ -14,22 +14,9 @@ use crate::{
 use mlua::{Lua, Table, Value};
 use std::collections::HashMap;
 
-/// Widget action keys that must carry the owning instance prefix so the host
-/// can route them back to the widget's own `actions` handler.
-const ACTION_KEYS: &[&str] = &[
-    "action",
-    "on_press",
-    "on_toggle",
-    "on_change",
-    "on_release",
-    "on_input",
-    "on_submit",
-    "on_select",
-];
-
 pub(crate) const REQUESTS: &str = "riced.widget_requests";
 
-/// Resolve every `riced.widget`/`riced.widget_popup` marker in a layer tree.
+/// Resolve every `riced.widget_popup` marker in a layer tree.
 pub(crate) fn resolve(
     lua: &Lua,
     value: Value,
@@ -41,52 +28,18 @@ pub(crate) fn resolve(
     let Value::Table(table) = value else {
         return Ok(value);
     };
-    match table.raw_get::<Option<String>>("type")?.as_deref() {
-        Some("embedded") => {
-            let id = table.get::<String>("id")?;
-            let Some(value) = render(lua, widgets, services, output, &id)? else {
-                return Ok(Value::Nil);
-            };
-            let value = prefix_actions(lua, value, &id)?;
-            Ok(value)
-        }
-        Some("widget_popup") => popup(lua, widgets, active_popup, services, output, &table),
-        _ => {
-            let mut entries = Vec::new();
-            for pair in table.clone().pairs::<Value, Value>() {
-                entries.push(pair?);
-            }
-            for (key, value) in entries {
-                let resolved = resolve(lua, value, widgets, active_popup, services, output)?;
-                table.raw_set(key, resolved)?;
-            }
-            Ok(Value::Table(table))
-        }
+    if table.raw_get::<Option<String>>("type")?.as_deref() == Some("widget_popup") {
+        return popup(lua, widgets, active_popup, services, output, &table);
     }
-}
-
-fn render(
-    lua: &Lua,
-    widgets: &mut WidgetState,
-    services: &ServiceCtx<'_>,
-    output: &str,
-    id: &str,
-) -> mlua::Result<Option<Value>> {
-    let Some(resolved) = resolved(lua, id)? else {
-        return Ok(None);
-    };
-    widgets.sync_revision(&resolved.path, std::iter::once(id));
-    let context = EntryContext {
-        services: *services,
-        output,
-    };
-    let value = widgets
-        .render(&resolved, &context)
-        .map_err(mlua::Error::RuntimeError)?;
-    let node = crate::ui::decode::parse_node(&value).map_err(mlua::Error::RuntimeError)?;
-    crate::ui::encode::to_table(lua, &node)
-        .map(Value::Table)
-        .map(Some)
+    let mut entries = Vec::new();
+    for pair in table.clone().pairs::<Value, Value>() {
+        entries.push(pair?);
+    }
+    for (key, value) in entries {
+        let resolved = resolve(lua, value, widgets, active_popup, services, output)?;
+        table.raw_set(key, resolved)?;
+    }
+    Ok(Value::Table(table))
 }
 
 fn popup(
@@ -214,27 +167,22 @@ fn props(value: Value) -> mlua::Result<HashMap<String, PropValue>> {
     Ok(out)
 }
 
-/// Prefix every action key in a rendered widget tree with its instance id.
-fn prefix_actions(lua: &Lua, value: Value, id: &str) -> mlua::Result<Value> {
-    let Value::Table(table) = value else {
-        return Ok(value);
+/// Convert a JSON props object from `iced.native("widget", ...)` args.
+pub(crate) fn json_props(value: &serde_json::Value) -> HashMap<String, PropValue> {
+    let mut out = HashMap::new();
+    let Some(map) = value.as_object() else {
+        return out;
     };
-    let mut entries = Vec::new();
-    for pair in table.clone().pairs::<Value, Value>() {
-        entries.push(pair?);
-    }
-    for (key, value) in entries {
-        if let Value::String(key) = &key
-            && ACTION_KEYS.contains(&key.to_string_lossy().as_ref())
-            && let Value::String(action) = &value
-        {
-            let prefixed =
-                lua.create_string(format!("widget:{id}:{}", action.to_string_lossy()))?;
-            table.raw_set(key, prefixed)?;
-            continue;
+    for (key, value) in map {
+        let value = match value {
+            serde_json::Value::Bool(value) => Some(PropValue::Bool(*value)),
+            serde_json::Value::Number(value) => value.as_f64().map(PropValue::Number),
+            serde_json::Value::String(value) => Some(PropValue::Text(value.clone())),
+            _ => None,
+        };
+        if let Some(value) = value {
+            out.insert(key.clone(), value);
         }
-        let value = prefix_actions(lua, value, id)?;
-        table.raw_set(key, value)?;
     }
-    Ok(Value::Table(table))
+    out
 }

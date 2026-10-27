@@ -475,21 +475,26 @@ impl Page {
             .as_ref()
             .ok_or_else(|| "Wallpaper page unavailable".to_owned())
             .and_then(|node| {
-                crate::ui::build::build_node_with_native(node, 13.0, Some(sender), &mut |slot| {
-                    let context = WallpaperContext {
-                        images: &draft.recipe.image,
-                        output_infos: &plots.windows.output_infos,
-                        sources: &draft.sources,
-                    };
-                    if slot != "wallpaper-map" {
-                        return Err(format!("unknown native slot {slot:?}"));
-                    }
-                    Ok(if draft.recipe.mode == WallpaperMode::PerMonitor {
-                        monitor_grid(id, &context, draft, map_view)
-                    } else {
-                        grid(id, &context, map_view)
-                    })
-                })
+                crate::ui::build::build_node_with_native(
+                    node,
+                    13.0,
+                    Some(sender),
+                    &mut |slot, _| {
+                        let context = WallpaperContext {
+                            images: &draft.recipe.image,
+                            output_infos: &plots.windows.output_infos,
+                            sources: &draft.sources,
+                        };
+                        if slot != "wallpaper-map" {
+                            return Err(format!("unknown native slot {slot:?}"));
+                        }
+                        Ok(if draft.recipe.mode == WallpaperMode::PerMonitor {
+                            monitor_grid(id, &context, draft, map_view)
+                        } else {
+                            grid(id, &context, map_view)
+                        })
+                    },
+                )
             });
         match result {
             Ok(element) => element,
@@ -896,7 +901,7 @@ mod tests {
             let mut slots = Vec::new();
             collect_slots(node, &mut slots);
             assert_eq!(slots, ["wallpaper-map"]);
-            crate::ui::build::build_node_with_native(node, 13.0, None, &mut |_| {
+            crate::ui::build::build_node_with_native(node, 13.0, None, &mut |_, _| {
                 Ok(iced::widget::text("map").into())
             })
             .unwrap();
@@ -985,7 +990,7 @@ mod tests {
 
     fn collect_slots<'a>(node: &'a WidgetNode, out: &mut Vec<&'a str>) {
         match node {
-            WidgetNode::Native { id } => out.push(id),
+            WidgetNode::Native { id, .. } => out.push(id),
             WidgetNode::Clickable { child, .. } | WidgetNode::Container { child, .. } => {
                 collect_slots(child, out)
             }

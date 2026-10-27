@@ -215,8 +215,8 @@ fn framework_wallpaper_slot_uses_settings_tiles_when_native_background_is_disabl
         crate::shell::screens::Background::wallpaper_views(&plots, output).len(),
         1
     );
-    assert!(app_native(&plots, Some(output))("wallpaper").is_ok());
-    assert!(app_native(&plots, None)("wallpaper").is_err());
+    assert!(app_native(&plots, window::Id::unique(), Some(output))("wallpaper", None).is_ok());
+    assert!(app_native(&plots, window::Id::unique(), None)("wallpaper", None).is_err());
 }
 impl Fixture {
     fn new(source: &str) -> Self {
@@ -295,7 +295,7 @@ fn text(instance: &Instance) -> &str {
 fn native_slots(node: &crate::ui::node::WidgetNode, out: &mut Vec<String>) {
     use crate::ui::node::WidgetNode;
     match node {
-        WidgetNode::Native { id } => out.push(id.clone()),
+        WidgetNode::Native { id, .. } => out.push(id.clone()),
         WidgetNode::Column { children, .. }
         | WidgetNode::Row { children, .. }
         | WidgetNode::Stack { children, .. }
@@ -1178,16 +1178,16 @@ fn framework_host_slots_resolve_desktop_widgets_and_reject_unknown_ids() {
     let (_, receiver) = iced_wayland_subscriber::shell::channel();
     let plots = Plots::new(receiver);
     // The legacy desktop host has no description equivalent, so it is a slot.
-    let mut native = app_native(&plots, Some(OutputId(1)));
-    let element = native("desktop-widgets").unwrap();
+    let mut native = app_native(&plots, window::Id::unique(), Some(OutputId(1)));
+    let element = native("desktop-widgets", None).unwrap();
     drop(element);
     // Without an output there is nothing to composite.
-    let mut native = app_native(&plots, None);
-    let error = native("desktop-widgets").err().unwrap();
+    let mut native = app_native(&plots, window::Id::unique(), None);
+    let error = native("desktop-widgets", None).err().unwrap();
     assert!(error.contains("output-bound"), "{error}");
     // Unknown ids are reported, never silently dropped.
-    let mut native = app_native(&plots, Some(OutputId(1)));
-    let error = native("wallpaper-map").err().unwrap();
+    let mut native = app_native(&plots, window::Id::unique(), Some(OutputId(1)));
+    let error = native("wallpaper-map", None).err().unwrap();
     assert!(error.contains("not a framework host slot"), "{error}");
 }
 

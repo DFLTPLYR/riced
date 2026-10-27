@@ -342,7 +342,7 @@ impl Page {
             .as_ref()
             .ok_or_else(|| "Desktop page unavailable".to_owned())
             .and_then(|node| {
-                crate::ui::build::build_node_with_native(node, 13.0, Some(sender), &mut |id| {
+                crate::ui::build::build_node_with_native(node, 13.0, Some(sender), &mut |id, _| {
                     let target = slots
                         .get(id)
                         .ok_or_else(|| format!("unknown native slot {id:?}"))?;
@@ -400,7 +400,7 @@ mod tests {
             page.node.as_ref().unwrap(),
             13.0,
             None,
-            &mut |id| {
+            &mut |id, _| {
                 assert!(declared.contains_key(id), "unexpected slot {id:?}");
                 Ok(iced::widget::text(id.to_owned()).into())
             },
@@ -548,7 +548,7 @@ mod tests {
 
     fn collect_slots<'a>(node: &'a WidgetNode, out: &mut Vec<&'a str>) {
         match node {
-            WidgetNode::Native { id } => out.push(id),
+            WidgetNode::Native { id, .. } => out.push(id),
             WidgetNode::Clickable { child, .. } | WidgetNode::Container { child, .. } => {
                 collect_slots(child, out)
             }

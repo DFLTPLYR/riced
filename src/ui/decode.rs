@@ -35,6 +35,42 @@ pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
     }
 }
 
+/// Convert a plain-data Lua value into JSON for host slots such as
+/// `iced.native("widget", { name = ... })`. Functions, userdata, and threads
+/// are rejected; the host only needs scalars, arrays, and maps.
+fn lua_json(value: &Value) -> Result<serde_json::Value, String> {
+    Ok(match value {
+        Value::Nil => serde_json::Value::Null,
+        Value::Boolean(value) => serde_json::Value::Bool(*value),
+        Value::Integer(value) => serde_json::Value::from(*value),
+        Value::Number(value) => serde_json::Value::from(*value),
+        Value::String(value) => serde_json::Value::String(value.to_string_lossy().to_string()),
+        Value::Table(table) => {
+            let length = table.raw_len();
+            if length > 0 {
+                let mut array = Vec::with_capacity(length);
+                for item in table.clone().sequence_values::<Value>() {
+                    array.push(lua_json(&item.map_err(|e| e.to_string())?)?);
+                }
+                serde_json::Value::Array(array)
+            } else {
+                let mut map = serde_json::Map::new();
+                for pair in table.clone().pairs::<Value, Value>() {
+                    let (key, value) = pair.map_err(|e| e.to_string())?;
+                    let key = match key {
+                        Value::String(key) => key.to_string_lossy().to_string(),
+                        Value::Integer(key) => key.to_string(),
+                        _ => return Err("table keys must be strings or integers".into()),
+                    };
+                    map.insert(key, lua_json(&value)?);
+                }
+                serde_json::Value::Object(map)
+            }
+        }
+        other => return Err(format!("unsupported value {}", lua_value_kind(other))),
+    })
+}
+
 pub(crate) fn opt_number(t: &Table, field: &str, what: &str) -> Result<Option<f32>, String> {
     let number = match node_property(t, field).map_err(|e| e.to_string())? {
         Value::Nil => return Ok(None),
@@ -816,9 +852,24 @@ fn parse_component(
             })
         }
         "native" => match t.get::<Value>("id").map_err(|e| e.to_string())? {
-            Value::String(s) if !s.to_string_lossy().trim().is_empty() => Ok(WidgetNode::Native {
-                id: s.to_string_lossy(),
-            }),
+            Value::String(s) if !s.to_string_lossy().trim().is_empty() => {
+                let args = match t.get::<Value>("args").map_err(|e| e.to_string())? {
+                    Value::Nil => None,
+                    value @ Value::Table(_) => {
+                        Some(lua_json(&value).map_err(|e| format!("iced.native() args: {e}"))?)
+                    }
+                    other => {
+                        return Err(format!(
+                            "iced.native() args must be a table, got {}",
+                            lua_value_kind(&other)
+                        ));
+                    }
+                };
+                Ok(WidgetNode::Native {
+                    id: s.to_string_lossy(),
+                    args,
+                })
+            }
             Value::String(_) => Err("iced.native() needs a non-empty slot id".into()),
             Value::Nil => Err("iced.native() needs a slot id".into()),
             other => Err(format!(

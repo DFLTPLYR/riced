@@ -177,7 +177,7 @@ mod tests {
         )
         .unwrap();
         let mut slots = Vec::new();
-        crate::ui::build::build_node_with_native(&node, 13.0, None, &mut |slot| {
+        crate::ui::build::build_node_with_native(&node, 13.0, None, &mut |slot, _| {
             slots.push(slot.to_string());
             Ok(iced::widget::text("page").into())
         })

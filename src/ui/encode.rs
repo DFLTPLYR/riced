@@ -1,6 +1,6 @@
 //! Export owned component structs as chainable iced Lua description tables.
 use super::node::{NodeLength, WidgetNode};
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 
 impl mlua::IntoLua for WidgetNode {
     fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
@@ -330,8 +330,11 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 sizes!(Some(width), Some(height));
             }
             WidgetNode::Spinner => {}
-            WidgetNode::Native { id } => {
+            WidgetNode::Native { id, args } => {
                 table.set("id", id.as_str())?;
+                if let Some(args) = args {
+                    table.set("args", lua.to_value(args)?)?;
+                }
             }
             WidgetNode::Shader {
                 source,

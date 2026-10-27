@@ -157,12 +157,17 @@ impl Setting {
                 &plots.config.component_defaults,
             )
             .and_then(|node| {
-                crate::ui::build::build_node_with_native(&node, 13.0, Some(sender), &mut |slot| {
-                    if slot != "settings-page" {
-                        return Err(format!("unknown native slot {slot:?}"));
-                    }
-                    Ok(self.content(id, plots))
-                })
+                crate::ui::build::build_node_with_native(
+                    &node,
+                    13.0,
+                    Some(sender),
+                    &mut |slot, _| {
+                        if slot != "settings-page" {
+                            return Err(format!("unknown native slot {slot:?}"));
+                        }
+                        Ok(self.content(id, plots))
+                    },
+                )
             });
         match result {
             Ok(element) => element,
@@ -229,9 +234,12 @@ impl Setting {
         match page.view(plots) {
             Ok(node) => {
                 let sender = std::sync::Arc::new(move |action| shell_page::action(action, id));
-                crate::ui::build::build_node_with_native(&node, 13.0, Some(sender), &mut |slot| {
-                    Err(format!("unknown native slot {slot:?}"))
-                })
+                crate::ui::build::build_node_with_native(
+                    &node,
+                    13.0,
+                    Some(sender),
+                    &mut |slot, _| Err(format!("unknown native slot {slot:?}")),
+                )
                 .unwrap_or_else(|error| text(error).into())
             }
             Err(error) => text(error).into(),

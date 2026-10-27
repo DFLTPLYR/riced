@@ -88,7 +88,7 @@ fn every_schema_constructs_round_trips_and_has_native_layout() {
             std::sync::Arc::new(|action| action),
             true,
             1.0,
-            &mut |id| {
+            &mut |id, _| {
                 assert_eq!(id, "preview");
                 Ok(iced::widget::text("native slot").into())
             },

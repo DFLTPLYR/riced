@@ -890,9 +890,10 @@ pub(crate) fn opened(plots: &Plots, surface: window::Id) -> Task<Plant> {
 /// service snapshots, hold-drag and placement all stay native.
 fn app_native<'a>(
     plots: &'a Plots,
+    surface: window::Id,
     output: Option<OutputId>,
-) -> impl FnMut(&str) -> Result<Element<'static, Plant>, String> + 'a {
-    move |id| match (id, output) {
+) -> impl FnMut(&str, Option<&serde_json::Value>) -> Result<Element<'static, Plant>, String> + 'a {
+    move |id, args| match (id, output) {
         ("wallpaper", Some(output)) => Ok(iced::widget::Stack::with_children(
             super::screens::Background::wallpaper_views(plots, output),
         )
@@ -914,6 +915,65 @@ fn app_native<'a>(
         ("desktop-widgets", None) => {
             Err("iced.native(\"desktop-widgets\") needs an output-bound app".into())
         }
+        ("widget", Some(_)) => {
+            let args = args.ok_or_else(|| "iced.native(\"widget\") needs args".to_owned())?;
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "iced.native(\"widget\") needs a name".to_owned())?;
+            let id = args
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(name)
+                .to_owned();
+            let props = args
+                .get("props")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let instance = plots
+                .apps
+                .instances
+                .values()
+                .find(|instance| instance.owns(surface))
+                .ok_or_else(|| "iced.native(\"widget\") needs an owning app".to_owned())?;
+            let runtime = instance
+                .runtime
+                .as_ref()
+                .ok_or_else(|| "iced.native(\"widget\") needs a live app".to_owned())?;
+            let path = crate::config::discovery::widget_file_path(name, &format!("{name}.lua"));
+            let resolved = crate::lua::widgets::ResolvedWidget {
+                id: id.clone(),
+                name: name.to_owned(),
+                path,
+                interval: 1.0,
+                size: 13.0,
+                props: crate::lua::embedded::json_props(&props),
+            };
+            let services = crate::services::ServiceCtx::from_plots(plots, plots.services.gpu());
+            let context = crate::lua::widgets::EntryContext {
+                services,
+                output: instance.output_name.as_str(),
+            };
+            let value = runtime
+                .widgets
+                .borrow_mut()
+                .render(&resolved, &context)
+                .map_err(|error| error.to_string())?;
+            let node = crate::ui::decode::parse_node(&value)?;
+            let target = id.clone();
+            let sender: crate::ui::action::Sender = Arc::new(move |action| {
+                let mut action = action;
+                action.key = format!("widget:{target}:{}", action.key);
+                Plant::App(AppMessage::Action { surface, action })
+            });
+            let content = crate::ui::build::build_node(&node, 13.0, Some(sender.clone()))?;
+            Ok(crate::ui::widgets::input::with_hold(
+                content,
+                sender,
+                plots.config.interaction.hold.duration(),
+            ))
+        }
+        ("widget", None) => Err("iced.native(\"widget\") needs an output-bound app".into()),
         (other, _) => Err(format!(
             "iced.native({other:?}) is not a framework host slot"
         )),
@@ -948,7 +1008,7 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
         Some(PlotInfo::App(output)) => Some(*output),
         _ => None,
     };
-    let mut native = app_native(plots, output);
+    let mut native = app_native(plots, surface, output);
     match layer.lists.build(
         &layer.root.content,
         &plots.animation.motion,

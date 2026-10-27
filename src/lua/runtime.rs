@@ -236,7 +236,9 @@ pub struct LuaRuntime {
     version: u64,
     views: HashMap<WindowId, (u64, Node)>,
     /// Widget VMs for `riced.widget` declarations embedded in app layers.
-    widgets: crate::lua::widgets::WidgetState,
+    /// Interior mutability lets the render path build widget leaves while the
+    /// app runtime is borrowed.
+    pub(crate) widgets: std::cell::RefCell<crate::lua::widgets::WidgetState>,
     /// Instance id of the widget whose popup is currently open.
     active_popup: Option<String>,
     pub last_error: Option<Arc<LuaError>>,
@@ -340,15 +342,20 @@ impl LuaRuntime {
                 }
                 let path = widget_path(lua, &name)?;
                 let request = lua.create_table()?;
-                request.set("name", name)?;
+                request.set("name", name.clone())?;
                 request.set("path", path.to_string_lossy().into_owned())?;
-                request.set("props", props)?;
+                request.set("props", props.clone())?;
                 let requests: Table = lua.named_registry_value(embedded::REQUESTS)?;
                 requests.raw_set(id.as_str(), request)?;
-                let marker = lua.create_table()?;
-                marker.set("type", "embedded")?;
-                marker.set("id", id)?;
-                Ok(marker)
+                let args = lua.create_table()?;
+                args.set("name", name)?;
+                args.set("id", id)?;
+                args.set("props", props)?;
+                let native = lua.create_table()?;
+                native.set("type", "native")?;
+                native.set("id", "widget")?;
+                native.set("args", args)?;
+                Ok(native)
             })?,
         )?;
         // The active widget popup, declared by the same layer that embedded it.
@@ -396,7 +403,7 @@ impl LuaRuntime {
             app: None,
             version: 0,
             views: HashMap::new(),
-            widgets: crate::lua::widgets::WidgetState::default(),
+            widgets: std::cell::RefCell::new(crate::lua::widgets::WidgetState::default()),
             active_popup: None,
             last_error: None,
         })
@@ -644,7 +651,7 @@ impl LuaRuntime {
                 "view",
                 mlua::MultiValue::from_vec(vec![Value::Table(props)]),
             )?;
-            let mut widgets = std::mem::take(&mut self.widgets);
+            let mut widgets = std::mem::take(&mut *self.widgets.borrow_mut());
             let mut active_popup = self.active_popup.take();
             let value = embedded::resolve(
                 &self.lua,
@@ -654,7 +661,7 @@ impl LuaRuntime {
                 services,
                 output,
             )?;
-            self.widgets = widgets;
+            *self.widgets.borrow_mut() = widgets;
             self.active_popup = active_popup;
             let node = decode(&self.lua, value)?;
             self.clear_entry_props()?;
@@ -788,7 +795,7 @@ impl LuaRuntime {
             if let AppEvent::Action(action) = event
                 && action.key.starts_with("widget:")
             {
-                let widgets = std::mem::take(&mut self.widgets);
+                let widgets = std::mem::take(&mut *self.widgets.borrow_mut());
                 let mut active_popup = self.active_popup.take();
                 let result = embedded::action(
                     &self.lua,
@@ -798,7 +805,7 @@ impl LuaRuntime {
                     output,
                     action,
                 );
-                self.widgets = widgets;
+                *self.widgets.borrow_mut() = widgets;
                 self.active_popup = active_popup;
                 return match result {
                     Some(result) => result,
@@ -1170,61 +1177,16 @@ mod tests {
         let crate::ui::node::WidgetNode::Row { children, .. } = &roots[0].content else {
             panic!("row");
         };
-        let crate::ui::node::WidgetNode::Row { children, .. } = &children[0] else {
-            panic!("widget row");
+        let crate::ui::node::WidgetNode::Native { id, args } = &children[0] else {
+            panic!("widget native slot");
         };
-        assert!(
-            matches!(&children[0], crate::ui::node::WidgetNode::Text { content, .. }
-            if content == "DP-1 %H")
-        );
-        let crate::ui::node::WidgetNode::Button { action, .. } = &children[1] else {
-            panic!("button");
-        };
-        assert_eq!(action, "widget:bar-top-clock:ping");
-        let action = crate::ui::action::Action {
-            key: "widget:bar-top-clock:ping".into(),
-            value: None,
-            event: crate::ui::action::Event::Action,
-        };
-        let value = runtime
-            .app_event(
-                &services,
-                "DP-1",
-                &serde_json::json!({}),
-                &serde_json::json!({}),
-                AppEvent::Action(&action),
-            )
-            .unwrap();
-        assert!(matches!(value, Value::String(value) if value.to_string_lossy() == "widget:"));
-        let widget = &runtime.widgets.instances["bar-top-clock"];
-        let app: Table = widget.named_registry_value("riced.widget.app").unwrap();
-        assert!(app.raw_get::<bool>("pinged").unwrap());
-        let open = crate::ui::action::Action {
-            key: "widget:bar-top-clock:open".into(),
-            value: None,
-            event: crate::ui::action::Event::Action,
-        };
-        runtime
-            .app_event(
-                &services,
-                "DP-1",
-                &serde_json::json!({}),
-                &serde_json::json!({}),
-                AppEvent::Action(&open),
-            )
-            .unwrap();
-        let roots = runtime
-            .layer_view(
-                &services,
-                "DP-1",
-                &serde_json::json!({}),
-                &serde_json::json!({}),
-                &hover,
-            )
-            .unwrap();
-        let popup = roots[0].popup.as_ref().expect("widget popup");
-        assert_eq!((popup.geometry.x, popup.geometry.y), (1.0, 2.0));
-        assert_eq!((popup.geometry.width, popup.geometry.height), (120, 40));
+        assert_eq!(id, "widget");
+        let args = args.as_ref().expect("widget args");
+        assert_eq!(args["name"], "clock");
+        assert_eq!(args["id"], "bar-top-clock");
+        assert_eq!(args["props"]["format"], "%H");
+        // No active popup yet: the marker resolves to nil.
+        assert!(roots[0].popup.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

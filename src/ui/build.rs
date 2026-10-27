@@ -193,16 +193,20 @@ pub(crate) fn realize_with_native<M: Clone + 'static>(
 }
 
 /// Resolver for `iced.native(id)` slots during realization.
-pub(crate) type NativeSlots<'a, M> = &'a mut dyn FnMut(&str) -> Result<Element<'static, M>, String>;
+pub(crate) type NativeSlots<'a, M> =
+    &'a mut dyn FnMut(&str, Option<&serde_json::Value>) -> Result<Element<'static, M>, String>;
 
 /// Resolver for hosts that provide no `iced.native(id)` slots.
 pub(crate) fn no_native_slots<M: Clone + 'static>()
--> impl FnMut(&str) -> Result<Element<'static, M>, String> {
-    |id: &str| unavailable(id)
+-> impl FnMut(&str, Option<&serde_json::Value>) -> Result<Element<'static, M>, String> {
+    |id: &str, args: Option<&serde_json::Value>| unavailable(id, args)
 }
 
 /// Default resolver: descriptions without a host must not silently drop slots.
-pub(crate) fn unavailable<M: Clone + 'static>(id: &str) -> Result<Element<'static, M>, String> {
+pub(crate) fn unavailable<M: Clone + 'static>(
+    id: &str,
+    _args: Option<&serde_json::Value>,
+) -> Result<Element<'static, M>, String> {
     Err(format!(
         "iced.native({id:?}) needs a host-provided slot resolver"
     ))
@@ -238,7 +242,7 @@ fn realize_aligned<M: Clone + 'static>(
     native: NativeSlots<'_, M>,
 ) -> Result<Element<'static, M>, String> {
     match node {
-        WidgetNode::Native { id } => native(id),
+        WidgetNode::Native { id, args } => native(id, args.as_ref()),
         WidgetNode::Animated { child, spec } => {
             super::animations::realize(spec, button_msg(Action::animation_frame()), |values| {
                 realize_aligned(
