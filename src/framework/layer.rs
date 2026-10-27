@@ -147,7 +147,7 @@ pub(crate) struct LayerRoot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct PopupGeometry {
     pub id: String,
     pub x: f32,
@@ -185,9 +185,31 @@ impl AppPopup {
                 "layer.popup must be a table or nil".into(),
             ));
         };
+        const ALLOWED: &[&str] = &[
+            "id",
+            "x",
+            "y",
+            "width",
+            "height",
+            "content",
+            "padding",
+            "background",
+            "radius",
+            "border",
+            "border_width",
+            "align_x",
+            "align_y",
+            "on_open",
+            "on_close",
+        ];
         let fields = lua.create_table()?;
         for pair in table.clone().pairs::<String, Value>() {
             let (key, value) = pair?;
+            if !ALLOWED.contains(&key.as_str()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "layer.popup unknown field {key:?}"
+                )));
+            }
             if key != "content" {
                 fields.raw_set(key, value)?;
             }
@@ -216,7 +238,31 @@ impl AppPopup {
                 "layer.popup.content is required".into(),
             ));
         }
-        let content = parse_node_hovered(&value, hover)
+        // Keep the popup's own presentation (background, padding, radius) by
+        // parsing it as a real popup root. Geometry fields are not popup
+        // properties, so only the presentation keys are copied.
+        let popup = lua.create_table()?;
+        popup.set("type", "popup")?;
+        popup.set("child", value)?;
+        for key in [
+            "width",
+            "height",
+            "padding",
+            "background",
+            "radius",
+            "border",
+            "border_width",
+            "align_x",
+            "align_y",
+            "on_open",
+            "on_close",
+        ] {
+            let value = table.raw_get::<Value>(key)?;
+            if value != Value::Nil {
+                popup.raw_set(key, value)?;
+            }
+        }
+        let content = parse_node_hovered(&Value::Table(popup), hover)
             .map_err(|e| mlua::Error::RuntimeError(format!("layer.popup.content: {e}")))?;
         Ok(Some(Self { geometry, content }))
     }
