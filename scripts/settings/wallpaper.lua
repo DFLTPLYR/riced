@@ -92,7 +92,7 @@ function app:view(props)
     table.insert(actions, iced.button("Discard", "discard"):padding(8))
     table.insert(actions, iced.button(props.apply_label, props.apply):padding(8))
     table.insert(rows, iced.row(actions):spacing(8):width(size.fill))
-    table.insert(rows, iced.native("wallpaper-map"))
+    table.insert(rows, riced.plugin("wallpaper-map"))
     local controls = props.per_monitor and monitor_controls(props) or image_controls(props)
     for _, row in ipairs(controls) do
         table.insert(rows, row)

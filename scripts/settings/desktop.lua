@@ -40,7 +40,7 @@ function app:view(props)
     for _, card in ipairs(props.available) do
         table.insert(available, iced.container(iced.column({
             iced.button("Place " .. card.name, card.action),
-            iced.native(card.slot),
+            riced.plugin(card.slot),
         }):spacing(8)):padding(12):width(size.fill))
     end
     table.insert(rows, iced.masonry(available):column_width(344):spacing(16))
@@ -48,7 +48,7 @@ function app:view(props)
     local placed = {}
     for _, card in ipairs(props.placed) do
         table.insert(placed, iced.container(iced.column({
-            iced.native(card.slot),
+            riced.plugin(card.slot),
             iced.text(card.caption):size(13):width(size.fill),
             iced.row({
                 iced.button("Reposition", card.reposition),

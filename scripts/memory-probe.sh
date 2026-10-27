@@ -5,7 +5,7 @@
 #
 #   native   no Lua app at all: the renderer plus the native shell (control)
 #   empty    one Lua layer, a single text child
-#   slot     the same layer embedding iced.native("desktop-widgets"), no
+#   slot     the same layer embedding riced.plugin("desktop-widgets"), no
 #            placements (measures the desktop-widget host, not the widgets)
 #   widgets  slot plus one `rectangle` placement (measures widget rendering)
 #   churn    widgets, then N source reloads, measured again (leak detection)
@@ -151,8 +151,8 @@ measure() {
 }
 
 text_layer="$(layer_with 'iced.text("probe " .. props.output.name)')"
-slot_layer="$(layer_with 'iced.native("desktop-widgets")')"
-widgets_layer="$(layer_with 'iced.native("desktop-widgets")')"
+slot_layer="$(layer_with 'riced.plugin("desktop-widgets")')"
+widgets_layer="$(layer_with 'riced.plugin("desktop-widgets")')"
 
 echo "binary: $binary"
 echo "projects: $root"

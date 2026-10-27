@@ -403,6 +403,25 @@ impl LuaRuntime {
                 effects.set(effects.raw_len() + 1, "invalidate")
             })?,
         )?;
+        // Host plugins are the public replacement for `iced.native`: a layer
+        // embeds one by id and the realizing host fills it.
+        api.set(
+            "plugin",
+            lua.create_function(|lua, (id, args): (String, Value)| {
+                if id.trim().is_empty() {
+                    return Err(mlua::Error::RuntimeError(
+                        "riced.plugin needs a non-empty id".into(),
+                    ));
+                }
+                let node = lua.create_table()?;
+                node.set("type", "native")?;
+                node.set("id", id)?;
+                if args != Value::Nil {
+                    node.set("args", args)?;
+                }
+                Ok(node)
+            })?,
+        )?;
         api.set(
             "path",
             lua.create_function(|lua, relative: String| {

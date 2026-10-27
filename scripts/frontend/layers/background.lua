@@ -11,8 +11,8 @@ function layer:view(props)
     end
     -- The baked tile (cover fit, shader-aware) published after Apply. Empty
     -- until the first bake completes, so it only ever draws over the above.
-    children[#children + 1] = iced.native("wallpaper")
-    children[#children + 1] = iced.native("desktop-widgets")
+    children[#children + 1] = riced.plugin("wallpaper")
+    children[#children + 1] = riced.plugin("desktop-widgets")
     local popup
     if props.menu then
         popup = {

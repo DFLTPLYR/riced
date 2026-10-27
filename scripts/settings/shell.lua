@@ -39,7 +39,7 @@ function app:view(props)
                 iced.text(selected and selected.title or ""):size(26):color(theme.on_surface),
                 iced.text(selected and selected.description or ""):size(12):wrap("word"):color(theme.on_surface),
             }):spacing(6):width(size.fill),
-            iced.native("settings-page"),
+            riced.plugin("settings-page"),
             iced.text(selected and selected.hint or "Changes apply live and are saved automatically.")
                 :size(12):wrap("word"):color(theme.on_surface),
         }):spacing(20):width(size.fill)

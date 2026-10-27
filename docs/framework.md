@@ -245,29 +245,47 @@ or app teardown silently suppresses late callbacks. Cancellation stops waiting;
 closing an already displayed native dialog is backend-dependent. There is no
 timeout while the user chooses a file. Picking does not read or save the file.
 
-## Native host slots
+## Host plugins
 
 A layer can embed host-owned content that has no description equivalent with
-`iced.native(id)`. The node carries only the slot id; the realizing host fills
-it during layout, and a description with no resolver fails instead of silently
-dropping the slot.
+`riced.plugin(id[, args])`. The node carries the plugin id and optional args;
+the realizing host fills it during layout, and an unknown id is a reported
+render error instead of a silently dropped node.
 
 ```lua
 content = iced.stack({
-    iced.native("wallpaper"),
-    iced.native("desktop-widgets"),
+    riced.plugin("wallpaper"),
+    riced.plugin("desktop-widgets"),
 })
 ```
 
-| Slot | Host | Fills with |
+| Plugin | Host | Fills with |
 | --- | --- | --- |
 | `wallpaper` | framework layer | The baked wallpaper tile published after Apply (cover fit, shader-aware) — the same pixels the native background draws. Empty until the first bake succeeds. |
 | `desktop-widgets` | framework layer | The legacy desktop-widget host for that output: every `desktop` placement, with service snapshots, hover, hold-drag, and persistence. |
+| `widget` | framework layer | One `widgets/<name>.lua` instance, built by `riced.widget`. |
+| `settings-page` / `wallpaper-map` | Settings host | The page body and the wallpaper map canvas. |
 
-Only framework layers and the Settings hosts resolve slots; bar, scene, and
-overlay hosts reject them. An unknown id is a reported render error, and both
-slots need an output-bound app (every layer app is). Each slot is Fill-sized, so
-place it in a `stack` or `container` rather than a `row`.
+Framework layers and the Settings hosts resolve plugins; bar, scene, and
+overlay hosts reject them. Plugins that need output geometry require an
+output-bound app (every layer app is). Each plugin is Fill-sized, so place it in
+a `stack` or `container` rather than a `row`.
+
+`wallpaper` is what lets a Lua background coexist with the native wallpaper
+pipeline: placement stays Lua, while baking, shader compilation, the theme
+regeneration prompt, and the decoded pixel resource stay native.
+
+Because the plugin is empty until a bake succeeds, a background layer should not
+depend on it for being visible. The app also receives the *configured* source
+for its output as `props.wallpaper` (per-monitor entry first, then the first
+free-form image), so it can draw that path directly underneath:
+
+```lua
+if props.wallpaper ~= "" then
+    children[#children + 1] = iced.image(props.wallpaper):width(size.fill):height(size.fill)
+end
+children[#children + 1] = riced.plugin("wallpaper")
+```
 
 `wallpaper` is what lets a Lua background coexist with the native wallpaper
 pipeline: placement stays Lua, while baking, shader compilation, the theme
