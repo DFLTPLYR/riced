@@ -1188,14 +1188,14 @@ fn framework_host_slots_resolve_desktop_widgets_and_reject_unknown_ids() {
     // Unknown ids are reported, never silently dropped.
     let mut native = app_native(&plots, window::Id::unique(), Some(OutputId(1)));
     let error = native("wallpaper-map", None).err().unwrap();
-    assert!(error.contains("not a framework host slot"), "{error}");
+    assert!(error.contains("unknown plugin"), "{error}");
 }
 
 #[test]
 fn framework_apps_build_a_layer_that_embeds_the_desktop_widget_slot() {
     let fixture = Fixture::new(
         "return {view=function() return iced.layer({width=200,height=100,\
-         content=iced.native('desktop-widgets')}) end}",
+         content=riced.plugin('desktop-widgets')}) end}",
     );
     let mut app = instance("DP-1");
     fixture.render(&mut app, false).unwrap();

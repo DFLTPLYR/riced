@@ -36,7 +36,7 @@ pub(crate) fn node_property(t: &Table, field: &str) -> mlua::Result<Value> {
 }
 
 /// Convert a plain-data Lua value into JSON for host slots such as
-/// `iced.native("widget", { name = ... })`. Functions, userdata, and threads
+/// `riced.plugin("widget", { name = ... })`. Functions, userdata, and threads
 /// are rejected; the host only needs scalars, arrays, and maps.
 fn lua_json(value: &Value) -> Result<serde_json::Value, String> {
     Ok(match value {
@@ -851,16 +851,16 @@ fn parse_component(
                 background: opt_color(t, "background", "iced.progress()")?,
             })
         }
-        "native" => match t.get::<Value>("id").map_err(|e| e.to_string())? {
+        "plugin" => match t.get::<Value>("id").map_err(|e| e.to_string())? {
             Value::String(s) if !s.to_string_lossy().trim().is_empty() => {
                 let args = match t.get::<Value>("args").map_err(|e| e.to_string())? {
                     Value::Nil => None,
                     value @ Value::Table(_) => {
-                        Some(lua_json(&value).map_err(|e| format!("iced.native() args: {e}"))?)
+                        Some(lua_json(&value).map_err(|e| format!("riced.plugin() args: {e}"))?)
                     }
                     other => {
                         return Err(format!(
-                            "iced.native() args must be a table, got {}",
+                            "riced.plugin() args must be a table, got {}",
                             lua_value_kind(&other)
                         ));
                     }
@@ -870,10 +870,10 @@ fn parse_component(
                     args,
                 })
             }
-            Value::String(_) => Err("iced.native() needs a non-empty slot id".into()),
-            Value::Nil => Err("iced.native() needs a slot id".into()),
+            Value::String(_) => Err("riced.plugin() needs a non-empty slot id".into()),
+            Value::Nil => Err("riced.plugin() needs a slot id".into()),
             other => Err(format!(
-                "iced.native() id must be a string, got {}",
+                "riced.plugin() id must be a string, got {}",
                 lua_value_kind(&other)
             )),
         },

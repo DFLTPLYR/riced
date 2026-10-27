@@ -21,7 +21,7 @@ const EXAMPLES: &[&str] = &[
     "iced.column({iced.space(), iced.spinner()}):width(size.fill)",
     "iced.stack({iced.space():width(100):height(40), iced.text('on top')}):width(120):height(60)",
     "iced.masonry({iced.text('one'),iced.text('two')}):column_width(260):spacing(12)",
-    "iced.native('preview')",
+    "iced.plugin('preview')",
     "iced.button('go','go'):padding(8):radius(3)",
     "iced.progress(0.4):height(8)",
     "iced.separator():height(2)",
@@ -158,7 +158,7 @@ fn masonry_is_strict_and_preserves_responsive_layout_in_every_host() {
         assert!(parse_node(&value).is_err(), "{source}");
     }
     let node = parse_node(&lua.load("return iced.masonry({iced.space():height(40),iced.space():height(80),iced.space():height(20)}):column_width(260):spacing(12)").eval().unwrap()).unwrap();
-    for host in ["native", "scene", "animated"] {
+    for host in ["plugin", "scene", "animated"] {
         for (width, expected_height) in [(600.0, 80.0), (240.0, 164.0)] {
             let mut element = match host {
                 "scene" => crate::ui::scene::Lists::default()

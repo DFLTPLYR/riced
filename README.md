@@ -45,7 +45,8 @@ config.lua                 preferences, bar slots and widget placements
 root.lua                   entry point; declares every surface
 state.lua                  riced.ipc command handlers
 layers/                    background and bar layer declarations
-bars.lua                   bar data owned by root.lua
+data/bars/                 one file per bar (read by root.lua, edited by Panel)
+plugins/                   example Lua host plugins (riced.plugin)
 settings/                  Settings window shell and pages (own folder)
 ```
 

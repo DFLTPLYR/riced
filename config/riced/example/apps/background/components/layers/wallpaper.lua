@@ -15,7 +15,7 @@ local function stack_of(props)
     end
     -- Host-owned desktop widgets (`desktop` placements in config.lua). The
     -- native host owns instances, service snapshots, hold-drag and persistence.
-    layers[#layers + 1] = iced.native("desktop-widgets")
+    layers[#layers + 1] = riced.plugin("desktop-widgets")
     layers[#layers + 1] = iced.container(iced.column({
         iced.text("Lua background · " .. output.name):size(24),
         iced.text("Right-click for wallpaper options · drag to select"),

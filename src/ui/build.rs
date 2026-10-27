@@ -131,7 +131,7 @@ pub(crate) fn build_node_opacity_aligned(
     )
 }
 
-/// [`build_node_opacity_aligned`] with an `iced.native(id)` slot resolver.
+/// [`build_node_opacity_aligned`] with an `riced.plugin(id)` slot resolver.
 pub(crate) fn build_node_opacity_aligned_with_native(
     node: &WidgetNode,
     size: f32,
@@ -152,7 +152,7 @@ pub(crate) fn build_node_opacity_aligned_with_native(
     )
 }
 
-/// Realize a description whose `iced.native(id)` slots are filled by `native`.
+/// Realize a description whose `riced.plugin(id)` slots are filled by `native`.
 /// Slots exist so Lua-authored layouts can embed host-owned widgets (live
 /// previews, canvases) that have no description equivalent.
 pub(crate) fn build_node_with_native(
@@ -172,7 +172,7 @@ pub(crate) fn build_node_with_native(
     )
 }
 
-/// [`realize`] with an `iced.native(id)` slot resolver.
+/// [`realize`] with an `riced.plugin(id)` slot resolver.
 pub(crate) fn realize_with_native<M: Clone + 'static>(
     node: &WidgetNode,
     size: f32,
@@ -192,11 +192,11 @@ pub(crate) fn realize_with_native<M: Clone + 'static>(
     )
 }
 
-/// Resolver for `iced.native(id)` slots during realization.
+/// Resolver for `riced.plugin(id)` slots during realization.
 pub(crate) type NativeSlots<'a, M> =
     &'a mut dyn FnMut(&str, Option<&serde_json::Value>) -> Result<Element<'static, M>, String>;
 
-/// Resolver for hosts that provide no `iced.native(id)` slots.
+/// Resolver for hosts that provide no `riced.plugin(id)` slots.
 pub(crate) fn no_native_slots<M: Clone + 'static>()
 -> impl FnMut(&str, Option<&serde_json::Value>) -> Result<Element<'static, M>, String> {
     |id: &str, args: Option<&serde_json::Value>| unavailable(id, args)
@@ -208,7 +208,7 @@ pub(crate) fn unavailable<M: Clone + 'static>(
     _args: Option<&serde_json::Value>,
 ) -> Result<Element<'static, M>, String> {
     Err(format!(
-        "iced.native({id:?}) needs a host-provided slot resolver"
+        "riced.plugin({id:?}) needs a host-provided slot resolver"
     ))
 }
 
@@ -1132,7 +1132,7 @@ mod tests {
             ),
         ] {
             let node = parse_node(&lua.load(format!("return {source}")).eval().unwrap()).unwrap();
-            for host in ["native", "scene", "animated"] {
+            for host in ["plugin", "scene", "animated"] {
                 let mut element = match host {
                     "scene" => crate::ui::scene::Lists::default()
                         .build(
@@ -1217,7 +1217,7 @@ mod tests {
         let limits = layout::Limits::new(iced::Size::ZERO, iced::Size::new(200.0, 100.0));
         for constructor in ["container", "popup"] {
             let node = parse_node(&lua.load(format!("return iced.{constructor}(iced.space():width(40):height(20)):padding({{top=3,right=5,bottom=7,left=11}}):radius({{top_left=8}})")).eval().unwrap()).unwrap();
-            for host in ["native", "scene", "animated"] {
+            for host in ["plugin", "scene", "animated"] {
                 let mut item = element(host, &node);
                 let mut tree = Tree::new(&item);
                 let bounds = item.as_widget_mut().layout(&mut tree, &renderer, &limits);
@@ -1246,7 +1246,7 @@ mod tests {
             ("center", iced::Point::new(75.0, 35.0)),
         ] {
             let node = parse_node(&lua.load(format!("return iced.space():width(40):height(20):anchor('{anchor}'):margin({{top=5,right=20,bottom=15,left=10}})")).eval().unwrap()).unwrap();
-            for host in ["native", "scene", "animated"] {
+            for host in ["plugin", "scene", "animated"] {
                 let mut item = element(host, &node);
                 let mut tree = Tree::new(&item);
                 let bounds = item.as_widget_mut().layout(&mut tree, &renderer, &limits);
@@ -1263,7 +1263,7 @@ mod tests {
             }
         }
         let node = parse_node(&lua.load("return iced.space():width(40):height(20):anchor('center'):margin({top=10000,right=10000,bottom=10000,left=10000})").eval().unwrap()).unwrap();
-        let mut item = element("native", &node);
+        let mut item = element("plugin", &node);
         let mut tree = Tree::new(&item);
         let bounds = item.as_widget_mut().layout(&mut tree, &renderer, &limits);
         assert_eq!(bounds.children()[0].size(), iced::Size::ZERO);
@@ -1356,7 +1356,7 @@ mod tests {
         for visibility in ["visible", "hidden"] {
             let value = lua.load(format!("return iced.scrollable(iced.space():width(80):height(600)):width(100):height(100):scrollbar('{visibility}')")).eval().unwrap();
             let node = parse_node(&value).unwrap();
-            for host in ["native", "scene", "animated"] {
+            for host in ["plugin", "scene", "animated"] {
                 let mut element = match host {
                     "scene" => crate::ui::scene::Lists::default()
                         .build(

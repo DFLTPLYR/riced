@@ -26,6 +26,14 @@ const FILES: &[(&str, &str)] = &[
         "data/bars/top.lua",
         include_str!("../../scripts/frontend/data/bars/top.lua"),
     ),
+    (
+        "plugins/hello.lua",
+        include_str!("../../scripts/plugins/hello.lua"),
+    ),
+    (
+        "plugins/counter.lua",
+        include_str!("../../scripts/plugins/counter.lua"),
+    ),
     // Publish the bootstrap only after its source files are in place.
     (
         "config.lua",

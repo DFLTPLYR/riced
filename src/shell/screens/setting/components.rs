@@ -13,7 +13,7 @@ pub(super) fn component_names() -> Vec<String> {
     crate::ui::components::COMPONENTS
         .iter()
         // `native` is a host-filled slot, not a user-configurable component.
-        .filter(|component| component.name != "native")
+        .filter(|component| component.name != "plugin")
         .map(|component| component.name.to_owned())
         .collect()
 }

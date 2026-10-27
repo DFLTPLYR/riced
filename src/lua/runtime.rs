@@ -151,6 +151,20 @@ fn project_path(lua: &Lua, relative: &str) -> mlua::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(root).join(relative))
 }
 
+/// Resolve a Lua plugin id to a `plugins/<id>.lua` file.
+fn plugin_path(lua: &Lua, id: &str) -> mlua::Result<Option<std::path::PathBuf>> {
+    let Ok(root) = lua.named_registry_value::<String>("riced.app_root") else {
+        return Ok(None);
+    };
+    let root = std::path::PathBuf::from(root);
+    let file = format!("{id}.lua");
+    let mut candidates = vec![root.join("plugins").join(&file)];
+    if let Some(project) = root.parent().and_then(std::path::Path::parent) {
+        candidates.push(project.join("plugins").join(&file));
+    }
+    Ok(candidates.into_iter().find(|path| path.is_file()))
+}
+
 /// Resolve a `riced.widget` name to a `widgets/<name>.lua` file.
 ///
 /// Folder apps own `apps/<name>/widgets`, but project-wide widgets live one
@@ -320,6 +334,7 @@ impl LuaRuntime {
         lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
         lua.set_named_registry_value("riced.component_sources", lua.create_table()?)?;
         lua.set_named_registry_value(embedded::REQUESTS, lua.create_table()?)?;
+        lua.set_named_registry_value(embedded::PLUGIN_REQUESTS, lua.create_table()?)?;
         api.set(
             "component",
             lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
@@ -375,7 +390,7 @@ impl LuaRuntime {
                 args.set("id", id)?;
                 args.set("props", props)?;
                 let native = lua.create_table()?;
-                native.set("type", "native")?;
+                native.set("type", "plugin")?;
                 native.set("id", "widget")?;
                 native.set("args", args)?;
                 Ok(native)
@@ -403,18 +418,31 @@ impl LuaRuntime {
                 effects.set(effects.raw_len() + 1, "invalidate")
             })?,
         )?;
-        // Host plugins are the public replacement for `iced.native`: a layer
-        // embeds one by id and the realizing host fills it.
+        // Host plugins are the public replacement for host slots: a layer
+        // embeds one by id and the realizing host fills it. Built-ins resolve
+        // in Rust; any other id resolves `plugins/<id>.lua`.
         api.set(
             "plugin",
             lua.create_function(|lua, (id, args): (String, Value)| {
-                if id.trim().is_empty() {
+                if id.trim().is_empty() || id.contains(['/', '\\', '\0']) || id.starts_with('.') {
                     return Err(mlua::Error::RuntimeError(
-                        "riced.plugin needs a non-empty id".into(),
+                        "riced.plugin id must be a plugin name".into(),
                     ));
                 }
+                if !matches!(
+                    id.as_str(),
+                    "wallpaper" | "desktop-widgets" | "widget" | "settings-page" | "wallpaper-map"
+                ) && let Some(path) = plugin_path(lua, &id)?
+                {
+                    let request = lua.create_table()?;
+                    request.set("name", id.clone())?;
+                    request.set("path", path.to_string_lossy().into_owned())?;
+                    request.set("props", args.clone())?;
+                    let requests: Table = lua.named_registry_value(embedded::PLUGIN_REQUESTS)?;
+                    requests.raw_set(id.as_str(), request)?;
+                }
                 let node = lua.create_table()?;
-                node.set("type", "native")?;
+                node.set("type", "plugin")?;
                 node.set("id", id)?;
                 if args != Value::Nil {
                     node.set("args", args)?;
@@ -744,6 +772,8 @@ impl LuaRuntime {
             app.set("props", props.clone())?;
             self.lua
                 .set_named_registry_value(embedded::REQUESTS, self.lua.create_table()?)?;
+            self.lua
+                .set_named_registry_value(embedded::PLUGIN_REQUESTS, self.lua.create_table()?)?;
             let value = super::entry::invoke(
                 &self.lua,
                 app,
@@ -894,7 +924,7 @@ impl LuaRuntime {
                 return function.call((app, self.lua.to_value(args)?));
             }
             if let AppEvent::Action(action) = event
-                && action.key.starts_with("widget:")
+                && (action.key.starts_with("widget:") || action.key.starts_with("plugin:"))
             {
                 let widgets = std::mem::take(&mut *self.widgets.borrow_mut());
                 let mut active_popup = self.active_popup.take();
@@ -961,22 +991,31 @@ impl LuaRuntime {
     }
 
     /// Drop embedded widget VMs whose source file changed. The caller forces a
-    /// redraw so `iced.native("widget")` reloads them from disk.
+    /// redraw so `riced.plugin("widget")` reloads them from disk.
     pub(crate) fn embedded_widgets_changed(&mut self) -> bool {
-        let Ok(requests) = self.lua.named_registry_value::<Table>(embedded::REQUESTS) else {
-            return false;
-        };
         let mut changed = false;
         let mut widgets = self.widgets.borrow_mut();
-        for pair in requests.clone().pairs::<String, Table>() {
-            let Ok((id, request)) = pair else {
+        for (kind, registry) in [
+            ("widget", embedded::REQUESTS),
+            ("plugin", embedded::PLUGIN_REQUESTS),
+        ] {
+            let Ok(requests) = self.lua.named_registry_value::<Table>(registry) else {
                 continue;
             };
-            let Ok(path) = request.get::<String>("path") else {
-                continue;
-            };
-            if widgets.sync_revision(std::path::Path::new(&path), std::iter::once(id.as_str())) {
-                changed = true;
+            for pair in requests.clone().pairs::<String, Table>() {
+                let Ok((id, request)) = pair else {
+                    continue;
+                };
+                let Ok(path) = request.get::<String>("path") else {
+                    continue;
+                };
+                let instance = format!("{kind}:{id}");
+                if widgets.sync_revision(
+                    std::path::Path::new(&path),
+                    std::iter::once(instance.as_str()),
+                ) {
+                    changed = true;
+                }
             }
         }
         changed
@@ -1327,6 +1366,69 @@ mod tests {
         assert_eq!(args["props"]["format"], "%H");
         // No active popup yet: the marker resolves to nil.
         assert!(roots[0].popup.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lua_plugins_resolve_and_record_requests() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("riced-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("plugins")).unwrap();
+        std::fs::write(
+            root.join("plugins/hello.lua"),
+            "return { view = function(self, props) return iced.text('hello') end }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("root.lua"),
+            r#"return { view = function(self, props)
+                return iced.layer({
+                    id = "bar", layer = "top", width = 100, height = 32,
+                    content = riced.plugin("hello", { name = "world" }),
+                })
+            end }"#,
+        )
+        .unwrap();
+        let mut runtime = LuaRuntime::with_components(Vec::new()).unwrap();
+        runtime.set_app_root(&root).unwrap();
+        let source = std::fs::read_to_string(root.join("root.lua")).unwrap();
+        runtime.load_named(&source, "root.lua").unwrap();
+        let system = sysinfo::System::new();
+        let theme = crate::config::ThemeConfig::default();
+        let outputs = std::collections::HashMap::new();
+        let notifications = std::collections::VecDeque::new();
+        let toplevels = crate::services::ToplevelCache::default();
+        let workspaces = crate::services::WorkspaceCache::default();
+        let tray = crate::tray::TrayCache::default();
+        let defaults = crate::ui::settings::ComponentDefaults::default();
+        let services = crate::services::ServiceCtx {
+            sys: &system,
+            gpu: None,
+            sampled: 0.0,
+            theme: &theme,
+            component_defaults: &defaults,
+            outputs: &outputs,
+            notifications: &notifications,
+            toplevels: &toplevels,
+            workspaces: &workspaces,
+            tray: &tray,
+        };
+        let hover = crate::ui::hover::HoverSet::default();
+        let roots = runtime
+            .layer_view(
+                &services,
+                "DP-1",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                &hover,
+            )
+            .unwrap();
+        let crate::ui::node::WidgetNode::Native { id, args } = &roots[0].content else {
+            panic!("plugin node");
+        };
+        assert_eq!(id, "hello");
+        assert_eq!(args.as_ref().unwrap()["name"], "world");
         std::fs::remove_dir_all(root).unwrap();
     }
 

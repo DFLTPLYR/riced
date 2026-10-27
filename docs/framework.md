@@ -271,6 +271,28 @@ overlay hosts reject them. Plugins that need output geometry require an
 output-bound app (every layer app is). Each plugin is Fill-sized, so place it in
 a `stack` or `container` rather than a `row`.
 
+Any id that is not a built-in resolves `plugins/<id>.lua` in the project. The
+module is a normal app table with `view(self, props)` and optional
+`actions(self, event)`; `props` is the `args` table passed to `riced.plugin`,
+and its action keys are routed back as `plugin:<id>:<key>`.
+
+```lua
+-- plugins/hello.lua
+return {
+    view = function(self, props)
+        return iced.text("Hello " .. (props.name or "plugin"))
+    end,
+}
+```
+
+```lua
+-- a layer
+content = riced.plugin("hello", { name = "world" })
+```
+
+The installed frontend seeds `plugins/hello.lua` and `plugins/counter.lua` as
+examples.
+
 `wallpaper` is what lets a Lua background coexist with the native wallpaper
 pipeline: placement stays Lua, while baking, shader compilation, the theme
 regeneration prompt, and the decoded pixel resource stay native.

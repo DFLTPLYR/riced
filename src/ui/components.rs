@@ -54,11 +54,11 @@ macro_rules! components {
         pub(crate) const COMPONENTS: &[Component] = &[
             $(Component { name: $lua, rust_type: stringify!($name), arguments: &[$($arg),*], setters: &[$($setter),*] },)*
             Component { name: "spinner", rust_type: "SpinnerNode", arguments: &[], setters: &[] },
-            Component { name: "native", rust_type: "WidgetNode", arguments: &["id"], setters: &[] },
+            Component { name: "plugin", rust_type: "WidgetNode", arguments: &["id", "args"], setters: &[] },
         ];
         impl WidgetNode {
             pub(crate) fn kind(&self) -> &'static str {
-                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Native { .. } => "native", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Animated { child, .. } | Self::Aligned { child, .. } => child.kind() }
+                match self { $(Self::$variant { .. } => $lua,)* Self::Spinner => "spinner", Self::Native { .. } => "plugin", Self::Anchored { child, .. } | Self::Clickable { child, .. } | Self::Animated { child, .. } | Self::Aligned { child, .. } => child.kind() }
             }
         }
     };

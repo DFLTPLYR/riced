@@ -1,7 +1,7 @@
 //! `riced.widget` host: widget files embedded inside Lua-declared layers.
 //!
 //! A layer declares `riced.widget("clock", { ... }, "bar-top-clock")`, which
-//! renders as an `iced.native("widget", ...)` slot. The render path builds the
+//! renders as an `riced.plugin("widget", ...)` slot. The render path builds the
 //! widget leaf with its own input wrapper and prefixed action sender, so clicks
 //! and popups behave like native bar widgets. This module owns the shared
 //! request registry, widget VM state, popup resolution, and action routing.
@@ -15,6 +15,7 @@ use mlua::{Lua, Table, Value};
 use std::collections::HashMap;
 
 pub(crate) const REQUESTS: &str = "riced.widget_requests";
+pub(crate) const PLUGIN_REQUESTS: &str = "riced.plugin_requests";
 
 /// Resolve every `riced.widget_popup` marker in a layer tree.
 pub(crate) fn resolve(
@@ -177,9 +178,13 @@ pub(crate) fn action(
     output: &str,
     action: &Action,
 ) -> Option<mlua::Result<Value>> {
-    let rest = action.key.strip_prefix("widget:")?;
+    let (kind, rest) = action.key.split_once(':')?;
+    if kind != "widget" && kind != "plugin" {
+        return None;
+    }
     let (id, key) = rest.split_once(':')?;
-    let resolved = resolved(lua, id).ok()??;
+    let full_id = format!("{kind}:{id}");
+    let resolved = resolved(lua, &full_id).ok()??;
     let context = EntryContext {
         services: *services,
         output,
@@ -193,7 +198,7 @@ pub(crate) fn action(
     let result = widgets.ui_action(&resolved, &context, &action)?;
     Some(result.map_err(mlua::Error::RuntimeError).inspect(|value| {
         if matches!(value, Value::Table(table) if table.get::<bool>("popup").unwrap_or(false)) {
-            *active_popup = Some(id.to_owned());
+            *active_popup = Some(full_id.clone());
             *active_bounds = bounds;
         }
     }))
@@ -211,8 +216,17 @@ pub(crate) fn popup_closed(
     }
 }
 
-fn resolved(lua: &Lua, id: &str) -> mlua::Result<Option<ResolvedWidget>> {
-    let requests: Table = lua.named_registry_value(REQUESTS)?;
+/// Resolve a `widget:<id>` or `plugin:<id>` request to a widget VM entry.
+fn resolved(lua: &Lua, full_id: &str) -> mlua::Result<Option<ResolvedWidget>> {
+    let Some((kind, id)) = full_id.split_once(':') else {
+        return Ok(None);
+    };
+    let registry = match kind {
+        "plugin" => PLUGIN_REQUESTS,
+        "widget" => REQUESTS,
+        _ => return Ok(None),
+    };
+    let requests: Table = lua.named_registry_value(registry)?;
     let request: Value = requests.raw_get(id)?;
     let Value::Table(request) = request else {
         return Ok(None);
@@ -221,7 +235,7 @@ fn resolved(lua: &Lua, id: &str) -> mlua::Result<Option<ResolvedWidget>> {
     let path = std::path::PathBuf::from(request.get::<String>("path")?);
     let props = props(request.raw_get::<Value>("props")?)?;
     Ok(Some(ResolvedWidget {
-        id: id.to_owned(),
+        id: full_id.to_owned(),
         name,
         path,
         interval: request.raw_get::<Option<f32>>("interval")?.unwrap_or(1.0),
@@ -256,7 +270,7 @@ fn props(value: Value) -> mlua::Result<HashMap<String, PropValue>> {
     Ok(out)
 }
 
-/// Convert a JSON props object from `iced.native("widget", ...)` args.
+/// Convert a JSON props object from `riced.plugin("widget", ...)` args.
 pub(crate) fn json_props(value: &serde_json::Value) -> HashMap<String, PropValue> {
     let mut out = HashMap::new();
     let Some(map) = value.as_object() else {
