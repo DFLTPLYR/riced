@@ -243,6 +243,8 @@ pub struct LuaRuntime {
     active_popup: Option<String>,
     /// Bar-surface bounds of the widget that requested the active popup.
     active_popup_bounds: Option<iced::Rectangle>,
+    /// Cursor fallback for actions without measured bounds (e.g. `on_press`).
+    action_bounds: Option<iced::Rectangle>,
     pub last_error: Option<Arc<LuaError>>,
 }
 
@@ -406,6 +408,7 @@ impl LuaRuntime {
             widgets: std::cell::RefCell::new(crate::lua::widgets::WidgetState::default()),
             active_popup: None,
             active_popup_bounds: None,
+            action_bounds: None,
             last_error: None,
         })
     }
@@ -801,11 +804,13 @@ impl LuaRuntime {
                 let widgets = std::mem::take(&mut *self.widgets.borrow_mut());
                 let mut active_popup = self.active_popup.take();
                 let mut active_bounds = self.active_popup_bounds;
+                let fallback = self.action_bounds;
                 let result = embedded::action(
                     &self.lua,
                     &widgets,
                     &mut active_popup,
                     &mut active_bounds,
+                    fallback,
                     services,
                     output,
                     action,
@@ -813,6 +818,7 @@ impl LuaRuntime {
                 *self.widgets.borrow_mut() = widgets;
                 self.active_popup = active_popup;
                 self.active_popup_bounds = active_bounds;
+                self.action_bounds = None;
                 return match result {
                     Some(result) => result,
                     None => Ok(Value::Nil),
@@ -857,6 +863,12 @@ impl LuaRuntime {
             function.call(arguments)
         })();
         self.finish(handler, result)
+    }
+
+    /// Fallback anchor for an action whose event carries no measured bounds,
+    /// such as a button `on_press` inside a widget.
+    pub(crate) fn set_action_bounds(&mut self, bounds: Option<iced::Rectangle>) {
+        self.action_bounds = bounds;
     }
 
     pub(crate) fn managed_generation(&self) -> Option<u64> {

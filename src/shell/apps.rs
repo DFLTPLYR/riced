@@ -1206,6 +1206,18 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                             } else if let Some(popup) = &instance.popup {
                                 context["layer"] = json!(popup.owner);
                             }
+                            let fallback =
+                                plots
+                                    .input
+                                    .cursors
+                                    .get(&surface)
+                                    .map(|point| iced::Rectangle {
+                                        x: point.x,
+                                        y: point.y,
+                                        width: 1.0,
+                                        height: 1.0,
+                                    });
+                            runtime.set_action_bounds(fallback);
                             runtime.app_event(
                                 &services(plots),
                                 &instance.output_name,

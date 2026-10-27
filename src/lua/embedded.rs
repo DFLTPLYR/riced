@@ -188,11 +188,13 @@ fn position(
 /// Route an action whose key carries a `widget:<id>:` prefix to that widget.
 ///
 /// Returns `None` when the action belongs to the parent app instead.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn action(
     lua: &Lua,
     widgets: &WidgetState,
     active_popup: &mut Option<String>,
     active_bounds: &mut Option<iced::Rectangle>,
+    fallback_bounds: Option<iced::Rectangle>,
     services: &ServiceCtx<'_>,
     output: &str,
     action: &Action,
@@ -205,8 +207,8 @@ pub(crate) fn action(
         output,
     };
     let bounds = match &action.event {
-        crate::ui::action::Event::Mouse { bounds, .. } => *bounds,
-        _ => None,
+        crate::ui::action::Event::Mouse { bounds, .. } => bounds.or(fallback_bounds),
+        _ => fallback_bounds,
     };
     let mut action = action.clone();
     action.key = key.to_owned();
