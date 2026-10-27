@@ -139,19 +139,26 @@ fn position(
         .as_ref()
         .and_then(|table| table.raw_get::<Option<f64>>("height").ok().flatten())
         .unwrap_or(0.0);
+    // Match the native popup anchor: the widget center on the bar edge, then
+    // slide back inside the output.
+    let center_x = bounds.x as f64 + bounds.width as f64 / 2.0;
+    let center_y = bounds.y as f64 + bounds.height as f64 / 2.0;
     let (x, y) = match edge.as_str() {
         "bottom" => (
-            bounds.x as f64,
-            (height - thickness) + bounds.y as f64 - popup_height as f64,
+            center_x - popup_width as f64 / 2.0,
+            (height - thickness) - popup_height as f64,
         ),
-        "left" => (bounds.x as f64 + bounds.width as f64, bounds.y as f64),
+        "left" => (thickness, center_y - popup_height as f64 / 2.0),
         "right" => (
-            (width - thickness) + bounds.x as f64 - popup_width as f64,
-            bounds.y as f64,
+            (width - thickness) - popup_width as f64,
+            center_y - popup_height as f64 / 2.0,
         ),
-        _ => (bounds.x as f64, bounds.y as f64 + bounds.height as f64),
+        _ => (center_x - popup_width as f64 / 2.0, thickness),
     };
-    Ok((x.max(0.0), y.max(0.0)))
+    Ok((
+        x.clamp(0.0, (width - popup_width as f64).max(0.0)),
+        y.clamp(0.0, (height - popup_height as f64).max(0.0)),
+    ))
 }
 
 /// Route an action whose key carries a `widget:<id>:` prefix to that widget.
