@@ -31,7 +31,6 @@ function layer:view(props)
         content[#content + 1] = slot_view(slot, index)
     end
     content[#content + 1] = iced.button("Settings", "settings")
-    local popup_y = edge == "top" and thickness or 0
     return iced.layer({
         id = props.id,
         layer = "top",
@@ -40,7 +39,11 @@ function layer:view(props)
         width = not horizontal and thickness or nil,
         height = horizontal and thickness or nil,
         pointer_events = true,
-        popup = riced.widget_popup({ x = 0, y = popup_y }),
+        popup = riced.widget_popup({
+            edge = edge,
+            thickness = thickness,
+            output = props.output,
+        }),
         content = iced.container(
             horizontal and iced.row(content):spacing(12):align_y("center")
                 or iced.column(content):spacing(12)

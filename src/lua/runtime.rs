@@ -241,6 +241,8 @@ pub struct LuaRuntime {
     pub(crate) widgets: std::cell::RefCell<crate::lua::widgets::WidgetState>,
     /// Instance id of the widget whose popup is currently open.
     active_popup: Option<String>,
+    /// Bar-surface bounds of the widget that requested the active popup.
+    active_popup_bounds: Option<iced::Rectangle>,
     pub last_error: Option<Arc<LuaError>>,
 }
 
@@ -365,11 +367,9 @@ impl LuaRuntime {
                 let marker = lua.create_table()?;
                 marker.set("type", "widget_popup")?;
                 if let Some(options) = options {
-                    if let Some(x) = options.raw_get::<Option<f64>>("x")? {
-                        marker.set("x", x)?;
-                    }
-                    if let Some(y) = options.raw_get::<Option<f64>>("y")? {
-                        marker.set("y", y)?;
+                    for pair in options.pairs::<Value, Value>() {
+                        let (key, value) = pair?;
+                        marker.raw_set(key, value)?;
                     }
                 }
                 Ok(marker)
@@ -405,6 +405,7 @@ impl LuaRuntime {
             views: HashMap::new(),
             widgets: std::cell::RefCell::new(crate::lua::widgets::WidgetState::default()),
             active_popup: None,
+            active_popup_bounds: None,
             last_error: None,
         })
     }
@@ -653,11 +654,13 @@ impl LuaRuntime {
             )?;
             let mut widgets = std::mem::take(&mut *self.widgets.borrow_mut());
             let mut active_popup = self.active_popup.take();
+            let active_bounds = self.active_popup_bounds;
             let value = embedded::resolve(
                 &self.lua,
                 value,
                 &mut widgets,
                 &mut active_popup,
+                &active_bounds,
                 services,
                 output,
             )?;
@@ -797,23 +800,26 @@ impl LuaRuntime {
             {
                 let widgets = std::mem::take(&mut *self.widgets.borrow_mut());
                 let mut active_popup = self.active_popup.take();
+                let mut active_bounds = self.active_popup_bounds;
                 let result = embedded::action(
                     &self.lua,
                     &widgets,
                     &mut active_popup,
+                    &mut active_bounds,
                     services,
                     output,
                     action,
                 );
                 *self.widgets.borrow_mut() = widgets;
                 self.active_popup = active_popup;
+                self.active_popup_bounds = active_bounds;
                 return match result {
                     Some(result) => result,
                     None => Ok(Value::Nil),
                 };
             }
             if let AppEvent::PopupClosed { id, .. } = event {
-                embedded::popup_closed(&mut self.active_popup, id);
+                embedded::popup_closed(&mut self.active_popup, &mut self.active_popup_bounds, id);
             }
             let function = match app.get::<Value>(handler)? {
                 Value::Nil => return Ok(Value::Nil),

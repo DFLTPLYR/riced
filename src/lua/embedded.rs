@@ -22,6 +22,7 @@ pub(crate) fn resolve(
     value: Value,
     widgets: &mut WidgetState,
     active_popup: &mut Option<String>,
+    active_bounds: &Option<iced::Rectangle>,
     services: &ServiceCtx<'_>,
     output: &str,
 ) -> mlua::Result<Value> {
@@ -29,14 +30,30 @@ pub(crate) fn resolve(
         return Ok(value);
     };
     if table.raw_get::<Option<String>>("type")?.as_deref() == Some("widget_popup") {
-        return popup(lua, widgets, active_popup, services, output, &table);
+        return popup(
+            lua,
+            widgets,
+            active_popup,
+            active_bounds,
+            services,
+            output,
+            &table,
+        );
     }
     let mut entries = Vec::new();
     for pair in table.clone().pairs::<Value, Value>() {
         entries.push(pair?);
     }
     for (key, value) in entries {
-        let resolved = resolve(lua, value, widgets, active_popup, services, output)?;
+        let resolved = resolve(
+            lua,
+            value,
+            widgets,
+            active_popup,
+            active_bounds,
+            services,
+            output,
+        )?;
         table.raw_set(key, resolved)?;
     }
     Ok(Value::Table(table))
@@ -46,6 +63,7 @@ fn popup(
     lua: &Lua,
     widgets: &WidgetState,
     active_popup: &Option<String>,
+    active_bounds: &Option<iced::Rectangle>,
     services: &ServiceCtx<'_>,
     output: &str,
     marker: &Table,
@@ -74,17 +92,66 @@ fn popup(
     else {
         return Ok(Value::Nil);
     };
+    let popup_width = length_px(&width, 240.0).round().max(1.0) as u32;
+    let popup_height = length_px(&height, 160.0).round().max(1.0) as u32;
+    let (x, y) = position(
+        marker,
+        active_bounds,
+        popup_width as f32,
+        popup_height as f32,
+    )?;
     let content = crate::ui::encode::to_table(lua, &child)?;
-    let x = marker.raw_get::<Option<f64>>("x")?.unwrap_or(0.0);
-    let y = marker.raw_get::<Option<f64>>("y")?.unwrap_or(0.0);
     let popup = lua.create_table()?;
     popup.set("id", "widget-popup")?;
     popup.set("x", x)?;
     popup.set("y", y)?;
-    popup.set("width", length_px(&width, 240.0).round().max(1.0) as u32)?;
-    popup.set("height", length_px(&height, 160.0).round().max(1.0) as u32)?;
+    popup.set("width", popup_width)?;
+    popup.set("height", popup_height)?;
     popup.set("content", Value::Table(content))?;
     Ok(Value::Table(popup))
+}
+
+/// Anchor the popup to the widget bounds reported by the click that opened it.
+///
+/// `bounds` are bar-surface-local; the marker supplies the bar edge, thickness,
+/// and output size so the popup lands on the correct side of the widget.
+fn position(
+    marker: &Table,
+    active_bounds: &Option<iced::Rectangle>,
+    popup_width: f32,
+    popup_height: f32,
+) -> mlua::Result<(f64, f64)> {
+    let fallback_x = marker.raw_get::<Option<f64>>("x")?.unwrap_or(0.0);
+    let fallback_y = marker.raw_get::<Option<f64>>("y")?.unwrap_or(0.0);
+    let Some(bounds) = active_bounds else {
+        return Ok((fallback_x, fallback_y));
+    };
+    let edge = marker
+        .raw_get::<Option<String>>("edge")?
+        .unwrap_or_else(|| "top".into());
+    let thickness = marker.raw_get::<Option<f64>>("thickness")?.unwrap_or(34.0);
+    let output = marker.raw_get::<Option<Table>>("output")?;
+    let width = output
+        .as_ref()
+        .and_then(|table| table.raw_get::<Option<f64>>("width").ok().flatten())
+        .unwrap_or(0.0);
+    let height = output
+        .as_ref()
+        .and_then(|table| table.raw_get::<Option<f64>>("height").ok().flatten())
+        .unwrap_or(0.0);
+    let (x, y) = match edge.as_str() {
+        "bottom" => (
+            bounds.x as f64,
+            (height - thickness) + bounds.y as f64 - popup_height as f64,
+        ),
+        "left" => (bounds.x as f64 + bounds.width as f64, bounds.y as f64),
+        "right" => (
+            (width - thickness) + bounds.x as f64 - popup_width as f64,
+            bounds.y as f64,
+        ),
+        _ => (bounds.x as f64, bounds.y as f64 + bounds.height as f64),
+    };
+    Ok((x.max(0.0), y.max(0.0)))
 }
 
 /// Route an action whose key carries a `widget:<id>:` prefix to that widget.
@@ -94,6 +161,7 @@ pub(crate) fn action(
     lua: &Lua,
     widgets: &WidgetState,
     active_popup: &mut Option<String>,
+    active_bounds: &mut Option<iced::Rectangle>,
     services: &ServiceCtx<'_>,
     output: &str,
     action: &Action,
@@ -105,20 +173,30 @@ pub(crate) fn action(
         services: *services,
         output,
     };
+    let bounds = match &action.event {
+        crate::ui::action::Event::Mouse { bounds, .. } => *bounds,
+        _ => None,
+    };
     let mut action = action.clone();
     action.key = key.to_owned();
     let result = widgets.ui_action(&resolved, &context, &action)?;
     Some(result.map_err(mlua::Error::RuntimeError).inspect(|value| {
         if matches!(value, Value::Table(table) if table.get::<bool>("popup").unwrap_or(false)) {
             *active_popup = Some(id.to_owned());
+            *active_bounds = bounds;
         }
     }))
 }
 
 /// Clear the active widget popup when its host closes.
-pub(crate) fn popup_closed(active_popup: &mut Option<String>, id: &str) {
+pub(crate) fn popup_closed(
+    active_popup: &mut Option<String>,
+    active_bounds: &mut Option<iced::Rectangle>,
+    id: &str,
+) {
     if id == "widget-popup" {
         *active_popup = None;
+        *active_bounds = None;
     }
 }
 
