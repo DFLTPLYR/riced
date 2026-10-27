@@ -1,13 +1,14 @@
--- A bar surface declared in Lua. Widgets are `riced.widget` instances, so the
--- widget files keep their own VMs, services, popups, and action handlers.
+-- A bar surface declared in Lua. The slot list is data: every entry is a row
+-- of `riced.widget` instances, so a bar can have any number of regions.
 local layer = {}
 
-local function widgets(list, prefix)
+local function slot_view(slot, index)
     local items = {}
-    for index, name in ipairs(list or {}) do
-        items[#items + 1] = riced.widget(name, {}, prefix .. "-" .. name .. "-" .. index)
+    for position, name in ipairs(slot.widgets or {}) do
+        local id = (slot.align or "center") .. "-" .. name .. "-" .. index .. "-" .. position
+        items[#items + 1] = riced.widget(name, {}, id)
     end
-    return items
+    return iced.row(items):spacing(8)
 end
 
 function layer:view(props)
@@ -20,15 +21,16 @@ function layer:view(props)
     else
         anchors.top, anchors.bottom = true, true
     end
-    local regions = props.widgets or {}
-    local content = {
-        iced.row(widgets(regions.start, "start")):spacing(8),
-        iced.space():width(size.fill),
-        iced.row(widgets(regions.center, "center")):spacing(8),
-        iced.space():width(size.fill),
-        iced.row(widgets(regions["end"], "end")):spacing(8),
-        iced.button("Settings", "settings"),
-    }
+    local content = {}
+    for index, slot in ipairs(props.slots or {}) do
+        if index > 1 then
+            content[#content + 1] = horizontal
+                and iced.space():width(size.fill)
+                or iced.space():height(size.fill)
+        end
+        content[#content + 1] = slot_view(slot, index)
+    end
+    content[#content + 1] = iced.button("Settings", "settings")
     local popup_y = edge == "top" and thickness or 0
     return iced.layer({
         id = props.id,

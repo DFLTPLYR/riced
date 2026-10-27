@@ -329,7 +329,9 @@ A bar placement is app-owned Lua data, not a host command:
   popups, and `actions`; the layer only decides where it sits.
 - Give each bar a **stable identity** — one bar per (output, edge) — so removing
   one never renumbers the others. The installed `bars.lua` uses
-  `edge`/`thickness`/`widgets`, and a layer should still write
+  `edge`/`thickness`/`slots`, where each slot is
+  `{ align = "start"|"center"|"end", widgets = { "name", ... } }` and
+  `layers/bar.lua` iterates the ordered list. A layer should still write
   `bar.edge or "top"` so a malformed document cannot take the frontend down.
 - Widget popups are declared by the same layer with `riced.widget_popup({x, y})`;
   the host renders the active widget's popup content there.

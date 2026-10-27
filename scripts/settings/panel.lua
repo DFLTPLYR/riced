@@ -2,15 +2,19 @@
 -- removing a bar here writes the same file root.lua reads to declare layers.
 local app = {}
 
-local function default_widgets(edge)
+local function default_slots(edge)
     if edge == "top" or edge == "bottom" then
         return {
-            start = { "workspaces" },
-            center = { "clock" },
-            ["end"] = { "systemtray", "notifycenter", "system" },
+            { align = "start", widgets = { "workspaces" } },
+            { align = "center", widgets = { "clock" } },
+            { align = "end", widgets = { "systemtray", "notifycenter", "system" } },
         }
     end
-    return { start = { "workspaces" }, center = { "clock" }, ["end"] = { "system" } }
+    return {
+        { align = "start", widgets = { "workspaces" } },
+        { align = "center", widgets = { "clock" } },
+        { align = "end", widgets = { "system" } },
+    }
 end
 
 local function hint(text)
@@ -37,8 +41,10 @@ function app:view(props)
     end
     for _, bar in ipairs(bars) do
         local edge = bar.edge or "top"
+        local slots = #(bar.slots or {})
         table.insert(rows, iced.row({
-            iced.text(edge .. " · " .. tostring(bar.thickness or 34) .. "px")
+            iced.text(edge .. " · " .. tostring(bar.thickness or 34) .. "px · "
+                .. slots .. (slots == 1 and " slot" or " slots"))
                 :width(size.fill):color(theme.on_surface),
             iced.button("Remove", "settings:lua:remove:" .. edge):padding(6),
         }):spacing(12):width(size.fill))
@@ -63,7 +69,7 @@ function app:actions(event)
         for _, bar in ipairs(bars) do
             if bar.edge == edge then return end
         end
-        table.insert(bars, { edge = edge, thickness = 34, widgets = default_widgets(edge) })
+        table.insert(bars, { edge = edge, thickness = 34, slots = default_slots(edge) })
         self.bars:set("bars", bars)
         self.bars:save(function() end)
         return

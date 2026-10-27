@@ -7,15 +7,19 @@ local state = require("state")
 
 local app = {}
 
-local function default_widgets(edge)
+local function default_slots(edge)
     if edge == "top" or edge == "bottom" then
         return {
-            start = { "workspaces" },
-            center = { "clock" },
-            ["end"] = { "systemtray", "notifycenter", "system" },
+            { align = "start", widgets = { "workspaces" } },
+            { align = "center", widgets = { "clock" } },
+            { align = "end", widgets = { "systemtray", "notifycenter", "system" } },
         }
     end
-    return { start = { "workspaces" }, center = { "clock" }, ["end"] = { "system" } }
+    return {
+        { align = "start", widgets = { "workspaces" } },
+        { align = "center", widgets = { "clock" } },
+        { align = "end", widgets = { "system" } },
+    }
 end
 
 function app:mount(context)
@@ -26,7 +30,7 @@ function app:mount(context)
         write_mode = "generated",
         defaults = {
             bars = {
-                { edge = "top", thickness = 34, widgets = default_widgets("top") },
+                { edge = "top", thickness = 34, slots = default_slots("top") },
             },
         },
     })
@@ -60,7 +64,7 @@ function app:add_bar(options)
         edge = options.anchor,
         output = options.output or "",
         thickness = options.thickness or 34,
-        widgets = default_widgets(options.anchor),
+        slots = default_slots(options.anchor),
     })
     self.bars:set("bars", bars)
     self:save_bars()
@@ -94,7 +98,7 @@ function app:view(props)
                 id = "bar-" .. edge,
                 edge = edge,
                 thickness = bar.thickness or 34,
-                widgets = bar.widgets or {},
+                slots = bar.slots or {},
                 output = props.output,
             })
         end
