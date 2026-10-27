@@ -1224,6 +1224,21 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                                         height: 1.0,
                                     });
                             runtime.set_action_bounds(fallback);
+                            // Actions inside a widget popup belong to the
+                            // widget that opened it, not the parent app.
+                            let action = if instance
+                                .popup
+                                .as_ref()
+                                .is_some_and(|popup| popup.surface == surface)
+                                && let Some(id) = runtime.active_popup_id()
+                                && !action.key.starts_with("widget:")
+                            {
+                                let mut action = action.clone();
+                                action.key = format!("widget:{id}:{}", action.key);
+                                action
+                            } else {
+                                action
+                            };
                             runtime.app_event(
                                 &services(plots),
                                 &instance.output_name,

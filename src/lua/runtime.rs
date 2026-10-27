@@ -887,6 +887,11 @@ impl LuaRuntime {
         changed
     }
 
+    /// The widget instance whose popup is currently open, if any.
+    pub(crate) fn active_popup_id(&self) -> Option<&str> {
+        self.active_popup.as_deref()
+    }
+
     /// Fallback anchor for an action whose event carries no measured bounds,
     /// such as a button `on_press` inside a widget.
     pub(crate) fn set_action_bounds(&mut self, bounds: Option<iced::Rectangle>) {
