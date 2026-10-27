@@ -5,6 +5,7 @@ mod desktop_page;
 mod panel;
 mod panel_bar;
 mod placement;
+mod shell_page;
 mod sources;
 mod theme_page;
 mod wallpaper;
@@ -14,7 +15,7 @@ use crate::shell::screens::ContextMenu;
 use crate::shell::{state::Plots, windows::PlotInfo};
 use crate::theme;
 use crate::ui::widgets::display_map::MapView;
-use iced::widget::{Space, button, column, container, row, rule, scrollable, text};
+use iced::widget::{column, container, text};
 use iced::window;
 use iced::{Element, Length, Task as Command};
 use iced_exwlshell::actions::IcedXdgWindowSettings;
@@ -36,6 +37,7 @@ pub struct Setting {
     desktop_page: std::cell::RefCell<desktop_page::Page>,
     wallpaper_page: std::cell::RefCell<wallpaper::Page>,
     context_menu_page: std::cell::RefCell<context_menu::Page>,
+    shell_page: std::cell::RefCell<shell_page::Page>,
     icon_previews: Option<Result<IconPreviews, String>>,
     icon_previews_loading: bool,
     pub(crate) wallpaper_draft: Option<crate::wallpaper::draft::Draft>,
@@ -86,49 +88,34 @@ pub enum SettingPage {
 }
 
 impl SettingPage {
-    fn all() -> [Self; 9] {
-        [
-            Self::Info,
-            Self::Desktop,
-            Self::Components,
-            Self::ContextMenu,
-            Self::Panel,
-            Self::Wallpaper,
-            Self::Theme,
-            Self::Animation,
-            Self::About,
-        ]
-    }
-
-    fn title(self) -> &'static str {
+    /// Stable id used by `settings:page:<id>` actions and the shell snapshot.
+    pub(crate) fn id(self) -> &'static str {
         match self {
-            Self::Info => "Info",
-            Self::Desktop => "Desktop",
-            Self::Components => "Components",
-            Self::Panel => "Panel",
-            Self::ContextMenu => "Context Menu",
-            Self::Wallpaper => "Wallpaper",
-            Self::Theme => "Theme",
-            Self::Animation => "Animation",
-            Self::About => "About",
+            Self::Info => "info",
+            Self::Desktop => "desktop",
+            Self::Components => "components",
+            Self::ContextMenu => "context_menu",
+            Self::Panel => "panel",
+            Self::Wallpaper => "wallpaper",
+            Self::Theme => "theme",
+            Self::Animation => "animation",
+            Self::About => "about",
         }
     }
 
-    fn description(self) -> &'static str {
-        match self {
-            Self::Info => "Overview of this Settings panel.",
-            Self::Desktop => {
-                "Click inside a widget preview, then click the desktop to place it. Hold and drag a desktop widget; release to drop. Right-click or Escape cancels."
-            }
-            Self::Components => {
-                "Per-component defaults for every Lua component. Explicit setters take precedence."
-            }
-            Self::Panel => "Choose a bar, arrange its widgets, and fine-tune its appearance.",
-            Self::ContextMenu => "Customize the menu opened by right-clicking the wallpaper.",
-            Self::Wallpaper => "Arrange images across your displays and adjust their placement.",
-            Self::Theme => "Choose a palette and preview its colors in light or dark mode.",
-            Self::Animation => "Set the pace of animated color and property changes.",
-            Self::About => "",
+    /// Validate one page id from Lua. Unknown ids stay inert.
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "info" => Some(Self::Info),
+            "desktop" => Some(Self::Desktop),
+            "components" => Some(Self::Components),
+            "context_menu" => Some(Self::ContextMenu),
+            "panel" => Some(Self::Panel),
+            "wallpaper" => Some(Self::Wallpaper),
+            "theme" => Some(Self::Theme),
+            "animation" => Some(Self::Animation),
+            "about" => Some(Self::About),
+            _ => None,
         }
     }
 }
@@ -154,71 +141,33 @@ impl Setting {
         )
     }
 
-    pub fn view(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
-        let body: Element<'_, Plant> =
-            if matches!(self.page, SettingPage::Info | SettingPage::About) {
-                Space::new().width(Length::Fill).height(Length::Fill).into()
-            } else {
-                scrollable(
-                    column![
-                        page_heading(self.page.title(), self.page.description()),
-                        self.content(id, plots),
-                        hint(if self.page == SettingPage::Wallpaper {
-                            "Wallpaper edits stay in this preview until you press Apply."
-                        } else {
-                            "Changes apply live and are saved automatically."
-                        }),
-                    ]
-                    .spacing(20)
-                    .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .spacing(8)
-                .into()
-            };
-        container(
-            row![
-                scrollable(self.nav(id))
-                    .width(Length::Fixed(168.0))
-                    .height(Length::Fill),
-                body,
-            ]
-            .spacing(24)
-            .padding(24),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::bar)
-        .into()
-    }
-
-    /// Left nav pane (30%): one button per page, highlighted when selected.
-    fn nav(&self, id: window::Id) -> Element<'_, Plant> {
-        let mut col = column![
-            text("RICED").size(20).color(theme::text()),
-            hint("Make it yours"),
-            rule::horizontal(1)
-        ]
-        .spacing(12);
-        for page in SettingPage::all() {
-            let selected = page == self.page;
-            col = col.push(
-                button(text(page.title()).size(14).color(theme::text()))
-                    .width(Length::Fill)
-                    .on_press(Plant::SettingPlot(crate::shell::SettingEvent::Select(
-                        id, page,
-                    )))
-                    .padding(12)
-                    .style(theme::nav_button(selected)),
-            );
+    pub fn view(&self, id: window::Id, plots: &Plots) -> Element<'static, Plant> {
+        let sender = std::sync::Arc::new(move |action| shell_page::action(action, id));
+        let result = self
+            .shell_page
+            .borrow_mut()
+            .node(
+                self.page,
+                &plots.config.theme,
+                &plots.config.component_defaults,
+            )
+            .and_then(|node| {
+                crate::ui::build::build_node_with_native(&node, 13.0, Some(sender), &mut |slot| {
+                    if slot != "settings-page" {
+                        return Err(format!("unknown native slot {slot:?}"));
+                    }
+                    Ok(self.content(id, plots))
+                })
+            });
+        match result {
+            Ok(element) => element,
+            Err(error) => iced::widget::text(error).into(),
         }
-        col.spacing(10).width(Length::Fill).into()
     }
 
     /// Most pages edit live config; Wallpaper owns an isolated draft and
     /// publishes a desktop snapshot only after Apply completes.
-    fn content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+    fn content(&self, id: window::Id, plots: &Plots) -> Element<'static, Plant> {
         match self.page {
             SettingPage::Info => column![].spacing(0).width(Length::Fill).into(),
             SettingPage::Desktop => {
@@ -246,7 +195,7 @@ impl Setting {
         }
     }
 
-    fn context_menu_content(&self, plots: &Plots) -> Element<'_, Plant> {
+    fn context_menu_content(&self, plots: &Plots) -> Element<'static, Plant> {
         self.context_menu_page
             .borrow_mut()
             .view(plots, &plots.config.theme)
@@ -255,7 +204,11 @@ impl Setting {
     /// Panel page: picker row of bars on top, controls for the picked bar
     /// below (defaults to the first). Length % + thickness px, floating
     /// (+ margins when floating) and per-corner rounding.
-    fn panel_content(&self, id: window::Id, plots: panel::PanelContext<'_>) -> Element<'_, Plant> {
+    fn panel_content(
+        &self,
+        id: window::Id,
+        plots: panel::PanelContext<'_>,
+    ) -> Element<'static, Plant> {
         panel::view(self, id, plots)
     }
 
@@ -263,7 +216,7 @@ impl Setting {
     /// `~/.config/riced/theme/*.json` (same files as reshell). Writes back
     /// via `ConfigEvent::Patch`, so the daemon re-themes on the next redraw
     /// and persists the choice to `config.lua`.
-    fn theme_content(&self, plots: &Plots) -> Element<'_, Plant> {
+    fn theme_content(&self, plots: &Plots) -> Element<'static, Plant> {
         self.theme_page.borrow_mut().view(
             &plots.config.theme,
             self.icon_previews.as_ref(),
@@ -275,7 +228,7 @@ impl Setting {
     /// transition (selection fade and any interpolated color/property
     /// change). Writes back via `ConfigEvent::Patch`, so the daemon
     /// re-times on the next redraw and persists the choice to `config.lua`.
-    fn animation_content(&self, plots: &Plots) -> Element<'_, Plant> {
+    fn animation_content(&self, plots: &Plots) -> Element<'static, Plant> {
         self.animation_page.borrow_mut().view(
             plots.config.animation.speed,
             &plots.config.theme,
@@ -283,7 +236,7 @@ impl Setting {
         )
     }
 
-    fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'_, Plant> {
+    fn wallpaper_content(&self, id: window::Id, plots: &Plots) -> Element<'static, Plant> {
         self.wallpaper_page.borrow_mut().view(
             wallpaper::Context {
                 id,
@@ -549,16 +502,6 @@ fn hint(message: impl Into<String>) -> Element<'static, Plant> {
         .size(12)
         .color(theme::text_dim())
         .into()
-}
-
-fn page_heading(title: &str, description: &str) -> Element<'static, Plant> {
-    column![
-        text(title.to_owned()).size(26).color(theme::text()),
-        hint(description),
-    ]
-    .spacing(6)
-    .width(Length::Fill)
-    .into()
 }
 
 fn section_heading(title: &str, description: &str) -> Element<'static, Plant> {

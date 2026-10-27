@@ -144,6 +144,10 @@ fn seed_component(dir: &std::path::Path, name: &str, content: &str) {
 /// Bundled Settings pages, installed once so users can edit them.
 pub(super) const SETTINGS_SEEDS: &[(&str, &str)] = &[
     (
+        "shell.lua",
+        include_str!("../../scripts/settings/shell.lua"),
+    ),
+    (
         "animation.lua",
         include_str!("../../scripts/settings/animation.lua"),
     ),

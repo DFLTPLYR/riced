@@ -12,6 +12,10 @@ use std::time::SystemTime;
 /// Bundled page sources, embedded so Settings works without a project copy.
 const BUNDLED: &[(&str, &str)] = &[
     (
+        "shell.lua",
+        include_str!("../../../../scripts/settings/shell.lua"),
+    ),
+    (
         "animation.lua",
         include_str!("../../../../scripts/settings/animation.lua"),
     ),

@@ -51,11 +51,11 @@ impl PanelContext<'_> {
     }
 }
 
-pub(super) fn view<'a>(
-    setting: &'a Setting,
+pub(super) fn view(
+    setting: &Setting,
     id: window::Id,
     context: PanelContext<'_>,
-) -> Element<'a, Plant> {
+) -> Element<'static, Plant> {
     let mut col = column![section_heading(
         "Choose a bar",
         "Each display can have its own bar configuration."
@@ -169,6 +169,7 @@ pub(super) fn view<'a>(
         .filter(|definition| !TopLocal::is_empty_widget(&definition.name))
         .map(|definition| definition.name.clone())
         .collect();
+    let selected_placement = setting.selected_placement.clone();
     let preview = iced::widget::responsive(move |size| {
         Preview::new(
             id,
@@ -177,7 +178,7 @@ pub(super) fn view<'a>(
             names.clone(),
             horizontal,
             slot,
-            setting.selected_placement.clone(),
+            selected_placement.clone(),
             size.width,
         )
         .element()
