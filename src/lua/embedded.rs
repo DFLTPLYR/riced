@@ -139,45 +139,23 @@ fn position(
         .as_ref()
         .and_then(|table| table.raw_get::<Option<f64>>("height").ok().flatten())
         .unwrap_or(0.0);
-    // Match the native popup anchor: the widget center on the bar edge, then
-    // flip toward the nearer side (FlipX/FlipY) and slide inside the output.
+    // Center the popup on the widget's cross axis, then slide it inside the
+    // output when the widget is near an edge.
     let center_x = bounds.x as f64 + bounds.width as f64 / 2.0;
     let center_y = bounds.y as f64 + bounds.height as f64 / 2.0;
     let popup_width = popup_width as f64;
     let popup_height = popup_height as f64;
     let (x, y) = match edge.as_str() {
         "bottom" => (
-            if center_x > width / 2.0 {
-                center_x - popup_width
-            } else {
-                center_x
-            },
+            center_x - popup_width / 2.0,
             (height - thickness) - popup_height,
         ),
-        "left" => (
-            thickness,
-            if center_y > height / 2.0 {
-                center_y - popup_height
-            } else {
-                center_y
-            },
-        ),
+        "left" => (thickness, center_y - popup_height / 2.0),
         "right" => (
             (width - thickness) - popup_width,
-            if center_y > height / 2.0 {
-                center_y - popup_height
-            } else {
-                center_y
-            },
+            center_y - popup_height / 2.0,
         ),
-        _ => (
-            if center_x > width / 2.0 {
-                center_x - popup_width
-            } else {
-                center_x
-            },
-            thickness,
-        ),
+        _ => (center_x - popup_width / 2.0, thickness),
     };
     Ok((
         x.clamp(0.0, (width - popup_width).max(0.0)),
