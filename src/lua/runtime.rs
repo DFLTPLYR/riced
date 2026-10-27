@@ -865,6 +865,28 @@ impl LuaRuntime {
         self.finish(handler, result)
     }
 
+    /// Drop embedded widget VMs whose source file changed. The caller forces a
+    /// redraw so `iced.native("widget")` reloads them from disk.
+    pub(crate) fn embedded_widgets_changed(&mut self) -> bool {
+        let Ok(requests) = self.lua.named_registry_value::<Table>(embedded::REQUESTS) else {
+            return false;
+        };
+        let mut changed = false;
+        let mut widgets = self.widgets.borrow_mut();
+        for pair in requests.clone().pairs::<String, Table>() {
+            let Ok((id, request)) = pair else {
+                continue;
+            };
+            let Ok(path) = request.get::<String>("path") else {
+                continue;
+            };
+            if widgets.sync_revision(std::path::Path::new(&path), std::iter::once(id.as_str())) {
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Fallback anchor for an action whose event carries no measured bounds,
     /// such as a button `on_press` inside a widget.
     pub(crate) fn set_action_bounds(&mut self, bounds: Option<iced::Rectangle>) {

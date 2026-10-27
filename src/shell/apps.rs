@@ -60,6 +60,11 @@ pub(crate) struct State {
     instances: BTreeMap<(OutputId, String), Instance>,
     pending_closes: Vec<window::Id>,
 }
+impl State {
+    pub(crate) fn active(&self) -> bool {
+        !self.instances.is_empty()
+    }
+}
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Apps")
@@ -231,8 +236,9 @@ impl Instance {
                 return Err(error.to_string());
             }
         };
+        let widgets_changed = runtime.embedded_widgets_changed();
         let modified = match self.update_roots(roots, motion, replaced) {
-            Ok(modified) => modified,
+            Ok(modified) => modified || widgets_changed,
             Err(error) => {
                 if let Some(runtime) = candidate.as_mut() {
                     let _ = runtime.app_event(
@@ -954,9 +960,9 @@ fn app_native<'a>(
                 services,
                 output: instance.output_name.as_str(),
             };
-            let value = runtime
-                .widgets
-                .borrow_mut()
+            let mut widgets = runtime.widgets.borrow_mut();
+            widgets.sync_revision(&resolved.path, std::iter::once(resolved.id.as_str()));
+            let value = widgets
                 .render(&resolved, &context)
                 .map_err(|error| error.to_string())?;
             let node = crate::ui::decode::parse_node(&value)?;

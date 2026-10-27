@@ -443,7 +443,7 @@ impl Plots {
             );
         }
 
-        if !self.config.apps.is_empty() {
+        if !self.config.apps.is_empty() || self.apps.active() {
             subs.push(
                 iced::time::every(Duration::from_millis(500))
                     .map(|_| Plant::App(super::apps::AppMessage::Tick)),
