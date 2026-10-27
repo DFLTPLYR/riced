@@ -834,6 +834,8 @@ styling stays as the default; read the flag only to style surrounding content.
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `riced.component(src[, overrides][, host])` | Render a `components/` module inline. Frame pattern: `riced.component(props.item_component.src, props.item_component.props, item)`. |
 | `riced.layer(src[, overrides])`             | Compose a whole layer from a `components/` module whose `view` returns `iced.layer({...})`. Returns it for the parent's layer list; a module that returns a widget tree is rejected. |
+| `riced.widget(name[, props][, id])`         | Embed `widgets/<name>.lua` in any layer. The widget keeps its own VM, services, popups, and `actions`; its action keys are routed back automatically. `id` defaults to `name` and must be unique per layer. |
+| `riced.widget_popup([{x, y}])`              | Declare the active widget popup for the enclosing layer. Place it in the layer's `popup` field; `x`/`y` are output-local coordinates. |
 | `riced.invalidate()`                        | Mark the view dirty.                                                                                                                |
 
 ## `notification.*` (scenes, widgets, popups, callbacks)

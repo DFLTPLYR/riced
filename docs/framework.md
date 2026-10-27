@@ -58,15 +58,14 @@ shared `layers/` participate in source reload detection. Failed candidate reload
 retain the working frontend and its handlers. Settings currently retains its
 native window host and Lua pages; its opening policy is now a Lua IPC handler.
 
-A root app receives `props.bar_host` and `props.background_disabled` so it can
-compose only the surfaces the native hosts do not own. The installed root uses
-that to gate its `layers/` modules: with the default `bar_host = true` and
-`background.disabled = false` the original Rust hosts provide slot layouts,
-editing, widget popups, selection and drag gestures. Set `bar_host = false` to
-render bars from `layers/bar.lua`, and `background.disabled = true` to render
-the desktop from `layers/background.lua` (its wallpaper and desktop-widget slots
-are still host-filled). Desktop Settings requests dispatch `settings` through
-the same handler as IPC.
+The installed root declares every surface from Lua: `layers/background.lua`
+plus one `layers/bar.lua` per `bars.lua` entry. `layers/bar.lua` embeds widget
+files with `riced.widget(name, props, id)`, so each widget keeps its own VM,
+services, popup contract, and `actions` handler. The native bar host is off in
+the installed `config.lua` (`bar_host = false`), and the background surface is
+Lua-owned (`background.disabled = true`) with wallpaper and desktop widgets
+still exposed as native leaves. Desktop Settings requests dispatch `settings`
+through the same handler as IPC.
 
 The project root is the directory containing the installed `config.lua`
 (`$XDG_CONFIG_HOME/riced`, normally `~/.config/riced`).
@@ -318,40 +317,32 @@ host, and the daemon owns execution and validation.
 layers in `view` and owns any layer *list* as its own data, so the runtime never
 invents a surface on request. See [App-owned layers](#app-owned-layers).
 
-### Bars are config, not app state
+### Bars are app data
 
-A bar placement belongs to the configuration, not to the app that draws it:
+A bar placement is app-owned Lua data, not a host command:
 
-- `config.bar` is the single list. Settings → Panel edits it (including
-  **Remove this bar**), and a framework app receives the entries for its output
-  as `props.bars`.
-- The default uses `bar_host = true` for the full native slot/widget flow.
-  A custom frontend that replaces bars with Lua surfaces should set
-  `bar_host = false` to avoid duplicate surfaces.
-- `shell.add_bar{anchor, output?, thickness?}` appends an entry and
-  `shell.remove_bar{anchor, output?}` drops the matching one. Both go through
-  validated persistence. Add spawns missing native bars immediately; remove
-  closes all surfaces/popups for the recipe and fixes surviving bar indices.
-- Give each bar a **stable identity** from the config entry — one bar per
-  (output, edge), which is the rule the config and Settings already use — so
-  removing one never renumbers the others.
-- `props.bars` entries are always **complete**. `TopConfig` serializes through
-  the file format, which omits any field equal to its default, so serializing it
-  directly would hand Lua a partial object with a nil `anchor`. The host sends
-  an explicit shape (`anchor`, `output`, `length`, `thickness`, `slots`,
-  `aligns`, `opacity`, `floating`) instead, and a layer should still write
-  `bar.anchor or "top"` so a malformed document cannot take the frontend down.
+- `bars.lua` is the single list. `root.lua` loads it with `riced.file`, composes
+  one `layers/bar.lua` per entry, and exposes `riced ipc add/remove` handlers
+  that edit the file. There is no `shell.add_bar`/`shell.remove_bar`.
+- `layers/bar.lua` builds the surface and embeds widgets with
+  `riced.widget(name, props, id)`. Each widget keeps its own VM, services,
+  popups, and `actions`; the layer only decides where it sits.
+- Give each bar a **stable identity** — one bar per (output, edge) — so removing
+  one never renumbers the others. The installed `bars.lua` uses
+  `edge`/`thickness`/`widgets`, and a layer should still write
+  `bar.edge or "top"` so a malformed document cannot take the frontend down.
+- Widget popups are declared by the same layer with `riced.widget_popup({x, y})`;
+  the host renders the active widget's popup content there.
 
-An action handler can therefore offer "add a bar" and "remove this bar" without
-owning a second list:
+An action handler can therefore offer "add a bar" and "remove this bar" by
+editing the app's own file:
 
 ```lua
-function app:actions(event)
-    if event.key == "add-bar" then
-        return shell.add_bar({ anchor = "top", output = self.output, thickness = 34 })
-    elseif event.key == "remove-bar" then
-        return shell.remove_bar({ anchor = self.edge, output = self.output })
-    end
+function app:add_bar(edge)
+    local bars = self.bars:get("bars") or {}
+    table.insert(bars, { edge = edge, thickness = 34 })
+    self.bars:set("bars", bars)
+    self.bars:save()
 end
 ```
 

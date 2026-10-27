@@ -3,6 +3,7 @@ pub mod bridge;
 pub(crate) mod callbacks;
 pub mod composable;
 pub mod demo;
+pub(crate) mod embedded;
 pub(crate) mod entry;
 pub mod error;
 pub(crate) mod files;

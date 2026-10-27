@@ -1,21 +1,9 @@
--- Preferences for the original shell flow. root.lua owns IPC and composes
--- the `layers/` modules for any native host disabled here.
+-- Preferences for the Lua-owned shell. Bars and widgets are declared by
+-- root.lua/layers, so no native bar host is enabled.
 return {
-    -- Native desktop host. Set `disabled = true` to draw
-    -- layers/background.lua instead (wallpaper and desktop widgets are still
-    -- host-filled through its native slots).
-    background = { disabled = false },
-    -- Native bar host. Set false to draw bars from root.lua/layers/bar.lua.
-    bar_host = true,
-    bar = {
-        {
-            anchor = "top", thickness = 34,
-            slots = {
-                { align = "start", widgets = { "workspaces" } },
-                { align = "center", widgets = { "clock" } },
-                { align = "end", widgets = { "systemtray", "notifycenter", "system" } },
-            },
-        },
-    },
+    -- The background surface is declared by layers/background.lua; the
+    -- wallpaper and desktop-widget leaves are still host-filled.
+    background = { disabled = true },
+    bar_host = false,
     theme = { name = "gruvbox", mode = "dark", templates_dir = "off" },
 }

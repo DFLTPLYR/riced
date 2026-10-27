@@ -4,7 +4,7 @@
 //! cached IR. Lua never receives an iced Element. The first milestone
 //! reuses the existing owned WidgetNode decoder/realizer; M1 replaces
 //! that adapter with ui::ir/RealizeCtx and designs borrowed widget state.
-use super::{bridge, composable, sandbox};
+use super::{bridge, composable, embedded, sandbox};
 
 use super::props::component_props;
 use crate::ui::dsl::inject_ui_base;
@@ -132,6 +132,30 @@ fn layer_value(lua: &Lua, src: &str, app: &Table, overrides: Value) -> mlua::Res
     result
 }
 
+/// Resolve a `riced.widget` name to a `widgets/<name>.lua` file.
+///
+/// Folder apps own `apps/<name>/widgets`, but project-wide widgets live one
+/// level above `apps`; both are checked before the installed XDG directory.
+fn widget_path(lua: &Lua, name: &str) -> mlua::Result<std::path::PathBuf> {
+    let root: Option<std::path::PathBuf> = lua
+        .named_registry_value::<String>("riced.app_root")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let file = format!("{name}.lua");
+    let mut candidates = Vec::new();
+    if let Some(root) = &root {
+        candidates.push(root.join("widgets").join(&file));
+        if let Some(project) = root.parent().and_then(std::path::Path::parent) {
+            candidates.push(project.join("widgets").join(&file));
+        }
+    }
+    candidates.push(crate::config::discovery::widget_file_path(name, &file));
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("no widget file for {name:?}")))
+}
+
 fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua::Result<Value> {
     let props = component_props(lua, app, overrides, host)?;
     app.set("props", props.clone())?;
@@ -207,10 +231,14 @@ pub enum Effect {
 pub enum SubSpec {}
 
 pub struct LuaRuntime {
-    lua: Lua,
+    pub(crate) lua: Lua,
     app: Option<RegistryKey>,
     version: u64,
     views: HashMap<WindowId, (u64, Node)>,
+    /// Widget VMs for `riced.widget` declarations embedded in app layers.
+    widgets: crate::lua::widgets::WidgetState,
+    /// Instance id of the widget whose popup is currently open.
+    active_popup: Option<String>,
     pub last_error: Option<Arc<LuaError>>,
 }
 
@@ -266,6 +294,7 @@ impl LuaRuntime {
         )?;
         lua.set_named_registry_value("riced.component_modules", lua.create_table()?)?;
         lua.set_named_registry_value("riced.component_sources", lua.create_table()?)?;
+        lua.set_named_registry_value(embedded::REQUESTS, lua.create_table()?)?;
         api.set(
             "component",
             lua.create_function(|lua, (src, overrides, host): (String, Value, Value)| {
@@ -282,6 +311,61 @@ impl LuaRuntime {
                 with_module(lua, &src, |app| {
                     layer_value(lua, &src, app, overrides.clone())
                 })
+            })?,
+        )?;
+        // A widget keeps its own VM, services, popup contract, and action
+        // routing. The layer declares the widget and the host renders it.
+        api.set(
+            "widget",
+            lua.create_function(|lua, (name, props, id): (String, Value, Option<String>)| {
+                if name.is_empty()
+                    || name.starts_with('.')
+                    || name.contains(['/', '\\'])
+                    || name.contains('\0')
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        "riced.widget name must be a widget file stem".into(),
+                    ));
+                }
+                let id = id.unwrap_or_else(|| name.clone());
+                if id.is_empty()
+                    || id.len() > 128
+                    || !id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                    })
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        "riced.widget id must use letters, digits, '_', '-' or '.'".into(),
+                    ));
+                }
+                let path = widget_path(lua, &name)?;
+                let request = lua.create_table()?;
+                request.set("name", name)?;
+                request.set("path", path.to_string_lossy().into_owned())?;
+                request.set("props", props)?;
+                let requests: Table = lua.named_registry_value(embedded::REQUESTS)?;
+                requests.raw_set(id.as_str(), request)?;
+                let marker = lua.create_table()?;
+                marker.set("type", "embedded")?;
+                marker.set("id", id)?;
+                Ok(marker)
+            })?,
+        )?;
+        // The active widget popup, declared by the same layer that embedded it.
+        api.set(
+            "widget_popup",
+            lua.create_function(|lua, options: Option<Table>| {
+                let marker = lua.create_table()?;
+                marker.set("type", "widget_popup")?;
+                if let Some(options) = options {
+                    if let Some(x) = options.raw_get::<Option<f64>>("x")? {
+                        marker.set("x", x)?;
+                    }
+                    if let Some(y) = options.raw_get::<Option<f64>>("y")? {
+                        marker.set("y", y)?;
+                    }
+                }
+                Ok(marker)
             })?,
         )?;
         api.set(
@@ -312,6 +396,8 @@ impl LuaRuntime {
             app: None,
             version: 0,
             views: HashMap::new(),
+            widgets: crate::lua::widgets::WidgetState::default(),
+            active_popup: None,
             last_error: None,
         })
     }
@@ -550,12 +636,26 @@ impl LuaRuntime {
                 Value::Nil,
             )?;
             app.set("props", props.clone())?;
+            self.lua
+                .set_named_registry_value(embedded::REQUESTS, self.lua.create_table()?)?;
             let value = super::entry::invoke(
                 &self.lua,
                 app,
                 "view",
                 mlua::MultiValue::from_vec(vec![Value::Table(props)]),
             )?;
+            let mut widgets = std::mem::take(&mut self.widgets);
+            let mut active_popup = self.active_popup.take();
+            let value = embedded::resolve(
+                &self.lua,
+                value,
+                &mut widgets,
+                &mut active_popup,
+                services,
+                output,
+            )?;
+            self.widgets = widgets;
+            self.active_popup = active_popup;
             let node = decode(&self.lua, value)?;
             self.clear_entry_props()?;
             // Let Lua's automatic incremental collector pace work with allocations;
@@ -684,6 +784,29 @@ impl LuaRuntime {
                 let handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
                 let function: Function = handlers.get(command)?;
                 return function.call((app, self.lua.to_value(args)?));
+            }
+            if let AppEvent::Action(action) = event
+                && action.key.starts_with("widget:")
+            {
+                let widgets = std::mem::take(&mut self.widgets);
+                let mut active_popup = self.active_popup.take();
+                let result = embedded::action(
+                    &self.lua,
+                    &widgets,
+                    &mut active_popup,
+                    services,
+                    output,
+                    action,
+                );
+                self.widgets = widgets;
+                self.active_popup = active_popup;
+                return match result {
+                    Some(result) => result,
+                    None => Ok(Value::Nil),
+                };
+            }
+            if let AppEvent::PopupClosed { id, .. } = event {
+                embedded::popup_closed(&mut self.active_popup, id);
             }
             let function = match app.get::<Value>(handler)? {
                 Value::Nil => return Ok(Value::Nil),
@@ -959,6 +1082,149 @@ mod tests {
             panic!("list")
         };
         assert!(matches!(&items[0].1, Node::Text {content, ..} if content == "hot:1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_widgets_render_with_bar_context_and_route_actions() {
+        use super::*;
+        let root =
+            std::env::temp_dir().join(format!("riced-embedded-widget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("widgets")).unwrap();
+        std::fs::write(
+            root.join("widgets/clock.lua"),
+            r#"return {
+                defaults = { interval = 1.0, size = 13.0, props = { format = "%H:%M" } },
+                view = function(self)
+                    return iced.row({
+                        iced.text((bar.output or "?") .. " " .. self.props.format),
+                        iced.button("ping", "ping"),
+                        iced.button("open", "open"),
+                    })
+                end,
+                popup = function(self)
+                    return iced.popup(iced.text("body")):width(120):height(40)
+                end,
+                actions = function(self, event)
+                    if event.key == "ping" then
+                        self.pinged = true
+                        return "widget:" .. (event.layer or "")
+                    end
+                    if event.key == "open" then self:popup() end
+                    return nil
+                end,
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("root.lua"),
+            r#"return { view = function(self, props)
+                return iced.layer({
+                    id = "bar", layer = "top",
+                    anchors = { top = true, left = true, right = true },
+                    height = 32, exclusive_zone = 32,
+                    content = iced.row({
+                        riced.widget("clock", { format = "%H" }, "bar-top-clock"),
+                    }),
+                    popup = riced.widget_popup({ x = 1, y = 2 }),
+                })
+            end }"#,
+        )
+        .unwrap();
+        let mut runtime = LuaRuntime::with_components(Vec::new()).unwrap();
+        runtime.set_app_root(&root).unwrap();
+        let source = std::fs::read_to_string(root.join("root.lua")).unwrap();
+        runtime.load_named(&source, "root.lua").unwrap();
+        let system = sysinfo::System::new();
+        let theme = crate::config::ThemeConfig::default();
+        let outputs = std::collections::HashMap::new();
+        let notifications = std::collections::VecDeque::new();
+        let toplevels = crate::services::ToplevelCache::default();
+        let workspaces = crate::services::WorkspaceCache::default();
+        let tray = crate::tray::TrayCache::default();
+        let defaults = crate::ui::settings::ComponentDefaults::default();
+        let services = crate::services::ServiceCtx {
+            sys: &system,
+            gpu: None,
+            sampled: 0.0,
+            theme: &theme,
+            component_defaults: &defaults,
+            outputs: &outputs,
+            notifications: &notifications,
+            toplevels: &toplevels,
+            workspaces: &workspaces,
+            tray: &tray,
+        };
+        let hover = crate::ui::hover::HoverSet::default();
+        let roots = runtime
+            .layer_view(
+                &services,
+                "DP-1",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                &hover,
+            )
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        let crate::ui::node::WidgetNode::Row { children, .. } = &roots[0].content else {
+            panic!("row");
+        };
+        let crate::ui::node::WidgetNode::Row { children, .. } = &children[0] else {
+            panic!("widget row");
+        };
+        assert!(
+            matches!(&children[0], crate::ui::node::WidgetNode::Text { content, .. }
+            if content == "DP-1 %H")
+        );
+        let crate::ui::node::WidgetNode::Button { action, .. } = &children[1] else {
+            panic!("button");
+        };
+        assert_eq!(action, "widget:bar-top-clock:ping");
+        let action = crate::ui::action::Action {
+            key: "widget:bar-top-clock:ping".into(),
+            value: None,
+            event: crate::ui::action::Event::Action,
+        };
+        let value = runtime
+            .app_event(
+                &services,
+                "DP-1",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                AppEvent::Action(&action),
+            )
+            .unwrap();
+        assert!(matches!(value, Value::String(value) if value.to_string_lossy() == "widget:"));
+        let widget = &runtime.widgets.instances["bar-top-clock"];
+        let app: Table = widget.named_registry_value("riced.widget.app").unwrap();
+        assert!(app.raw_get::<bool>("pinged").unwrap());
+        let open = crate::ui::action::Action {
+            key: "widget:bar-top-clock:open".into(),
+            value: None,
+            event: crate::ui::action::Event::Action,
+        };
+        runtime
+            .app_event(
+                &services,
+                "DP-1",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                AppEvent::Action(&open),
+            )
+            .unwrap();
+        let roots = runtime
+            .layer_view(
+                &services,
+                "DP-1",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                &hover,
+            )
+            .unwrap();
+        let popup = roots[0].popup.as_ref().expect("widget popup");
+        assert_eq!((popup.geometry.x, popup.geometry.y), (1.0, 2.0));
+        assert_eq!((popup.geometry.width, popup.geometry.height), (120, 40));
         std::fs::remove_dir_all(root).unwrap();
     }
 

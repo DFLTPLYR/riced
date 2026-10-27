@@ -1,21 +1,21 @@
 # Migration: Lua-authored UI and plugin services
 
-## Current default: restored shell flow with Lua IPC
+## Current default: Lua-owned surfaces with Rust rendering
 
-The installed `root.lua` loads command handlers from `state.lua` and leaves the
-original Rust bar/desktop hosts enabled. It no longer substitutes the demo
-Settings-button/clock bar or the simplified background menu for the existing
-slot editor, widget popups, desktop selection and drag interactions. The
-`layers/` templates are composed by `root.lua` for any native host turned off:
-`bar_host = false` activates `layers/bar.lua`, and `background.disabled = true`
-activates `layers/background.lua` (with host-filled wallpaper and
-desktop-widget slots). Notifications and Settings keep their existing lifecycle
-and Apply/Discard behavior.
+The installed `root.lua` owns every surface. It composes
+`layers/background.lua` plus one `layers/bar.lua` per `bars.lua` entry, and
+`layers/bar.lua` embeds widget files with `riced.widget`. Each widget keeps its
+own VM, services, popups, and `actions` handler, so Rust only renders the Lua
+declarations. The installed `config.lua` disables the native bar host
+(`bar_host = false`) and marks the background as Lua-owned
+(`background.disabled = true`); wallpaper and desktop widgets remain native
+leaves. Notifications and Settings keep their existing lifecycle and
+Apply/Discard behavior.
 
 `riced ipc settings` and the desktop Settings menu share the root's command
 handler. `riced ipc add --anchor EDGE [--output NAME] [--thickness PIXELS]`
-and `riced ipc remove --anchor EDGE [--output NAME]` use the native bar lifecycle,
-with removal closing every surface owned by the recipe, including other outputs.
+and `riced ipc remove --anchor EDGE [--output NAME]` edit `bars.lua`; the next
+`view` declares or drops the matching layer. There is no `shell.add_bar`.
 Existing user-authored project files are still preserved during initialization.
 The remaining Lua ownership migration must retain these interactions before
 replacing their hosts.
@@ -242,15 +242,14 @@ restores missing files only, without overwriting edits. Explicit projects skip
 automatic default installation. Tests exercise startup and repair with private
 XDG directories and render the installed frontend through the real app host.
 
-The installed frontend is a single file, `apps/root.lua`, with its layer
-modules in the shared project `layers/`; `riced.layer` resolves the app's
-`components/` first, then the project directory, then the shared library. A `TopConfig` cannot be sent to Lua directly: it serializes through the file
-format, which drops default-valued fields, so the app saw a nil `anchor` and the
-whole view failed. The host now projects an explicit, complete bar shape. Bar
-removal and addition edit `config.bar` — the list Settings → Panel already
-owns — through `shell.add_bar`/`shell.remove_bar`, and `bar_host = false` stops
-the native bar host from drawing those same edges. **Settings** always opens the
-riced window, so there is exactly one Settings.
+The installed frontend is `root.lua` with its layer modules in the shared
+project `layers/`; `riced.layer` resolves the app's `components/` first, then
+the project directory, then the shared library. Bars live in `bars.lua`, which
+`root.lua` owns through `riced.file`; `riced ipc add/remove` edits that file and
+the next `view` declares or drops the matching layer. Widgets are embedded with
+`riced.widget`, so each one keeps its own VM, services, popup contract, and
+action routing. **Settings** always opens the riced window, so there is exactly
+one Settings.
 
 The installed frontend renders the wallpaper published by Wallpaper Settings
 through an `iced.native("wallpaper")` slot, so Apply in Settings is visible on a

@@ -1,5 +1,6 @@
 use super::*;
 use iced::futures::StreamExt;
+use mlua::LuaSerdeExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Fixture {
@@ -14,7 +15,7 @@ fn root_state_module_registers_ipc_and_failed_reload_keeps_handlers() {
         r#"
         riced.ipc({ remove = function(self, args)
             self.seen = args[2]
-            return shell.remove_bar({anchor='top', output=args[2]})
+            return {seen = args[2]}
         end })
         return {}
     "#,
@@ -52,17 +53,12 @@ fn root_state_module_registers_ipc_and_failed_reload_keeps_handlers() {
         )
     })
     .unwrap();
-    assert_eq!(
-        crate::lua::shell::parse(&result).unwrap(),
-        Some(crate::lua::shell::ShellCommand::RemoveBar {
-            anchor: "top".into(),
-            output: "Display with spaces".into(),
-        })
-    );
+    let seen: serde_json::Value = runtime.lua.from_value(result).unwrap();
+    assert_eq!(seen["seen"], "Display with spaces");
 }
 
 #[test]
-fn installed_root_keeps_native_hosts_and_dispatches_settings() {
+fn installed_root_declares_layers_and_dispatches_settings() {
     let directory = tempfile::tempdir_in("/tmp/opencode").unwrap();
     crate::config::initialize::initialize_in(
         directory.path(),
@@ -95,28 +91,11 @@ fn installed_root_keeps_native_hosts_and_dispatches_settings() {
         .unwrap();
     };
     render(&mut app);
-    assert!(
-        app.roots.is_empty(),
-        "root must not duplicate the native hosts"
-    );
-    assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
-
-    // Turning a native host off hands that surface to the matching module.
-    app.props["bar_host"] = json!(false);
-    app.props["background_disabled"] = json!(true);
-    app.props["bars"] = json!([{
-        "anchor": "top",
-        "output": "DP-1",
-        "length": 1.0,
-        "thickness": 34.0,
-        "slots": [],
-        "aligns": [],
-        "opacity": 1.0,
-        "floating": false,
-    }]);
-    render(&mut app);
     assert!(app.roots.contains_key("background"));
     assert!(app.roots.contains_key("bar-top"));
+    assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
+    assert!(app.runtime.as_ref().unwrap().has_ipc_handler("add"));
+    assert!(app.runtime.as_ref().unwrap().has_ipc_handler("remove"));
 
     // One Settings: the app asks the daemon for the real window.
     let value = with_services(|services| {
@@ -141,6 +120,17 @@ fn installed_root_keeps_native_hosts_and_dispatches_settings() {
         .as_slice(),
         [iced_runtime::Action::Output(Plant::Sprout)]
     ));
+
+    // Adding a bar edits the app's own data and the next view declares it.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for delivery in managed_deliveries(&mut app).await {
+            with_services(|services| app.deliver(services, &delivery).unwrap().unwrap());
+        }
+    });
     let value = with_services(|services| {
         app.runtime.as_mut().unwrap().app_event(
             services,
@@ -148,16 +138,20 @@ fn installed_root_keeps_native_hosts_and_dispatches_settings() {
             &app.context,
             &app.props,
             AppEvent::Ipc {
-                command: "remove",
-                args: &["--anchor".into(), "top".into()],
+                command: "add",
+                args: &[
+                    "--anchor".into(),
+                    "bottom".into(),
+                    "--thickness".into(),
+                    "28".into(),
+                ],
             },
         )
     })
     .unwrap();
-    assert!(matches!(
-        crate::lua::shell::parse(&value).unwrap(),
-        Some(crate::lua::shell::ShellCommand::RemoveBar { ref anchor, .. }) if anchor == "top"
-    ));
+    assert!(crate::lua::shell::parse(&value).unwrap().is_none());
+    render(&mut app);
+    assert!(app.roots.contains_key("bar-bottom"));
 }
 
 #[test]

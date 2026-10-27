@@ -22,6 +22,7 @@ const FILES: &[(&str, &str)] = &[
         "layers/bar.lua",
         include_str!("../../scripts/frontend/layers/bar.lua"),
     ),
+    ("bars.lua", include_str!("../../scripts/frontend/bars.lua")),
     // Publish the bootstrap only after its source files are in place.
     (
         "config.lua",
@@ -178,10 +179,9 @@ mod tests {
             super::super::test_parse_config(&fs::read_to_string(root.join("config.lua")).unwrap())
                 .unwrap();
         assert!(config.apps.is_empty());
-        // Preserve the original desktop gestures and full slot/widget host.
-        assert!(!config.background.disabled && config.bar_host);
-        assert_eq!(config.bar.len(), 1);
-        assert_eq!(config.bar[0].anchor, "top");
+        // The fresh frontend owns every surface from Lua.
+        assert!(config.background.disabled && !config.bar_host);
+        assert!(config.bar.is_empty());
         assert_eq!(fs::read_to_string(root.join(COMPLETE)).unwrap(), VERSION);
         assert!(!root.join(PENDING).exists());
     }

@@ -42,19 +42,19 @@ is the entry point, with command handlers in `state.lua`:
 
 ```
 config.lua                 preferences, bar slots and widget placements
-root.lua                   entry point; optional extra Lua surfaces
+root.lua                   entry point; declares every surface
 state.lua                  riced.ipc command handlers
-layers/                    optional custom-layer examples
+layers/                    background and bar layer declarations
+bars.lua                   bar data owned by root.lua
 settings/                  Settings window shell and pages (own folder)
 ```
 
-The default restores the original Rust-backed shell flow: native bar slots,
-widget popups, the Panel editor, desktop selection/dragging and context menus,
-notifications, and the existing Settings Apply/Discard behavior. `bar_host = true`
-and `background.disabled = false` keep those hosts active. Bars still live in
-`config.bar` and are edited through Settings → Panel. Right-click the desktop to
-add a bar at the nearest edge or open Settings. Settings requests use the same Lua
-IPC handler as the CLI:
+Every surface is declared in Lua. `root.lua` composes `layers/background.lua`
+and one `layers/bar.lua` per entry in `bars.lua`; `layers/bar.lua` embeds
+`riced.widget` instances, so widget files keep their own VMs, services, popups,
+and action handlers. The native bar host is disabled in the installed
+`config.lua`, and Settings remains the existing Apply/Discard window. Settings
+requests use the same Lua IPC handler as the CLI:
 
 ```sh
 riced ipc settings
@@ -62,12 +62,8 @@ riced ipc add --anchor bottom --output DP-1 --thickness 34
 riced ipc remove --anchor bottom --output DP-1
 ```
 
-Omit `--output` to address an all-output bar recipe. Add/remove updates native
-surfaces immediately, and removing a recipe closes its popups and surfaces on
-every affected output. Custom Lua layers remain opt-in: set `bar_host = false`
-in `config.lua` to render bars from `layers/bar.lua`, or set
-`background.disabled = true` to render the desktop from
-`layers/background.lua`. `root.lua` skips a layer while its native host is on.
+Omit `--output` to address an all-output bar. Add/remove edits `bars.lua`; the
+next `view` declares or drops the matching layer. There is no host bar command.
 
 ```sh
 riced init           # Install without starting Wayland; preserves existing configs

@@ -10,6 +10,7 @@ use std::collections::{HashMap, VecDeque};
 
 /// Read-only snapshot inputs every service publishes from. All borrows
 /// are shared and short-lived; nothing outlives the publish call.
+#[derive(Clone, Copy)]
 pub struct ServiceCtx<'a> {
     pub sys: &'a sysinfo::System,
     pub gpu: Option<f32>,

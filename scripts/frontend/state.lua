@@ -1,4 +1,5 @@
--- All commands use `riced ipc <command> [args...]`.
+-- Shared commands. Bars live in Lua data; these handlers edit that data and
+-- the next `view` declares the matching layers. No host bar command exists.
 local state = {}
 
 local function bar_options(args, adding)
@@ -14,6 +15,9 @@ local function bar_options(args, adding)
         options[key:sub(3)] = value
     end
     if not options.anchor then error("--anchor is required") end
+    if not ({ top = true, bottom = true, left = true, right = true })[options.anchor] then
+        error("--anchor must be top, bottom, left, or right")
+    end
     if options.thickness then
         options.thickness = assert(tonumber(options.thickness), "thickness must be numeric")
         if options.thickness ~= math.floor(options.thickness)
@@ -30,10 +34,10 @@ riced.ipc({
         return shell.open_settings()
     end,
     add = function(self, args)
-        return shell.add_bar(bar_options(args, true))
+        return self:add_bar(bar_options(args, true))
     end,
     remove = function(self, args)
-        return shell.remove_bar(bar_options(args, false))
+        return self:remove_bar(bar_options(args, false))
     end,
 })
 
