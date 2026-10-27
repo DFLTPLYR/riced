@@ -21,13 +21,16 @@ local function hint(text)
     return iced.text(text):size(12):wrap("word"):color(theme.on_surface)
 end
 
-function app:view(props)
-    self.bars = self.bars or riced.file({
+function app:mount()
+    self.bars = riced.file({
         type = "lua",
         path = "bars.lua",
         write_mode = "generated",
         defaults = { bars = {} },
     })
+end
+
+function app:view(props)
     local rows = {
         hint("Bars live in bars.lua. root.lua declares one layer per entry."),
     }
