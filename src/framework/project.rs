@@ -155,11 +155,26 @@ impl Project {
                 .to_path_buf(),
         }
     }
+    /// Where an app keeps owned data (`state/`, generated documents).
+    ///
+    /// A folder app is `apps/<name>/`; a single-file app is `apps/<name>.lua`
+    /// and gets this directory only for data, never for its entry point.
     pub fn app_root(&self, name: &str) -> PathBuf {
+        if name == "root" && self.root.join("root.lua").is_file() {
+            return self.root.clone();
+        }
         self.root.join("apps").join(name)
     }
+    /// `apps/<name>/app.lua`, or `apps/<name>.lua` when that file exists.
     pub fn source(&self, name: &str) -> PathBuf {
-        self.app_root(name).join("app.lua")
+        if name == "root" && self.root.join("root.lua").is_file() {
+            return self.root.join("root.lua");
+        }
+        let folder = self.app_root(name).join("app.lua");
+        if folder.is_file() {
+            return folder;
+        }
+        self.root.join("apps").join(format!("{name}.lua"))
     }
     /// Snapshot code, not generated data files, so saving preferences cannot reload the app.
     pub fn sources(&self, name: &str) -> Result<Vec<(PathBuf, String)>, String> {
@@ -186,11 +201,24 @@ impl Project {
         let source =
             std::fs::read_to_string(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
         let mut sources = vec![(entry, source)];
-        let components = self.app_root(name).join("components");
-        match std::fs::metadata(&components) {
-            Ok(_) => visit(&components, &mut sources)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{}: {e}", components.display())),
+        let state = self.app_root(name).join("state.lua");
+        match std::fs::read_to_string(&state) {
+            Ok(source) => sources.push((state, source)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", state.display())),
+        }
+        // App-local components, then the project's shared `layers/`, which is
+        // where a single-file app keeps its layer modules.
+        for directory in [
+            self.app_root(name).join("components"),
+            self.root.join("layers"),
+            self.app_root(name).join("shell"),
+        ] {
+            match std::fs::metadata(&directory) {
+                Ok(_) => visit(&directory, &mut sources)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", directory.display())),
+            }
         }
         Ok(sources)
     }

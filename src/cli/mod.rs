@@ -30,6 +30,12 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Install the default Lua frontend without overwriting existing files.
+    Init {
+        /// Restore missing default files in an initialized project.
+        #[arg(long)]
+        repair: bool,
+    },
     /// Run the M0 declarative Lua app in a plain iced window.
     LuaDemo {
         /// Override the embedded main.lua (file edits reload live).

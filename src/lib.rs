@@ -95,6 +95,19 @@ fn run_with(
             cli::queue_ipc(command, args)?;
             Ok(())
         }
+        Some(cli::Commands::Init { repair }) => {
+            let mode = if repair {
+                config::initialize::Mode::Repair
+            } else {
+                config::initialize::Mode::Startup
+            };
+            let outcome = config::initialize::selected(mode)?;
+            println!(
+                "riced: frontend {outcome:?} at {}",
+                config::config_path().display()
+            );
+            Ok(())
+        }
         Some(cli::Commands::LuaDemo { .. }) => unreachable!("Lua demo handled above"),
         Some(cli::Commands::OpenSettings) => {
             if let Err(e) = cli::queue_open_settings() {
@@ -153,7 +166,12 @@ fn run_with(
             },
         }),
         // No subcommand: run the shell daemon.
-        None => run_daemon().map_err(Into::into),
+        None => {
+            if config::project_root().is_none() {
+                config::initialize::selected(config::initialize::Mode::Startup)?;
+            }
+            run_daemon().map_err(Into::into)
+        }
     }
 }
 

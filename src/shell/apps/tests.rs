@@ -62,6 +62,88 @@ fn root_state_module_registers_ipc_and_failed_reload_keeps_handlers() {
 }
 
 #[test]
+fn installed_root_keeps_native_hosts_and_dispatches_settings() {
+    let directory = tempfile::tempdir_in("/tmp/opencode").unwrap();
+    crate::config::initialize::initialize_in(
+        directory.path(),
+        crate::config::initialize::Mode::Startup,
+    )
+    .unwrap();
+    let project = Project {
+        root: directory.path().to_path_buf(),
+    };
+    let sources = project.sources("root");
+    let config = AppConfig {
+        name: "root".into(),
+        ..Default::default()
+    };
+    let mut app = instance("DP-1");
+    let render = |app: &mut Instance| {
+        with_services(|services| {
+            app.render(
+                &Request {
+                    project: &project,
+                    config: &config,
+                    sources: &sources,
+                    components: &[],
+                    services,
+                },
+                &mut Default::default(),
+                false,
+            )
+        })
+        .unwrap();
+    };
+    render(&mut app);
+    assert!(
+        app.roots.is_empty(),
+        "root must not duplicate the native hosts"
+    );
+    assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
+
+    // One Settings: the app asks the daemon for the real window.
+    let value = with_services(|services| {
+        app.runtime.as_mut().unwrap().app_event(
+            services,
+            &app.output_name,
+            &app.context,
+            &app.props,
+            AppEvent::Ipc {
+                command: "settings",
+                args: &[],
+            },
+        )
+    })
+    .unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    assert!(matches!(
+        messages(crate::shell::actions::command_from_action(
+            &value, &mut plots
+        ))
+        .as_slice(),
+        [iced_runtime::Action::Output(Plant::Sprout)]
+    ));
+    let value = with_services(|services| {
+        app.runtime.as_mut().unwrap().app_event(
+            services,
+            &app.output_name,
+            &app.context,
+            &app.props,
+            AppEvent::Ipc {
+                command: "remove",
+                args: &["--anchor".into(), "top".into()],
+            },
+        )
+    })
+    .unwrap();
+    assert!(matches!(
+        crate::lua::shell::parse(&value).unwrap(),
+        Some(crate::lua::shell::ShellCommand::RemoveBar { ref anchor, .. }) if anchor == "top"
+    ));
+}
+
+#[test]
 fn framework_actions_include_the_identity_of_the_source_layer() {
     let fixture = Fixture::new(
         r#"

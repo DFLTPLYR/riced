@@ -2,6 +2,7 @@
 pub mod discovery;
 mod format;
 mod format_migration;
+pub(crate) mod initialize;
 mod io;
 pub(crate) mod lua;
 pub(crate) use lua::{parse_value as parse_lua_value, to_literal as to_lua_literal};
