@@ -161,12 +161,12 @@ impl LuaPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::futures::StreamExt;
 
     fn texts(node: &crate::ui::node::WidgetNode, out: &mut Vec<String>) {
         use crate::ui::node::WidgetNode;
         match node {
             WidgetNode::Text { content, .. } => out.push(content.clone()),
+            WidgetNode::Button { label, .. } => out.push(label.clone()),
             WidgetNode::Row { children, .. }
             | WidgetNode::Column { children, .. }
             | WidgetNode::Stack { children, .. }
@@ -185,11 +185,12 @@ mod tests {
     }
 
     #[test]
-    fn panel_page_mounts_and_loads_bars() {
+    fn panel_page_lists_and_edits_bar_files() {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        std::fs::create_dir_all(root.path().join("data/bars")).unwrap();
         std::fs::write(
-            root.path().join("bars.lua"),
-            "return { bars = { { edge = 'top', thickness = 34, slots = {} } } }",
+            root.path().join("data/bars/top.lua"),
+            "return { edge = 'top', thickness = 34, slots = { { align = 'start', widgets = { 'clock' } } } }",
         )
         .unwrap();
         let source = include_str!("../../../../scripts/settings/panel.lua");
@@ -197,54 +198,30 @@ mod tests {
             LuaPage::with_root(root.path(), source, "settings/panel.lua").expect("panel page");
         let (_, receiver) = iced_wayland_subscriber::shell::channel();
         let plots = Plots::new(receiver);
+
         let node = page.view(&plots).expect("first view");
-        let mut loading = Vec::new();
-        texts(&node, &mut loading);
+        let mut loaded = Vec::new();
+        texts(&node, &mut loaded);
+        assert!(loaded.iter().any(|text| text.contains("top")), "{loaded:?}");
         assert!(
-            loading.iter().any(|text| text.contains("Loading")),
-            "{loading:?}"
+            loaded.iter().any(|text| text.contains("clock")),
+            "{loaded:?}"
         );
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let id = iced::window::Id::unique();
-            for _ in 0..8 {
-                let tasks = page.managed_work(&plots, id);
-                if tasks.is_empty() {
-                    break;
-                }
-                let Some(stream) = iced_runtime::task::into_stream(iced::Task::batch(tasks)) else {
-                    break;
-                };
-                let deliveries: Vec<_> = stream
-                    .filter_map(|action| async move {
-                        match action {
-                            iced_runtime::Action::Output(crate::shell::Plant::SettingPlot(
-                                crate::shell::SettingEvent::LuaManaged { delivery, .. },
-                            )) => Some(delivery),
-                            _ => None,
-                        }
-                    })
-                    .collect()
-                    .await;
-                if deliveries.is_empty() {
-                    break;
-                }
-                for delivery in deliveries {
-                    page.deliver(&plots, &delivery);
-                }
-            }
-        });
-        let node = page.view(&plots).expect("loaded view");
+        page.action(&plots, "settings:lua:add-bar:bottom")
+            .expect("add bar");
+        let node = page.view(&plots).expect("after add");
         let mut loaded = Vec::new();
         texts(&node, &mut loaded);
         assert!(
-            !loaded.iter().any(|text| text.contains("Loading")),
+            loaded.iter().any(|text| text.contains("bottom")),
             "{loaded:?}"
         );
-        assert!(loaded.iter().any(|text| text.contains("top")), "{loaded:?}");
+        assert!(root.path().join("data/bars/bottom.lua").is_file());
+
+        page.action(&plots, "settings:lua:add-widget:top:1:system")
+            .expect("add widget");
+        let bar = crate::config::lua::read_file(&root.path().join("data/bars/top.lua")).unwrap();
+        assert_eq!(bar["slots"][0]["widgets"][1], "system");
     }
 }

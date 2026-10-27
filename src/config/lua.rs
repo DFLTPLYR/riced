@@ -94,6 +94,30 @@ pub(super) fn to_string(config: &super::Config) -> Result<String, String> {
 /// Render one JSON value (component default, saved-list entry, editor
 /// draft) as compact Lua text. Lua has a single `{}` constructor, so an
 /// empty map prints as `{}` and round-trips as the caller's target type.
+/// Read a plain-data Lua document (`return { ... }`) from disk.
+pub(crate) fn read_file(path: &std::path::Path) -> Result<Json, String> {
+    let content = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    parse::<Json>(&content, &path.display().to_string())
+}
+
+/// Write a plain-data Lua document atomically, creating parent directories.
+pub(crate) fn write_file(path: &std::path::Path, value: &Json) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let text = format!("return {}\n", to_literal(value));
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    use std::io::Write as _;
+    file.write_all(text.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    file.persist(path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn to_literal(value: &Json) -> String {
     stringify(value, 0).unwrap_or_else(|_| "\"<invalid>\"".into())
 }

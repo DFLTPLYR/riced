@@ -1,8 +1,8 @@
 -- Root entry point: every surface is declared here.
 --
--- Bars are Lua data (`bars.lua`) and widgets are `riced.widget` instances
--- embedded in `layers/bar.lua`; Rust only renders the declarations. Add or
--- remove a bar with `riced ipc add/remove`, which edits `bars.lua` directly.
+-- Bars are plain data files under `data/bars/`. root.lua lists the directory
+-- and declares one layer per file; Settings → Panel reads and writes the same
+-- files. Nothing here hardcodes a bar or its widgets.
 local state = require("state")
 
 local app = {}
@@ -24,79 +24,38 @@ end
 
 function app:mount(context)
     self.output = context.output.name
-    self.bars = riced.file({
-        type = "lua",
-        path = "bars.lua",
-        write_mode = "generated",
-        defaults = {
-            bars = {
-                { edge = "top", thickness = 34, slots = default_slots("top") },
-            },
-        },
-    })
-    self.bars:watch(function(event)
-        if event.ok then
-            self.error = nil
-        else
-            self.error = event.error.message
-        end
-    end)
-end
-
-function app:save_bars()
-    self.bars:save(function(saved)
-        if saved.ok then
-            self.error = nil
-        else
-            self.error = saved.error.message
-        end
-    end)
 end
 
 function app:add_bar(options)
-    local bars = self.bars:get("bars") or {}
-    for _, bar in ipairs(bars) do
-        if bar.edge == options.anchor and (bar.output or "") == (options.output or "") then
-            error("that edge already has a bar")
-        end
+    local path = "data/bars/" .. options.anchor .. ".lua"
+    if pcall(riced.read, path) then
+        error("that edge already has a bar")
     end
-    table.insert(bars, {
+    riced.write(path, {
         edge = options.anchor,
-        output = options.output or "",
         thickness = options.thickness or 34,
         slots = default_slots(options.anchor),
     })
-    self.bars:set("bars", bars)
-    self:save_bars()
 end
 
 function app:remove_bar(options)
-    local bars = self.bars:get("bars") or {}
-    for index, bar in ipairs(bars) do
-        if bar.edge == options.anchor and (bar.output or "") == (options.output or "") then
-            table.remove(bars, index)
-            self.bars:set("bars", bars)
-            self:save_bars()
-            return
-        end
-    end
-    error("no matching bar")
+    riced.remove("data/bars/" .. options.anchor .. ".lua")
 end
 
 function app:view(props)
-    local layers = {}
-    layers[#layers + 1] = riced.layer("layers/background.lua", {
-        output = props.output,
-        wallpaper = props.wallpaper,
-    })
-    local output = props.output and props.output.name or ""
-    for _, bar in ipairs(self.bars:get("bars") or {}) do
-        local scoped = bar.output or ""
-        if scoped == "" or scoped == output then
-            local edge = bar.edge or "top"
+    local layers = {
+        riced.layer("layers/background.lua", {
+            output = props.output,
+            wallpaper = props.wallpaper,
+        }),
+    }
+    for _, name in ipairs(riced.list("data/bars")) do
+        local ok, bar = pcall(riced.read, "data/bars/" .. name)
+        if ok and type(bar) == "table" then
+            local stem = name:gsub("%.lua$", "")
             layers[#layers + 1] = riced.layer("layers/bar.lua", {
-                id = "bar-" .. edge,
-                edge = edge,
+                id = "bar-" .. stem,
+                edge = bar.edge or "top",
                 thickness = bar.thickness or 34,
                 slots = bar.slots or {},
                 output = props.output,

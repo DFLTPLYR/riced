@@ -62,11 +62,11 @@ riced ipc add --anchor bottom --output DP-1 --thickness 34
 riced ipc remove --anchor bottom --output DP-1
 ```
 
-Omit `--output` to address an all-output bar. **Settings → Panel** is a
-persistent Lua page (`settings/panel.lua`) that owns `bars.lua` through
-`riced.file`, so adding or removing a bar there writes the same file root.lua
-reads to declare layers. Add/remove IPC edits `bars.lua` too; the next `view`
-declares or drops the matching layer. There is no host bar command.
+Omit `--output` to address an all-output bar. Bars are plain data files under
+`data/bars/`; `root.lua` lists that directory and declares one layer per file.
+**Settings → Panel** lists the same files and edits their slots and widgets,
+writing the files back. Add/remove IPC writes or removes `data/bars/<edge>.lua`.
+There is no host bar command and no hardcoded bar list.
 
 ```sh
 riced init           # Install without starting Wayland; preserves existing configs

@@ -321,9 +321,11 @@ invents a surface on request. See [App-owned layers](#app-owned-layers).
 
 A bar placement is app-owned Lua data, not a host command:
 
-- `bars.lua` is the single list. `root.lua` loads it with `riced.file`, composes
-  one `layers/bar.lua` per entry, and exposes `riced ipc add/remove` handlers
-  that edit the file. There is no `shell.add_bar`/`shell.remove_bar`.
+- Bars are files under `data/bars/`. `root.lua` lists the directory with
+  `riced.list`, reads each with `riced.read`, and composes one `layers/bar.lua`
+  per file. Settings → Panel lists the same directory and writes the files with
+  `riced.write`. There is no `shell.add_bar`/`shell.remove_bar` and no hardcoded
+  bar list.
 - `layers/bar.lua` builds the surface and embeds widgets with
   `riced.widget(name, props, id)`. Each widget keeps its own VM, services,
   popups, and `actions`; the layer only decides where it sits.

@@ -132,6 +132,25 @@ fn layer_value(lua: &Lua, src: &str, app: &Table, overrides: Value) -> mlua::Res
     result
 }
 
+/// Resolve a project-relative data path, rejecting escapes.
+fn project_path(lua: &Lua, relative: &str) -> mlua::Result<std::path::PathBuf> {
+    if relative.is_empty()
+        || relative.contains('\0')
+        || std::path::Path::new(relative).is_absolute()
+        || relative
+            .split(['/', '\\'])
+            .any(|part| part.is_empty() || part == "..")
+    {
+        return Err(mlua::Error::RuntimeError(format!(
+            "invalid project path {relative:?}"
+        )));
+    }
+    let root: String = lua.named_registry_value("riced.app_root").map_err(|_| {
+        mlua::Error::RuntimeError("riced.* is available inside framework apps".into())
+    })?;
+    Ok(std::path::PathBuf::from(root).join(relative))
+}
+
 /// Resolve a `riced.widget` name to a `widgets/<name>.lua` file.
 ///
 /// Folder apps own `apps/<name>/widgets`, but project-wide widgets live one
@@ -396,6 +415,63 @@ impl LuaRuntime {
                     .join(relative)
                     .to_string_lossy()
                     .into_owned())
+            })?,
+        )?;
+        // Plain-data project files: list a directory, read one document, and
+        // write one from `mount`/`actions`. No host handles, no defaults.
+        api.set(
+            "list",
+            lua.create_function(|lua, relative: String| {
+                let path = project_path(lua, &relative)?;
+                let mut names = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    for entry in entries.flatten() {
+                        if entry
+                            .file_type()
+                            .map(|kind| kind.is_file())
+                            .unwrap_or(false)
+                            && let Some(name) = entry.file_name().to_str()
+                        {
+                            names.push(name.to_owned());
+                        }
+                    }
+                }
+                names.sort();
+                let table = lua.create_table()?;
+                for (index, name) in names.into_iter().enumerate() {
+                    table.raw_set(index + 1, name)?;
+                }
+                Ok(table)
+            })?,
+        )?;
+        api.set(
+            "read",
+            lua.create_function(|lua, relative: String| {
+                let path = project_path(lua, &relative)?;
+                let value = crate::config::lua::read_file(&path).map_err(mlua::Error::external)?;
+                lua.to_value(&value)
+            })?,
+        )?;
+        api.set(
+            "write",
+            lua.create_function(|lua, (relative, value): (String, Value)| {
+                super::managed::require_active(lua)?;
+                let path = project_path(lua, &relative)?;
+                let value: serde_json::Value = lua.from_value(value)?;
+                crate::config::lua::write_file(&path, &value).map_err(mlua::Error::external)?;
+                Ok(())
+            })?,
+        )?;
+        api.set(
+            "remove",
+            lua.create_function(|lua, relative: String| {
+                super::managed::require_active(lua)?;
+                let path = project_path(lua, &relative)?;
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(mlua::Error::external(error)),
+                }
             })?,
         )?;
         lua.globals().set("riced", api)?;
