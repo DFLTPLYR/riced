@@ -333,6 +333,9 @@ A bar placement is app-owned Lua data, not a host command:
   `bar.edge or "top"` so a malformed document cannot take the frontend down.
 - Widget popups are declared by the same layer with `riced.widget_popup({x, y})`;
   the host renders the active widget's popup content there.
+- Settings → Panel is a persistent Lua page: it keeps its VM, owns `bars.lua`
+  through `riced.file`, and receives its own actions. The host pumps managed
+  file work while a Settings window is open.
 
 An action handler can therefore offer "add a bar" and "remove this bar" by
 editing the app's own file:

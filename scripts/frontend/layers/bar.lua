@@ -27,7 +27,6 @@ function layer:view(props)
         iced.row(widgets(regions.center, "center")):spacing(8),
         iced.space():width(size.fill),
         iced.row(widgets(regions["end"], "end")):spacing(8),
-        iced.button("Panel", "panel"),
         iced.button("Settings", "settings"),
     }
     local popup_y = edge == "top" and thickness or 0

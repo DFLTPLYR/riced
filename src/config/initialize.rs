@@ -22,10 +22,6 @@ const FILES: &[(&str, &str)] = &[
         "layers/bar.lua",
         include_str!("../../scripts/frontend/layers/bar.lua"),
     ),
-    (
-        "layers/panel.lua",
-        include_str!("../../scripts/frontend/layers/panel.lua"),
-    ),
     ("bars.lua", include_str!("../../scripts/frontend/bars.lua")),
     // Publish the bootstrap only after its source files are in place.
     (

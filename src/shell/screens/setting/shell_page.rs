@@ -25,6 +25,12 @@ pub(super) fn action(action: Action, id: iced::window::Id) -> Plant {
     if !matches!(action.event, crate::ui::action::Event::Action) || action.value.is_some() {
         return Plant::Tend;
     }
+    if let Some(key) = action.key.strip_prefix("settings:lua:") {
+        return Plant::SettingPlot(SettingEvent::LuaPage {
+            id,
+            key: key.to_owned(),
+        });
+    }
     let Some(page) = action
         .key
         .strip_prefix("settings:page:")
@@ -134,6 +140,30 @@ mod tests {
             ),
             Plant::Tend
         ));
+    }
+
+    #[test]
+    fn lua_page_actions_route_to_the_persistent_page() {
+        let id = iced::window::Id::unique();
+        match action(
+            Action {
+                key: "settings:lua:add:top".into(),
+                value: None,
+                event: Event::Action,
+            },
+            id,
+        ) {
+            Plant::SettingPlot(crate::shell::SettingEvent::LuaPage { id: got, key }) => {
+                assert_eq!(got, id);
+                assert_eq!(key, "add:top");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_panel_page_is_available() {
+        assert!(super::super::sources::page_source("panel.lua").is_some());
     }
 
     #[test]

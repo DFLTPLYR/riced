@@ -156,6 +156,10 @@ pub(super) const SETTINGS_SEEDS: &[(&str, &str)] = &[
         include_str!("../../scripts/settings/theme.lua"),
     ),
     (
+        "panel.lua",
+        include_str!("../../scripts/settings/panel.lua"),
+    ),
+    (
         "panel_bar.lua",
         include_str!("../../scripts/settings/panel_bar.lua"),
     ),

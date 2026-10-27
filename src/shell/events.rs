@@ -289,6 +289,19 @@ pub enum SettingEvent {
     ApplyWallpaper(Id),
     DiscardWallpaper(Id),
     Select(Id, crate::shell::screens::SettingPage),
+    /// One action from a persistent Lua Settings page (`id` = settings
+    /// window, `key` = the key with its `settings:lua:` prefix removed).
+    LuaPage {
+        id: Id,
+        key: String,
+    },
+    /// Managed file/service delivery for a persistent Lua Settings page.
+    LuaManaged {
+        id: Id,
+        delivery: crate::framework::tasks::Delivery,
+    },
+    /// Pump managed work for persistent Lua Settings pages.
+    Tick,
     IconPreviewsReady {
         id: Id,
         result: Result<crate::shell::screens::setting::IconPreviews, String>,

@@ -450,6 +450,15 @@ impl Plots {
             );
         }
 
+        // Persistent Lua Settings pages own `riced.file` handles, so they need
+        // a managed-work pump while a Settings window is open.
+        if !self.windows.settings.is_empty() {
+            subs.push(
+                iced::time::every(Duration::from_millis(250))
+                    .map(|_| Plant::SettingPlot(SettingEvent::Tick)),
+            );
+        }
+
         // List enter/exit transitions tick at 60fps only while a
         // motion is active (aura runtime idles to zero wakeups).
         if self.animation.motion.has_active()
@@ -1435,6 +1444,40 @@ impl Plots {
             }
             Plant::SettingPlot(SettingEvent::Select(id, page)) => {
                 Setting::handle_select(self, id, page)
+            }
+            Plant::SettingPlot(SettingEvent::LuaPage { id, key }) => {
+                let Some(setting) = self.windows.settings.remove(&id) else {
+                    return Command::none();
+                };
+                let result = setting.lua_page_action(self, &key);
+                self.windows.settings.insert(id, setting);
+                if let Err(error) = result {
+                    eprintln!("settings page: {error}");
+                }
+                Command::none()
+            }
+            Plant::SettingPlot(SettingEvent::LuaManaged { id, delivery }) => {
+                let Some(setting) = self.windows.settings.remove(&id) else {
+                    return Command::none();
+                };
+                let result = setting.lua_managed(self, &delivery);
+                self.windows.settings.insert(id, setting);
+                if let Err(error) = result {
+                    eprintln!("settings page: {error}");
+                }
+                Command::none()
+            }
+            Plant::SettingPlot(SettingEvent::Tick) => {
+                let ids: Vec<_> = self.windows.settings.keys().copied().collect();
+                let mut commands = Vec::new();
+                for id in ids {
+                    let Some(setting) = self.windows.settings.remove(&id) else {
+                        continue;
+                    };
+                    commands.extend(setting.lua_tick(self, id));
+                    self.windows.settings.insert(id, setting);
+                }
+                Command::batch(commands)
             }
             Plant::SettingPlot(SettingEvent::IconPreviewsReady { id, result }) => {
                 if let Some(setting) = self.windows.settings.get_mut(&id) {

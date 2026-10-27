@@ -24,6 +24,10 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../../../scripts/settings/theme.lua"),
     ),
     (
+        "panel.lua",
+        include_str!("../../../../scripts/settings/panel.lua"),
+    ),
+    (
         "panel_bar.lua",
         include_str!("../../../../scripts/settings/panel_bar.lua"),
     ),
@@ -76,6 +80,11 @@ pub(super) fn revision(name: &str) -> Option<String> {
 
 fn project_text(name: &str) -> Option<String> {
     std::fs::read_to_string(project_path(name)).ok()
+}
+
+/// Source text for a page that keeps its own VM, preferring the project copy.
+pub(super) fn page_source(name: &str) -> Option<String> {
+    project_text(name).or_else(|| bundled(name).map(str::to_owned))
 }
 
 fn attempt(

@@ -2,7 +2,10 @@ mod animation;
 pub(crate) mod components;
 mod context_menu;
 mod desktop_page;
+mod lua_page;
+#[allow(dead_code)]
 mod panel;
+#[allow(dead_code)]
 mod panel_bar;
 mod placement;
 mod shell_page;
@@ -38,6 +41,8 @@ pub struct Setting {
     wallpaper_page: std::cell::RefCell<wallpaper::Page>,
     context_menu_page: std::cell::RefCell<context_menu::Page>,
     shell_page: std::cell::RefCell<shell_page::Page>,
+    panel_page: std::cell::RefCell<Option<lua_page::LuaPage>>,
+    panel_revision: std::cell::RefCell<Option<String>>,
     icon_previews: Option<Result<IconPreviews, String>>,
     icon_previews_loading: bool,
     pub(crate) wallpaper_draft: Option<crate::wallpaper::draft::Draft>,
@@ -186,7 +191,7 @@ impl Setting {
                 &plots.config.component_defaults,
                 &plots.config.theme,
             ),
-            SettingPage::Panel => self.panel_content(id, panel::PanelContext::from(plots)),
+            SettingPage::Panel => self.panel_lua(id, plots),
             SettingPage::ContextMenu => self.context_menu_content(plots),
             SettingPage::Wallpaper => self.wallpaper_content(id, plots),
             SettingPage::Theme => self.theme_content(plots),
@@ -201,9 +206,40 @@ impl Setting {
             .view(plots, &plots.config.theme)
     }
 
-    /// Panel page: picker row of bars on top, controls for the picked bar
-    /// below (defaults to the first). Length % + thickness px, floating
-    /// (+ margins when floating) and per-corner rounding.
+    /// Panel page: a persistent Lua page that owns `bars.lua`.
+    fn panel_lua(&self, id: window::Id, plots: &Plots) -> Element<'static, Plant> {
+        let revision = sources::revision("panel.lua");
+        if *self.panel_revision.borrow() != revision {
+            *self.panel_page.borrow_mut() = None;
+            *self.panel_revision.borrow_mut() = revision;
+        }
+        let mut page = self.panel_page.borrow_mut();
+        if page.is_none() {
+            let Some(source) = sources::page_source("panel.lua") else {
+                return text("Panel page unavailable").into();
+            };
+            match lua_page::LuaPage::new(&source, "settings/panel.lua") {
+                Ok(created) => *page = Some(created),
+                Err(error) => return text(error).into(),
+            }
+        }
+        let Some(page) = page.as_mut() else {
+            return text("Panel page unavailable").into();
+        };
+        match page.view(plots) {
+            Ok(node) => {
+                let sender = std::sync::Arc::new(move |action| shell_page::action(action, id));
+                crate::ui::build::build_node_with_native(&node, 13.0, Some(sender), &mut |slot| {
+                    Err(format!("unknown native slot {slot:?}"))
+                })
+                .unwrap_or_else(|error| text(error).into())
+            }
+            Err(error) => text(error).into(),
+        }
+    }
+
+    /// Native Panel page, kept while the Lua page proves the file contract.
+    #[allow(dead_code)]
     fn panel_content(
         &self,
         id: window::Id,
@@ -308,6 +344,37 @@ impl Setting {
             return plots.load_wallpaper_preview(id);
         }
         Command::none()
+    }
+
+    pub(crate) fn lua_page_action(&self, plots: &Plots, key: &str) -> Result<(), String> {
+        let mut page = self.panel_page.borrow_mut();
+        let Some(page) = page.as_mut() else {
+            return Ok(());
+        };
+        page.action(plots, key).map(|_| ())
+    }
+
+    pub(crate) fn lua_managed(
+        &self,
+        plots: &Plots,
+        delivery: &crate::framework::tasks::Delivery,
+    ) -> Result<(), String> {
+        let mut page = self.panel_page.borrow_mut();
+        let Some(page) = page.as_mut() else {
+            return Ok(());
+        };
+        match page.deliver(plots, delivery) {
+            Some(result) => result.map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn lua_tick(&self, plots: &Plots, id: window::Id) -> Vec<Command<Plant>> {
+        let mut page = self.panel_page.borrow_mut();
+        let Some(page) = page.as_mut() else {
+            return Vec::new();
+        };
+        page.managed_work(plots, id)
     }
 
     pub(crate) fn icon_previews_ready(&mut self, result: Result<IconPreviews, String>) {
