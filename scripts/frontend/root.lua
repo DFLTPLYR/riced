@@ -20,6 +20,7 @@ end
 
 function app:mount(context)
     self.output = context.output.name
+    self.panel = false
     self.bars = riced.file({
         type = "lua",
         path = "bars.lua",
@@ -99,12 +100,35 @@ function app:view(props)
             })
         end
     end
+    if self.panel then
+        layers[#layers + 1] = riced.layer("layers/panel.lua", {
+            bars = self.bars:get("bars") or {},
+        })
+    end
     return layers
 end
 
 function app:actions(event)
-    if event.key == "settings" then
+    local key = event.key
+    if key == "settings" then
         return shell.open_settings()
+    end
+    if key == "panel" then
+        self.panel = not self.panel
+        return
+    end
+    if key == "panel:close" then
+        self.panel = false
+        return
+    end
+    local edge = key and key:match("^panel:add:(.+)$")
+    if edge then
+        pcall(self.add_bar, self, { anchor = edge, thickness = 34 })
+        return
+    end
+    local remove = key and key:match("^panel:remove:(.+)$")
+    if remove then
+        pcall(self.remove_bar, self, { anchor = remove })
     end
 end
 

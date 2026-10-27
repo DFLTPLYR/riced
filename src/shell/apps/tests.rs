@@ -152,6 +152,42 @@ fn installed_root_declares_layers_and_dispatches_settings() {
     assert!(crate::lua::shell::parse(&value).unwrap().is_none());
     render(&mut app);
     assert!(app.roots.contains_key("bar-bottom"));
+
+    // The Panel button toggles a Lua layer that edits the same bar data.
+    let open = crate::ui::action::Action {
+        key: "panel".into(),
+        value: None,
+        event: crate::ui::action::Event::Action,
+    };
+    with_services(|services| {
+        app.runtime.as_mut().unwrap().app_event(
+            services,
+            &app.output_name,
+            &app.context,
+            &app.props,
+            AppEvent::Action(&open),
+        )
+    })
+    .unwrap();
+    render(&mut app);
+    assert!(app.roots.contains_key("panel"));
+    let add = crate::ui::action::Action {
+        key: "panel:add:left".into(),
+        value: None,
+        event: crate::ui::action::Event::Action,
+    };
+    with_services(|services| {
+        app.runtime.as_mut().unwrap().app_event(
+            services,
+            &app.output_name,
+            &app.context,
+            &app.props,
+            AppEvent::Action(&add),
+        )
+    })
+    .unwrap();
+    render(&mut app);
+    assert!(app.roots.contains_key("bar-left"));
 }
 
 #[test]

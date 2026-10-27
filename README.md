@@ -62,8 +62,10 @@ riced ipc add --anchor bottom --output DP-1 --thickness 34
 riced ipc remove --anchor bottom --output DP-1
 ```
 
-Omit `--output` to address an all-output bar. Add/remove edits `bars.lua`; the
-next `view` declares or drops the matching layer. There is no host bar command.
+Omit `--output` to address an all-output bar. The bar's **Panel** button opens
+the Lua-owned panel (`layers/panel.lua`), which reads and edits `bars.lua`
+directly. Add/remove also edits `bars.lua`; the next `view` declares or drops
+the matching layer. There is no host bar command.
 
 ```sh
 riced init           # Install without starting Wayland; preserves existing configs
