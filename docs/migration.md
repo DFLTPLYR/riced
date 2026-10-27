@@ -6,8 +6,11 @@ The installed `root.lua` loads command handlers from `state.lua` and leaves the
 original Rust bar/desktop hosts enabled. It no longer substitutes the demo
 Settings-button/clock bar or the simplified background menu for the existing
 slot editor, widget popups, desktop selection and drag interactions. The
-`layers/` templates remain optional examples. Notifications and Settings keep
-their existing lifecycle and Apply/Discard behavior.
+`layers/` templates are composed by `root.lua` for any native host turned off:
+`bar_host = false` activates `layers/bar.lua`, and `background.disabled = true`
+activates `layers/background.lua` (with host-filled wallpaper and
+desktop-widget slots). Notifications and Settings keep their existing lifecycle
+and Apply/Discard behavior.
 
 `riced ipc settings` and the desktop Settings menu share the root's command
 handler. `riced ipc add --anchor EDGE [--output NAME] [--thickness PIXELS]`

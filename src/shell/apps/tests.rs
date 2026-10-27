@@ -101,6 +101,23 @@ fn installed_root_keeps_native_hosts_and_dispatches_settings() {
     );
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
 
+    // Turning a native host off hands that surface to the matching module.
+    app.props["bar_host"] = json!(false);
+    app.props["background_disabled"] = json!(true);
+    app.props["bars"] = json!([{
+        "anchor": "top",
+        "output": "DP-1",
+        "length": 1.0,
+        "thickness": 34.0,
+        "slots": [],
+        "aligns": [],
+        "opacity": 1.0,
+        "floating": false,
+    }]);
+    render(&mut app);
+    assert!(app.roots.contains_key("background"));
+    assert!(app.roots.contains_key("bar-top"));
+
     // One Settings: the app asks the daemon for the real window.
     let value = with_services(|services| {
         app.runtime.as_mut().unwrap().app_event(

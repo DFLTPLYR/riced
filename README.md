@@ -51,10 +51,10 @@ settings/                  Settings window shell and pages (own folder)
 The default restores the original Rust-backed shell flow: native bar slots,
 widget popups, the Panel editor, desktop selection/dragging and context menus,
 notifications, and the existing Settings Apply/Discard behavior. `bar_host = true`
-and `background.disabled = false` keep those hosts active; `root.lua` does not
-draw duplicate demo surfaces. Bars still live in `config.bar` and are edited
-through Settings → Panel. Right-click the desktop to add a bar at the nearest
-edge or open Settings. Settings requests use the same Lua IPC handler as the CLI:
+and `background.disabled = false` keep those hosts active. Bars still live in
+`config.bar` and are edited through Settings → Panel. Right-click the desktop to
+add a bar at the nearest edge or open Settings. Settings requests use the same Lua
+IPC handler as the CLI:
 
 ```sh
 riced ipc settings
@@ -64,7 +64,10 @@ riced ipc remove --anchor bottom --output DP-1
 
 Omit `--output` to address an all-output bar recipe. Add/remove updates native
 surfaces immediately, and removing a recipe closes its popups and surfaces on
-every affected output. Custom Lua layers remain opt-in.
+every affected output. Custom Lua layers remain opt-in: set `bar_host = false`
+in `config.lua` to render bars from `layers/bar.lua`, or set
+`background.disabled = true` to render the desktop from
+`layers/background.lua`. `root.lua` skips a layer while its native host is on.
 
 ```sh
 riced init           # Install without starting Wayland; preserves existing configs

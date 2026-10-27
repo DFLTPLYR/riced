@@ -58,11 +58,15 @@ shared `layers/` participate in source reload detection. Failed candidate reload
 retain the working frontend and its handlers. Settings currently retains its
 native window host and Lua pages; its opening policy is now a Lua IPC handler.
 
-The default root declares no replacement surfaces: the original Rust bar and
-desktop hosts provide slot layouts, editing, widget popups, selection and drag
-gestures. Preferences enable `bar_host` and leave `background.disabled` false.
-The installed `layers/` files are optional examples, not the default shell.
-Desktop Settings requests dispatch `settings` through the same handler as IPC.
+A root app receives `props.bar_host` and `props.background_disabled` so it can
+compose only the surfaces the native hosts do not own. The installed root uses
+that to gate its `layers/` modules: with the default `bar_host = true` and
+`background.disabled = false` the original Rust hosts provide slot layouts,
+editing, widget popups, selection and drag gestures. Set `bar_host = false` to
+render bars from `layers/bar.lua`, and `background.disabled = true` to render
+the desktop from `layers/background.lua` (its wallpaper and desktop-widget slots
+are still host-filled). Desktop Settings requests dispatch `settings` through
+the same handler as IPC.
 
 The project root is the directory containing the installed `config.lua`
 (`$XDG_CONFIG_HOME/riced`, normally `~/.config/riced`).

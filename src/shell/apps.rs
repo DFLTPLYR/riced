@@ -659,6 +659,11 @@ fn refresh_target(
             instance.context = json!({"id":config.identity(),"name":config.name,"root":project.app_root(&config.name),"output":output_context});
             instance.props = serde_json::to_value(&config.props).unwrap_or_else(|_| json!({}));
             instance.props["output"] = output_context;
+            // Which native hosts own their surface. A root app uses these to
+            // decide whether to compose its `layers/` modules or leave the
+            // surface to the established Rust host.
+            instance.props["bar_host"] = json!(plots.config.bar_host);
+            instance.props["background_disabled"] = json!(plots.config.background.disabled);
             // The configured wallpaper source for this output. The layer draws
             // it immediately, so a background is visible before (and without) a
             // successful bake; the baked tile still draws over it.
