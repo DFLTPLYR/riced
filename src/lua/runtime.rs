@@ -151,6 +151,16 @@ fn project_path(lua: &Lua, relative: &str) -> mlua::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(root).join(relative))
 }
 
+/// Host plugins implemented in Rust. These render native leaves that cannot be
+/// expressed as Lua descriptions, so they stay built in.
+pub(crate) const BUILTIN_PLUGINS: &[&str] = &[
+    "wallpaper",
+    "desktop-widgets",
+    "widget",
+    "settings-page",
+    "wallpaper-map",
+];
+
 /// Resolve a Lua plugin id to a `plugins/<id>.lua` file.
 fn plugin_path(lua: &Lua, id: &str) -> mlua::Result<Option<std::path::PathBuf>> {
     let Ok(root) = lua.named_registry_value::<String>("riced.app_root") else {
@@ -429,10 +439,8 @@ impl LuaRuntime {
                         "riced.plugin id must be a plugin name".into(),
                     ));
                 }
-                if !matches!(
-                    id.as_str(),
-                    "wallpaper" | "desktop-widgets" | "widget" | "settings-page" | "wallpaper-map"
-                ) && let Some(path) = plugin_path(lua, &id)?
+                if !BUILTIN_PLUGINS.contains(&id.as_str())
+                    && let Some(path) = plugin_path(lua, &id)?
                 {
                     let request = lua.create_table()?;
                     request.set("name", id.clone())?;
@@ -448,6 +456,38 @@ impl LuaRuntime {
                     node.set("args", args)?;
                 }
                 Ok(node)
+            })?,
+        )?;
+        api.set(
+            "plugins",
+            lua.create_function(|lua, ()| {
+                let table = lua.create_table()?;
+                let mut index = 0;
+                for id in BUILTIN_PLUGINS {
+                    index += 1;
+                    table.raw_set(index, *id)?;
+                }
+                if let Ok(root) = lua.named_registry_value::<String>("riced.app_root") {
+                    let dir = std::path::PathBuf::from(root).join("plugins");
+                    let mut names = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            if let Some(stem) = entry
+                                .file_name()
+                                .to_str()
+                                .and_then(|name| name.strip_suffix(".lua"))
+                            {
+                                names.push(stem.to_owned());
+                            }
+                        }
+                    }
+                    names.sort();
+                    for name in names {
+                        index += 1;
+                        table.raw_set(index, name)?;
+                    }
+                }
+                Ok(table)
             })?,
         )?;
         api.set(
