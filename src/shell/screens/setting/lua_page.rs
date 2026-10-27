@@ -32,10 +32,14 @@ impl LuaPage {
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        Self::with_root(&root, source, label)
+    }
+
+    fn with_root(root: &std::path::Path, source: &str, label: &str) -> Result<Self, String> {
         let mut runtime =
             LuaRuntime::with_components(Vec::new()).map_err(|error| error.to_string())?;
         runtime
-            .set_app_root(&root)
+            .set_app_root(root)
             .map_err(|error| error.to_string())?;
         runtime
             .load_named(source, label)
@@ -151,5 +155,96 @@ impl LuaPage {
                 )
                 .map_err(|error| error.to_string()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::futures::StreamExt;
+
+    fn texts(node: &crate::ui::node::WidgetNode, out: &mut Vec<String>) {
+        use crate::ui::node::WidgetNode;
+        match node {
+            WidgetNode::Text { content, .. } => out.push(content.clone()),
+            WidgetNode::Row { children, .. }
+            | WidgetNode::Column { children, .. }
+            | WidgetNode::Stack { children, .. }
+            | WidgetNode::Masonry { children, .. } => {
+                for child in children {
+                    texts(child, out);
+                }
+            }
+            WidgetNode::Container { child, .. }
+            | WidgetNode::Scrollable { child, .. }
+            | WidgetNode::Clickable { child, .. }
+            | WidgetNode::Aligned { child, .. }
+            | WidgetNode::Animated { child, .. } => texts(child, out),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn panel_page_mounts_and_loads_bars() {
+        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        std::fs::write(
+            root.path().join("bars.lua"),
+            "return { bars = { { edge = 'top', thickness = 34, slots = {} } } }",
+        )
+        .unwrap();
+        let source = include_str!("../../../../scripts/settings/panel.lua");
+        let mut page =
+            LuaPage::with_root(root.path(), source, "settings/panel.lua").expect("panel page");
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let plots = Plots::new(receiver);
+        let node = page.view(&plots).expect("first view");
+        let mut loading = Vec::new();
+        texts(&node, &mut loading);
+        assert!(
+            loading.iter().any(|text| text.contains("Loading")),
+            "{loading:?}"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let id = iced::window::Id::unique();
+            for _ in 0..8 {
+                let tasks = page.managed_work(&plots, id);
+                if tasks.is_empty() {
+                    break;
+                }
+                let Some(stream) = iced_runtime::task::into_stream(iced::Task::batch(tasks)) else {
+                    break;
+                };
+                let deliveries: Vec<_> = stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(crate::shell::Plant::SettingPlot(
+                                crate::shell::SettingEvent::LuaManaged { delivery, .. },
+                            )) => Some(delivery),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await;
+                if deliveries.is_empty() {
+                    break;
+                }
+                for delivery in deliveries {
+                    page.deliver(&plots, &delivery);
+                }
+            }
+        });
+        let node = page.view(&plots).expect("loaded view");
+        let mut loaded = Vec::new();
+        texts(&node, &mut loaded);
+        assert!(
+            !loaded.iter().any(|text| text.contains("Loading")),
+            "{loaded:?}"
+        );
+        assert!(loaded.iter().any(|text| text.contains("top")), "{loaded:?}");
     }
 }

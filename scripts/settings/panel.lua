@@ -28,12 +28,22 @@ function app:mount()
         write_mode = "generated",
         defaults = { bars = {} },
     })
+    self.bars:watch(function(event)
+        if event.ok then
+            self.error = nil
+        else
+            self.error = event.error.message
+        end
+    end)
 end
 
 function app:view(props)
     local rows = {
         hint("Bars live in bars.lua. root.lua declares one layer per entry."),
     }
+    if self.error then
+        table.insert(rows, hint(self.error))
+    end
     if not self.bars:status().loaded then
         table.insert(rows, hint("Loading bars.lua…"))
         return iced.column(rows):spacing(12):width(size.fill)
