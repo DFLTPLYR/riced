@@ -2,9 +2,10 @@
 
 use super::registry::ServiceCtx;
 
-/// Publish `notifications = { {id, app, title, body, urgency,
-/// has_image}, … }`, newest-first. Metadata only — no image handles
-/// or action arrays cross into Lua.
+/// Publish `notifications = { {id, app, title, body, icon, urgency,
+/// has_image, actions, output, popup_visible, closed}, … }`, newest-first.
+/// Metadata only — no image handles cross into Lua. `actions` is a plain
+/// `{key, label}` array so a Lua-only notification layer can render buttons.
 pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
     let list = lua.create_table()?;
     let mut i = 0;
@@ -17,8 +18,20 @@ pub fn publish(ctx: &ServiceCtx, lua: &mlua::Lua) -> mlua::Result<()> {
         entry.set("app", n.app.clone())?;
         entry.set("title", n.title.clone())?;
         entry.set("body", n.body.clone())?;
+        entry.set("icon", n.icon.clone())?;
         entry.set("urgency", n.urgency)?;
         entry.set("has_image", n.image.is_some())?;
+        entry.set(
+            "output",
+            n.output
+                .and_then(|id| ctx.outputs.get(&id))
+                .and_then(|info| info.name.clone()),
+        )?;
+        entry.set(
+            "actions",
+            crate::lua::notifications::actions_table(lua, &n.actions)
+                .map_err(mlua::Error::RuntimeError)?,
+        )?;
         i += 1;
         list.set(i, entry)?;
     }
@@ -49,6 +62,8 @@ mod tests {
         let mut queue = std::collections::VecDeque::new();
         let mut a = mk();
         a.id = 1;
+        a.icon = "dialog-information".into();
+        a.actions = vec![("open".into(), "Open".into())];
         let mut b = mk();
         b.id = 2;
         queue.push_back(a);
@@ -70,5 +85,20 @@ mod tests {
         assert_eq!(first, 2);
         let count: i64 = lua.load("return #notifications").eval().expect("len");
         assert_eq!(count, 2);
+        let icon: String = lua
+            .load("return notifications[2].icon")
+            .eval()
+            .expect("icon");
+        assert_eq!(icon, "dialog-information");
+        let key: String = lua
+            .load("return notifications[2].actions[1].key")
+            .eval()
+            .expect("action key");
+        assert_eq!(key, "open");
+        let visible: bool = lua
+            .load("return notifications[2].popup_visible")
+            .eval()
+            .expect("visible");
+        assert!(visible);
     }
 }

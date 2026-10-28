@@ -23,6 +23,10 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../scripts/frontend/layers/bar.lua"),
     ),
     (
+        "layers/notifications.lua",
+        include_str!("../../scripts/frontend/layers/notifications.lua"),
+    ),
+    (
         "data/bars/top.lua",
         include_str!("../../scripts/frontend/data/bars/top.lua"),
     ),

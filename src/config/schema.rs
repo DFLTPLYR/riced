@@ -297,7 +297,7 @@ fn default_notification_source() -> String {
 ///     notifications = {
 ///         enabled = true,
 ///         output = "mouse", -- or an output name like "DP-1" to pin it
-///         source = "notifications.lua", -- relative to components/, absolute paths allowed
+///         source = "notifications.lua", -- legacy scene; a Lua layer supersedes it
 ///         timeout_ms = 5000,
 ///     },
 /// }
@@ -1004,22 +1004,18 @@ pub use paths::{config_migrated_path, config_path, legacy_config_path};
 /// mid-transition) and fades ride style alpha; survivors glide toward
 /// their new slot (`displaced`). Popup trees stay static for now.
 ///
-/// Override the motion per widget (or for cards, in
-/// `notifications.lua`) with an optional `transitions()` — the QML
-/// `Transition { NumberAnimation { ... } }` subset, declarative and
-/// parsed once per diff:
+/// Override the motion per listview with `onEntered`, `onExit`, and
+/// `onDisplaced` — the QML `Transition { NumberAnimation { ... } }` subset,
+/// declarative and parsed once per diff:
 ///
 /// ```lua
-/// function app:transitions()
-///     return {
-///         add = { x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 },
-///         remove = { x = { to = -200 }, opacity = { to = 0 }, duration = 250 },
-///         displaced = { duration = 250 },
-///     }
-/// end
+/// iced.listview(items)
+///     :onEntered({ x = { from = 200, to = 0 }, opacity = { from = 0, to = 1 }, duration = 250 })
+///     :onExit({ x = { to = -200 }, opacity = { to = 0 }, duration = 250 })
+///     :onDisplaced({ duration = 250 })
 /// ```
 ///
-/// Missing `transitions`, slots, or fields keep the defaults (`add`/
+/// Missing transition fields keep the defaults (`add`/
 /// `remove` slide-fade ±16px, `displaced` glides the index delta at the
 /// global speed), so partial specs compose. `displaced` takes only
 /// `duration` (distance comes from the layout). Malformed specs log
@@ -1028,8 +1024,9 @@ pub use paths::{config_migrated_path, config_path, legacy_config_path};
 /// ## Notification queue: the `notifications` global
 ///
 /// Republished before every `render()`/`popup()`/`actions` call
-/// (newest-first): `notifications = { {id, app, title, body, urgency,
-/// has_image}, ... }` — metadata only, no image handles or actions.
+/// (newest-first): `notifications = { {id, app, title, body, icon,
+/// urgency, has_image, actions, output, popup_visible, closed}, ... }`
+/// — metadata only, no image handles. `actions` is `{key, label}[]`.
 /// Build a notification center from this (see the `notifycenter`
 /// seed) and dismiss with the `actions` return convention:
 ///

@@ -1253,6 +1253,93 @@ impl LuaRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn notification_layer_filters_output_and_is_transparent_when_empty() {
+        let mut runtime = super::LuaRuntime::with_components(vec![
+            (
+                std::path::PathBuf::from("00-define.lua"),
+                include_str!("../../scripts/components/00-define.lua").into(),
+            ),
+            (
+                std::path::PathBuf::from("05-styled.lua"),
+                include_str!("../../scripts/components/05-styled.lua").into(),
+            ),
+            (
+                std::path::PathBuf::from("10-card.lua"),
+                include_str!("../../scripts/components/10-card.lua").into(),
+            ),
+            (
+                std::path::PathBuf::from("notification_card.lua"),
+                include_str!("../../scripts/components/notification_card.lua").into(),
+            ),
+        ])
+        .unwrap();
+        runtime
+            .load_named(
+                include_str!("../../scripts/frontend/layers/notifications.lua"),
+                "notifications.lua",
+            )
+            .unwrap();
+        let lua = &runtime.lua;
+        let notifications = lua.create_table().unwrap();
+        let add = |index: i64, id: u32, output: &str, visible: bool| {
+            let item = lua.create_table().unwrap();
+            item.set("id", id).unwrap();
+            item.set("app", "app").unwrap();
+            item.set("title", "title").unwrap();
+            item.set("body", "body").unwrap();
+            item.set("icon", "").unwrap();
+            item.set("urgency", 1).unwrap();
+            item.set("has_image", false).unwrap();
+            item.set("popup_visible", visible).unwrap();
+            item.set("output", output).unwrap();
+            item.set("actions", lua.create_table().unwrap()).unwrap();
+            notifications.set(index, item).unwrap();
+        };
+        add(1, 7, "DP-1", true);
+        add(2, 8, "DP-2", true);
+        add(3, 9, "DP-1", false);
+        lua.globals().set("notifications", notifications).unwrap();
+        let app: mlua::Table = lua
+            .registry_value(runtime.app.as_ref().expect("app"))
+            .unwrap();
+        let props = lua.create_table().unwrap();
+        let output = lua.create_table().unwrap();
+        output.set("name", "DP-1").unwrap();
+        output.set("height", 1080.0).unwrap();
+        props.set("output", output).unwrap();
+        let value: mlua::Value = app
+            .get::<mlua::Function>("view")
+            .unwrap()
+            .call((app.clone(), props))
+            .unwrap();
+        let roots =
+            crate::framework::LayerRoot::parse_list(lua, value, &Default::default()).unwrap();
+        let root = roots.first().expect("one layer");
+        assert_eq!(root.surface.id, "notifications");
+        assert_eq!(root.surface.input, "regions");
+        assert_eq!(root.surface.height, Some(480));
+        assert!(
+            matches!(&root.content, crate::ui::node::WidgetNode::ListView { items, .. } if items.len() == 1)
+        );
+
+        lua.globals()
+            .set("notifications", lua.create_table().unwrap())
+            .unwrap();
+        let props = lua.create_table().unwrap();
+        let output = lua.create_table().unwrap();
+        output.set("name", "DP-1").unwrap();
+        props.set("output", output).unwrap();
+        let value: mlua::Value = app
+            .get::<mlua::Function>("view")
+            .unwrap()
+            .call((app, props))
+            .unwrap();
+        let roots =
+            crate::framework::LayerRoot::parse_list(lua, value, &Default::default()).unwrap();
+        assert_eq!(roots[0].surface.input, "regions");
+    }
+
+    #[test]
     fn component_image_tokens_are_entry_scoped_and_decode_to_owned_handles() {
         let mut runtime = super::LuaRuntime::with_components(Vec::new()).unwrap();
         runtime.load_named("local app={} function app:view(props) if props.images then return iced.image_handle(props.images.icon):width(40):height(40) end return iced.text('no images') end return app", "fixture").unwrap();

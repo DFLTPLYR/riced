@@ -51,6 +51,11 @@ function app:view(props)
             selecting = self.selecting,
             fade_ms = props.selection_fade_ms,
         }),
+        -- Notification popups are ordinary Lua layers. The service still owns
+        -- delivery and expiry; removing this line leaves notifications headless.
+        riced.layer("layers/notifications.lua", {
+            output = props.output,
+        }),
     }
     for _, name in ipairs(riced.list("data/bars")) do
         local ok, bar = pcall(riced.read, "data/bars/" .. name)
@@ -92,6 +97,17 @@ function app:actions(event)
     if not event.key then return end
     if event.key == "settings" then
         return shell.open_settings()
+    end
+    if event.key == "dismiss-all" then
+        return notification.dismissAll()
+    end
+    local dismissed = event.key:match("^dismiss:(%d+)$")
+    if dismissed then
+        return notification.dismiss(tonumber(dismissed))
+    end
+    local target, key = event.key:match("^invoke:(%d+):(.*)$")
+    if target then
+        return { invoke = { id = tonumber(target), key = key } }
     end
 end
 

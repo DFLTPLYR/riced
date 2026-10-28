@@ -471,6 +471,14 @@ impl Instance {
 }
 
 impl State {
+    /// Whether a live app on this output declares a layer with this id.
+    /// Native surfaces use this to step aside when a Lua layer owns the same
+    /// role on that output.
+    pub(crate) fn declares_layer(&self, output: OutputId, id: &str) -> bool {
+        self.instances
+            .iter()
+            .any(|((owner, _), instance)| *owner == output && instance.roots.contains_key(id))
+    }
     pub fn has_callbacks(&self) -> bool {
         self.instances.values().any(|i| {
             i.roots.values().any(|root| root.lists.has_callbacks())

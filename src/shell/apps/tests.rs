@@ -150,6 +150,53 @@ fn bundled_selection_uses_global_geometry_and_only_background_left_drags() {
 }
 
 #[test]
+fn bundled_root_preserves_notification_action_keys() {
+    let lua = crate::lua::widgets::new_widget_lua().unwrap();
+    lua.load("require = function() return {} end")
+        .exec()
+        .unwrap();
+    let app: mlua::Table = lua
+        .load(include_str!("../../../scripts/frontend/root.lua"))
+        .eval()
+        .unwrap();
+    let actions: mlua::Function = app.get("actions").unwrap();
+    let value: mlua::Value = actions
+        .call((
+            app.clone(),
+            lua.to_value(&json!({"key":"invoke:42:open:details"}))
+                .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        crate::lua::notifications::notification_action(&value),
+        Some(crate::lua::notifications::NotificationAction::Invoke(
+            42,
+            "open:details".into()
+        ))
+    );
+    for key in [
+        json!({}),
+        json!({"key":"invoke:no:open"}),
+        json!({"key":"unknown"}),
+    ] {
+        let value: mlua::Value = actions
+            .call((app.clone(), lua.to_value(&key).unwrap()))
+            .unwrap();
+        assert!(value.is_nil());
+    }
+    let value: mlua::Value = actions
+        .call((
+            app.clone(),
+            lua.to_value(&json!({"key":"dismiss:42"})).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        crate::lua::notifications::notification_action(&value),
+        Some(crate::lua::notifications::NotificationAction::Dismiss(42))
+    );
+}
+
+#[test]
 fn root_state_module_registers_ipc_and_failed_reload_keeps_handlers() {
     let directory = tempfile::tempdir_in("/tmp/opencode").unwrap();
     std::fs::write(

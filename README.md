@@ -650,49 +650,49 @@ The demo's static Lua tree does not register interactive closure callbacks.
 
 ## Notifications
 
-D-Bus freedesktop server (mako replacement) plus internal events,
-rendered per output — mouse output by default, pinnable by name:
+D-Bus freedesktop server (mako replacement) plus internal events. The Rust
+service owns delivery, expiry, retained history, and output assignment.
+Presentation is a normal Lua layer declared by `root.lua`:
+
+```lua
+riced.layer("layers/notifications.lua", { output = props.output })
+```
+
+`layers/notifications.lua` returns an `iced.layer` whose top-right drawer renders
+`iced.listview(notifications)` and delegates each row to
+`iced.notification_card(n)`. The installed frontend provides this file. Removing
+the declaration leaves notifications headless; the service and history are
+unaffected. Dismissal and action clicks route through `root.lua`'s
+`app:actions`:
+
+```lua
+function app:actions(event)
+    if not event.key then return end
+    local id = event.key:match("^dismiss:(%d+)$")
+    if id then return notification.dismiss(tonumber(id)) end
+    local target, key = event.key:match("^invoke:(%d+):(.*)$")
+    if target then return { invoke = { id = tonumber(target), key = key } } end
+end
+```
+
+The `notifications` global is newest-first and includes `id`, `app`, `title`,
+`body`, `icon`, `urgency`, `has_image`, `actions`, `output`, `popup_visible`,
+and `closed`. `actions` is `{ key, label }[]`; image pixels never cross into Lua.
+`components/notification_card.lua` is the reusable
+`iced.define("notification_card", ...)` builder.
+
+Projects without a `root.lua` can keep the legacy `notifications.source` scene.
+It renders through the shared overlay host and receives output-filtered
+`props.notifications` with richer per-item `image` and `actions`. Setting
+`source = ""` keeps the service enabled without a scene.
 
 ```toml
 [notification]
 enabled = true
 output = "mouse"  # or "DP-1" to pin
-source = "notifications.lua"
+source = "notifications.lua"  # legacy scene; ignored when root.lua declares layers/notifications.lua
 timeout-ms = 5000
 ```
-
-`source` resolves relative to `~/.config/riced/components/` (absolute paths also work),
-using the same resolver as composable sources and `riced.component()`.
-It renders the **whole scene**, including the list, through the shared overlay
-host. Width, placement, spacing, card height, and transitions belong in Lua:
-
-```lua
-local app = {}
-function app:view(props)
-    return iced.listview(props.notifications)
-        :id("notifications"):key("id")
-        :delegate(function(n)
-            return riced.component("notification_card.lua", n)
-                :on_press("dismiss:" .. n.id)
-        end)
-        :width(360):anchor("right"):margin(16)
-end
-function app:actions(events)
-    if events.type ~= "action" then return end
-    local key = events.key
-    local id = key:match("^dismiss:(%d+)$")
-    if id then return { dismiss = tonumber(id) } end
-end
-return app
-```
-
-The bundled `scripts/components/notifications.lua` additionally shows images and action
-buttons. `components/notification_card.lua` is the reusable per-card module.
-The scene receives `props.notifications` newest-first, filtered to its output,
-with `{ id, app, title, body, icon, urgency, actions, has_image, image }`.
-`image` is an opaque owned token accepted by `iced.image(n.image)`; image
-pixels are never serialized through Lua. `actions` contains `{ key, label }`.
-Return `{ invoke = { id = id, key = key } }` to invoke a validated D-Bus action.
 
 ### Popup timeout and retained notifications
 
