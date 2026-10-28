@@ -688,12 +688,10 @@ See `examples/` for a Lua bar with a local component, clock, and
 independent click counter on each output. Copy its `apps/bar/` directory into
 your project and merge the example `apps` entry into your existing config.
 
-Run `riced -c example` from the repository root for the background migration
-sample in `config/riced/example/`. It demonstrates wallpaper preferences, file
-watching, a context menu, and local selection with a fade. Its README lists
-remaining native-only features. `background = { disabled = true }` disables
-legacy background creation on startup; restart after changing it. This also
-disables the legacy desktop-widget host, not just its wallpaper rendering.
+Run `riced -c example` from the repository root for the personal frontend snapshot
+in `config/riced/example/`. It uses `root.lua`, Lua layers, and `data/bars/` rather
+than the previous `apps/background` migration sample. Its README lists the
+machine-specific settings and differences from the latest bundled frontend.
 
 ## Subsequent milestones
 

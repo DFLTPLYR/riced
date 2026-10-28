@@ -124,24 +124,27 @@ function app:actions(event)
         end
         return
     end
+    if event.layer and event.layer ~= "background" then return end
+    local output = self.props.output
     if event.type == "press" and event.button == "right" then
+        if event.source_output and event.source_output ~= self.output then return end
         self.menu = { x = event.x, y = event.y }
     elseif event.type == "press" and event.button == "left" then
         self.menu = nil
-        if self.fade then self:cancel(self.fade); self.fade = nil end
-        self.selection = { start_x = event.x, start_y = event.y,
-            x = event.x, y = event.y, width = 0, height = 0 }
+        self.selection_id = (self.selection_id or 0) + 1
+        local x, y = event.x + output.x, event.y + output.y
+        self.selection = { id = self.selection_id, start_x = x, start_y = y,
+            x = x, y = y, width = 0, height = 0 }
         self.selecting = true
-    elseif event.type == "move" and self.selecting and self.selection then
+    elseif self.selecting and self.selection then
         local s = self.selection
-        s.x, s.y = math.min(s.start_x, event.x), math.min(s.start_y, event.y)
-        s.width, s.height = math.abs(event.x - s.start_x), math.abs(event.y - s.start_y)
-    elseif (event.type == "release" and event.button == "left") or event.type == "exit" then
-        if not self.selecting then return end
-        self.selecting = false
-        self.fade = self:after(self.props.fade_ms, function()
-            self.selection, self.fade = nil, nil
-        end)
+        local released = event.type == "release" and event.button == "left"
+        if (event.type == "move" or released) and event.x and event.y then
+            local x, y = event.x + output.x, event.y + output.y
+            s.x, s.y = math.min(s.start_x, x), math.min(s.start_y, y)
+            s.width, s.height = math.abs(x - s.start_x), math.abs(y - s.start_y)
+        end
+        if released or event.type == "cancel" then self.selecting = false end
     end
 end
 

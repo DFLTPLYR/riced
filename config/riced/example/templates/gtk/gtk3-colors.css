@@ -1,0 +1,141 @@
+@keyframes ripple {
+  to { background-size: 1000% 1000%; }
+}
+
+@keyframes ripple-on-slider {
+  to { background-size: auto, 1000% 1000%; }
+}
+
+@keyframes ripple-on-headerbar {
+  from { background-image: radial-gradient(circle, {{ colors.primary }} 0%, transparent 0%); }
+  to { background-image: radial-gradient(circle, {{ colors.primary }} 100%, transparent 0%); }
+}
+
+* {
+  background-clip: padding-box;
+  -GtkTextView-error-underline-color: {{ colors.error }};
+  -gtk-secondary-caret-color: {{ colors.primary }};
+  outline-style: solid;
+  outline-width: 2px;
+  outline-color: transparent;
+  outline-offset: -4px;
+  -gtk-outline-radius: 6px;
+}
+
+*:focus { outline-color: alpha(currentColor, 0.1); }
+
+.background {
+  background-color: {{ colors.surface }};
+  color: {{ colors.on_surface }};
+}
+
+.view {
+  background-color: {{ colors.surface }};
+  color: {{ colors.on_surface }};
+}
+
+.view:selected {
+  color: {{ colors.on_primary }};
+  background-color: {{ colors.primary }};
+}
+
+label selection, flowbox flowboxchild:selected,
+entry selection, textview text selection,
+widget.view:selected, .view:selected {
+  color: {{ colors.on_primary }};
+  background-color: {{ colors.primary }};
+}
+
+rubberband {
+  border: 1px solid {{ colors.primary }};
+  background-color: alpha({{ colors.primary }}, 0.3);
+}
+
+*:link, link { color: {{ colors.tertiary }}; }
+*:visited { color: {{ colors.secondary }}; }
+
+button {
+  background-color: alpha({{ colors.on_surface }}, 0.08);
+  color: {{ colors.on_surface }};
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+button:hover { box-shadow: inset 0 0 0 9999px alpha(currentColor, 0.08); }
+button:checked {
+  background-color: {{ colors.primary }};
+  color: {{ colors.on_primary }};
+}
+button:disabled {
+  background-color: alpha({{ colors.on_surface }}, 0.04);
+  color: alpha({{ colors.on_surface }}, 0.5);
+}
+
+button.suggested-action {
+  background-color: {{ colors.primary }};
+  color: {{ colors.on_primary }};
+}
+
+button.destructive-action {
+  background-color: {{ colors.error }};
+  color: {{ colors.on_error }};
+}
+
+entry {
+  background-color: alpha({{ colors.on_surface }}, 0.08);
+  color: {{ colors.on_surface }};
+  border-radius: 6px;
+}
+
+entry:focus { box-shadow: inset 0 0 0 2px {{ colors.primary }}; }
+
+toolbar {
+  background-color: {{ colors.surface }};
+}
+
+treeview.view:selected {
+  color: {{ colors.on_primary }};
+  background-color: {{ colors.primary }};
+}
+
+tooltip {
+  background-color: {{ colors.surface }};
+  color: {{ colors.on_surface }};
+}
+
+scrollbar {
+  background-color: {{ colors.surface_variant }};
+}
+
+scrollbar slider {
+  background-color: {{ colors.on_surface_variant }};
+}
+
+scrollbar slider:hover {
+  background-color: {{ colors.primary }};
+}
+
+progressbar trough {
+  background-color: {{ colors.surface_variant }};
+}
+
+progressbar progress {
+  background-color: {{ colors.primary }};
+}
+
+scale trough {
+  background-color: {{ colors.surface_variant }};
+}
+
+scale slider {
+  background-color: {{ colors.primary }};
+}
+
+menu {
+  background-color: {{ colors.surface }};
+  color: {{ colors.on_surface }};
+}
+
+menu menuitem:hover {
+  background-color: {{ colors.surface_variant }};
+}

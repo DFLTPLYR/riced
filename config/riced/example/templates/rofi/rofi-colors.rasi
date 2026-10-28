@@ -1,0 +1,18 @@
+* {
+    primary: {{ colors.primary }};
+    on-primary: {{ colors.on_primary }};
+    secondary: {{ colors.secondary }};
+    on-secondary: {{ colors.on_secondary }};
+    tertiary: {{ colors.tertiary }};
+    on-tertiary: {{ colors.on_tertiary }};
+    error: {{ colors.error }};
+    on-error: {{ colors.on_error }};
+    surface: {{ colors.surface }};
+    on-surface: {{ colors.on_surface }};
+    surface-variant: {{ colors.surface_variant }};
+    on-surface-variant: {{ colors.on_surface_variant }};
+    outline: {{ colors.outline }};
+    shadow: {{ colors.shadow }};
+    hover: {{ colors.hover }};
+    on-hover: {{ colors.on_hover }};
+}

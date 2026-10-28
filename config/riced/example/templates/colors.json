@@ -1,0 +1,48 @@
+{
+  "color": {
+    "primary": "{{ colors.primary }}",
+    "on_primary": "{{ colors.on_primary }}",
+    "secondary": "{{ colors.secondary }}",
+    "on_secondary": "{{ colors.on_secondary }}",
+    "tertiary": "{{ colors.tertiary }}",
+    "on_tertiary": "{{ colors.on_tertiary }}",
+    "error": "{{ colors.error }}",
+    "on_error": "{{ colors.on_error }}",
+    "surface": "{{ colors.surface }}",
+    "on_surface": "{{ colors.on_surface }}",
+    "surface_variant": "{{ colors.surface_variant }}",
+    "on_surface_variant": "{{ colors.on_surface_variant }}",
+    "outline": "{{ colors.outline }}",
+    "shadow": "{{ colors.shadow }}",
+    "hover": "{{ colors.hover }}",
+    "on_hover": "{{ colors.on_hover }}"
+  },
+  "terminal": {
+    "normal": {
+      "black": "{{ colors.terminal.normal.black }}",
+      "red": "{{ colors.terminal.normal.red }}",
+      "green": "{{ colors.terminal.normal.green }}",
+      "yellow": "{{ colors.terminal.normal.yellow }}",
+      "blue": "{{ colors.terminal.normal.blue }}",
+      "magenta": "{{ colors.terminal.normal.magenta }}",
+      "cyan": "{{ colors.terminal.normal.cyan }}",
+      "white": "{{ colors.terminal.normal.white }}"
+    },
+    "bright": {
+      "black": "{{ colors.terminal.bright.black }}",
+      "red": "{{ colors.terminal.bright.red }}",
+      "green": "{{ colors.terminal.bright.green }}",
+      "yellow": "{{ colors.terminal.bright.yellow }}",
+      "blue": "{{ colors.terminal.bright.blue }}",
+      "magenta": "{{ colors.terminal.bright.magenta }}",
+      "cyan": "{{ colors.terminal.bright.cyan }}",
+      "white": "{{ colors.terminal.bright.white }}"
+    },
+    "foreground": "{{ colors.terminal.foreground }}",
+    "background": "{{ colors.terminal.background }}",
+    "selectionFg": "{{ colors.terminal.selectionFg }}",
+    "selectionBg": "{{ colors.terminal.selectionBg }}",
+    "cursorText": "{{ colors.terminal.cursorText }}",
+    "cursor": "{{ colors.terminal.cursor }}"
+  }
+}

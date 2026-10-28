@@ -1,0 +1,48 @@
+@import url('https://refact0r.github.io/midnight-discord/build/midnight.css');
+
+:root {
+  --font: 'figtree';
+  --online-indicator: {{ colors.primary }};
+  --dnd-indicator: {{ colors.error }};
+  --idle-indicator: {{ colors.tertiary }};
+  --streaming-indicator: {{ colors.on_primary }};
+  --accent-1: {{ colors.tertiary }};
+  --accent-2: {{ colors.primary }};
+  --accent-3: {{ colors.primary }};
+  --accent-4: {{ colors.surface_variant }};
+  --accent-5: {{ colors.surface_variant }};
+  --accent-new: {{ colors.primary }};
+  --mention: {{ colors.surface }};
+  --mention-hover: {{ colors.surface_variant }};
+  --text-0: {{ colors.surface }};
+  --text-1: {{ colors.on_surface }};
+  --text-2: {{ colors.on_surface }};
+  --text-3: {{ colors.on_surface_variant }};
+  --text-4: {{ colors.on_surface_variant }};
+  --text-5: {{ colors.outline }};
+  --bg-1: {{ colors.surface_variant }};
+  --bg-2: {{ colors.surface_variant }};
+  --bg-3: {{ colors.surface_variant }};
+  --bg-4: {{ colors.surface }};
+  --hover: {{ colors.surface_variant }};
+  --active: {{ colors.surface_variant }};
+  --message-hover: {{ colors.surface_variant }};
+  --spacing: 12px;
+  --list-item-transition: 0.2s ease;
+  --unread-bar-transition: 0.2s ease;
+  --moon-spin-transition: 0.4s ease;
+  --icon-spin-transition: 1s ease;
+  --roundness-xl: 22px;
+  --roundness-l: 20px;
+  --roundness-m: 16px;
+  --roundness-s: 12px;
+  --roundness-xs: 10px;
+  --roundness-xxs: 8px;
+  --discord-icon: none;
+  --moon-icon: block;
+  --moon-icon-url: url('https://upload.wikimedia.org/wikipedia/commons/c/c4/Font_Awesome_5_solid_moon.svg');
+  --moon-icon-size: auto;
+  --login-bg-filter: saturate(0.3) hue-rotate(-15deg) brightness(0.4);
+  --green-to-accent-3-filter: hue-rotate(56deg) saturate(1.43);
+  --blurple-to-accent-3-filter: hue-rotate(304deg) saturate(0.84) brightness(1.2);
+}

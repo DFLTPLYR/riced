@@ -26,12 +26,14 @@ local function stack_of(props)
 
     local s = props.selection
     if s and s.width > 0 and s.height > 0 then
-        layers[#layers + 1] = iced.container(iced.space())
-            :width(s.width):height(s.height)
-            :background("#89b4fa22"):border("#89b4fa"):border_width(1)
-            :anchor("top_left"):margin({ left = s.x, top = s.y })
-            :animate({ id = "selection", opacity = iced.animations.opacity({
-                to = props.selecting and 1 or 0, duration = props.fade_ms,
+        local x, y = s.x - output.x, s.y - output.y
+        layers[#layers + 1] = iced.canvas({
+            rects = {{x=x,y=y,width=s.width,height=s.height,color="#89b4fa22"}},
+            lines = {{points={{x,y},{x+s.width,y},{x+s.width,y+s.height},{x,y+s.height},{x,y}},color="#89b4fa",width=1}},
+        }):width(size.fill):height(size.fill)
+            :animate({ id = "selection-" .. s.id, opacity = iced.animations.opacity({
+                from = 1, to = props.selecting and 1 or 0,
+                duration = props.selecting and 0 or props.fade_ms, easing = "ease_in_out",
             }) })
     end
     if props.menu then
@@ -55,6 +57,7 @@ function layer:view(props)
         keyboard = "none",
         input = "all",
         pointer_events = true,
+        shared_pointer_events = true,
         content = iced.stack(stack_of(props)):width(size.fill):height(size.fill),
     })
 end

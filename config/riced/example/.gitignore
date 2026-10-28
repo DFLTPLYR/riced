@@ -1,11 +1,4 @@
-# Seeded libraries and runtime state belong to this project, not the user config.
-/apps/background/state/
-# App-owned layer state, written by the background app.
-/apps/background/bars.lua
-/components/
-/widgets/
-/shaders/
-/theme/
-/templates/
+# Runtime state is not part of the installed frontend snapshot.
 /widgets.toml*
 /.*-initialized
+/.frontend-install.lock
