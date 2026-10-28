@@ -566,6 +566,7 @@ set.
 | `keyboard` | `"none"` (default), `"on_demand"`, or `"exclusive"`. |
 | `input` | `"all"` (default), `"none"`, or `"regions"`. `"regions"` unions the measured bounds of clickable widgets and controls, so the rest of an oversized layer stays click-through. |
 | `pointer_events` | Boolean, default false. Deliver unconsumed layer-local pointer gestures to `actions`; child controls handle input first. |
+| `shared_pointer_events` | Boolean, default false. Mirror unconsumed pointer presses and grabbed gestures to the same app/layer on every output. Requires `pointer_events=true`, all four anchors, `exclusive_zone=-1`, no fixed dimensions, and zero margins. |
 | `content` | Required ordinary `iced.*` widget tree. |
 
 With `input = "regions"`, widgets that handle input (`on_press` mouse areas,
@@ -577,9 +578,25 @@ are no regions the input mask is empty.
 
 Layer-app pointer moves are coalesced to the latest position on each redraw.
 Pending motion is delivered before release or pointer exit, so drag endpoints
-are not lost. Input refreshes only its owning app instance without rescanning
+are not lost. A background-owned press retains its gesture outside the surface
+until release; focus loss sends `type="cancel"`. Child controls cannot steal an
+already-started background drag, and their own presses never start one.
+Input normally refreshes only its owning app instance without rescanning
 source files; hot reload remains handled by the regular project refresh.
 Content-only changes redraw the affected surface rather than every window.
+
+Shared gestures translate `event.x/y` into each recipient output's local logical
+coordinates (possibly negative/outside its bounds); add `self.props.output.x/y`
+to obtain the same global point in each VM. `event.source_output` names the
+originating output. Gate one-output side effects such as opening a context menu
+on `event.source_output == self.props.output.name`. Keyed control actions and
+idle hover/motion are not broadcast, nor are gestures shared with other apps or
+layers that did not opt in. No Lua objects or persistent state cross VM boundaries.
+
+The installed root uses this transport for desktop selection: Lua owns geometry,
+an inert canvas clips the global fill/border on each output, and `:animate` fades
+it with the native clock on release. A new drag gets a fresh animation identity;
+no repeating Lua timers or disk-backed gesture state are needed.
 
 Unknown fields and invalid geometry fail before native creation. Layout, focus,
 layer, margins, input, and reserved space reconcile on the same native window.

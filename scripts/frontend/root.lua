@@ -47,6 +47,9 @@ function app:view(props)
         riced.layer("layers/background.lua", {
             output = props.output,
             wallpaper = props.wallpaper,
+            selection = self.selection,
+            selecting = self.selecting,
+            fade_ms = props.selection_fade_ms,
         }),
     }
     for _, name in ipairs(riced.list("data/bars")) do
@@ -66,6 +69,27 @@ function app:view(props)
 end
 
 function app:actions(event)
+    if event.layer == "background" then
+        local output = self.props.output
+        if event.type == "press" and event.button == "left" then
+            self.menu = nil
+            self.selection_id = (self.selection_id or 0) + 1
+            local x, y = event.x + output.x, event.y + output.y
+            self.selection = { id = self.selection_id, start_x = x, start_y = y,
+                x = x, y = y, width = 0, height = 0 }
+            self.selecting = true
+        elseif self.selecting then
+            local released = event.type == "release" and event.button == "left"
+            if (event.type == "move" or released) and event.x and event.y then
+                local s = self.selection
+                local x, y = event.x + output.x, event.y + output.y
+                s.x, s.y = math.min(s.start_x, x), math.min(s.start_y, y)
+                s.width, s.height = math.abs(x - s.start_x), math.abs(y - s.start_y)
+            end
+            if released or event.type == "cancel" then self.selecting = false end
+        end
+    end
+    if not event.key then return end
     if event.key == "settings" then
         return shell.open_settings()
     end

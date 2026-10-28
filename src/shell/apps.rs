@@ -692,6 +692,11 @@ fn refresh_target(
             // surface to the established Rust host.
             instance.props["bar_host"] = json!(plots.config.bar_host);
             instance.props["background_disabled"] = json!(plots.config.background.disabled);
+            instance.props["selection_fade_ms"] = json!(if plots.config.animation.reduced_motion {
+                0
+            } else {
+                plots.config.animation.speed.duration().as_millis() as u64
+            });
             // The configured wallpaper source for this output. The layer draws
             // it immediately, so a background is visible before (and without) a
             // successful bake; the baked tile still draws over it.
@@ -1167,6 +1172,93 @@ pub(crate) fn forget(plots: &mut Plots, surface: window::Id) {
     plots.animation.motion = motion;
     plots.apps = state;
 }
+fn shared_pointer_action(
+    plots: &mut Plots,
+    surface: window::Id,
+    action: &Action,
+) -> Option<Task<Plant>> {
+    if !action.key.is_empty()
+        || !matches!(&action.event, crate::ui::action::Event::Mouse { state, origin, .. }
+        if state == "press" || state == "cancel" || origin.is_some())
+    {
+        return None;
+    }
+    let ((_, app), instance) = plots.apps.instances.iter().find(|(_, instance)| {
+        instance
+            .root_by_surface(surface)
+            .is_some_and(|root| root.root.surface.shared_pointer_events)
+    })?;
+    let layer = instance
+        .roots
+        .iter()
+        .find_map(|(id, root)| (root.surface == Some(surface)).then(|| id.clone()))?;
+    let app = app.clone();
+    let source_output = instance.output_name.clone();
+    let source_origin = iced::Point::new(
+        instance.context["output"]["x"].as_f64()? as f32,
+        instance.context["output"]["y"].as_f64()? as f32,
+    );
+    let mut state = std::mem::take(&mut plots.apps);
+    let mut results = Vec::new();
+    let mut surfaces = Vec::new();
+    for ((_, owner), instance) in &mut state.instances {
+        if owner != &app
+            || !instance
+                .roots
+                .get(&layer)
+                .is_some_and(|root| root.root.surface.shared_pointer_events)
+        {
+            continue;
+        }
+        let (Some(x), Some(y)) = (
+            instance.context["output"]["x"].as_f64(),
+            instance.context["output"]["y"].as_f64(),
+        ) else {
+            continue;
+        };
+        let offset = source_origin - iced::Point::new(x as f32, y as f32);
+        let mut action = action.clone();
+        if let crate::ui::action::Event::Mouse {
+            position,
+            origin,
+            bounds,
+            ..
+        } = &mut action.event
+        {
+            *position = position.map(|point| point + offset);
+            *origin = origin.map(|point| point + offset);
+            *bounds = bounds.map(|rect| rect + offset);
+        }
+        if let Some(runtime) = &mut instance.runtime {
+            let mut context = instance.context.clone();
+            context["layer"] = json!(layer);
+            context["source_output"] = json!(source_output);
+            results.push(runtime.app_event(
+                &services(plots),
+                &instance.output_name,
+                &context,
+                &instance.props,
+                AppEvent::Action(&action),
+            ));
+        }
+        surfaces.extend(instance.roots.get(&layer).and_then(|root| root.surface));
+    }
+    plots.apps = state;
+    let mut tasks = Vec::new();
+    for result in results {
+        match result {
+            Ok(value) => tasks.push(super::actions::command_from_action(&value, plots)),
+            Err(error) => eprintln!("app shared pointer: {error}"),
+        }
+    }
+    tasks.extend(
+        surfaces
+            .into_iter()
+            .map(|surface| refresh_surface(plots, surface)),
+    );
+    Some(Task::batch(tasks))
+}
+
 pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
     match message {
         AppMessage::DismissPopup { surface, reason } => dismiss_popup(plots, surface, reason, true),
@@ -1311,6 +1403,9 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
         AppMessage::Action { surface, action } => {
             if action.is_animation_frame() {
                 return Task::none();
+            }
+            if let Some(task) = shared_pointer_action(plots, surface, &action) {
+                return task;
             }
             let mut state = std::mem::take(&mut plots.apps);
             let result =

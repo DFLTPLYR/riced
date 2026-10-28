@@ -1013,6 +1013,12 @@ impl LuaRuntime {
                         && let Some(layer) = context.get("layer").and_then(|value| value.as_str())
                     {
                         event.raw_set("layer", layer)?;
+                        if let Some(source) = context
+                            .get("source_output")
+                            .and_then(|value| value.as_str())
+                        {
+                            event.raw_set("source_output", source)?;
+                        }
                     }
                     arguments
                 }

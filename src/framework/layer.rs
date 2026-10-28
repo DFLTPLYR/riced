@@ -38,6 +38,7 @@ pub(crate) struct Surface {
     pub keyboard: String,
     pub input: String,
     pub pointer_events: bool,
+    pub shared_pointer_events: bool,
 }
 impl Default for Surface {
     fn default() -> Self {
@@ -52,11 +53,25 @@ impl Default for Surface {
             keyboard: "none".into(),
             input: "all".into(),
             pointer_events: false,
+            shared_pointer_events: false,
         }
     }
 }
 impl Surface {
     fn validate(&self) -> Result<(), String> {
+        if self.shared_pointer_events
+            && (!self.pointer_events
+                || self.exclusive_zone != -1
+                || !(self.anchors.top
+                    && self.anchors.right
+                    && self.anchors.bottom
+                    && self.anchors.left)
+                || self.width.is_some()
+                || self.height.is_some()
+                || self.margin != Margin::default())
+        {
+            return Err("shared_pointer_events requires pointer_events, exclusive_zone=-1 and a full-output layer without margins or fixed dimensions".into());
+        }
         if self.id.trim().is_empty() {
             return Err("layer.id must not be empty".into());
         }
@@ -337,6 +352,53 @@ pub(crate) fn install(lua: &Lua, iced: &Table) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_pointer_surfaces_require_full_output_geometry() {
+        let surface = Surface {
+            pointer_events: true,
+            shared_pointer_events: true,
+            exclusive_zone: -1,
+            anchors: Anchors {
+                top: true,
+                right: true,
+                bottom: true,
+                left: true,
+            },
+            ..Default::default()
+        };
+        assert!(surface.validate().is_ok());
+        for invalid in [
+            Surface {
+                pointer_events: false,
+                ..surface.clone()
+            },
+            Surface {
+                exclusive_zone: 0,
+                ..surface.clone()
+            },
+            Surface {
+                width: Some(100),
+                ..surface.clone()
+            },
+            Surface {
+                margin: Margin {
+                    left: 1,
+                    ..Default::default()
+                },
+                ..surface.clone()
+            },
+            Surface {
+                anchors: Anchors {
+                    top: true,
+                    ..Default::default()
+                },
+                ..surface
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+    }
+
     #[test]
     fn surface_accepts_measured_input_regions_but_rejects_unknown_modes() {
         let mut surface = Surface {

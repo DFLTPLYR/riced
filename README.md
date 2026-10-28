@@ -11,9 +11,9 @@ reviews, and tests every change — prompts in, review before merge.
 ## Features
 
 - **Layer shell daemon** (`daemon` + `exwlshell`) — one `Background` (`Layer::Background`, `Anchor::all`, `Size::FILL`) + one `Top` bar (`50px`, `Anchor::Top`, `exclusive_zone`) per output via `OutputInsert`
-- **Global selectionRect** — `QtObject { startPoint, selecting, x/y/width/height, onSelectingChanged { if(!selecting) width=0 height=0 startPoint=null } }` → `SelectionRect` `src/app/app.rs:17` with `set_selecting` `150ms InOutQuad` fade, `to_global` `mapToGlobal` via `OutputInfo.logical_position` `src/app/app.rs:212`
-- **Cross-monitor drag** — global `x/y/w/h` clipped per `panel.screen` `min(x+w,sx+sw)-max(x,sx)` `src/app/app.rs:267` + `Utils.intersects` `src/app/app.rs:225`, `Scope::All` on `SelectionTick` `src/app/app.rs:591`
-- **Smooth input** — `hoverEnabled: selecting` via `AtomicBool SELECTING` `src/app/app.rs:105`, `CursorMoved` throttled at source `16ms ~60fps` `src/app/app.rs:107` + `16ms` in `update` `src/app/app.rs:490`, filtered to `Event::Mouse` only (drops `RedrawRequested` flood), `SelectionTick` drives `All` redraw; `canvas` `SelCanvas` `src/app/app.rs:52` single `fill/stroke` vs `container+stack` layout
+- **Lua desktop selection** — `scripts/frontend/root.lua` owns the left-drag state and global rectangle; `layers/background.lua` draws its themed fill/border and declares the release fade. The native animation clock applies the configured speed/reduced-motion setting without Lua frame timers.
+- **Cross-monitor drag** — opt-in shared pointer gestures keep the app's output-local VMs in sync using logical coordinates. Each canvas clips the full rectangle, without adding borders at monitor seams. The legacy Rust background remains a fallback for projects without Lua-owned backgrounds.
+- **Smooth input** — pointer moves coalesce to one sample per frame, including outside the originating surface during a drag. Child controls consume their own presses before background selection; a fresh drag resets the previous fade.
 - **Context menu** — `Right` `ButtonPressed` `src/app/app.rs:525` `contextMenu {x,y,open}` `src/app/app.rs:42`, clipped to screen, `Left` press closes
 
 ## Experimental framework apps

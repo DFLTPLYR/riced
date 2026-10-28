@@ -8,6 +8,148 @@ struct Fixture {
 }
 
 #[test]
+fn shared_pointer_delivery_translates_logical_coordinates_and_is_app_scoped() {
+    let fixture = Fixture::new(
+        r#"
+        return {
+            actions=function(self, event)
+                self.seen=string.format('%s:%g:%g', event.source_output or '', event.x, event.y)
+            end,
+            view=function(self) return iced.layer({id='background',layer='background',
+                anchors={top=true,right=true,bottom=true,left=true},exclusive_zone=-1,pointer_events=true,shared_pointer_events=self.props.shared ~= false,
+                content=iced.text(self.seen or 'untouched')}) end,
+        }
+    "#,
+    );
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let mut state = State::default();
+    for (output, owner, x, y) in [
+        (1, "bar", -1280, 100),
+        (2, "bar", 0, 0),
+        (3, "other", 1920, 0),
+        (4, "bar", 0, 800),
+    ] {
+        let mut app = instance(&format!("DP-{output}"));
+        app.props["shared"] = json!(output != 4);
+        app.props["output"] =
+            json!({"name":format!("DP-{output}"),"x":x,"y":y,"width":1280,"height":720});
+        app.context["output"] = app.props["output"].clone();
+        fixture.render(&mut app, false).unwrap();
+        state
+            .instances
+            .insert((OutputId(output), owner.into()), app);
+    }
+    reconcile(&mut plots, &mut state, &mut Vec::new());
+    let surface = state.instances[&(OutputId(1), "bar".into())]
+        .surface()
+        .unwrap();
+    plots.apps = state;
+    let _ = update(
+        &mut plots,
+        AppMessage::Action {
+            surface,
+            action: Action {
+                key: String::new(),
+                value: None,
+                event: crate::ui::action::Event::Mouse {
+                    state: "move".into(),
+                    button: None,
+                    position: Some(iced::Point::new(1500.0, -50.0)),
+                    origin: Some(iced::Point::new(20.0, 10.0)),
+                    bounds: None,
+                },
+            },
+        },
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(1), "bar".into())]),
+        "DP-1:1500:-50"
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(2), "bar".into())]),
+        "DP-1:220:50"
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(3), "other".into())]),
+        "untouched"
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(4), "bar".into())]),
+        "untouched"
+    );
+    let _ = update(
+        &mut plots,
+        AppMessage::Action {
+            surface,
+            action: Action {
+                key: String::new(),
+                value: None,
+                event: crate::ui::action::Event::Mouse {
+                    state: "move".into(),
+                    button: None,
+                    position: Some(iced::Point::new(50.0, 10.0)),
+                    origin: None,
+                    bounds: None,
+                },
+            },
+        },
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(1), "bar".into())]),
+        ":50:10"
+    );
+    assert_eq!(
+        text(&plots.apps.instances[&(OutputId(2), "bar".into())]),
+        "DP-1:220:50",
+        "idle motion must not rebuild other outputs"
+    );
+}
+
+#[test]
+fn bundled_selection_uses_global_geometry_and_only_background_left_drags() {
+    let lua = crate::lua::widgets::new_widget_lua().unwrap();
+    lua.load("require = function() return {} end")
+        .exec()
+        .unwrap();
+    let app: mlua::Table = lua
+        .load(include_str!("../../../scripts/frontend/root.lua"))
+        .eval()
+        .unwrap();
+    lua.globals().set("app", app).unwrap();
+    lua.load(
+        r#"
+        app.props = {output={name='left', x=-1280, y=100, width=1280, height=720}}
+        app:actions({type='press',layer='bar-top',button='left',x=20,y=30})
+        assert(not app.selection)
+        app:actions({type='press',layer='background',button='right',x=20,y=30})
+        assert(not app.selection)
+        app.menu = {x=20,y=30}
+        app:actions({type='press',layer='background',button='left',x=900,y=300})
+        assert(app.selecting and not app.menu)
+        app:actions({type='move',layer='background',x=200,y=50})
+        local s = app.selection
+        assert(s.x == -1080 and s.y == 150 and s.width == 700 and s.height == 250)
+        app:actions({type='exit',layer='background'})
+        assert(app.selecting, 'cross-output motion must not cancel selection')
+        app:actions({type='move',layer='background',x=1500,y=-50})
+        assert(s.x == -380 and s.y == 50 and s.width == 600 and s.height == 350)
+        app:actions({type='release',layer='background',button='right'})
+        assert(app.selecting)
+        app:actions({type='release',layer='background',button='left',x=1550,y=-100})
+        assert(not app.selecting and s.width == 650 and s.height == 400)
+        local previous = s.id
+        app:actions({type='press',layer='background',button='left',x=10,y=10})
+        assert(app.selecting and app.selection.id ~= previous)
+        app:actions({type='cancel',layer='background'})
+        assert(not app.selecting)
+    "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
 fn root_state_module_registers_ipc_and_failed_reload_keeps_handlers() {
     let directory = tempfile::tempdir_in("/tmp/opencode").unwrap();
     std::fs::write(
@@ -96,6 +238,74 @@ fn installed_root_declares_layers_and_dispatches_settings() {
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("add"));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("remove"));
+
+    // The bundled background renders global selection geometry without seam borders.
+    app.context["output"] = json!({"name":"DP-1","x":-1280,"y":100,"width":1280,"height":720});
+    app.props["output"] = app.context["output"].clone();
+    app.props["selection_fade_ms"] = json!(150);
+    for (kind, point) in [
+        ("press", iced::Point::new(100.0, 100.0)),
+        ("move", iced::Point::new(-50.0, 20.0)),
+        ("release", iced::Point::new(-50.0, 20.0)),
+    ] {
+        let action = Action {
+            key: String::new(),
+            value: None,
+            event: crate::ui::action::Event::Mouse {
+                state: kind.into(),
+                button: (kind != "move").then(|| "left".into()),
+                position: Some(point),
+                origin: None,
+                bounds: None,
+            },
+        };
+        let mut context = app.context.clone();
+        context["layer"] = json!("background");
+        with_services(|services| {
+            app.runtime.as_mut().unwrap().app_event(
+                services,
+                &app.output_name,
+                &context,
+                &app.props,
+                AppEvent::Action(&action),
+            )
+        })
+        .unwrap();
+        render(&mut app);
+        if kind == "press" {
+            continue;
+        }
+        let crate::ui::node::WidgetNode::Stack { children, .. } =
+            &app.roots["background"].root.content
+        else {
+            panic!("background stack")
+        };
+        let (spec, child) = children
+            .iter()
+            .find_map(|node| match node {
+                crate::ui::node::WidgetNode::Animated { spec, child } => Some((spec, child)),
+                _ => None,
+            })
+            .expect("selection animation");
+        assert_eq!(
+            spec.properties[2].as_ref().unwrap().to,
+            if kind == "move" { 1.0 } else { 0.0 }
+        );
+        let crate::ui::node::WidgetNode::Canvas { drawing, .. } = child.as_ref() else {
+            panic!("selection canvas")
+        };
+        assert_eq!(
+            (
+                drawing.rects[0].x,
+                drawing.rects[0].y,
+                drawing.rects[0].width,
+                drawing.rects[0].height
+            ),
+            (-50.0, 20.0, 150.0, 80.0)
+        );
+        assert_eq!(drawing.lines[0].points[0], (-50.0, 20.0));
+        crate::ui::build::build_node(child, 13.0, None).unwrap();
+    }
 
     // One Settings: the app asks the daemon for the real window.
     let value = with_services(|services| {
