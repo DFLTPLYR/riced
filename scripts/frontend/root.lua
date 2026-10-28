@@ -27,19 +27,20 @@ function app:mount(context)
 end
 
 function app:add_bar(options)
-    local path = "data/bars/" .. options.anchor .. ".lua"
+    local path = "data/bars/" .. state.bar_name(options)
     if pcall(riced.read, path) then
         error("that edge already has a bar")
     end
     riced.write(path, {
         edge = options.anchor,
+        output = options.output,
         thickness = options.thickness or 34,
         slots = default_slots(options.anchor),
     })
 end
 
 function app:remove_bar(options)
-    riced.remove("data/bars/" .. options.anchor .. ".lua")
+    riced.remove("data/bars/" .. state.bar_name(options))
 end
 
 function app:view(props)
@@ -59,7 +60,8 @@ function app:view(props)
     }
     for _, name in ipairs(riced.list("data/bars")) do
         local ok, bar = pcall(riced.read, "data/bars/" .. name)
-        if ok and type(bar) == "table" then
+        if ok and type(bar) == "table"
+            and (not bar.output or bar.output == "" or bar.output == props.output.name) then
             local stem = name:gsub("%.lua$", "")
             layers[#layers + 1] = riced.layer("layers/bar.lua", {
                 id = "bar-" .. stem,

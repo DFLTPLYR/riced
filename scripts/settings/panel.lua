@@ -75,7 +75,8 @@ function app:view(props)
         if bar then
             local name = stem(file)
             table.insert(rows, heading(name .. " · " .. (bar.edge or "top")
-                .. " · " .. tostring(bar.thickness or 34) .. "px"))
+                .. " · " .. tostring(bar.thickness or 34) .. "px"
+                .. " · " .. ((bar.output and bar.output ~= "") and bar.output or "All outputs")))
             table.insert(rows, iced.row({
                 button("-", "settings:lua:thickness:" .. name .. ":-2"),
                 button("+", "settings:lua:thickness:" .. name .. ":2"),

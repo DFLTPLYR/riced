@@ -2,6 +2,16 @@
 -- the next `view` declares the matching layers. No host bar command exists.
 local state = {}
 
+function state.bar_name(options)
+    local name = options.anchor
+    if options.output and options.output ~= "" then
+        name = name .. "-output-" .. options.output:gsub(".", function(byte)
+            return string.format("%02x", string.byte(byte))
+        end)
+    end
+    return name .. ".lua"
+end
+
 local function bar_options(args, adding)
     local options = {}
     for i = 1, #args, 2 do
@@ -15,6 +25,7 @@ local function bar_options(args, adding)
         options[key:sub(3)] = value
     end
     if not options.anchor then error("--anchor is required") end
+    if options.output == "" then error("--output must not be empty") end
     if not ({ top = true, bottom = true, left = true, right = true })[options.anchor] then
         error("--anchor must be top, bottom, left, or right")
     end

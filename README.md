@@ -66,7 +66,35 @@ riced ipc remove --anchor bottom --output DP-1
 Omit `--output` to address an all-output bar. Bars are plain data files under
 `data/bars/`; `root.lua` lists that directory and declares one layer per file.
 **Settings → Panel** lists the same files and edits their slots and widgets,
-writing the files back. Add/remove IPC writes or removes `data/bars/<edge>.lua`.
+writing the files back. Add/remove IPC without `--output` writes or removes
+`data/bars/<edge>.lua` (all outputs). With `--output DP-1`, the filename is
+`<edge>-output-<hex-encoded-output>.lua` and the original name is saved as `output`.
+For example, `riced ipc add --anchor bottom --output DP-1 --thickness 28` and
+`riced ipc remove --anchor bottom --output DP-1` affect only that output's bar.
+Targeted removal never removes an all-output bar. Disconnected outputs keep their
+files for reconnect; Panel lists and edits both kinds without changing their target.
+
+Existing installations keep their Lua files: startup and `riced init --repair`
+never overwrite existing files. To apply these bundled fixes, merge only these
+changes from the matching release into your project (back up your files first):
+
+- `root.lua`: guard a missing `event.key`, then use
+  `local target, key = event.key:match("^invoke:(%d+):(.*)$")` without `and`.
+- `state.lua`: copy `state.bar_name` and the empty-output validation from
+  `scripts/frontend/state.lua`. In `root.lua`, use `state.bar_name(options)` for
+  both add/remove paths, save `output = options.output`, and filter bars in `view`
+  by `bar.output` against `props.output.name` (missing/empty means all outputs).
+- If you have a custom `settings/panel.lua`, merge the output-name label from
+  `scripts/settings/panel.lua`; its existing read-modify-write edits preserve
+  the `output` field. Existing `<edge>.lua` bar files need no migration.
+
+To enable Lua desktop selection in an existing root project, rebuild/restart the
+daemon, then merge the background-pointer branch of `app:actions` and the
+`selection`/`selecting`/`fade_ms` props from `scripts/frontend/root.lua`. Merge the
+selection canvas and `shared_pointer_events = true` from
+`scripts/frontend/layers/background.lua` into your `layers/background.lua`.
+Preserve your other handlers and styling; startup and repair will not replace
+these user-owned files. Upgrade the binary before adding the new layer field.
 There is no host bar command and no hardcoded bar list.
 
 ```sh

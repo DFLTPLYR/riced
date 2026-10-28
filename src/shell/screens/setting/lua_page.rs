@@ -223,5 +223,27 @@ mod tests {
             .expect("add widget");
         let bar = crate::config::lua::read_file(&root.path().join("data/bars/top.lua")).unwrap();
         assert_eq!(bar["slots"][0]["widgets"][1], "system");
+
+        let target = root.path().join("data/bars/top-output-44502d31.lua");
+        std::fs::write(
+            &target,
+            "return { edge='top', output='DP-1', thickness=34, slots={} }",
+        )
+        .unwrap();
+        let mut loaded = Vec::new();
+        texts(&page.view(&plots).unwrap(), &mut loaded);
+        assert!(
+            loaded.iter().any(|text| text.contains("DP-1")),
+            "{loaded:?}"
+        );
+        page.action(&plots, "settings:lua:thickness:top-output-44502d31:2")
+            .unwrap();
+        let bar = crate::config::lua::read_file(&target).unwrap();
+        assert_eq!(bar["output"], "DP-1");
+        assert_eq!(bar["thickness"], 36);
+        page.action(&plots, "settings:lua:remove-bar:top-output-44502d31")
+            .unwrap();
+        assert!(!target.exists());
+        assert!(root.path().join("data/bars/top.lua").exists());
     }
 }

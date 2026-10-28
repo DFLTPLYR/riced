@@ -370,16 +370,20 @@ A bar placement is app-owned Lua data, not a host command:
   `riced.widget(name, props, id)`. Each widget keeps its own VM, services,
   popups, and `actions`; the layer only decides where it sits.
 - Give each bar a **stable identity** — one bar per (output, edge) — so removing
-  one never renumbers the others. The installed `bars.lua` uses
-  `edge`/`thickness`/`slots`, where each slot is
+  one never renumbers the others. Bundled bars without a target keep
+  `data/bars/<edge>.lua` and appear on all outputs. Targeted bars use
+  `<edge>-output-<hex-encoded-name>.lua`, retain the original connector in
+  `output`, and appear only there. Add and remove IPC accept `--output NAME`;
+  removal never falls back to the all-output file. Disconnected targets keep
+  their files. The data uses `edge`/`thickness`/`slots`, where each slot is
   `{ align = "start"|"center"|"end", widgets = { "name", ... } }` and
   `layers/bar.lua` iterates the ordered list. A layer should still write
   `bar.edge or "top"` so a malformed document cannot take the frontend down.
 - Widget popups are declared by the same layer with `riced.widget_popup({x, y})`;
   the host renders the active widget's popup content there.
-- Settings → Panel is a persistent Lua page: it keeps its VM, owns `bars.lua`
-  through `riced.file`, and receives its own actions. The host pumps managed
-  file work while a Settings window is open.
+- Settings → Panel is a persistent Lua page: it keeps its VM, lists and edits
+  these same files, shows their output names, and preserves the target on edits.
+  Its Add buttons still create all-output bars; no output-picker UI is required.
 
 An action handler can therefore offer "add a bar" and "remove this bar" by
 editing the app's own file:

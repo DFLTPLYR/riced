@@ -240,6 +240,71 @@ fn deferred_reclamation_collects_discarded_framework_notification_items() {
 }
 
 #[test]
+fn bundled_bars_are_scoped_to_safe_output_identities() {
+    let lua = mlua::Lua::new();
+    lua.load(r#"
+        files = { ['data/bars/top.lua'] = {edge='top'} }
+        riced = {
+            ipc = function(handlers) ipc = handlers end,
+            read = function(path) return assert(files[path], 'missing') end,
+            write = function(path, data) files[path] = data end,
+            remove = function(path) files[path] = nil end,
+            list = function() local names={} for path in pairs(files) do names[#names+1]=path:sub(11) end return names end,
+            layer = function(path, props) return props end,
+        }
+    "#).exec().unwrap();
+    let state: mlua::Table = lua
+        .load(include_str!("../../../scripts/frontend/state.lua"))
+        .eval()
+        .unwrap();
+    lua.globals().set("state", state).unwrap();
+    lua.load("require = function() return state end")
+        .exec()
+        .unwrap();
+    let app: mlua::Table = lua
+        .load(include_str!("../../../scripts/frontend/root.lua"))
+        .eval()
+        .unwrap();
+    lua.globals().set("app", app).unwrap();
+    lua.load(
+        r#"
+        local odd = '../Display: with spaces/é'
+        ipc.add(app, {'--anchor','top','--output','DP-1'})
+        ipc.add(app, {'--anchor','top','--output',odd})
+        local count=0
+        for path, bar in pairs(files) do
+            count=count+1
+            assert(path:match('^data/bars/[%w%-]+%.lua$'), path)
+            if bar.output then assert(bar.output == 'DP-1' or bar.output == odd) end
+        end
+        assert(count == 3, 'targeted bars must not collide with all-output bars')
+        assert(not pcall(ipc.add, app, {'--anchor','top','--output','DP-1'}))
+        local function visible(output)
+            local count=0
+            for _, layer in ipairs(app:view({output={name=output}})) do
+                if layer.id then count=count+1 end
+            end
+            return count
+        end
+        assert(visible('DP-1') == 2)
+        assert(visible('DP-2') == 1)
+        assert(visible(odd) == 2)
+        assert(visible('DP-1') == 2, 'reconnect restores saved bar')
+        ipc.remove(app, {'--anchor','top','--output','DP-2'})
+        assert(files['data/bars/top.lua'], 'targeted miss must not delete shared bar')
+        ipc.remove(app, {'--anchor','top','--output','DP-1'})
+        assert(visible('DP-1') == 1)
+        assert(visible(odd) == 2)
+        ipc.remove(app, {'--anchor','top'})
+        assert(visible('DP-2') == 0)
+        assert(visible(odd) == 1)
+    "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
 fn bundled_root_preserves_notification_action_keys() {
     let lua = crate::lua::widgets::new_widget_lua().unwrap();
     lua.load("require = function() return {} end")
