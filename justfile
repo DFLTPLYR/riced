@@ -30,6 +30,7 @@ build:
         export RUSTFLAGS="-C link-args=$rpaths"
         cargo build --release
     BUILD
+    install -Dm755 "target/release/riced" "{{ home_directory() }}/.local/bin/riced"
 
 # Build release and install to ~/.local/bin (already on PATH)
 install: build
