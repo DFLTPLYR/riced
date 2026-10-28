@@ -1129,9 +1129,7 @@ fn palette_example_renders_before_and_after_native_generation() {
 
 #[test]
 fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
-    let fixture = Fixture::new(include_str!(
-        "../../../examples/apps/background/app.lua"
-    ));
+    let fixture = Fixture::new(include_str!("../../../examples/apps/background/app.lua"));
     // The app composes its layers from its own component library.
     for (relative, source) in [
         (
@@ -1140,9 +1138,7 @@ fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
         ),
         (
             "layers/wallpaper.lua",
-            include_str!(
-                "../../../examples/apps/background/components/layers/wallpaper.lua"
-            ),
+            include_str!("../../../examples/apps/background/components/layers/wallpaper.lua"),
         ),
         (
             "layers/bar.lua",
