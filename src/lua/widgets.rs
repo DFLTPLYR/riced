@@ -271,6 +271,9 @@ pub(crate) struct WidgetState {
     /// Placement-level hover flags by placement id. Placement ids are
     /// process-unique, so one map covers every bar.
     pub hovered: HashMap<String, bool>,
+    /// Listview row hover sets by placement id. Each entry holds
+    /// `(list id, item key)` pairs for `item.hovered`.
+    pub item_hovered: HashMap<String, crate::ui::hover::HoverSet>,
 }
 
 impl WidgetState {
@@ -283,6 +286,51 @@ impl WidgetState {
     /// Placement ids are never reused, so this only runs on hover edits.
     pub(crate) fn retain_hovered(&mut self, live: &HashSet<String>) {
         self.hovered.retain(|id, _| live.contains(id));
+        self.item_hovered.retain(|id, _| live.contains(id));
+    }
+
+    /// Update one row hover set for `id` and clear every other row and every
+    /// other widget: the pointer is single. Returns the widget ids whose row
+    /// state changed, for targeted re-rendering.
+    pub(crate) fn set_item_hovered(
+        &mut self,
+        id: &str,
+        list: &str,
+        key: &str,
+        hovered: bool,
+    ) -> Vec<String> {
+        let mut dirty = Vec::new();
+        if hovered {
+            for (other, set) in self.item_hovered.iter_mut() {
+                if other == id {
+                    let keep = (list.to_owned(), key.to_owned());
+                    if set.iter().any(|entry| entry != &keep) {
+                        set.retain(|entry| entry == &keep);
+                        dirty.push(other.clone());
+                    }
+                } else if !set.is_empty() {
+                    set.clear();
+                    dirty.push(other.clone());
+                }
+            }
+        }
+        let owned = (list.to_owned(), key.to_owned());
+        let changed = if hovered {
+            self.item_hovered
+                .entry(id.to_owned())
+                .or_default()
+                .insert(owned)
+        } else {
+            self.item_hovered
+                .get_mut(id)
+                .is_some_and(|set| set.remove(&owned))
+        };
+        if changed {
+            dirty.push(id.to_owned());
+        }
+        dirty.sort();
+        dirty.dedup();
+        dirty
     }
 
     /// Invalidate every instance using a changed path. Unreadable paths retain
@@ -476,6 +524,8 @@ impl WidgetState {
         self.last_run.clear();
         self.errors.clear();
         self.revisions.clear();
+        self.hovered.clear();
+        self.item_hovered.clear();
     }
 }
 

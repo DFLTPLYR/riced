@@ -130,8 +130,11 @@ pub enum WidgetEvent {
     /// the origin bar so `on_action` sees that bar's `bar.output`.
     CellAction(Id, String, crate::ui::action::Action),
     /// Pointer entered or left one widget placement: republish
-    /// `self.hovered` and re-render that placement only. Never invokes Lua.
+    /// `self.hovered` and re-render that placement only.
     CellHover(Id, String, bool),
+    /// Pointer entered or left one bar listview row: re-parse that
+    /// placement with the row's `item.hovered` set, then re-render it.
+    CellRowHover(Id, String, String, String, bool),
     /// Pointer entered or left one popup listview row: re-parse that popup
     /// with the row's `item.hovered` set. Never invokes Lua.
     PopupHover(Id, String, String, bool),

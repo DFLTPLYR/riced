@@ -76,6 +76,17 @@ fn render_slot_widgets(
                     action,
                 )))
             });
+            let hover_id = id.clone();
+            let hover: crate::ui::action::HoverSender =
+                std::sync::Arc::new(move |list, key, entered| {
+                    Plant::TopPlot(TopEvent::Widget(WidgetEvent::CellRowHover(
+                        bar,
+                        hover_id.clone(),
+                        list,
+                        key,
+                        entered,
+                    )))
+                });
             let built = match node {
                 _ if context.lists.display(&scope, node).1 => build_with_lists(
                     node,
@@ -84,7 +95,7 @@ fn render_slot_widgets(
                     Some(message.clone()),
                     context.motion,
                     context.lists,
-                    None,
+                    Some(hover.clone()),
                 ),
                 WidgetNode::Row {
                     children,
@@ -108,6 +119,7 @@ fn render_slot_widgets(
                     message.clone(),
                     context.motion,
                     context.lists,
+                    Some(hover.clone()),
                 ),
                 _ => build_with_lists(
                     node,
@@ -116,7 +128,7 @@ fn render_slot_widgets(
                     Some(message),
                     context.motion,
                     context.lists,
-                    None,
+                    Some(hover),
                 ),
             };
             if let Ok(element) = built {

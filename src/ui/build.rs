@@ -103,6 +103,28 @@ pub(crate) fn build_node(
 ) -> Result<Element<'static, Plant>, String> {
     build_node_opacity(node, size, button_msg, 1.0)
 }
+
+/// [`build_node`] with listview row hover reporting. Embedded `riced.widget`
+/// leaves use this so `item.hovered` inside their delegates follows the
+/// pointer, exactly like listviews owned by a framework layer.
+pub(crate) fn build_node_hover(
+    node: &WidgetNode,
+    size: f32,
+    button_msg: Option<Sender>,
+    hover: Option<crate::ui::action::HoverSender>,
+) -> Result<Element<'static, Plant>, String> {
+    let interactive = button_msg.is_some();
+    realize_aligned(
+        node,
+        size,
+        button_msg.unwrap_or_else(|| std::sync::Arc::new(|_| Plant::Tend)),
+        interactive,
+        1.0,
+        Align::default(),
+        &mut unavailable,
+        hover,
+    )
+}
 pub(crate) fn build_node_opacity(
     node: &WidgetNode,
     size: f32,
@@ -128,6 +150,7 @@ pub(crate) fn build_node_opacity_aligned(
         opacity,
         align,
         &mut unavailable,
+        None,
     )
 }
 
@@ -149,6 +172,7 @@ pub(crate) fn build_node_opacity_aligned_with_native(
         opacity,
         align,
         native,
+        None,
     )
 }
 
@@ -189,6 +213,7 @@ pub(crate) fn realize_with_native<M: Clone + 'static>(
         opacity,
         Align::default(),
         native,
+        None,
     )
 }
 
@@ -229,9 +254,11 @@ pub(crate) fn realize<M: Clone + 'static>(
         opacity,
         Align::default(),
         &mut unavailable,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn realize_aligned<M: Clone + 'static>(
     node: &WidgetNode,
     size: f32,
@@ -240,6 +267,7 @@ fn realize_aligned<M: Clone + 'static>(
     opacity: f32,
     align: Align,
     native: NativeSlots<'_, M>,
+    hover: Option<crate::ui::action::HoverSender<M>>,
 ) -> Result<Element<'static, M>, String> {
     match node {
         WidgetNode::Native { id, args } => native(id, args.as_ref()),
@@ -253,6 +281,7 @@ fn realize_aligned<M: Clone + 'static>(
                     opacity * values[2],
                     align,
                     &mut *native,
+                    hover.clone(),
                 )
             })
         }
@@ -269,6 +298,7 @@ fn realize_aligned<M: Clone + 'static>(
                 opacity,
                 Align::default(),
                 &mut *native,
+                hover.clone(),
             )?,
             *placement,
             *margin,
@@ -282,6 +312,7 @@ fn realize_aligned<M: Clone + 'static>(
                 opacity,
                 Align::default(),
                 &mut *native,
+                hover.clone(),
             )?;
             if interactive {
                 Ok(super::widgets::input::on_press(
@@ -315,6 +346,7 @@ fn realize_aligned<M: Clone + 'static>(
                     y: *align_y,
                 },
                 &mut *native,
+                hover.clone(),
             )
         }
         WidgetNode::Raster {
@@ -330,6 +362,7 @@ fn realize_aligned<M: Clone + 'static>(
                 .into())
         }
         WidgetNode::ListView {
+            id,
             items,
             horizontal,
             spacing,
@@ -339,9 +372,10 @@ fn realize_aligned<M: Clone + 'static>(
         } => {
             // Realize borrowed descriptions directly instead of cloning an
             // entire subtree just to construct a temporary layout node.
+            let hover = hover.clone();
             let mut children = Vec::with_capacity(items.len());
-            for (_, child) in items {
-                children.push(realize_aligned(
+            for (key, child) in items {
+                let mut element = realize_aligned(
                     child,
                     size,
                     button_msg.clone(),
@@ -349,7 +383,18 @@ fn realize_aligned<M: Clone + 'static>(
                     opacity,
                     Align::default(),
                     &mut *native,
-                )?);
+                    hover.clone(),
+                )?;
+                if let Some(hover) = &hover {
+                    let report = hover.clone();
+                    let list = id.clone();
+                    let item = key.clone();
+                    element = iced::widget::mouse_area(element)
+                        .on_enter(report(list.clone(), item.clone(), true))
+                        .on_exit(report(list, item, false))
+                        .into();
+                }
+                children.push(element);
             }
             if *horizontal {
                 let layout = iced::widget::Row::with_children(children)
@@ -404,6 +449,7 @@ fn realize_aligned<M: Clone + 'static>(
                 opacity,
                 Align::default(),
                 &mut *native,
+                hover.clone(),
             )?);
             if let Some(align) = align.x {
                 content = content.align_x(align);
@@ -441,6 +487,7 @@ fn realize_aligned<M: Clone + 'static>(
                 opacity,
                 Align::default(),
                 &mut *native,
+                hover.clone(),
             )?);
             if *scrollbar_hidden {
                 content = content.direction(iced::widget::scrollable::Direction::Vertical(
@@ -543,6 +590,7 @@ fn realize_aligned<M: Clone + 'static>(
                     opacity,
                     Align::default(),
                     &mut *native,
+                    hover.clone(),
                 )?);
             }
             let hints = iced::advanced::Widget::size(&row);
@@ -569,6 +617,7 @@ fn realize_aligned<M: Clone + 'static>(
                     opacity,
                     Align::default(),
                     &mut *native,
+                    hover.clone(),
                 )?);
             }
             let hints = iced::advanced::Widget::size(&column);
@@ -592,6 +641,7 @@ fn realize_aligned<M: Clone + 'static>(
                     opacity,
                     Align::default(),
                     &mut *native,
+                    hover.clone(),
                 )?);
             }
             Ok(super::widgets::masonry::masonry(
@@ -615,6 +665,7 @@ fn realize_aligned<M: Clone + 'static>(
                     opacity,
                     Align::default(),
                     &mut *native,
+                    hover.clone(),
                 )?);
             }
             let hints = iced::advanced::Widget::size(&stack);
@@ -1911,5 +1962,63 @@ mod tests {
         let node = parse_node(&value).unwrap();
         assert!(matches!(node, WidgetNode::Icon { color: Some(_), .. }));
         let _ = build_node(&node, 13.0, None).unwrap();
+    }
+
+    #[test]
+    fn embedded_listview_rows_report_hover_through_build_node_hover() {
+        use iced::advanced::{Layout, clipboard, layout, renderer::Headless, widget::Tree};
+        use iced::{Rectangle, Size};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = lua();
+        let node = parse_node(
+            &lua.load(
+                r#"return iced.listview({{id='1'},{id='2'}}):id('rows'):key('id'):delegate(function(n)
+                    return iced.text(n.hovered and 'hot' or 'cold')
+                end)"#,
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = hits.clone();
+        let hover: crate::ui::action::HoverSender =
+            std::sync::Arc::new(move |list, key, entered| {
+                recorded.lock().unwrap().push((list, key, entered));
+                Plant::Tend
+            });
+        let mut element = build_node_hover(&node, 13.0, None, Some(hover)).unwrap();
+        let mut tree = Tree::new(&element);
+        let viewport = Rectangle::with_size(Size::new(200.0, 100.0));
+        let layout = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, viewport.size()),
+        );
+        let point = layout.children()[0].bounds().center();
+        let mut messages = Vec::new();
+        let mut shell = iced::advanced::Shell::new(&mut messages);
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: point }),
+            Layout::new(&layout),
+            iced::advanced::mouse::Cursor::Available(point),
+            &renderer,
+            &mut clipboard::Null,
+            &mut shell,
+            &viewport,
+        );
+        assert!(
+            hits.lock()
+                .unwrap()
+                .contains(&("rows".to_owned(), "1".to_owned(), true)),
+            "first row never reported hover: {:?}",
+            hits.lock().unwrap()
+        );
     }
 }

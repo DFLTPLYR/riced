@@ -828,6 +828,8 @@ hovered. Entering one row clears the rest of its surface (single pointer), which
 also heals flags left stale by a closed window. No hover while untouched by the
 pointer (touch/no-pointer yields all-`false`). Native button hover/pressed
 styling stays as the default; read the flag only to style surrounding content.
+Lists rendered inside a `riced.widget` leaf report row hover the same way, so a
+widget embedded in a framework layer keeps `item.hovered` live.
 
 ## `riced.*`
 

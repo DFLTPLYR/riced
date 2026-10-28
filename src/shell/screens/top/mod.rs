@@ -332,6 +332,7 @@ fn build_anim_list(
     button_msg: crate::ui::action::Sender,
     anim_runtime: &aura_anim::core::runtime::MotionRuntime,
     lists: &WidgetLists,
+    hover: Option<crate::ui::action::HoverSender>,
 ) -> Result<Element<'static, Plant>, String> {
     // This widget's own list (absent on first paint): settled motion.
     let at_rest = crate::ui::anim::ItemMotion::settled();
@@ -353,7 +354,7 @@ fn build_anim_list(
             Some(button_msg.clone()),
             anim_runtime,
             lists,
-            None,
+            hover.clone(),
             1.0,
         )?;
         match child {
@@ -582,7 +583,7 @@ pub(crate) fn build_with_lists_opacity(
                 // host can re-parse with `item.hovered` set.
                 if live && let Some(hover) = &hover {
                     let report = hover.clone();
-                    let list = key.0.clone();
+                    let list = id.clone();
                     let item = key.1.clone();
                     element = iced::widget::mouse_area(element)
                         .on_enter(report(list.clone(), item.clone(), true))
@@ -1977,6 +1978,46 @@ impl Top {
         }
     }
 
+    /// Pointer entered or left one listview row in a bar widget: update
+    /// that placement's row hover set and re-render only affected
+    /// placements. The pointer is single, so entering one row clears every
+    /// other row state.
+    pub(crate) fn handle_cell_row_hover(
+        plots: &mut Plots,
+        placement: String,
+        list: String,
+        key: String,
+        hovered: bool,
+    ) -> Command<Plant> {
+        if Self::resolve_placement_id(plots, &placement).is_none() {
+            return Command::none();
+        }
+        let live: std::collections::HashSet<String> = plots
+            .windows
+            .tops
+            .values()
+            .flat_map(|top| top.local.widgets.iter().flatten())
+            .map(|placement| placement.id.clone())
+            .collect();
+        plots.placements.retain_hovered(&live);
+        let dirty = plots
+            .placements
+            .set_item_hovered(&placement, &list, &key, hovered);
+        if dirty.is_empty() {
+            return Command::none();
+        }
+        let gpu = Popup::gpu_usage_percent();
+        let mut repaint = false;
+        for id in dirty {
+            repaint |= Self::refresh_widget(plots, &id, gpu);
+        }
+        if repaint {
+            Command::done(Plant::TopPlot(TopEvent::Widget(WidgetEvent::Changed)))
+        } else {
+            Command::none()
+        }
+    }
+
     pub(crate) fn handle_set_opacity(
         plots: &mut Plots,
         id: window::Id,
@@ -2835,6 +2876,7 @@ mod tests {
                 msg.clone(),
                 &rt,
                 &lists,
+                None,
             )
             .expect("builds");
         }

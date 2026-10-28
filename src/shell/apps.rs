@@ -47,6 +47,17 @@ pub enum AppMessage {
         key: String,
         entered: bool,
     },
+    /// Pointer entered or left one listview row inside a `riced.widget`
+    /// embedded in a framework layer. Unlike [`AppMessage::Hover`], the row
+    /// belongs to an embedded widget's own [`crate::lua::widgets::WidgetState`],
+    /// so it updates that state and re-renders the leaf.
+    LeafHover {
+        surface: window::Id,
+        widget: String,
+        list: String,
+        key: String,
+        entered: bool,
+    },
     Measured {
         surface: window::Id,
         revision: u64,
@@ -990,14 +1001,30 @@ fn render_leaf(
     let value = widgets
         .render(&resolved, &context)
         .map_err(|error| error.to_string())?;
-    let node = crate::ui::decode::parse_node(&value)?;
+    let hover = widgets
+        .item_hovered
+        .get(&resolved.id)
+        .cloned()
+        .unwrap_or_default();
+    let node = crate::ui::decode::parse_node_hovered(&value, &hover)?;
     let prefix = format!("{kind}:{id}");
     let sender: crate::ui::action::Sender = Arc::new(move |action| {
         let mut action = action;
         action.key = format!("{prefix}:{}", action.key);
         Plant::App(AppMessage::Action { surface, action })
     });
-    let content = crate::ui::build::build_node(&node, 13.0, Some(sender.clone()))?;
+    let widget_id = resolved.id.clone();
+    let hover: crate::ui::action::HoverSender = Arc::new(move |list, key, entered| {
+        Plant::App(AppMessage::LeafHover {
+            surface,
+            widget: widget_id.clone(),
+            list,
+            key,
+            entered,
+        })
+    });
+    let content =
+        crate::ui::build::build_node_hover(&node, 13.0, Some(sender.clone()), Some(hover))?;
     Ok(crate::ui::widgets::input::with_hold(
         content,
         sender,
@@ -1208,6 +1235,28 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                 instance.hover.insert(key);
             } else {
                 instance.hover.remove(&key);
+            }
+            refresh_surface(plots, surface)
+        }
+        AppMessage::LeafHover {
+            surface,
+            widget,
+            list,
+            key,
+            entered,
+        } => {
+            let Some(instance) = plots.apps.instances.values().find(|i| i.owns(surface)) else {
+                return Task::none();
+            };
+            let Some(runtime) = instance.runtime.as_ref() else {
+                return Task::none();
+            };
+            let dirty = runtime
+                .widgets
+                .borrow_mut()
+                .set_item_hovered(&widget, &list, &key, entered);
+            if dirty.is_empty() {
+                return Task::none();
             }
             refresh_surface(plots, surface)
         }

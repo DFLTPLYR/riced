@@ -1352,6 +1352,9 @@ impl Plots {
                 WidgetEvent::CellHover(_bar, placement, hovered) => {
                     Top::handle_cell_hover(self, placement, hovered)
                 }
+                WidgetEvent::CellRowHover(_bar, placement, list, key, hovered) => {
+                    Top::handle_cell_row_hover(self, placement, list, key, hovered)
+                }
                 WidgetEvent::PopupHover(id, list, key, hovered) => {
                     Popup::handle_hover(self, id, list, key, hovered)
                 }
@@ -3183,6 +3186,101 @@ mod tests {
         let _ = Top::handle_cell_hover(&mut plots, "whover2".into(), false);
         assert!(plots.placements.hovered.is_empty());
         assert_eq!(text(&plots, "whover2").as_deref(), Some("cold"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn listview_row_hover_reparses_only_the_entered_placement() {
+        use crate::config::{WidgetDefinition, WidgetPlacement};
+        let dir = std::env::temp_dir().join(format!("riced-row-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("row-hover.lua");
+        std::fs::write(
+            &script,
+            r#"return {view=function(self)
+                return iced.listview({{id='1'},{id='2'}}):id('rows'):key('id'):delegate(function(n)
+                    return iced.text(n.hovered and 'hot' or 'cold')
+                end)
+            end}"#,
+        )
+        .unwrap();
+        let placement = |id: &str| WidgetPlacement {
+            id: id.into(),
+            name: "rowhover".into(),
+            file: Some(script.to_string_lossy().into()),
+            ..Default::default()
+        };
+        let mut plots = wallpaper_test_plots();
+        let bar = iced::window::Id::unique();
+        let mut top = Top::new();
+        top.local.widgets = vec![vec![placement("whover"), placement("whover2")]];
+        plots.windows.tops.insert(bar, top);
+        plots.catalog.definitions.push(WidgetDefinition {
+            name: "rowhover".into(),
+            file: script.clone(),
+            defaults: Default::default(),
+            schema: Default::default(),
+        });
+        let text = |plots: &Plots, id: &str, key: &str| -> Option<String> {
+            let Some(crate::ui::node::WidgetNode::ListView { items, .. }) =
+                plots.placements.trees.get(&(bar, id.to_string()))
+            else {
+                return None;
+            };
+            items
+                .iter()
+                .find(|(item, _)| item == key)
+                .and_then(|(_, node)| match node {
+                    crate::ui::node::WidgetNode::Text { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+        };
+        Top::render_bar_widgets(&mut plots, bar);
+        assert_eq!(text(&plots, "whover", "1").as_deref(), Some("cold"));
+        assert_eq!(text(&plots, "whover", "2").as_deref(), Some("cold"));
+        // Entering one row updates only that placement's tree.
+        let _ = Top::handle_cell_row_hover(
+            &mut plots,
+            "whover".into(),
+            "rows".into(),
+            "1".into(),
+            true,
+        );
+        assert_eq!(plots.placements.item_hovered["whover"].len(), 1);
+        assert_eq!(text(&plots, "whover", "1").as_deref(), Some("hot"));
+        assert_eq!(text(&plots, "whover", "2").as_deref(), Some("cold"));
+        // The pointer is single: entering the sibling clears the first row.
+        let _ = Top::handle_cell_row_hover(
+            &mut plots,
+            "whover".into(),
+            "rows".into(),
+            "2".into(),
+            true,
+        );
+        assert_eq!(text(&plots, "whover", "1").as_deref(), Some("cold"));
+        assert_eq!(text(&plots, "whover", "2").as_deref(), Some("hot"));
+        // Repeats are no-ops and leaving clears the row.
+        let _ = Top::handle_cell_row_hover(
+            &mut plots,
+            "whover".into(),
+            "rows".into(),
+            "2".into(),
+            true,
+        );
+        let _ = Top::handle_cell_row_hover(
+            &mut plots,
+            "whover".into(),
+            "rows".into(),
+            "2".into(),
+            false,
+        );
+        assert!(plots.placements.item_hovered["whover"].is_empty());
+        assert_eq!(text(&plots, "whover", "2").as_deref(), Some("cold"));
+        // Stale placements are ignored.
+        let _ =
+            Top::handle_cell_row_hover(&mut plots, "gone".into(), "rows".into(), "1".into(), true);
+        assert!(!plots.placements.item_hovered.contains_key("gone"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

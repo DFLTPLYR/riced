@@ -7,7 +7,7 @@ use crate::{
     lua::widgets::{EntryContext, ResolvedWidget, WidgetState, load_widget_script, new_widget_lua},
     services::ServiceCtx,
     ui::{
-        decode::parse_node,
+        decode::parse_node_hovered,
         listview::{Axis, ListView},
         node::WidgetNode,
     },
@@ -100,7 +100,13 @@ impl RuntimeContext<'_> {
             Ok(Value::Table(table)) => {
                 self.placements.errors.remove(&resolved.id);
                 let had_text = self.placements.outputs.remove(&key).is_some();
-                match parse_node(&Value::Table(table)) {
+                let hover = self
+                    .placements
+                    .item_hovered
+                    .get(&resolved.id)
+                    .cloned()
+                    .unwrap_or_default();
+                match parse_node_hovered(&Value::Table(table), &hover) {
                     Ok(node) => {
                         let changed = had_text || self.placements.trees.get(&key) != Some(&node);
                         if changed
