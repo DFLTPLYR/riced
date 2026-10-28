@@ -96,12 +96,16 @@ pub(crate) fn commit(
     batch: &Batch,
     dir: &Path,
     config_path: &Path,
+    baseline: &[u8],
 ) -> Result<(crate::config::Config, Option<std::time::SystemTime>), String> {
+    if std::fs::read(config_path).as_deref().ok() != Some(baseline) {
+        return Err("Configuration changed or became unreadable during Apply. Restore it and reload before trying again.".into());
+    }
     let previous = std::fs::read(dir.join("applied.json")).ok();
     save_manifest(dir, images, batch)?;
     let mut next = config.clone();
     next.background = images.clone();
-    match next.save_atomic_to(config_path) {
+    match next.save_atomic_checked(config_path, Some(baseline)) {
         Ok(mtime) => Ok((next, mtime)),
         Err(error) => {
             if let Some(previous) = previous {
@@ -168,6 +172,7 @@ pub struct Batch {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Request {
+    pub config_baseline: Option<Vec<u8>>,
     pub generation: u64,
     pub editor: Option<(window::Id, u64)>,
     pub images: BackgroundConfig,

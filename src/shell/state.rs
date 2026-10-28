@@ -2785,6 +2785,7 @@ mod tests {
         plots.windows.ids.insert(id, PlotInfo::Setting);
         plots.desktop.wallpaper.running = Some(1);
         plots.desktop.wallpaper.pending = Some(crate::wallpaper::Request {
+            config_baseline: None,
             generation: 1,
             editor: Some((id, 0)),
             images: plots.config.background.clone(),
@@ -2885,6 +2886,7 @@ mod tests {
     fn stale_wallpaper_result_never_publishes_and_latest_request_is_serialized() {
         let mut plots = wallpaper_test_plots();
         let request = crate::wallpaper::Request {
+            config_baseline: None,
             generation: 9,
             editor: None,
             images: Default::default(),

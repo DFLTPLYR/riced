@@ -113,10 +113,21 @@ impl Plots {
             draft.error = Some("No outputs are available to apply wallpaper".into());
             return Task::none();
         }
+        let baseline = match crate::config::Config::apply_baseline(
+            &crate::config::config_path(),
+            &self.config_mtime,
+        ) {
+            Ok(baseline) => baseline,
+            Err(error) => {
+                draft.error = Some(error);
+                return Task::none();
+            }
+        };
         draft.applying = true;
         draft.error = None;
         self.desktop.wallpaper.generation += 1;
         self.desktop.wallpaper.pending = Some(Request {
+            config_baseline: Some(baseline),
             generation: self.desktop.wallpaper.generation,
             editor: Some((id, draft.revision)),
             images: draft.recipe.clone(),
@@ -147,9 +158,14 @@ impl Plots {
             return Task::batch(previews);
         }
         let previous = self.desktop.wallpaper.pending.take();
-        let (editor, images, sources) = match previous {
+        let (editor, images, sources, config_baseline) = match previous {
             Some(request) if request.editor.is_some() && request.base == self.config.background => {
-                (request.editor, request.images, request.sources)
+                (
+                    request.editor,
+                    request.images,
+                    request.sources,
+                    request.config_baseline,
+                )
             }
             other => {
                 if let Some((id, _)) = other.and_then(|request| request.editor)
@@ -162,11 +178,12 @@ impl Plots {
                     draft.applying = false;
                     draft.error = Some("Wallpaper configuration changed during Apply.".into());
                 }
-                (None, self.config.background.clone(), Sources::new())
+                (None, self.config.background.clone(), Sources::new(), None)
             }
         };
         self.desktop.wallpaper.generation += 1;
         self.desktop.wallpaper.pending = Some(Request {
+            config_baseline,
             generation: self.desktop.wallpaper.generation,
             editor,
             images,
@@ -247,18 +264,17 @@ impl Plots {
         }
         let result = result.and_then(|batch| {
             if request.editor.is_some() {
-                if let Some((_, _)) = crate::config::Config::poll(&self.config_mtime) {
-                    return Err(
-                        "Configuration changed on disk during Apply. Try again after reloading."
-                            .into(),
-                    );
-                }
+                let baseline = request
+                    .config_baseline
+                    .as_deref()
+                    .ok_or("Missing configuration baseline; reload before Apply.")?;
                 let (next, mtime) = wallpaper::commit(
                     &self.config,
                     &request.images,
                     &batch,
                     &wallpaper::cache_dir(),
                     &crate::config::config_path(),
+                    baseline,
                 )?;
                 self.config_mtime = mtime;
                 self.config = next;

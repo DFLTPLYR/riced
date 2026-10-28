@@ -164,7 +164,28 @@ fn legacy_rename_bar(table: &mut toml::Table) -> Result<(), String> {
 /// `format_migration`.
 use toml::Value;
 impl Config {
+    pub(crate) fn apply_baseline(
+        path: &Path,
+        known: &Option<SystemTime>,
+    ) -> Result<Vec<u8>, String> {
+        let bytes = std::fs::read(path).map_err(|error| {
+            format!("Cannot read configuration: {error}. Restore it and reload before Apply.")
+        })?;
+        if read_mtime(path) != *known {
+            return Err("Configuration changed on disk. Reload before Apply.".into());
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn save_atomic_to(&self, path: &Path) -> Result<Option<SystemTime>, String> {
+        self.save_atomic_checked(path, None)
+    }
+
+    pub(crate) fn save_atomic_checked(
+        &self,
+        path: &Path,
+        expected: Option<&[u8]>,
+    ) -> Result<Option<SystemTime>, String> {
         let text = crate::config::format::to_string(self)?;
         let temporary = path.with_extension(format!("lua.{}.pending", std::process::id()));
         let result = (|| {
@@ -175,6 +196,12 @@ impl Config {
             if let Ok(metadata) = std::fs::metadata(path) {
                 std::fs::set_permissions(&temporary, metadata.permissions())
                     .map_err(|error| error.to_string())?;
+            }
+            if let Some(expected) = expected {
+                // Optimistic check, not a lock against non-cooperating external writers.
+                if std::fs::read(path).as_deref().ok() != Some(expected) {
+                    return Err("Configuration changed or became unreadable during Apply. Restore it and reload before trying again.".into());
+                }
             }
             std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
             Ok(read_mtime(path))
@@ -309,6 +336,32 @@ mod tests {
 
     fn parse_lua(source: &str) -> Config {
         try_parse(source).expect("valid test config")
+    }
+
+    #[test]
+    fn checked_save_rejects_changed_missing_and_unreadable_baselines() {
+        let dir = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let path = dir.path().join("config.lua");
+        let config = Config::default();
+        let stamp = config.save_atomic_to(&path).unwrap();
+        let baseline = Config::apply_baseline(&path, &stamp).unwrap();
+        std::fs::write(&path, b"invalid external edit").unwrap();
+        assert!(config.save_atomic_checked(&path, Some(&baseline)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"invalid external edit");
+        assert!(Config::apply_baseline(&path, &None).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(Config::apply_baseline(&path, &stamp).is_err());
+        assert!(config.save_atomic_checked(&path, Some(&baseline)).is_err());
+        assert!(!path.exists());
+        std::fs::create_dir(&path).unwrap();
+        assert!(Config::apply_baseline(&path, &stamp).is_err());
+        assert!(config.save_atomic_checked(&path, Some(&baseline)).is_err());
+        assert!(path.is_dir());
+        assert!(
+            !path
+                .with_extension(format!("lua.{}.pending", std::process::id()))
+                .exists()
+        );
     }
 
     #[test]

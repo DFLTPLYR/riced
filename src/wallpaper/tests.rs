@@ -235,12 +235,16 @@ fn monitor_assignments_are_isolated_persisted_and_restored_by_output_name() {
         );
     }
     let config_path = dir.join("config.lua");
+    crate::config::Config::default()
+        .save_atomic_to(&config_path)
+        .unwrap();
     commit(
         &crate::config::Config::default(),
         &request.images,
         &batch,
         &cache,
         &config_path,
+        &std::fs::read(&config_path).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -598,6 +602,7 @@ fn source(dir: &Path, name: &str, pixels: RgbaImage) -> (BackgroundImage, raster
 
 fn request(images: Vec<BackgroundImage>) -> Request {
     Request {
+        config_baseline: None,
         generation: 1,
         editor: Some((window::Id::unique(), 0)),
         base: BackgroundConfig::default(),
@@ -739,6 +744,70 @@ fn alpha_and_z_order_are_composited_without_transparent_color_halos() {
 }
 
 #[test]
+fn apply_rejects_external_edits_deletion_and_unreadable_config() {
+    let dir = directory("config-conflicts");
+    let cache = dir.join("cache");
+    let path = dir.join("config.lua");
+    let config = crate::config::Config::default();
+    config.save_atomic_to(&path).unwrap();
+    let baseline = std::fs::read(&path).unwrap();
+    let batch = Batch {
+        tiles: HashMap::new(),
+    };
+    save_manifest(&cache, &config.background, &batch).unwrap();
+    let previous = std::fs::read(cache.join("applied.json")).unwrap();
+    for edit in [
+        Some("return { notifications = { enabled = false } }"),
+        Some("not valid lua"),
+        None,
+    ] {
+        match edit {
+            Some(text) => std::fs::write(&path, text).unwrap(),
+            None => std::fs::remove_file(&path).unwrap(),
+        }
+        assert!(
+            commit(
+                &config,
+                &config.background,
+                &batch,
+                &cache,
+                &path,
+                &baseline
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(cache.join("applied.json")).unwrap(), previous);
+        assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), edit);
+    }
+    std::fs::create_dir(&path).unwrap();
+    assert!(
+        commit(
+            &config,
+            &config.background,
+            &batch,
+            &cache,
+            &path,
+            &baseline
+        )
+        .is_err()
+    );
+    assert!(path.is_dir());
+    assert_eq!(std::fs::read(cache.join("applied.json")).unwrap(), previous);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, &baseline).unwrap();
+    commit(
+        &config,
+        &config.background,
+        &batch,
+        &cache,
+        &path,
+        &baseline,
+    )
+    .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn failed_persistence_restores_manifest_and_does_not_replace_configuration() {
     let dir = directory("commit");
     let cache = dir.join("cache");
@@ -767,13 +836,23 @@ fn failed_persistence_restores_manifest_and_does_not_replace_configuration() {
             &request.images,
             &batch,
             &cache,
-            &blocking_parent.join("config.lua")
+            &blocking_parent.join("config.lua"),
+            b"return {}",
         )
         .is_err()
     );
     assert_eq!(std::fs::read(cache.join("applied.json")).unwrap(), previous);
     let path = dir.join("config.lua");
-    let (saved, _) = commit(&config, &request.images, &batch, &cache, &path).unwrap();
+    config.save_atomic_to(&path).unwrap();
+    let (saved, _) = commit(
+        &config,
+        &request.images,
+        &batch,
+        &cache,
+        &path,
+        &std::fs::read(&path).unwrap(),
+    )
+    .unwrap();
     assert_eq!(saved.background, request.images);
     assert_eq!(
         crate::config::Config::load_from(&path).0.background,

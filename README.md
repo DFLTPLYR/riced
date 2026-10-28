@@ -966,6 +966,10 @@ The Wallpaper page owns a draft with full-resolution source buffers. Drag,
 Ctrl+wheel scale, image properties, add, and remove operations update only
 that preview. **Discard** restores the current applied layout; **Apply** runs
 a background bake and atomically saves the editable recipe after success.
+Apply snapshots the config file and rejects changed, deleted, or unreadable
+contents before publication, leaving the previous desktop and manifest intact.
+Restore/reload the config before retrying. The final byte check is optimistic,
+not a cross-process lock against editors racing the last check and rename.
 
 Each connected output receives one lossless PNG, sampled from the originals
 at its native pixel resolution, with scaling, rotation-aware dimensions,
