@@ -3,6 +3,7 @@ pub mod anchored;
 pub mod display_map;
 pub(crate) mod input;
 pub(crate) mod keyed_row;
+pub(crate) mod layered;
 pub(crate) mod masonry;
 pub(crate) mod measured;
 pub mod panel;

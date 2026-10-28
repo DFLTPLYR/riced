@@ -30,6 +30,16 @@ fn list_items(node: Option<&WidgetNode>) -> &[(String, WidgetNode)] {
 mod tests;
 
 #[derive(Debug, Default)]
+struct Hold {
+    /// Survivors pinned at their previous absolute bounds until the new
+    /// layout is measured.
+    pinned: HashMap<Key, Rectangle>,
+    /// Added rows stay hidden for that one interval so they cannot overlap the
+    /// survivors they are about to displace.
+    entering: HashSet<Key>,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct Lists {
     pub scope: String,
     resets: Vec<String>,
@@ -41,6 +51,7 @@ pub(crate) struct Lists {
     move_callbacks: HashMap<Key, crate::lua::callbacks::Callback>,
     completed: Vec<crate::lua::callbacks::Callback>,
     previous: BTreeMap<String, Rectangle>,
+    holds: HashMap<String, Hold>,
     pending: bool,
 }
 fn declared<'a>(
@@ -116,8 +127,10 @@ impl Lists {
             let new = after.get(&id).copied();
             let old = before.get(&id).copied();
             if new == old {
+                self.holds.remove(&id);
                 continue;
             }
+            self.holds.remove(&id);
             if old.is_some() && new.is_some() {
                 self.displace.insert(id.clone());
             }
@@ -166,6 +179,28 @@ impl Lists {
                 true,
             );
             let live_keys: HashSet<_> = new_items.iter().map(|(key, _)| key).collect();
+            // While the new layout is unmeasured, pin survivors to their last
+            // painted positions and keep added rows hidden. Without this the
+            // keyed column reflows immediately, then the measured displacement
+            // starts on a later frame: survivors overlap the new row (or jump
+            // down and back) for that interval.
+            if !old_items.is_empty() {
+                let survivors: HashSet<_> = old_items.iter().map(|(key, _)| key).collect();
+                let mut hold = Hold::default();
+                for (key, _) in new_items {
+                    let owner = (id.clone(), key.clone());
+                    if survivors.contains(key) {
+                        if let Some(bounds) = frame.items.get(&item_id(&id, key)) {
+                            hold.pinned.insert(owner, *bounds);
+                        }
+                    } else {
+                        hold.entering.insert(owner);
+                    }
+                }
+                if !hold.pinned.is_empty() {
+                    self.holds.insert(id.clone(), hold);
+                }
+            }
             let removed: Vec<_> = old_items
                 .iter()
                 .enumerate()
@@ -211,9 +246,14 @@ impl Lists {
         }
         self.pending = false;
         let mut moved = false;
+        let mut settled = Vec::new();
         for (id, list) in &self.lists {
             if !self.displace.contains(id) {
                 continue;
+            }
+            let prefix = format!("{}:{id}", id.len());
+            if data.items.keys().any(|key| key.starts_with(&prefix)) {
+                settled.push(id.clone());
             }
             for (key, old) in &self.previous {
                 let Some((_, item)) = key.split_once(':') else {
@@ -260,6 +300,9 @@ impl Lists {
                 moved = true;
             }
         }
+        for id in settled {
+            self.holds.remove(&id);
+        }
         self.previous.clear();
         moved
     }
@@ -281,6 +324,7 @@ impl Lists {
                 false
             }
         });
+        self.holds.retain(|id, _| self.active.contains(id));
         let retained: HashSet<_> = self
             .lists
             .values()
@@ -330,6 +374,7 @@ impl Lists {
         self.completed.clear();
         self.origins.clear();
         self.previous.clear();
+        self.holds.clear();
         self.active.clear();
         self.displace.clear();
         self.resets.clear();
@@ -359,6 +404,33 @@ impl Lists {
         .width(Length::Fill)
         .height(Length::Fill)
         .clip(false);
+        // A surviving row is pinned at its previous absolute bounds for the
+        // frame between a content change and its displacement measurement.
+        // Draw that snapshot outside the scrollable so the coordinates match
+        // the measurement (content coordinates do not include scroll offset).
+        if !self.holds.is_empty() {
+            let mut present = HashMap::new();
+            declared(node, &mut present)?;
+            for (id, hold) in &self.holds {
+                let Some(WidgetNode::ListView { items, .. }) = present.get(id).copied() else {
+                    continue;
+                };
+                for (key, bounds) in &hold.pinned {
+                    let Some((_, content)) = items.iter().find(|(item, _)| item == &key.1) else {
+                        continue;
+                    };
+                    let body = super::build::build_node_opacity(content, 13.0, None, 1.0)?;
+                    let body = iced::widget::container(body)
+                        .width(bounds.width)
+                        .height(bounds.height);
+                    layer = layer.push(super::motion::ghost(
+                        super::widgets::layered::layered(body),
+                        bounds.x,
+                        bounds.y,
+                    ));
+                }
+            }
+        }
         for list in self.lists.values() {
             for ghost in list.ghosts_for(|_| true) {
                 let Some(bounds) = self.origins.get(&ghost.key) else {
@@ -371,7 +443,7 @@ impl Lists {
                     .width(bounds.width)
                     .height(bounds.height);
                 layer = layer.push(super::motion::ghost(
-                    body.into(),
+                    super::widgets::layered::layered(body),
                     bounds.x + motion.x,
                     bounds.y + motion.y,
                 ));
@@ -692,6 +764,21 @@ impl Lists {
             } => {
                 let mut keys = Vec::new();
                 let mut elements = Vec::new();
+                let hold = self.holds.get(id);
+                let list = self.lists.get(id);
+                let animate = hold.is_some()
+                    || list.is_some_and(|list| {
+                        !list.ghosts_for(|_| true).is_empty()
+                            || items.iter().any(|(key, _)| {
+                                let owner = (id.clone(), key.clone());
+                                list.motion_of(runtime, &owner) != ItemMotion::settled()
+                                    || self
+                                        .moves
+                                        .get(&owner)
+                                        .and_then(|motion| motion.value(runtime).ok())
+                                        .is_some_and(|motion| motion != ItemMotion::settled())
+                            })
+                    });
                 for (key, child) in items {
                     let owner = (id.clone(), key.clone());
                     let mut motion = self
@@ -734,7 +821,22 @@ impl Lists {
                     use std::hash::{Hash, Hasher};
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
                     key.hash(&mut hash);
-                    elements.push(super::motion::shifted(child, motion.x, motion.y, active));
+                    let child = if hold.is_some_and(|hold| {
+                        hold.entering.contains(&owner) || hold.pinned.contains_key(&owner)
+                    }) {
+                        // Hold the painted frame at the previous layout until
+                        // the displacement measurement arrives. Pinned rows
+                        // are redrawn from that snapshot below.
+                        super::motion::visibility(child, false)
+                    } else {
+                        let child = if animate {
+                            super::widgets::layered::layered(child)
+                        } else {
+                            child
+                        };
+                        super::motion::shifted(child, motion.x, motion.y, active)
+                    };
+                    elements.push(child);
                     keys.push(hash.finish());
                 }
                 // from_vecs does not infer children's Fill hints. Resolve the

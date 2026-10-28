@@ -529,6 +529,160 @@ fn image_pixels_survive_only_until_the_last_exit_owner_is_swept() {
     assert!(weak.upgrade().is_none());
 }
 
+fn colored_list(lua: &mlua::Lua, items: &[(u32, u32, &str)]) -> WidgetNode {
+    let items = items
+        .iter()
+        .map(|(id, height, color)| format!("{{id={id},height={height},color='{color}'}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    parse_node(
+        &lua.load(format!(
+            r##"return iced.listview({{{items}}}):id('cards'):key('id')
+            :delegate(function(n) return iced.container(iced.space()):width(240):height(n.height):background(n.color) end)
+            :onEntered({{x={{from=0,to=0}},opacity={{from=1,to=1}},duration=0}})
+            :onDisplaced({{duration=250}})
+            :spacing(7):width(240):anchor('top-right'):margin(16)"##
+        ))
+        .eval()
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn draw(
+    element: &mut Element<'static, Plant>,
+    tree: &mut Tree,
+    renderer: &mut iced::Renderer,
+) -> Vec<u8> {
+    let native = layout(element, tree, renderer);
+    element.as_widget().draw(
+        tree,
+        renderer,
+        &iced::Theme::Dark,
+        &iced::advanced::renderer::Style::default(),
+        iced::advanced::Layout::new(&native),
+        iced::mouse::Cursor::Unavailable,
+        &Rectangle::with_size(iced::Size::new(800.0, 600.0)),
+    );
+    renderer.screenshot(iced::Size::new(800, 600), 1.0, iced::Color::WHITE)
+}
+
+fn pixel(pixels: &[u8], x: usize, y: usize) -> [u8; 3] {
+    let index = (y * 800 + x) * 4;
+    [pixels[index], pixels[index + 1], pixels[index + 2]]
+}
+
+#[test]
+fn prepend_pins_survivors_until_the_displacement_is_measured() {
+    let lua = mlua::Lua::new();
+    crate::ui::dsl::inject_ui_base(&lua).unwrap();
+    let old = colored_list(&lua, &[(1, 50, "#ff0000"), (2, 40, "#ff0000")]);
+    let new = colored_list(
+        &lua,
+        &[(9, 50, "#00ff00"), (1, 50, "#ff0000"), (2, 40, "#ff0000")],
+    );
+    let mut lists = Lists::default();
+    let mut motion = AnimRuntime::default();
+    lists
+        .synchronize(
+            None,
+            &old,
+            &Measurement::default(),
+            &mut motion,
+            Duration::from_millis(250),
+        )
+        .unwrap();
+    let frame = Arc::new(Mutex::new(Frame::default()));
+    let mut view = element(&lists, &old, &motion, frame.clone());
+    let mut tree = Tree::new(&view);
+    let mut renderer = renderer();
+    layout(&mut view, &mut tree, &renderer);
+    let before = frame.lock().unwrap().last.clone().unwrap();
+    drop(view);
+    lists
+        .synchronize(
+            Some(&old),
+            &new,
+            &before,
+            &mut motion,
+            Duration::from_millis(250),
+        )
+        .unwrap();
+    let hold = lists.holds.get("cards").expect("hold");
+    assert!(hold.pinned.contains_key(&("cards".into(), "1".into())));
+    assert!(hold.pinned.contains_key(&("cards".into(), "2".into())));
+    assert!(hold.entering.contains(&("cards".into(), "9".into())));
+    let mut view = element(&lists, &new, &motion, frame.clone());
+    tree.diff(view.as_widget());
+    let pixels = draw(&mut view, &mut tree, &mut renderer);
+    // Survivors keep their previous slots; the new row stays hidden.
+    assert_eq!(pixel(&pixels, 650, 30), [255, 0, 0]);
+    assert_eq!(pixel(&pixels, 650, 95), [255, 0, 0]);
+    assert_eq!(pixel(&pixels, 650, 140), [255, 255, 255]);
+    let after = frame.lock().unwrap().last.clone().unwrap();
+    assert!(lists.layout(&after, &mut motion, Duration::from_millis(250)));
+    assert!(!lists.holds.contains_key("cards"));
+    for key in ["1", "2"] {
+        assert_eq!(
+            lists.moves[&("cards".into(), key.into())]
+                .value(&motion)
+                .unwrap()
+                .y,
+            -57.0
+        );
+    }
+}
+
+#[test]
+fn appended_row_is_hidden_only_until_it_has_measured() {
+    let lua = mlua::Lua::new();
+    crate::ui::dsl::inject_ui_base(&lua).unwrap();
+    let old = colored_list(&lua, &[(1, 50, "#ff0000"), (2, 40, "#ff0000")]);
+    let new = colored_list(
+        &lua,
+        &[(1, 50, "#ff0000"), (2, 40, "#ff0000"), (9, 50, "#00ff00")],
+    );
+    let mut lists = Lists::default();
+    let mut motion = AnimRuntime::default();
+    lists
+        .synchronize(
+            None,
+            &old,
+            &Measurement::default(),
+            &mut motion,
+            Duration::from_millis(250),
+        )
+        .unwrap();
+    let frame = Arc::new(Mutex::new(Frame::default()));
+    let mut view = element(&lists, &old, &motion, frame.clone());
+    let mut tree = Tree::new(&view);
+    let mut renderer = renderer();
+    layout(&mut view, &mut tree, &renderer);
+    let before = frame.lock().unwrap().last.clone().unwrap();
+    drop(view);
+    lists
+        .synchronize(
+            Some(&old),
+            &new,
+            &before,
+            &mut motion,
+            Duration::from_millis(250),
+        )
+        .unwrap();
+    let mut view = element(&lists, &new, &motion, frame.clone());
+    tree.diff(view.as_widget());
+    let pixels = draw(&mut view, &mut tree, &mut renderer);
+    assert_eq!(pixel(&pixels, 650, 30), [255, 0, 0]);
+    assert_eq!(pixel(&pixels, 650, 140), [255, 255, 255]);
+    let after = frame.lock().unwrap().last.clone().unwrap();
+    lists.layout(&after, &mut motion, Duration::from_millis(250));
+    drop(view);
+    let mut view = element(&lists, &new, &motion, frame.clone());
+    tree.diff(view.as_widget());
+    let pixels = draw(&mut view, &mut tree, &mut renderer);
+    assert_eq!(pixel(&pixels, 650, 140), [0, 255, 0]);
+}
+
 #[test]
 fn displacement_uses_measured_row_heights_not_a_fixed_pitch() {
     let renderer = renderer();
