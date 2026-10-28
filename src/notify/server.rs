@@ -20,7 +20,7 @@
 //! mandated fallback. SVG entries rasterize via resvg (no system
 //! fonts — text inside icons may not render, which is fine for glyphs).
 
-use super::images::image_of;
+use super::images::load_image;
 use crate::shell::{NotifyEvent, Plant};
 use iced::{Task as Command, futures::channel::mpsc};
 use std::collections::HashMap;
@@ -128,6 +128,7 @@ fn parse_actions(flat: Vec<String>) -> Vec<(String, String)> {
 struct Server {
     tx: mpsc::Sender<Plant>,
     default_ms: u64,
+    worker: tokio::runtime::Handle,
 }
 
 fn urgency_of(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> u8 {
@@ -159,6 +160,8 @@ impl Server {
             allocate_id()
         };
         let timeout_ms = (expire_timeout >= 0).then(|| (expire_timeout as u64).min(MAX_TIMEOUT_MS));
+        let urgency = urgency_of(&hints);
+        let image = load_image(hints, app_icon.clone(), &self.worker).await;
         let msg = Plant::Notify(NotifyEvent::Arrived(Box::new(
             crate::shell::screens::notification::Notification::from_dbus(
                 crate::shell::screens::notification::Incoming {
@@ -168,8 +171,8 @@ impl Server {
                     title: summary,
                     body,
                     actions: parse_actions(actions),
-                    image: image_of(&hints, &app_icon),
-                    urgency: urgency_of(&hints),
+                    image,
+                    urgency,
                     timeout_ms,
                 },
                 self.default_ms,
@@ -231,6 +234,7 @@ async fn serve_on(
     let server = Server {
         tx: tx.clone(),
         default_ms,
+        worker: tokio::runtime::Handle::current(),
     };
     let built = builder
         .name("org.freedesktop.Notifications")

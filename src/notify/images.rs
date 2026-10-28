@@ -1,4 +1,33 @@
 //! Pixel ingestion independent of notification D-Bus dispatch.
+const MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RASTER_PX: u32 = 1024;
+static IMAGE_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+pub(crate) async fn load_image(
+    hints: HashMap<String, zbus::zvariant::OwnedValue>,
+    app_icon: String,
+    worker: &tokio::runtime::Handle,
+) -> Option<iced::widget::image::Handle> {
+    if app_icon.is_empty() && !hints.contains_key("image-data") && !hints.contains_key("image-path")
+    {
+        return None;
+    }
+    // Saturation falls back to text instead of retaining an unbounded work queue.
+    let permit = IMAGE_WORKERS.try_acquire().ok()?;
+    worker
+        .spawn_blocking(move || {
+            let _permit = permit;
+            let image = image_of(&hints, &app_icon);
+            drop(hints);
+            drop(app_icon);
+            crate::theme_gen::trim_memory();
+            image
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
 pub(super) const MAX_ICON_PX: i32 = 512;
 pub(super) fn decode_pixbuf(
     width: i32,
@@ -12,9 +41,9 @@ pub(super) fn decode_pixbuf(
         return None;
     }
     let (w, h) = (width as usize, height as usize);
-    let stride = rowstride as usize;
+    let stride = usize::try_from(rowstride).ok()?;
     let ch = channels as usize;
-    if (ch != 3 && ch != 4) || stride < w * ch || data.len() < stride * h {
+    if (ch != 3 && ch != 4) || stride < w * ch || data.len() < stride.checked_mul(h)? {
         return None;
     }
     let mut rgba = Vec::with_capacity(w * h * 4);
@@ -53,7 +82,18 @@ pub(crate) fn hint_image_data(
     };
     let (width, height, rowstride, bps, channels) = (num(0)?, num(1)?, num(2)?, num(4)?, num(5)?);
     let data: Vec<u8> = match f.get(6) {
-        Some(Value::Array(bytes)) => bytes.iter().filter_map(|v| u8::try_from(v).ok()).collect(),
+        Some(Value::Array(bytes))
+            if bytes.len() <= MAX_INPUT_BYTES as usize
+                && bps == 8
+                && (1..=MAX_ICON_PX).contains(&width)
+                && (1..=MAX_ICON_PX).contains(&height) =>
+        {
+            bytes
+                .iter()
+                .map(u8::try_from)
+                .collect::<Result<_, _>>()
+                .ok()?
+        }
         _ => return None,
     };
     decode_pixbuf(width, height, rowstride, bps, channels, &data)
@@ -66,20 +106,47 @@ pub(crate) fn image_file(path: &str) -> Option<iced::widget::image::Handle> {
     if !path.starts_with('/') {
         return None;
     }
+    use std::io::Read;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    // NONBLOCK prevents a raced replacement with a FIFO from blocking open.
+    let fd = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()?;
+    let file = std::fs::File::from(fd);
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_INPUT_BYTES {
+        return None;
+    }
+    let mut data = Vec::new();
+    file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut data).ok()?;
+    if data.len() as u64 > MAX_INPUT_BYTES {
+        return None;
+    }
     if std::path::Path::new(path)
         .extension()
         .is_some_and(|ext| ext == "svg")
     {
-        return std::fs::read(path)
-            .ok()
-            .and_then(|data| rasterize_svg(&data));
+        return rasterize_svg(&data);
     }
-    let img = image::open(path).ok()?;
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    if w == 0 || h == 0 || w > 1024 || h > 1024 {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_RASTER_PX);
+    limits.max_image_height = Some(MAX_RASTER_PX);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 || w > MAX_RASTER_PX || h > MAX_RASTER_PX {
         return None;
     }
+    let rgba = img.to_rgba8();
     Some(iced::widget::image::Handle::from_rgba(
         w,
         h,
@@ -111,7 +178,18 @@ pub(crate) fn straighten_rgba(rgba: &mut [u8]) -> bool {
 /// the tree), so text inside icons may come out empty — acceptable for
 /// glyphs, which is what notification icons are.
 pub(crate) fn rasterize_svg(data: &[u8]) -> Option<iced::widget::image::Handle> {
-    let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).ok()?;
+    if data.len() as u64 > MAX_INPUT_BYTES {
+        return None;
+    }
+    // Vector icons only: nested images bypass decoder limits and can open files.
+    let options = resvg::usvg::Options {
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    let tree = resvg::usvg::Tree::from_str(std::str::from_utf8(data).ok()?, &options).ok()?;
     let size = tree.size();
     if size.width() <= 0.0 || size.height() <= 0.0 {
         return None;
@@ -168,6 +246,98 @@ pub(crate) fn image_of(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn image_files_reject_excess_input_and_recover() {
+        let dir = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let path = dir.path().join("image.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        assert!(image_file(path.to_str().unwrap()).is_some());
+        let original = std::fs::read(&path).unwrap();
+        let mut padded = original.clone();
+        padded.resize(8 * 1024 * 1024 + 1, 0);
+        std::fs::write(&path, padded).unwrap();
+        assert!(image_file(path.to_str().unwrap()).is_none());
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(image_file(path.to_str().unwrap()).is_none());
+        image::RgbaImage::new(1025, 1).save(&path).unwrap();
+        assert!(image_file(path.to_str().unwrap()).is_none());
+        // Header-only oversized BMP exercises dimension rejection without large pixels.
+        let mut bmp = vec![0u8; 54];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&54u32.to_le_bytes());
+        bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&8192i32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&8192i32.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+        assert_eq!(
+            image::ImageReader::new(std::io::Cursor::new(&bmp))
+                .with_guessed_format()
+                .unwrap()
+                .into_dimensions()
+                .unwrap(),
+            (8192, 8192)
+        );
+        std::fs::write(&path, bmp).unwrap();
+        assert!(image_file(path.to_str().unwrap()).is_none());
+        std::fs::write(&path, original).unwrap();
+        assert!(image_file(path.to_str().unwrap()).is_some());
+        assert!(image_file(dir.path().to_str().unwrap()).is_none());
+        let fifo = dir.path().join("pipe.png");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        assert!(image_file(fifo.to_str().unwrap()).is_none());
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16"><image xlink:href="{}" width="16" height="16"/></svg>"#,
+            fifo.display()
+        );
+        assert!(rasterize_svg(svg.as_bytes()).is_none());
+        let mut large_svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="red"/></svg>"#.to_vec();
+        large_svg.resize(MAX_INPUT_BYTES as usize + 1, b' ');
+        assert!(rasterize_svg(&large_svg).is_none());
+    }
+
+    #[test]
+    fn image_worker_saturation_falls_back_without_queueing() {
+        let dir = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let path = dir.path().join("image.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        let path = path.to_str().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let permits = IMAGE_WORKERS.acquire_many(2).await.unwrap();
+                assert!(
+                    load_image(
+                        HashMap::new(),
+                        path.to_owned(),
+                        &tokio::runtime::Handle::current()
+                    )
+                    .await
+                    .is_none()
+                );
+                drop(permits);
+                assert!(
+                    load_image(
+                        HashMap::new(),
+                        path.to_owned(),
+                        &tokio::runtime::Handle::current()
+                    )
+                    .await
+                    .is_some()
+                );
+            });
+    }
 
     #[test]
     fn decode_pixbuf_handles_rgb_rgba_and_stride() {
