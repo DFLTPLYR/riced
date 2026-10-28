@@ -1292,10 +1292,15 @@ mod tests {
         ))
         .unwrap();
         for kind in 0..3 {
+            for (primitive, source) in [
+                "iced.container(iced.space():width(10):height(10)):background('#00ff00')",
+                "iced.canvas({rects={{x=0,y=0,width=10,height=10,color='#00ff00'}}}):width(10):height(10)",
+                "iced.canvas({lines={{points={{0,5},{10,5}},width=2,color='#00ff00'}}}):width(10):height(10)",
+            ].iter().enumerate() {
             let description = node(
                 &lua,
                 &format!(
-                    "return iced.container(iced.space():width(10):height(10)):background('#00ff00'):animate({{id='fade-{kind}',opacity={{from=0,to=1,duration=100,easing='linear'}}}})"
+                    "return {source}:animate({{id='fade-{kind}-{primitive}',opacity={{from=0,to=1,duration=100,easing='linear'}}}})"
                 ),
             );
             let original = host(&description, kind);
@@ -1331,8 +1336,9 @@ mod tests {
                     && (126..=129).contains(&pixel[1])
                     && pixel[2] == 0
                     && (126..=129).contains(&pixel[3]),
-                "host {kind}: {pixel:?}"
+                "host {kind}, primitive {primitive}: {pixel:?}"
             );
+            }
         }
     }
     #[test]

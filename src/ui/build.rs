@@ -1032,9 +1032,14 @@ fn realize_aligned<M: Clone + 'static>(
             width,
             height,
         } => {
-            let program = super::canvas::Shape {
-                drawing: drawing.clone(),
-            };
+            let mut drawing = drawing.clone();
+            for rect in &mut drawing.rects {
+                rect.color = rect.color.scale_alpha(opacity);
+            }
+            for line in &mut drawing.lines {
+                line.color = line.color.scale_alpha(opacity);
+            }
+            let program = super::canvas::Shape { drawing };
             let canvas: iced::widget::Canvas<super::canvas::Shape, M> =
                 iced::widget::Canvas::new(program);
             let width = match width {
