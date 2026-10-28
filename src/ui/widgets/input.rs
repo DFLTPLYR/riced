@@ -23,6 +23,7 @@ pub(crate) fn with_hold<M: Clone + 'static>(
         sender,
         hold,
         coalesce_motion: false,
+        press: None,
     })
 }
 
@@ -36,6 +37,22 @@ pub(crate) fn frame_input<M: Clone + 'static>(
         sender,
         hold: HOLD,
         coalesce_motion: true,
+        press: None,
+    })
+}
+
+/// A keyed press retains its own measured bounds for popup anchoring.
+pub(crate) fn on_press<M: Clone + 'static>(
+    content: Element<'static, M>,
+    key: String,
+    sender: Sender<M>,
+) -> Element<'static, M> {
+    Element::new(Input {
+        content,
+        sender,
+        hold: HOLD,
+        coalesce_motion: false,
+        press: Some(key),
     })
 }
 
@@ -44,6 +61,7 @@ struct Input<M> {
     sender: Sender<M>,
     hold: Duration,
     coalesce_motion: bool,
+    press: Option<String>,
 }
 
 #[derive(Default)]
@@ -96,35 +114,69 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
     ) {
         // Flush before child controls can consume a release, and before exit.
         let state = tree.state.downcast_mut::<State>();
+        let dragging = self.coalesce_motion && state.pressed.is_some();
         if (matches!(
             event,
-            Event::Window(iced::window::Event::RedrawRequested(_))
+            Event::Window(iced::window::Event::RedrawRequested(_) | iced::window::Event::Unfocused)
                 | Event::Mouse(
                     mouse::Event::ButtonPressed(_)
                         | mouse::Event::ButtonReleased(_)
                         | mouse::Event::CursorLeft
                 )
-        ) || !cursor.is_over(layout.bounds())
-            || !cursor.is_over(*viewport))
+        ) || (!dragging && (!cursor.is_over(layout.bounds()) || !cursor.is_over(*viewport))))
             && let Some(action) = state.pending_motion.take()
         {
             shell.publish((self.sender)(action));
         }
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
+        if !dragging
+            || !matches!(
+                event,
+                Event::Mouse(
+                    mouse::Event::CursorMoved { .. }
+                        | mouse::Event::ButtonPressed(_)
+                        | mouse::Event::ButtonReleased(_)
+                )
+            )
+        {
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
         let state = tree.state.downcast_mut::<State>();
         let inside = cursor.is_over(layout.bounds()) && cursor.is_over(*viewport);
         let position = cursor.position().map(|point| {
             iced::Point::new(point.x - layout.bounds().x, point.y - layout.bounds().y)
         });
+        if let Some(key) = &self.press {
+            if !shell.is_event_captured()
+                && inside
+                && matches!(
+                    event,
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                )
+            {
+                shell.publish((self.sender)(Action {
+                    key: key.clone(),
+                    value: None,
+                    event: InputEvent::Mouse {
+                        state: "action".into(),
+                        button: Some("left".into()),
+                        position,
+                        origin: position,
+                        bounds: Some(layout.bounds()),
+                    },
+                }));
+                shell.capture_event();
+            }
+            return;
+        }
         let pointer =
             |kind: &str, button: Option<mouse::Button>, origin: Option<iced::Point>| Action {
                 key: String::new(),
@@ -149,7 +201,7 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
                 None,
             )));
             state.inside = inside;
-            if !inside {
+            if !inside && !dragging {
                 state.pressed = None;
             }
         }
@@ -158,8 +210,8 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
             return;
         }
         match event {
-            Event::Mouse(mouse::Event::CursorMoved { .. }) if inside => {
-                let action = pointer("move", None, None);
+            Event::Mouse(mouse::Event::CursorMoved { .. }) if inside || dragging => {
+                let action = pointer("move", None, state.pressed.map(|(_, _, origin)| origin));
                 if self.coalesce_motion {
                     state.pending_motion = Some(action);
                     shell.request_redraw();
@@ -167,7 +219,7 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
                     shell.publish((self.sender)(action));
                 }
             }
-            Event::Mouse(mouse::Event::ButtonPressed(button)) if inside => {
+            Event::Mouse(mouse::Event::ButtonPressed(button)) if inside || dragging => {
                 if state
                     .pressed
                     .is_some_and(|(pressed, _, _)| pressed != *button)
@@ -184,22 +236,29 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonReleased(button)) => {
-                if inside {
+                if inside || dragging {
                     shell.publish((self.sender)(pointer(
                         "release",
                         Some(*button),
                         state.pressed.map(|(_, _, origin)| origin),
                     )));
                 }
-                if let Some((pressed, time, origin)) = state.pressed.take()
-                    && inside
-                    && pressed == *button
+                if state
+                    .pressed
+                    .is_some_and(|(pressed, _, _)| pressed == *button)
+                    && let Some((_, time, origin)) = state.pressed.take()
+                    && (inside || dragging)
                 {
-                    if !state.held && time.elapsed() < self.hold {
+                    if inside && !state.held && time.elapsed() < self.hold {
                         shell.publish((self.sender)(pointer("click", Some(*button), Some(origin))));
                     }
                     shell.capture_event();
                 }
+            }
+            Event::Window(iced::window::Event::Unfocused) if dragging => {
+                state.pressed = None;
+                state.pending_motion = None;
+                shell.publish((self.sender)(pointer("cancel", None, None)));
             }
             Event::Window(iced::window::Event::RedrawRequested(_)) if inside && !state.held => {
                 if let Some((button, started, origin)) = state.pressed {
@@ -251,6 +310,9 @@ impl<M: Clone + 'static> Widget<M, iced::Theme, iced::Renderer> for Input<M> {
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
+        if self.press.is_some() && cursor.is_over(layout.bounds()) && cursor.is_over(*viewport) {
+            return mouse::Interaction::Pointer;
+        }
         self.content.as_widget().mouse_interaction(
             &tree.children[0],
             layout,
@@ -311,6 +373,138 @@ fn key_event(
 mod tests {
     use super::*;
     use iced::advanced::renderer::Headless;
+
+    #[test]
+    fn keyed_presses_report_the_selected_icon_bounds_and_keep_lua_action_events() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let icon = |key: &str| {
+            on_press(
+                iced::widget::Space::new().width(20).height(20).into(),
+                key.into(),
+                std::sync::Arc::new(|action| action),
+            )
+        };
+        let mut element: Element<'static, Action> =
+            iced::widget::row![icon("first"), icon("second")]
+                .spacing(8)
+                .into();
+        let mut tree = widget::Tree::new(&element);
+        let node = element
+            .as_widget_mut()
+            .layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(300.0, 100.0)),
+            )
+            .move_to(iced::Point::new(100.0, 20.0));
+        let lua = mlua::Lua::new();
+        for (key, x) in [("first", 100.0), ("second", 128.0)] {
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Layout::new(&node),
+                mouse::Cursor::Available(iced::Point::new(x + 10.0, 30.0)),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(300.0, 100.0)),
+            );
+            assert_eq!(messages.len(), 1);
+            let action = &messages[0];
+            assert_eq!(action.key, key);
+            assert!(
+                matches!(&action.event, InputEvent::Mouse { bounds: Some(bounds), .. }
+                if *bounds == Rectangle::new(iced::Point::new(x, 20.0), Size::new(20.0, 20.0)))
+            );
+            let args = action.arguments(&lua).unwrap();
+            let mlua::Value::Table(events) = &args[0] else {
+                panic!("events table")
+            };
+            assert_eq!(events.get::<String>("type").unwrap(), "action");
+            assert_eq!(events.get::<String>("key").unwrap(), key);
+        }
+    }
+
+    #[test]
+    fn frame_drag_keeps_implicit_grab_outside_surface_until_release_or_cancel() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        for ending in [
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            Event::Window(iced::window::Event::Unfocused),
+        ] {
+            let mut element = frame_input(
+                iced::widget::Space::new().width(100).height(50).into(),
+                std::sync::Arc::new(|event| event),
+            );
+            let mut tree = widget::Tree::new(&element);
+            let size = Size::new(100.0, 50.0);
+            let layout = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            let mut messages = Vec::new();
+            for (event, cursor) in [
+                (
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    mouse::Cursor::Available(iced::Point::new(20.0, 10.0)),
+                ),
+                (
+                    Event::Mouse(mouse::Event::CursorLeft),
+                    mouse::Cursor::Unavailable,
+                ),
+                (
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)),
+                    mouse::Cursor::Available(iced::Point::new(150.0, -10.0)),
+                ),
+                (
+                    Event::Mouse(mouse::Event::CursorMoved {
+                        position: iced::Point::new(150.0, -10.0),
+                    }),
+                    mouse::Cursor::Available(iced::Point::new(150.0, -10.0)),
+                ),
+                (
+                    ending.clone(),
+                    mouse::Cursor::Available(iced::Point::new(150.0, -10.0)),
+                ),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &event,
+                    Layout::new(&layout),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &Rectangle::with_size(size),
+                );
+            }
+            assert!(tree.state.downcast_ref::<State>().pressed.is_none());
+            assert!(messages.iter().any(|action| matches!(&action.event, InputEvent::Mouse {state,position:Some(position),..} if state=="move" && *position==iced::Point::new(150.0,-10.0))));
+            let expected = if matches!(ending, Event::Window(_)) {
+                "cancel"
+            } else {
+                "release"
+            };
+            assert!(messages.iter().any(
+                |action| matches!(&action.event, InputEvent::Mouse {state,..} if state==expected)
+            ));
+            assert!(!messages.iter().any(
+                |action| matches!(&action.event, InputEvent::Mouse {state,..} if state=="click")
+            ));
+        }
+    }
 
     #[test]
     fn frame_motion_is_latest_wins_and_flushes_before_release_or_exit() {
@@ -611,6 +805,6 @@ mod tests {
                 .count(),
             1
         );
-        assert!(!messages.iter().any(|events| matches!(&events.event, InputEvent::Mouse{state,..} if state == "click" || state == "hold")));
+        assert!(!messages.iter().any(|events| matches!(&events.event, InputEvent::Mouse{state,..} if state == "press" || state == "click" || state == "hold")));
     }
 }

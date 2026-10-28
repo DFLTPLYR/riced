@@ -37,6 +37,8 @@ pub struct Popup {
     pub bar_id: window::Id,
     /// Placement id whose `popup()` renders the body.
     pub placement: String,
+    /// Action within the placement that opened this popup (e.g. a tray icon).
+    pub opener: String,
     /// Last rendered popup root, including its user-owned presentation.
     pub tree: Option<WidgetNode>,
     /// Listview rows hovered in this popup, keyed `(list id, item key)`.
@@ -236,6 +238,7 @@ impl Popup {
         bar_id: window::Id,
         output: OutputId,
         placement_id: &str,
+        opener: &str,
         bounds: Option<(f32, f32, f32, f32)>,
     ) -> Option<Command<Plant>> {
         // Fresh state for the placement: edits apply on open, not on the
@@ -277,6 +280,7 @@ impl Popup {
             surface::OpenRequest {
                 bar: bar_id,
                 output,
+                opener: opener.to_owned(),
                 anchor: bounds,
             },
             &resolved,
@@ -853,6 +857,7 @@ mod tests {
                 win_id: pid,
                 bar_id: bar,
                 placement: "whover".into(),
+                opener: String::new(),
                 auto_width: false,
                 max_width: 1920.0,
                 tree: None,
@@ -978,6 +983,7 @@ mod tests {
                 win_id: id,
                 bar_id: window::Id::unique(),
                 placement: "session".into(),
+                opener: String::new(),
                 auto_width: false,
                 max_width: 1920.0,
                 tree: None,
@@ -1171,6 +1177,7 @@ mod tests {
             win_id: id,
             bar_id: window::Id::unique(),
             placement: "clock".into(),
+            opener: String::new(),
             tree,
             hovered: Default::default(),
             size: 13.0,
@@ -1194,6 +1201,65 @@ mod tests {
             closing: None,
             phase: 0,
         }
+    }
+
+    #[test]
+    fn different_tray_icons_replace_the_menu_instead_of_toggling_the_placement() {
+        use crate::config::{WidgetDefinition, WidgetPlacement};
+        use crate::shell::windows::PlotInfo;
+
+        let (_, receiver) = iced_wayland_subscriber::shell::channel();
+        let mut plots = Plots::new(receiver);
+        let bar = window::Id::unique();
+        let mut top = Top::new();
+        top.local.widgets = vec![vec![WidgetPlacement {
+            id: "tray".into(),
+            name: "tray".into(),
+            ..Default::default()
+        }]];
+        plots.windows.tops.insert(bar, top);
+        plots.windows.ids.insert(bar, PlotInfo::Top(OutputId(1)));
+        plots.catalog.definitions.push(WidgetDefinition {
+            name: "tray".into(),
+            file: "/not-real-tray.lua".into(),
+            defaults: Default::default(),
+            schema: Default::default(),
+        });
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        crate::lua::widgets::load_widget_script(
+            &lua,
+            "tray",
+            r#"return {
+            rendered=0,
+            view=function() return iced.text('tray') end,
+            actions=function(self, events) self.selected=events.key; return {popup=true} end,
+            popup=function(self)
+                self.rendered=self.rendered+1
+                return iced.popup(iced.scrollable(iced.text(self.selected)):height(360)):width(280)
+            end
+        }"#,
+        )
+        .unwrap();
+        let app: mlua::Table = lua.named_registry_value("riced.widget.app").unwrap();
+        plots.placements.instances.insert("tray".into(), lua);
+
+        let id = window::Id::unique();
+        let mut popup = test_popup(id, None, None, None);
+        popup.bar_id = bar;
+        popup.placement = "tray".into();
+        popup.opener = "first".into();
+        plots.windows.popups.insert(id, popup.clone());
+        let _ = Top::handle_cell_action(&mut plots, bar, "tray".into(), "first".into());
+        assert!(plots.windows.popups.is_empty());
+        assert_eq!(app.get::<u32>("rendered").unwrap(), 0);
+
+        plots.windows.popups.insert(id, popup);
+        let _ = Top::handle_cell_action(&mut plots, bar, "tray".into(), "second".into());
+        assert!(!plots.windows.popups.contains_key(&id));
+        // There is no compositor output in this test, but the replacement must
+        // still render the newly selected body before attempting surface creation.
+        assert_eq!(app.get::<u32>("rendered").unwrap(), 1);
+        assert_eq!(app.get::<String>("selected").unwrap(), "second");
     }
 
     #[test]

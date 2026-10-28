@@ -283,11 +283,15 @@ fn realize_aligned<M: Clone + 'static>(
                 Align::default(),
                 &mut *native,
             )?;
-            let mut item = iced::widget::mouse_area(element);
             if interactive {
-                item = item.on_press(button_msg(action.clone().into()));
+                Ok(super::widgets::input::on_press(
+                    element,
+                    action.clone(),
+                    button_msg,
+                ))
+            } else {
+                Ok(element)
             }
-            Ok(item.into())
         }
         WidgetNode::Aligned {
             child,
@@ -1324,6 +1328,83 @@ mod tests {
             .err()
             .expect("unaligned component must fail");
         assert!(error.contains("no alignment setters"), "{error}");
+    }
+
+    #[test]
+    fn clickable_icons_keep_the_selected_anchor_in_every_host() {
+        use iced::advanced::{Layout, Shell, layout, renderer::Headless, widget::Tree};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(13.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let lua = lua();
+        let node = parse_node(&lua.load("return iced.row({iced.space():width(20):height(20):on_press('first'),iced.space():width(20):height(20):on_press('second')}):spacing(8)").eval().unwrap()).unwrap();
+        for host in ["plugin", "scene", "animated"] {
+            let sender: Sender = std::sync::Arc::new(|action| {
+                Plant::TopPlot(crate::shell::TopEvent::Widget(
+                    crate::shell::WidgetEvent::PopupSelect(iced::window::Id::unique(), action),
+                ))
+            });
+            let mut element = match host {
+                "scene" => crate::ui::scene::Lists::default()
+                    .build(
+                        &node,
+                        &crate::ui::anim::AnimRuntime::default(),
+                        sender,
+                        None,
+                        &mut no_native_slots::<Plant>(),
+                    )
+                    .unwrap(),
+                "animated" => crate::shell::screens::top::build_with_lists(
+                    &node,
+                    "test",
+                    13.0,
+                    Some(sender),
+                    &crate::ui::anim::AnimRuntime::default(),
+                    &Default::default(),
+                    None,
+                )
+                .unwrap(),
+                _ => build_node(&node, 13.0, Some(sender)).unwrap(),
+            };
+            let mut tree = Tree::new(&element);
+            let layout = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(200.0, 100.0)),
+            );
+            for (key, x) in [("first", 0.0), ("second", 28.0)] {
+                let mut messages = Vec::new();
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                        iced::mouse::Button::Left,
+                    )),
+                    Layout::new(&layout),
+                    iced::mouse::Cursor::Available(iced::Point::new(x + 10.0, 10.0)),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &iced::Rectangle::with_size(iced::Size::new(200.0, 100.0)),
+                );
+                assert_eq!(messages.len(), 1, "{host}");
+                let Plant::TopPlot(crate::shell::TopEvent::Widget(
+                    crate::shell::WidgetEvent::PopupSelect(_, action),
+                )) = &messages[0]
+                else {
+                    panic!("action")
+                };
+                assert_eq!(action.key, key, "{host}");
+                assert!(
+                    matches!(&action.event, crate::ui::action::Event::Mouse { bounds: Some(bounds), .. }
+                    if bounds.x == x && bounds.width == 20.0),
+                    "{host}: {:?}",
+                    action.event
+                );
+            }
+        }
     }
 
     #[test]

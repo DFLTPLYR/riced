@@ -26,6 +26,7 @@ pub(super) struct SurfaceContext<'a> {
 pub(super) struct OpenRequest {
     pub bar: window::Id,
     pub output: OutputId,
+    pub opener: String,
     /// Reporting widget rect in bar-local px; the popup anchors to its
     /// center. `None` falls back to the bar center.
     pub anchor: Option<(f32, f32, f32, f32)>,
@@ -149,6 +150,7 @@ impl SurfaceContext<'_> {
         let OpenRequest {
             bar,
             output,
+            opener,
             anchor,
         } = request;
         let Some(top) = self.windows.tops.get(&bar) else {
@@ -242,6 +244,7 @@ impl SurfaceContext<'_> {
                 win_id: id,
                 bar_id: bar,
                 placement: resolved.id.clone(),
+                opener,
                 tree,
                 hovered: Default::default(),
                 size: resolved.size.max(1.0),

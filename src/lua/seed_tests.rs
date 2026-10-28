@@ -213,7 +213,9 @@ fn systemtray_seed_opens_and_navigates_menu_from_snapshot() {
         include_str!("../../scripts/widgets/systemtray.lua"),
     )
     .unwrap();
-    lua.load("systemtray={items={}}").exec().unwrap();
+    lua.load("systemtray={items={}}; theme={surface='#282828'}")
+        .exec()
+        .unwrap();
     parse_node(&call_lua_value(&lua, "view").unwrap()).unwrap();
     lua.load(r#"systemtray={items={{id=':1.5/Item',title='Test',status='Active',has_menu=true,
         menu={children={{id=2,label='_Options',type='',visible=true,enabled=true,toggle_type='',submenu=true,

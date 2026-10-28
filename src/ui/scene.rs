@@ -481,9 +481,7 @@ impl Lists {
                     opacity,
                     &mut *native,
                 )?;
-                let element = iced::widget::mouse_area(body)
-                    .on_press(sender(action.clone().into()))
-                    .into();
+                let element = super::widgets::input::on_press(body, action.clone(), sender);
                 Ok(if active {
                     measured::marked(element, Marker::Interactive)
                 } else {

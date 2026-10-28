@@ -527,11 +527,18 @@ pub(crate) fn build_with_lists_opacity(
                 hover,
                 opacity,
             )?;
-            let mut area = iced::widget::mouse_area(element);
             if let Some(sender) = message {
-                area = area.on_press(sender(action.clone().into()));
+                Ok(crate::ui::widgets::input::on_press(
+                    element,
+                    action.clone(),
+                    sender,
+                ))
+            } else {
+                Ok(element)
             }
-            Ok(area.into())
+        }
+        WidgetNode::Region { child } => {
+            build_with_lists_opacity(child, widget, size, message, runtime, lists, hover, opacity)
         }
         WidgetNode::ListView {
             id,
@@ -1848,6 +1855,7 @@ impl Top {
                         plots,
                         bar,
                         &placement_id,
+                        &action.key,
                         bounds,
                     ));
                 }
@@ -1872,11 +1880,12 @@ impl Top {
     }
 
     /// Open the placement's popup anchored to its measured bounds, or
-    /// dismiss it when the same placement is already open (toggle).
+    /// dismiss it when the same action in that placement is already open.
     fn toggle_placement_popup(
         plots: &mut Plots,
         bar_id: window::Id,
         placement_id: &str,
+        opener: &str,
         bounds: Option<(f32, f32, f32, f32)>,
     ) -> Command<Plant> {
         let output = match plots.windows.ids.get(&bar_id).copied() {
@@ -1895,19 +1904,19 @@ impl Top {
                 .windows
                 .popups
                 .get(&pid)
-                .is_some_and(|popup| popup.placement == placement_id);
+                .is_some_and(|popup| popup.placement == placement_id && popup.opener == opener);
             cmds.push(if same {
                 Popup::request_close(plots, pid)
             } else {
-                // Replacing a different placement should not wait for an
-                // exit transition; the new surface must open immediately.
+                // Different tray icons share a placement, but need separate
+                // bodies and anchors rather than toggling the first menu.
                 Popup::handle_dismiss(plots, pid)
             });
             if same {
                 return Command::batch(cmds);
             }
         }
-        if let Some(cmd) = Popup::open_for(plots, bar_id, output, placement_id, bounds) {
+        if let Some(cmd) = Popup::open_for(plots, bar_id, output, placement_id, opener, bounds) {
             cmds.push(cmd);
         }
         if cmds.is_empty() {
