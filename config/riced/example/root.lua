@@ -93,6 +93,9 @@ function app:actions(event)
 			end
 		end
 	end
+	if event.key == "settings" then
+		return shell.open_settings()
+	end
 	if event.key == "dismiss-all" then
 		return notification.dismissAll()
 	end
