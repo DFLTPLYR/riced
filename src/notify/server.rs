@@ -25,7 +25,7 @@ use crate::shell::{NotifyEvent, Plant};
 use iced::{Task as Command, futures::channel::mpsc};
 use std::collections::HashMap;
 use std::sync::{
-    LazyLock, Mutex,
+    Arc, LazyLock, Mutex,
     atomic::{AtomicU32, Ordering},
 };
 use zbus::{interface, object_server::SignalEmitter};
@@ -48,8 +48,31 @@ pub(crate) fn allocate_id() -> u32 {
 
 /// Live bus connection for emitting `ActionInvoked` /
 /// `NotificationClosed` from message handlers (which can't await).
-/// Set once by [`serve`]; `None` when the server never came up.
-static DBUS_CONN: LazyLock<Mutex<Option<zbus::Connection>>> = LazyLock::new(|| Mutex::new(None));
+/// Present only while the serving subscription is alive.
+static DBUS_CONN: LazyLock<Mutex<Option<Arc<zbus::Connection>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+struct ServingConnection(Arc<zbus::Connection>);
+impl ServingConnection {
+    fn new(connection: zbus::Connection) -> Self {
+        let connection = Arc::new(connection);
+        if let Ok(mut slot) = DBUS_CONN.lock() {
+            *slot = Some(connection.clone());
+        }
+        Self(connection)
+    }
+}
+impl Drop for ServingConnection {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = DBUS_CONN.lock()
+            && slot
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.0))
+        {
+            *slot = None;
+        }
+    }
+}
 
 /// Emit `ActionInvoked(id, key)` as a fire-and-forget command.
 pub(crate) fn emit_action_invoked(id: u32, key: String) -> Command<Plant> {
@@ -191,24 +214,30 @@ impl Server {
 /// for the iced subscription stream in `Plots::subscription`
 /// (`default_ms` threads the configured timeout through, since the
 /// stream builder is a bare fn pointer).
-pub async fn serve(mut tx: mpsc::Sender<Plant>, default_ms: u64) {
+pub async fn serve(tx: mpsc::Sender<Plant>, default_ms: u64) {
+    match zbus::connection::Builder::session() {
+        Ok(builder) => serve_on(tx, default_ms, builder).await,
+        Err(error) => {
+            eprintln!("riced: notifications: D-Bus unavailable ({error}), continuing without it")
+        }
+    }
+}
+
+async fn serve_on(
+    mut tx: mpsc::Sender<Plant>,
+    default_ms: u64,
+    builder: zbus::connection::Builder<'_>,
+) {
     let server = Server {
         tx: tx.clone(),
         default_ms,
     };
-    let built = zbus::connection::Builder::session()
-        .and_then(|b| b.name("org.freedesktop.Notifications"))
+    let built = builder
+        .name("org.freedesktop.Notifications")
         .and_then(|b| b.serve_at("/org/freedesktop/Notifications", server));
     let _conn = match built {
         Ok(b) => match b.build().await {
-            Ok(conn) => {
-                // Stash for fire-and-forget signal emission from message
-                // handlers (which can't await). Best effort only.
-                if let Ok(mut slot) = DBUS_CONN.lock() {
-                    *slot = Some(conn.clone());
-                }
-                conn
-            }
+            Ok(conn) => ServingConnection::new(conn),
             Err(e) => {
                 eprintln!("riced: notifications: D-Bus unavailable ({e}), continuing without it");
                 return;
@@ -222,14 +251,167 @@ pub async fn serve(mut tx: mpsc::Sender<Plant>, default_ms: u64) {
     let _ = tx
         .try_send(Plant::Notify(NotifyEvent::DBusUp))
         .map_err(|_| ());
-    // Park: the connection serves for the app lifetime. Dropping (on
-    // shutdown) releases the name.
+    // The guard clears shared ownership even when this future is cancelled.
     std::future::pending::<()>().await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelling_server_releases_name_and_restart_emits_signals() {
+        use iced::futures::StreamExt;
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        struct Bus(std::process::Child);
+        impl Drop for Bus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut bus = Bus(Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap());
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let address = address.trim();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let peer = zbus::connection::Builder::address(address)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                let proxy = zbus::Proxy::new(
+                    &peer,
+                    "org.freedesktop.Notifications",
+                    "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications",
+                )
+                .await
+                .unwrap();
+                for timeout in [1000, 2000, 2000] {
+                    let (tx, mut rx) = mpsc::channel(32);
+                    let server = tokio::spawn(serve_on(
+                        tx,
+                        timeout,
+                        zbus::connection::Builder::address(address).unwrap(),
+                    ));
+                    assert!(matches!(
+                        tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+                            .await
+                            .unwrap(),
+                        Some(Plant::Notify(NotifyEvent::DBusUp))
+                    ));
+                    let id: u32 = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        proxy.call(
+                            "Notify",
+                            &(
+                                "test",
+                                0u32,
+                                "",
+                                "title",
+                                "body",
+                                Vec::<String>::new(),
+                                HashMap::<String, zbus::zvariant::OwnedValue>::new(),
+                                -1i32,
+                            ),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    let Some(Plant::Notify(NotifyEvent::Arrived(item))) =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+                            .await
+                            .unwrap()
+                    else {
+                        panic!("missing arrival")
+                    };
+                    assert_eq!(item.id, id);
+                    assert_eq!(
+                        item.timeout,
+                        Some(std::time::Duration::from_millis(timeout))
+                    );
+                    let mut signals = proxy.receive_signal("NotificationClosed").await.unwrap();
+                    let task = emit_closed(u32::MAX, 2);
+                    let mut stream = iced_runtime::task::into_stream(task).unwrap();
+                    while stream.next().await.is_some() {}
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while let Some(signal) = signals.next().await {
+                            if signal.body().deserialize::<(u32, u32)>().unwrap() == (u32::MAX, 2) {
+                                return;
+                            }
+                        }
+                        panic!("close signal stream ended");
+                    })
+                    .await
+                    .unwrap();
+                    drop(signals);
+                    let mut actions = proxy.receive_signal("ActionInvoked").await.unwrap();
+                    let mut stream = iced_runtime::task::into_stream(emit_action_invoked(
+                        u32::MAX,
+                        "open:details".into(),
+                    ))
+                    .unwrap();
+                    while stream.next().await.is_some() {}
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while let Some(signal) = actions.next().await {
+                            if signal.body().deserialize::<(u32, String)>().unwrap()
+                                == (u32::MAX, "open:details".into())
+                            {
+                                return;
+                            }
+                        }
+                        panic!("action signal stream ended");
+                    })
+                    .await
+                    .unwrap();
+                    drop(actions);
+                    server.abort();
+                    let _ = server.await;
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            if peer
+                                .request_name_with_flags(
+                                    "org.freedesktop.Notifications",
+                                    zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+                                )
+                                .await
+                                .is_ok()
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("disabled server retained notification bus name");
+                    peer.release_name("org.freedesktop.Notifications")
+                        .await
+                        .unwrap();
+                }
+                let old = ServingConnection::new(peer.clone());
+                let new = ServingConnection::new(peer.clone());
+                drop(old);
+                assert!(Arc::ptr_eq(
+                    DBUS_CONN.lock().unwrap().as_ref().unwrap(),
+                    &new.0
+                ));
+                drop(new);
+                assert!(DBUS_CONN.lock().unwrap().is_none());
+            });
+    }
 
     #[test]
     fn parse_actions_pairs_keys_and_labels() {
