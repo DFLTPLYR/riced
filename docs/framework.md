@@ -564,9 +564,16 @@ set.
 | `exclusive_zone` | Integer `-1..32768`, default `0`; positive values reserve space according to Wayland layer-shell rules. |
 | `margin` | Named integers `top`, `right`, `bottom`, `left`, default zero. |
 | `keyboard` | `"none"` (default), `"on_demand"`, or `"exclusive"`. |
-| `input` | `"all"` (default) or `"none"`; partial measured input regions are not exposed yet. |
+| `input` | `"all"` (default), `"none"`, or `"regions"`. `"regions"` unions the measured bounds of clickable widgets and controls, so the rest of an oversized layer stays click-through. |
 | `pointer_events` | Boolean, default false. Deliver unconsumed layer-local pointer gestures to `actions`; child controls handle input first. |
 | `content` | Required ordinary `iced.*` widget tree. |
+
+With `input = "regions"`, widgets that handle input (`on_press` mouse areas,
+buttons, sliders, text inputs, and other controls) contribute surface-local hit
+rectangles. Wrap any node in `iced.region(child)` to add an explicit hit area
+even when it has no action. A full-output or oversized layer can therefore
+paint a large drawer while remaining click-through everywhere else; when there
+are no regions the input mask is empty.
 
 Layer-app pointer moves are coalesced to the latest position on each redraw.
 Pending motion is delivered before release or pointer exit, so drag endpoints

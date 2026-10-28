@@ -15,6 +15,7 @@ const EXAMPLES: &[&str] = &[
     "iced.space():width(size.fill):height(8)",
     "iced.image('memory-only.png'):width(20)",
     "iced.container(iced.text('nested')):padding(4):border('#112233')",
+    "iced.region(iced.text('hit'))",
     "iced.popup(iced.text('popup')):width(120):padding(6):align_x('center')",
     "iced.scrollable(iced.text('scroll'))",
     "iced.row({iced.text('x'), iced.button('go','go')}, 3)",

@@ -22,7 +22,8 @@ pub(crate) fn estimate_height(node: &WidgetNode, size: f32) -> f32 {
         WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
         | WidgetNode::Aligned { child, .. }
-        | WidgetNode::Animated { child, .. } => estimate_height(child, size),
+        | WidgetNode::Animated { child, .. }
+        | WidgetNode::Region { child } => estimate_height(child, size),
         WidgetNode::Raster { height, .. } => px(height).max(base),
         WidgetNode::Checkbox { size, .. }
         | WidgetNode::Radio { size, .. }
@@ -324,6 +325,16 @@ fn realize_aligned<M: Clone + 'static>(
                 Ok(element)
             }
         }
+        WidgetNode::Region { child } => realize_aligned(
+            child,
+            size,
+            button_msg,
+            interactive,
+            opacity,
+            align,
+            &mut *native,
+            hover.clone(),
+        ),
         WidgetNode::Aligned {
             child,
             align_x,

@@ -147,6 +147,7 @@ components! {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: Insets,
         background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32
     }
+    Region => RegionNode, "region", ["child"], [] { child: Box<WidgetNode> }
     Popup => PopupNode, "popup", ["child"], ["width", "height", "padding", "background", "radius", "border", "border_width", "align_x", "align_y", "on_open", "on_close"] {
         child: Box<WidgetNode>, width: NodeLength, height: NodeLength, padding: Insets,
         background: Option<iced::Color>, radius: Corners, border: Option<iced::Color>, border_width: f32,

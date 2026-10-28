@@ -66,8 +66,8 @@ impl Surface {
         if !["none", "on_demand", "exclusive"].contains(&self.keyboard.as_str()) {
             return Err("layer.keyboard must be none, on_demand, or exclusive".into());
         }
-        if !["all", "none"].contains(&self.input.as_str()) {
-            return Err("layer.input must be all or none".into());
+        if !["all", "none", "regions"].contains(&self.input.as_str()) {
+            return Err("layer.input must be all, none, or regions".into());
         }
         for (name, size, opposite) in [
             ("width", self.width, self.anchors.left && self.anchors.right),
@@ -133,7 +133,7 @@ impl Surface {
                 "on_demand" => KeyboardInteractivity::OnDemand,
                 _ => KeyboardInteractivity::None,
             },
-            events_transparent: self.input == "none",
+            events_transparent: self.input != "all",
             blur_option: BlurOption::None,
         }
     }
@@ -337,6 +337,19 @@ pub(crate) fn install(lua: &Lua, iced: &Table) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn surface_accepts_measured_input_regions_but_rejects_unknown_modes() {
+        let mut surface = Surface {
+            input: "regions".into(),
+            width: Some(100),
+            height: Some(100),
+            ..Surface::default()
+        };
+        assert!(surface.validate().is_ok());
+        surface.input = "partial".into();
+        assert!(surface.validate().is_err());
+    }
+
     #[test]
     fn app_popup_geometry_is_strict_and_content_cannot_contain_surfaces() {
         let lua = Lua::new();

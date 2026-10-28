@@ -133,6 +133,31 @@ fn all_anchors_measure_actual_variable_height_rows() {
 }
 
 #[test]
+fn explicit_regions_contribute_hit_rectangles_without_an_action() {
+    let lua = mlua::Lua::new();
+    crate::ui::dsl::inject_ui_base(&lua).unwrap();
+    let node = parse_node(
+        &lua.load("return iced.region(iced.container(iced.space()):width(120):height(30))")
+            .eval()
+            .unwrap(),
+    )
+    .unwrap();
+    let lists = Lists::default();
+    let frame = Arc::new(Mutex::new(Frame::default()));
+    let motion = AnimRuntime::default();
+    let mut element = element(&lists, &node, &motion, frame.clone());
+    let mut tree = Tree::new(&element);
+    layout(&mut element, &mut tree, &renderer());
+    assert_eq!(
+        frame.lock().unwrap().last.as_ref().unwrap().regions,
+        [Rectangle::new(
+            iced::Point::new(0.0, 0.0),
+            iced::Size::new(120.0, 30.0)
+        )]
+    );
+}
+
+#[test]
 fn native_scroll_measurements_clip_and_translate_live_regions() {
     let renderer = renderer();
     let node = node("top-right", &[100; 20]);

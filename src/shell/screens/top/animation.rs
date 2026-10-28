@@ -116,7 +116,8 @@ fn declared_lists<'a>(
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
         | WidgetNode::Aligned { child, .. }
-        | WidgetNode::Animated { child, .. } => declared_lists(child, out)?,
+        | WidgetNode::Animated { child, .. }
+        | WidgetNode::Region { child } => declared_lists(child, out)?,
         _ => {}
     }
     Ok(())

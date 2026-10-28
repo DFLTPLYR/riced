@@ -10,7 +10,8 @@ pub(crate) fn contains_popup(node: &WidgetNode) -> bool {
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
         | WidgetNode::Aligned { child, .. }
-        | WidgetNode::Animated { child, .. } => contains_popup(child),
+        | WidgetNode::Animated { child, .. }
+        | WidgetNode::Region { child } => contains_popup(child),
         WidgetNode::Row { children, .. }
         | WidgetNode::Column { children, .. }
         | WidgetNode::Stack { children, .. }
@@ -30,7 +31,8 @@ pub(crate) fn contains_images(node: &WidgetNode) -> bool {
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
         | WidgetNode::Aligned { child, .. }
-        | WidgetNode::Animated { child, .. } => contains_images(child),
+        | WidgetNode::Animated { child, .. }
+        | WidgetNode::Region { child } => contains_images(child),
         WidgetNode::Row { children, .. }
         | WidgetNode::Column { children, .. }
         | WidgetNode::Stack { children, .. }

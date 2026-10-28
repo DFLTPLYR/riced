@@ -70,7 +70,8 @@ fn declared<'a>(
         | WidgetNode::Anchored { child, .. }
         | WidgetNode::Clickable { child, .. }
         | WidgetNode::Aligned { child, .. }
-        | WidgetNode::Animated { child, .. } => declared(child, out)?,
+        | WidgetNode::Animated { child, .. }
+        | WidgetNode::Region { child } => declared(child, out)?,
         _ => {}
     }
     Ok(())
@@ -486,6 +487,22 @@ impl Lists {
                     measured::marked(element, Marker::Interactive)
                 } else {
                     super::motion::shifted(element, 0.0, 0.0, false)
+                })
+            }
+            WidgetNode::Region { child } => {
+                let body = self.node(
+                    child,
+                    runtime,
+                    sender,
+                    hover.clone(),
+                    active,
+                    opacity,
+                    &mut *native,
+                )?;
+                Ok(if active {
+                    measured::marked(body, Marker::Interactive)
+                } else {
+                    body
                 })
             }
             WidgetNode::Container {

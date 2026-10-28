@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 pub(super) fn component_names() -> Vec<String> {
     crate::ui::components::COMPONENTS
         .iter()
-        // `native` is a host-filled slot, not a user-configurable component.
-        .filter(|component| component.name != "plugin")
+        // `plugin` is a host-filled slot and `region` is an input wrapper;
+        // neither has visual defaults worth editing here.
+        .filter(|component| !matches!(component.name, "plugin" | "region"))
         .map(|component| component.name.to_owned())
         .collect()
 }

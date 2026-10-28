@@ -117,6 +117,13 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
                 .set("on_press", action.as_str())?;
             return Ok(table);
         }
+        WidgetNode::Region { child } => {
+            let mts: Table = lua.named_registry_value("riced.iced.metatables")?;
+            let table = super::dsl::node(lua, "region", mts.get("region")?, |table| {
+                table.set("child", to_table(lua, child)?)
+            })?;
+            return Ok(table);
+        }
         _ => {}
     }
     let mts: Table = lua.named_registry_value("riced.iced.metatables")?;
@@ -351,7 +358,8 @@ pub(crate) fn to_table(lua: &Lua, node: &WidgetNode) -> mlua::Result<Table> {
             WidgetNode::Anchored { .. }
             | WidgetNode::Clickable { .. }
             | WidgetNode::Aligned { .. }
-            | WidgetNode::Animated { .. } => unreachable!("handled above"),
+            | WidgetNode::Animated { .. }
+            | WidgetNode::Region { .. } => unreachable!("handled above"),
             WidgetNode::Raster {
                 handle,
                 width,

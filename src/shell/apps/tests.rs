@@ -1215,6 +1215,42 @@ fn framework_apps_build_a_layer_that_embeds_the_desktop_widget_slot() {
 }
 
 #[test]
+fn layer_region_input_masks_only_measured_widgets() {
+    let rects = input_rects(
+        &Surface {
+            input: "regions".into(),
+            ..Surface::default()
+        },
+        &[
+            Rectangle::new(iced::Point::new(10.2, 20.7), iced::Size::new(100.2, 40.1)),
+            Rectangle::new(iced::Point::new(10.2, 20.7), iced::Size::new(100.2, 40.1)),
+            Rectangle::new(iced::Point::new(300.0, 400.0), iced::Size::new(0.2, 2.0)),
+        ],
+    );
+    assert_eq!(rects, [(10, 20, 101, 41), (300, 400, 1, 2)]);
+    assert!(
+        input_rects(
+            &Surface {
+                input: "none".into(),
+                ..Surface::default()
+            },
+            &[]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        input_rects(
+            &Surface {
+                input: "all".into(),
+                ..Surface::default()
+            },
+            &[]
+        ),
+        [(0, 0, 32768, 32768)]
+    );
+}
+
+#[test]
 fn an_app_can_declare_several_layers_and_each_gets_its_own_surface() {
     let fixture = Fixture::new(
         r#"

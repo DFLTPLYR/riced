@@ -11,7 +11,7 @@ use crate::{
         widgets::measured::{self, Measurement, SharedFrame},
     },
 };
-use iced::{Element, Task, window};
+use iced::{Element, Rectangle, Task, window};
 use iced_exwlshell::reexport::WlRegion;
 use iced_wayland_subscriber::OutputId;
 use serde_json::{Value, json};
@@ -112,6 +112,17 @@ struct Root {
     lists: Lists,
     revision: u64,
     frame: SharedFrame,
+}
+
+impl Root {
+    /// Last measured clickable regions in surface-local coordinates.
+    fn measured_regions(&self) -> Vec<Rectangle> {
+        self.frame
+            .lock()
+            .ok()
+            .and_then(|frame| frame.last.as_ref().map(|data| data.regions.clone()))
+            .unwrap_or_default()
+    }
 }
 
 impl Instance {
@@ -824,6 +835,7 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
                 Some(surface) => {
                     if layer.applied.as_ref() != Some(&surface_desc) {
                         changed = true;
+                        let regions = layer.measured_regions();
                         commands.extend([
                             Task::done(Plant::LayoutChange {
                                 id: surface,
@@ -846,7 +858,7 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
                                 id: surface,
                                 keyboard_interactivity: settings.keyboard_interactivity,
                             }),
-                            input_region(surface, &surface_desc),
+                            input_region(surface, &surface_desc, &regions),
                         ]);
                     }
                 }
@@ -879,20 +891,48 @@ fn close(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
         iced_runtime::window::Action::Close(surface),
     ))
 }
-fn input_region(surface: window::Id, settings: &Surface) -> Task<Plant> {
-    let accepts = settings.input == "all";
+fn input_region(surface: window::Id, settings: &Surface, regions: &[Rectangle]) -> Task<Plant> {
+    let rects = input_rects(settings, regions);
     Task::done(Plant::SetInputRegion {
         id: surface,
         callback: iced_exwlshell::actions::ActionCallback::new(move |region: &WlRegion| {
-            if accepts {
-                region.add(0, 0, 32768, 32768);
+            for (x, y, width, height) in &rects {
+                region.add(*x, *y, *width, *height);
             }
         }),
     })
 }
+
+/// Surface-local input masks. `regions` is the union of measured interactive
+/// widgets, so an oversized layer can still be click-through between cards.
+fn input_rects(settings: &Surface, regions: &[Rectangle]) -> Vec<(i32, i32, i32, i32)> {
+    match settings.input.as_str() {
+        "all" => vec![(0, 0, 32768, 32768)],
+        "regions" => {
+            let mut rects: Vec<_> = regions
+                .iter()
+                .map(|rect| {
+                    let x = rect.x.floor() as i32;
+                    let y = rect.y.floor() as i32;
+                    (
+                        x,
+                        y,
+                        (rect.x + rect.width).ceil() as i32 - x,
+                        (rect.y + rect.height).ceil() as i32 - y,
+                    )
+                })
+                .filter(|(_, _, width, height)| *width > 0 && *height > 0)
+                .collect();
+            rects.sort_unstable();
+            rects.dedup();
+            rects
+        }
+        _ => Vec::new(),
+    }
+}
 pub(crate) fn opened(plots: &Plots, surface: window::Id) -> Task<Plant> {
     if is_popup(plots, surface) {
-        return input_region(surface, &Surface::default());
+        return input_region(surface, &Surface::default(), &[]);
     }
     plots
         .apps
@@ -900,7 +940,10 @@ pub(crate) fn opened(plots: &Plots, surface: window::Id) -> Task<Plant> {
         .values()
         .find(|i| i.owns(surface))
         .and_then(|i| i.root_by_surface(surface))
-        .map_or_else(Task::none, |root| input_region(surface, &root.root.surface))
+        .map_or_else(Task::none, |root| {
+            let regions = root.measured_regions();
+            input_region(surface, &root.root.surface, &regions)
+        })
 }
 /// Host slots a framework layer can embed. `desktop-widgets` composites the
 /// legacy desktop host, which has no description equivalent: widget instances,
@@ -1210,14 +1253,19 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
             else {
                 return Task::none();
             };
+            let mask = if layer.root.surface.input == "regions" {
+                input_region(surface, &layer.root.surface, &data.regions)
+            } else {
+                Task::none()
+            };
             if layer.lists.layout(
                 &data,
                 &mut plots.animation.motion,
                 Duration::from_millis(250),
             ) {
-                Task::done(Plant::App(AppMessage::Redraw(surface)))
+                Task::batch([mask, Task::done(Plant::App(AppMessage::Redraw(surface)))])
             } else {
-                Task::none()
+                mask
             }
         }
         AppMessage::Hover {

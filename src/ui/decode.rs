@@ -576,6 +576,17 @@ fn parse_component(
                 callbacks,
             })
         }
+        "region" => {
+            let child = t.get::<Value>("child").map_err(|e| e.to_string())?;
+            if child.is_nil() {
+                return Err("iced.region() needs a child".into());
+            }
+            let child = parse_child(&child, hover, budget)
+                .map_err(|error| format!("iced.region().child: {error}"))?;
+            Ok(WidgetNode::Region {
+                child: Box::new(child),
+            })
+        }
         "container" | "popup" => {
             let what = format!("iced.{kind}()");
             if kind == "popup" {
