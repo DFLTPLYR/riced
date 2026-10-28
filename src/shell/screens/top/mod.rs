@@ -1811,8 +1811,15 @@ impl Top {
     /// notification transition sets. Repaint comes from the `Scope::All`
     /// redraw scope, not here.
     pub(crate) fn handle_anim_frame(plots: &mut Plots) -> Command<Plant> {
-        plots.animation.advance(Instant::now());
-        crate::shell::overlay::sweep(plots)
+        let released = plots.animation.advance(Instant::now());
+        Command::batch([
+            crate::shell::overlay::sweep(plots),
+            if released {
+                plots.reclaim_image_memory(true)
+            } else {
+                Command::none()
+            },
+        ])
     }
 
     /// Dispatch an event to the owning placement's `actions(events)`

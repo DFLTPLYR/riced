@@ -34,11 +34,15 @@ impl AnimationState {
         self.widgets.clear();
     }
 
-    pub(crate) fn advance(&mut self, now: Instant) {
+    pub(crate) fn advance(&mut self, now: Instant) -> bool {
         self.motion.tick_at(now);
+        let mut released = false;
         for list in self.widgets.values_mut() {
+            let had_ghosts = list.has_ghosts();
             list.sweep(&mut self.motion);
+            released |= had_ghosts && !list.has_ghosts();
         }
+        released
     }
 }
 
@@ -79,4 +83,46 @@ pub(crate) fn complete(
     commands.push(super::screens::popup::Popup::refresh_bodies(plots));
     commands.push(super::overlay::refresh(plots, true));
     iced::Task::batch(commands)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::listview::{Axis, ListView};
+    use std::time::Duration;
+
+    #[test]
+    fn widget_ghost_release_requests_cleanup_only_after_exit() {
+        let mut state = AnimationState::default();
+        let mut list = ListView::new(32.0);
+        let key = ("center".to_owned(), "7".to_owned());
+        let duration = Duration::from_millis(250);
+        let lua = crate::lua::widgets::new_widget_lua().unwrap();
+        let node = crate::ui::decode::parse_node(
+            &lua.load("return iced.text('notification')").eval().unwrap(),
+        )
+        .unwrap();
+        list.update(
+            &mut state.motion,
+            duration,
+            Axis::Vertical,
+            &[],
+            std::slice::from_ref(&key),
+            &[],
+        );
+        list.update(
+            &mut state.motion,
+            duration,
+            Axis::Vertical,
+            std::slice::from_ref(&key),
+            &[],
+            &[(0, key.clone(), node)],
+        );
+        assert!(list.has_ghosts());
+        state.widgets.insert("center".into(), list);
+        let now = Instant::now();
+        assert!(!state.advance(now));
+        assert!(state.advance(now + Duration::from_secs(1)));
+        assert!(!state.advance(now + Duration::from_secs(2)));
+    }
 }

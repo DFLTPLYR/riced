@@ -1152,17 +1152,35 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
 }
 pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
     let mut completed = Vec::new();
+    let mut released = false;
     for instance in plots.apps.instances.values_mut() {
         for root in instance.roots.values_mut() {
-            root.lists.sweep(&mut plots.animation.motion);
+            released |= root.lists.sweep(&mut plots.animation.motion);
             completed.extend(root.lists.take_completed());
         }
         if let Some(popup) = &mut instance.popup {
-            popup.lists.sweep(&mut plots.animation.motion);
+            released |= popup.lists.sweep(&mut plots.animation.motion);
             completed.extend(popup.lists.take_completed());
         }
     }
-    super::animation::complete(plots, completed)
+    Task::batch([
+        super::animation::complete(plots, completed),
+        if released {
+            plots.reclaim_image_memory(true)
+        } else {
+            Task::none()
+        },
+    ])
+}
+
+pub(crate) fn collect_garbage(plots: &Plots) {
+    for instance in plots.apps.instances.values() {
+        if let Some(runtime) = &instance.runtime
+            && let Err(error) = runtime.collect_garbage()
+        {
+            eprintln!("app memory cleanup: {error}");
+        }
+    }
 }
 pub(crate) fn forget(plots: &mut Plots, surface: window::Id) {
     if !plots

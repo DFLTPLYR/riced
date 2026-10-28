@@ -15,6 +15,14 @@ use crate::ui::{
 use mlua::{Function, IntoLua, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+pub(crate) fn collect_garbage(lua: &Lua) -> mlua::Result<()> {
+    lua.expire_registry_values();
+    lua.gc_collect()?;
+    // Finalizing callback userdata can release more registry-held item snapshots.
+    lua.expire_registry_values();
+    lua.gc_collect()
+}
+
 /// Resolve, snapshot and cache one app-local or shared component module.
 ///
 /// `build` runs against the resolved module; when a reload fails it runs again
@@ -292,6 +300,12 @@ pub struct LuaRuntime {
 }
 
 impl LuaRuntime {
+    pub(crate) fn collect_garbage(&self) -> mlua::Result<()> {
+        collect_garbage(&self.lua)?;
+        self.widgets.borrow().collect_garbage();
+        Ok(())
+    }
+
     pub fn new() -> mlua::Result<Self> {
         Self::with_components(crate::config::builtin_component_files())
     }

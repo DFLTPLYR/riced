@@ -74,6 +74,17 @@ impl std::fmt::Debug for State {
             .finish()
     }
 }
+impl State {
+    pub(crate) fn collect_garbage(&self) {
+        for scene in self.scenes.values() {
+            if let Some(runtime) = &scene.runtime
+                && let Err(error) = runtime.collect_garbage()
+            {
+                eprintln!("scene memory cleanup: {error}");
+            }
+        }
+    }
+}
 #[derive(Default)]
 struct Scene {
     runtime: Option<LuaRuntime>,
@@ -497,8 +508,9 @@ pub(crate) fn push_mask(plots: &mut Plots, output: OutputId) -> Task<Plant> {
 }
 pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
     let mut callbacks = Vec::new();
+    let mut released = false;
     for scene in plots.desktop.overlays.scenes.values_mut() {
-        scene.lists.sweep(&mut plots.animation.motion);
+        released |= scene.lists.sweep(&mut plots.animation.motion);
         callbacks.extend(scene.lists.take_completed());
     }
     for list in plots.animation.widgets.values_mut() {
@@ -511,6 +523,11 @@ pub(crate) fn sweep(plots: &mut Plots) -> Task<Plant> {
     Task::batch([
         super::animation::complete(plots, callbacks),
         super::apps::sweep(plots),
+        if released {
+            plots.reclaim_image_memory(true)
+        } else {
+            Task::none()
+        },
     ])
 }
 pub(crate) fn update(plots: &mut Plots, event: OverlayEvent) -> Task<Plant> {

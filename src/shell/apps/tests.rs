@@ -150,6 +150,96 @@ fn bundled_selection_uses_global_geometry_and_only_background_left_drags() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn deferred_reclamation_collects_discarded_framework_notification_items() {
+    const CHILD: &str = "RICED_NOTIFICATION_RSS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "shell::apps::tests::deferred_reclamation_collects_discarded_framework_notification_items", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated notification memory probe failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let rss = || -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    struct Owner(std::sync::Arc<Vec<u8>>);
+    impl mlua::UserData for Owner {}
+    let fixture = Fixture::new(
+        r#"
+        return {view=function()
+            local items = payload and {{id=1, image=payload}} or {}
+            return iced.layer({id='notifications',width=360,height=480,
+                content=iced.listview(items):id('notifications'):key('id')
+                    :delegate(function(item) return iced.text(item.id) end)})
+        end}
+    "#,
+    );
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let owner = std::sync::Arc::new(vec![7u8; 32 * 1024 * 1024]);
+    let weak = std::sync::Arc::downgrade(&owner);
+    let payload = Owner(owner);
+    assert_eq!(std::sync::Arc::strong_count(&payload.0), 1);
+    app.runtime
+        .as_ref()
+        .unwrap()
+        .lua
+        .globals()
+        .set("payload", payload)
+        .unwrap();
+    fixture.render(&mut app, false).unwrap();
+    app.runtime
+        .as_ref()
+        .unwrap()
+        .lua
+        .globals()
+        .set("payload", mlua::Value::Nil)
+        .unwrap();
+    fixture.render(&mut app, false).unwrap();
+    // Settle legitimate exit owners before asking the host to collect Lua garbage.
+    let mut motion = crate::ui::anim::AnimRuntime::default();
+    for root in app.roots.values_mut() {
+        root.lists.clear(&mut motion);
+    }
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    plots
+        .apps
+        .instances
+        .insert((OutputId(1), "bar".into()), app);
+    let peak = rss();
+    let _ = plots.update(Plant::Config(
+        super::super::ConfigEvent::ReclaimImageMemory { redraw: true },
+    ));
+    assert!(
+        weak.upgrade().is_none(),
+        "discarded Lua items still retain native resources after dismissal cleanup"
+    );
+    let after = rss();
+    eprintln!("notification native/Lua reclamation: peak {peak} KiB -> {after} KiB");
+    assert!(
+        peak.saturating_sub(after) > 16 * 1024,
+        "dismissal retained native/Lua RSS: peak {peak}, after {after} KiB"
+    );
+}
+
+#[test]
 fn bundled_root_preserves_notification_action_keys() {
     let lua = crate::lua::widgets::new_widget_lua().unwrap();
     lua.load("require = function() return {} end")

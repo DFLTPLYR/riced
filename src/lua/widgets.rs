@@ -277,6 +277,14 @@ pub(crate) struct WidgetState {
 }
 
 impl WidgetState {
+    pub(crate) fn collect_garbage(&self) {
+        for lua in self.instances.values() {
+            if let Err(error) = super::runtime::collect_garbage(lua) {
+                eprintln!("widget memory cleanup: {error}");
+            }
+        }
+    }
+
     pub(crate) fn forget_window(&mut self, window: window::Id) {
         self.outputs.retain(|(owner, _), _| *owner != window);
         self.trees.retain(|(owner, _), _| *owner != window);

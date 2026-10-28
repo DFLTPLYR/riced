@@ -1651,6 +1651,9 @@ impl Plots {
             Plant::Config(ConfigEvent::ReclaimImageMemory { .. }) => {
                 // Host-side cleanup only; a redraw accompanies the message
                 // when scheduled, via `redraw_scope`.
+                super::apps::collect_garbage(self);
+                self.placements.collect_garbage();
+                self.desktop.overlays.collect_garbage();
                 crate::ui::assets::release_unused();
                 crate::theme_gen::trim_memory();
                 Command::none()

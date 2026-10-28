@@ -700,9 +700,26 @@ timeout-ms = 5000
 record. The popup scene receives visible records only. The `notifications`
 service array contains all retained records, so the center and badge include
 expired popups. Entries expose `popup_visible` and `closed` flags.
-History is in-memory for the current daemon session. Retained records own their
-image handles until dismissed; completing an exit releases only the visual
-ghost and its callback/item references.
+History is in-memory for the current daemon session, capped at **256 records**
+and **32 MiB of retained image bytes** (counted per record). Oldest closed
+records are evicted first; if needed, oldest live records are expired with one
+`NotificationClosed(id, 1)`, even for zero-timeout or critical notifications.
+Replacements count only their current image. Retained records own their image
+handles until dismissed or evicted; snapshots, exit animations, and renderer
+caches may keep pixels longer. These queue budgets are not a process-memory cap.
+Dismissal schedules a deferred Lua/native cleanup pass, repeated when exit ghosts
+finish. This expires discarded callback snapshots, collects framework/embedded
+widget VMs, releases unused decoded-image cache entries, and trims free allocator
+pages on glibc Linux. It does not force collection on every render or invalidate
+live images; renderer/driver memory recovery remains backend-dependent.
+
+Image ingestion uses at most two blocking workers; saturation or rejected images
+falls back to text. Files must be regular and at most 8 MiB. Raster dimensions
+are limited to 1024×1024 before pixel decoding, with a 16 MiB decoder allocation
+budget (best-effort for codec internals). Raw image hints remain limited to
+512×512. SVG input is capped at 8 MiB and rasterized within 96px; compressed SVG
+and nested/linked images are not loaded, preventing unbounded secondary decodes
+and file access. Shared icon and Settings previews use the same file limits.
 
 Use explicit commands from `app:actions` or a completion callback:
 
