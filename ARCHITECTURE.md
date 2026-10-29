@@ -7,7 +7,7 @@ src/
   main.rs              CLI dispatch and daemon bootstrap
   cli/                 arguments, IPC, headless command execution
                        (build.rs generates a project shell; extension.rs
-                       compiles the crates config.lua enables)
+                       compiles the crates data/config.lua enables)
   shell/
     state.rs           domain coordination and event dispatch
     windows.rs         surface registries, output identity and idempotent detachment
@@ -22,7 +22,7 @@ src/
     events.rs          host messages
     jobs.rs            persistence and theme-regeneration job ownership
     apps.rs            framework app instances and their declared layer roots
-    apps/popup.rs      app-owned modal child surfaces
+    apps/popup.rs      app-owned native popup child surfaces
     screens/           bar, wallpaper/menu, popup, notification, settings hosts
       top/             bar host
         scheduling.rs  due placement selection and execution with an injected clock
@@ -73,7 +73,6 @@ src/
     widgets.rs         placement VMs, entry publication and per-window render caches
     metadata.rs        widget author defaults and property-schema decoding
     notifications.rs   notification app entries, metadata and owned action decoding
-    shell.rs           Lua-requested native Settings command (layers are app-owned)
     transitions.rs     transition decoding
     value.rs           scalar coercion and diagnostics
     demo.rs            development host
@@ -120,6 +119,11 @@ The former `app`, `components`, `composables`, and `colorgen` import facades
 have been removed. Callers use `shell`, `ui/widgets`, and `theme_gen` directly.
 
 ## Data flow
+
+Lua apps declare both layer surfaces and native XDG windows. `settings.lua`
+declares the Settings window; its native editor slot keeps page state and
+transactional wallpaper handling. Native window closes notify only their owning
+app and leave sibling layers alive.
 
 The shell owns lifecycle, input routing, output identity, and persistence.
 It assembles read-only `ServiceCtx` snapshots at `shell/context.rs`.

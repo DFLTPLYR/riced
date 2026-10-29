@@ -1,4 +1,4 @@
--- One Lua instance owns the button layer and its modal popup on each output.
+-- One Lua instance owns the button layer and its native popup on each output.
 local app = {}
 
 function app:mount()
@@ -16,13 +16,13 @@ function app:actions(event)
     end
 end
 
-function app:view(props)
+function app:view()
     local popup
     if self.open then
         popup = {
             id = "counter",
-            x = 16,
-            y = (props.output.height or 600) - 240,
+            x = 0,
+            y = -176, -- above the parent layer, with a 16px gap
             width = 260,
             height = 160,
             content = iced.container(iced.column({

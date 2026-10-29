@@ -11,7 +11,7 @@ reviews, and tests every change — prompts in, review before merge.
 ## Features
 
 - **Layer shell daemon** (`daemon` + `exwlshell`) — one `Background` (`Layer::Background`, `Anchor::all`, `Size::FILL`) + one `Top` bar (`50px`, `Anchor::Top`, `exclusive_zone`) per output via `OutputInsert`
-- **Lua desktop selection** — `scripts/frontend/root.lua` owns the left-drag state and global rectangle; `layers/background.lua` draws its themed fill/border and declares the release fade. The native animation clock applies the configured speed/reduced-motion setting without Lua frame timers.
+- **Lua desktop selection** — `scripts/frontend/shell.lua` owns the left-drag state and global rectangle; `layers/background.lua` draws its themed fill/border and declares the release fade. The native animation clock applies the configured speed/reduced-motion setting without Lua frame timers.
 - **Cross-monitor drag** — opt-in shared pointer gestures keep the app's output-local VMs in sync using logical coordinates. Each canvas clips the full rectangle, without adding borders at monitor seams. The legacy Rust background remains a fallback for projects without Lua-owned backgrounds.
 - **Smooth input** — pointer moves coalesce to one sample per frame, including outside the originating surface during a drag. Child controls consume their own presses before background selection; a fresh drag resets the previous fade.
 - **Context menu** — `Right` `ButtonPressed` `src/app/app.rs:525` `contextMenu {x,y,open}` `src/app/app.rs:42`, clipped to screen, `Left` press closes
@@ -19,12 +19,12 @@ reviews, and tests every change — prompts in, review before merge.
 ## Experimental framework apps
 
 Build opt-in Lua applications under `apps/<name>/app.lua` and enable them with
-`apps = { { name = "bar" } }` in `config.lua`. Apps can return `iced.layer({...})`
+`apps = { { name = "bar" } }` in `data/config.lua`. Apps can return `iced.layer({...})`
 to declare native surfaces with independent per-output state and lifecycle hooks.
 See [the framework guide](docs/framework.md) and [example project](examples/).
 Existing shell configuration remains supported. The [experimental Rust extension
 SDK](docs/extensions.md) supports compiled-in and supervised executable services enabled from
-`config.lua`; `riced build` generates the registration and a locked build, with
+`data/config.lua`; `riced build` generates the registration and a locked build, with
 a palette extension and isolated palette worker as examples.
 
 ## Requirements
@@ -37,24 +37,24 @@ a palette extension and isolated palette worker as examples.
 ## Install & Run
 
 Plain `riced` installs the default frontend into `$XDG_CONFIG_HOME/riced`
-(normally `~/.config/riced`) **only when no configuration exists**. `root.lua`
+(normally `~/.config/riced`) **only when no configuration exists**. `shell.lua`
 is the entry point, with command handlers in `state.lua`:
 
 ```
-config.lua                 preferences, bar slots and widget placements
-root.lua                   entry point; declares every surface
+data/config.lua            preferences, bar slots and widget placements
+shell.lua                  entry point; declares every surface and startup options
 state.lua                  riced.ipc command handlers
 layers/                    background and bar layer declarations
-data/bars/                 one file per bar (read by root.lua, edited by Panel)
+data/bars/                 one file per bar (read by shell.lua, edited by Panel)
 plugins/                   example Lua host plugins (riced.plugin)
 settings/                  Settings window shell and pages (own folder)
 ```
 
-Every surface is declared in Lua. `root.lua` composes `layers/background.lua`
-and one `layers/bar.lua` per entry in `bars.lua`; `layers/bar.lua` embeds
+Every surface is declared in Lua. `shell.lua` composes `layers/background.lua`
+and one `layers/bar.lua` per entry in `data/bars/`; `layers/bar.lua` embeds
 `riced.widget` instances, so widget files keep their own VMs, services, popups,
 and action handlers. The native bar host is disabled in the installed
-`config.lua`, and Settings remains the existing Apply/Discard window. Settings
+`data/config.lua`, and Settings remains the existing Apply/Discard window. Settings
 requests use the same Lua IPC handler as the CLI:
 
 ```sh
@@ -64,7 +64,7 @@ riced ipc remove --anchor bottom --output DP-1
 ```
 
 Omit `--output` to address an all-output bar. Bars are plain data files under
-`data/bars/`; `root.lua` lists that directory and declares one layer per file.
+`data/bars/`; `shell.lua` lists that directory and declares one layer per file.
 **Settings → Panel** lists the same files and edits their slots and widgets,
 writing the files back. Add/remove IPC without `--output` writes or removes
 `data/bars/<edge>.lua` (all outputs). With `--output DP-1`, the filename is
@@ -78,19 +78,19 @@ Existing installations keep their Lua files: startup and `riced init --repair`
 never overwrite existing files. To apply these bundled fixes, merge only these
 changes from the matching release into your project (back up your files first):
 
-- `root.lua`: guard a missing `event.key`, then use
+- `shell.lua`: guard a missing `event.key`, then use
   `local target, key = event.key:match("^invoke:(%d+):(.*)$")` without `and`.
 - `state.lua`: copy `state.bar_name` and the empty-output validation from
-  `scripts/frontend/state.lua`. In `root.lua`, use `state.bar_name(options)` for
+  `scripts/frontend/state.lua`. In `shell.lua`, use `state.bar_name(options)` for
   both add/remove paths, save `output = options.output`, and filter bars in `view`
   by `bar.output` against `props.output.name` (missing/empty means all outputs).
 - If you have a custom `settings/panel.lua`, merge the output-name label from
   `scripts/settings/panel.lua`; its existing read-modify-write edits preserve
   the `output` field. Existing `<edge>.lua` bar files need no migration.
 
-To enable Lua desktop selection in an existing root project, rebuild/restart the
+To enable Lua desktop selection in an existing shell project, rebuild/restart the
 daemon, then merge the background-pointer branch of `app:actions` and the
-`selection`/`selecting`/`fade_ms` props from `scripts/frontend/root.lua`. Merge the
+`selection`/`selecting`/`fade_ms` props from `scripts/frontend/shell.lua`. Merge the
 selection canvas and `shared_pointer_events = true` from
 `scripts/frontend/layers/background.lua` into your `layers/background.lua`.
 Preserve your other handlers and styling; startup and repair will not replace
@@ -680,7 +680,7 @@ The demo's static Lua tree does not register interactive closure callbacks.
 
 D-Bus freedesktop server (mako replacement) plus internal events. The Rust
 service owns delivery, expiry, retained history, and output assignment.
-Presentation is a normal Lua layer declared by `root.lua`:
+Presentation is a normal Lua layer declared by `shell.lua`:
 
 ```lua
 riced.layer("layers/notifications.lua", { output = props.output })
@@ -690,7 +690,7 @@ riced.layer("layers/notifications.lua", { output = props.output })
 `iced.listview(notifications)` and delegates each row to
 `iced.notification_card(n)`. The installed frontend provides this file. Removing
 the declaration leaves notifications headless; the service and history are
-unaffected. Dismissal and action clicks route through `root.lua`'s
+unaffected. Dismissal and action clicks route through `shell.lua`'s
 `app:actions`:
 
 ```lua
@@ -709,7 +709,7 @@ and `closed`. `actions` is `{ key, label }[]`; image pixels never cross into Lua
 `components/notification_card.lua` is the reusable
 `iced.define("notification_card", ...)` builder.
 
-Projects without a `root.lua` can keep the legacy `notifications.source` scene.
+Projects without a `shell.lua` can keep the legacy `notifications.source` scene.
 It renders through the shared overlay host and receives output-filtered
 `props.notifications` with richer per-item `image` and `actions`. Setting
 `source = ""` keeps the service enabled without a scene.
@@ -718,7 +718,7 @@ It renders through the shared overlay host and receives output-filtered
 [notification]
 enabled = true
 output = "mouse"  # or "DP-1" to pin
-source = "notifications.lua"  # legacy scene; ignored when root.lua declares layers/notifications.lua
+source = "notifications.lua"  # legacy scene; ignored when shell.lua declares layers/notifications.lua
 timeout-ms = 5000
 ```
 
@@ -880,7 +880,7 @@ anchor: Anchor::Top, size: LayerSize::fill_width(1), exclusive_zone: 0, start_mo
 
 ## Theme
 
-Global theme lives in `src/theme.rs` — every color/style helper reads one
+Global theme lives in `src/theme/` — every color/style helper reads one
 `ActiveTheme`, so a palette tweak repaints everywhere on the next frame.
 
 Theme files use the exact reshell schema
@@ -900,6 +900,14 @@ First run seeds `~/.config/riced/theme/` with all 11 vendored themes so
 they are editable; edits hot-reload on the 500ms `ConfigTick` (same as
 `config.toml`). A Theme page in the Settings panel lists themes + a
 Dark/Light toggle, persisted via `ConfigPatch::ThemeName/Darkmode`.
+
+Lua can read the applied colors with `iced.palette()` and explicitly apply a
+partial update by returning `iced.palette({primary="#89b4fa", on_primary="#181825"})`
+from an action or managed callback. Overrides persist under `theme.palette`
+in `data/config.lua`; choosing a named palette clears them, while dark/light mode
+changes retain them. `theme.*` and native base colors resolve from the same
+palette. Palette updates alone do not run external-app template hooks.
+See [the Lua palette contract](docs/lua-api.md#icedpalette-built-in-not-a-widget).
 
 ## Dynamic theme (colorgen)
 

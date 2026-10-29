@@ -75,9 +75,9 @@ pub(super) fn node(
 pub(crate) fn inject_ui_base(lua: &Lua) -> mlua::Result<()> {
     crate::lua::notifications::install(lua)?;
     crate::lua::tray::install(lua)?;
-    crate::lua::shell::install(lua)?;
     crate::lua::callbacks::install(lua)?;
     let iced = lua.create_table()?;
+    crate::theme::palette::install(lua, &iced)?;
     super::animations::install(lua, &iced)?;
     crate::framework::install(lua, &iced)?;
     let mts = lua.create_table()?;

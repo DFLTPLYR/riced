@@ -121,7 +121,7 @@ fn snapshot(
         }
     };
     Snapshot {
-        host: json!({"name":current.name, "darkmode":current.darkmode, "icon_theme":current.icon_theme,
+        host: json!({"name":current.name, "custom":!current.palette.is_empty(), "darkmode":current.darkmode, "icon_theme":current.icon_theme,
             "palettes":palettes, "icon_themes":icons, "preview_status":status, "preview_message":message}),
         images,
         actions,

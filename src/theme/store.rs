@@ -34,7 +34,7 @@ pub fn builtin_text(name: &str) -> Option<&'static str> {
 }
 
 pub fn theme_dir() -> PathBuf {
-    crate::config::config_path().with_file_name("theme")
+    crate::config::theme_dir()
 }
 
 pub(crate) fn user_file(name: &str) -> PathBuf {
@@ -111,19 +111,21 @@ pub fn resolve(cfg: &ThemeConfig) -> ActiveTheme {
         }
         load_file("gruvbox")
     });
-    match file {
+    let mut active = match file {
         Some(f) => ActiveTheme::from_raw(if cfg.darkmode { &f.dark } else { &f.light }),
         None => ActiveTheme::fallback(),
-    }
+    };
+    cfg.palette.apply(&mut active);
+    active
 }
 
 pub fn to_palette(a: &ActiveTheme) -> Palette {
     Palette {
-        background: a.surface,
-        text: a.on_surface,
+        background: a.background,
+        text: a.on_background,
         primary: a.primary,
-        success: a.tertiary,
-        warning: a.secondary,
+        success: a.success,
+        warning: a.warning,
         danger: a.error,
     }
 }

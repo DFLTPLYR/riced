@@ -23,7 +23,7 @@ mod ui;
 mod wallpaper;
 
 use cli::commands::{run_apply_templates, run_generate_theme};
-use iced_exwlshell::settings::{LayerShellSettings, Settings, StartMode};
+use iced_exwlshell::settings::Settings;
 use shell::{Plots, redraw_scope};
 
 /// Re-exported registry type for generated shell entry points.
@@ -74,13 +74,6 @@ fn run_with(
         }
     }
     let _shutdown = Shutdown;
-    tracing_subscriber::fmt().init();
-    // usvg's generic attribute parser warns about valid `marker-*: none`
-    // declarations, which third-party SVG icons use freely. The tree still
-    // parses and rasterizes; keep the per-icon warning spam out of the log.
-    let _ = tracing_log::LogTracer::builder()
-        .ignore_crate("usvg::parser::svgtree")
-        .init();
     let cli = cli::parse();
     let project_root = match cli.project_root()? {
         Some(root) => Some(root),
@@ -90,6 +83,11 @@ fn run_with(
         config::set_project_root(root)?;
     }
     let command = cli.command;
+    if command.is_some() {
+        // CLI commands never evaluate the shell entry; keep logging at the
+        // environment/default level.
+        init_tracing(None);
+    }
     if let Some(cli::Commands::LuaDemo { script }) = command {
         lua::demo::run(script)?;
         return Ok(());
@@ -109,19 +107,11 @@ fn run_with(
             let outcome = config::initialize::selected(mode)?;
             println!(
                 "riced: frontend {outcome:?} at {}",
-                config::config_path().display()
+                config::project_dir().join("shell.lua").display()
             );
             Ok(())
         }
         Some(cli::Commands::LuaDemo { .. }) => unreachable!("Lua demo handled above"),
-        Some(cli::Commands::OpenSettings) => {
-            if let Err(e) = cli::queue_open_settings() {
-                eprintln!("riced: cannot queue open-settings: {e}");
-                std::process::exit(1);
-            }
-            println!("riced: settings requested");
-            Ok(())
-        }
         Some(cli::Commands::GenerateTheme {
             variant,
             set,
@@ -181,6 +171,10 @@ fn run_with(
 }
 
 fn run_daemon() -> Result<(), iced_exwlshell::Error> {
+    // The entry is loaded once more per output; this pre-pass only reads the
+    // startup options. Keep shell.lua top-level side-effect free.
+    let startup = shell_settings();
+    init_tracing(startup.tracing.as_deref());
     let connection = Connection::connect_to_env().unwrap_or_else(|e| {
         eprintln!(
             "riced: cannot connect to Wayland ({e:?}); \
@@ -203,15 +197,95 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
     .theme(|plots: &Plots, _| theme::theme_for(&plots.config.theme))
     .style(theme::app_style)
     .settings(Settings {
-        layer_settings: LayerShellSettings {
-            start_mode: StartMode::Background,
-            keyboard_interactivity: iced_exwlshell::reexport::KeyboardInteractivity::None,
-            ..Default::default()
-        },
+        id: (!startup.connection.id.is_empty()).then(|| startup.connection.id.clone()),
+        layer_settings: startup.settings.layer(),
+        antialiasing: startup.connection.antialiasing,
+        default_text_size: iced::Pixels(
+            if startup.connection.default_text_size.is_finite()
+                && startup.connection.default_text_size > 0.0
+            {
+                startup.connection.default_text_size
+            } else {
+                16.0
+            },
+        ),
+        keep_compositor_alive: startup.connection.keep_compositor_alive,
         with_connection: Some(connection2.into()),
         shell_broadcast,
         ..Default::default()
     })
     .redraw_scope(redraw_scope)
     .run()
+}
+
+/// Read `riced.root(app, {...})` from `shell.lua` before the daemon connects.
+fn shell_settings() -> lua::root::Settings {
+    let project = framework::Project::installed();
+    let entry = project.source("root");
+    if !entry.is_file() {
+        return lua::root::Settings::default();
+    }
+    let mut runtime = match lua::LuaRuntime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("shell.lua: cannot prepare runtime: {error}");
+            return lua::root::Settings::default();
+        }
+    };
+    if let Err(error) = runtime.set_app_root(&project.root) {
+        eprintln!("shell.lua: cannot set project root: {error}");
+        return lua::root::Settings::default();
+    }
+    if let Err(error) = runtime.load_path(&entry) {
+        eprintln!("shell.lua: startup options unavailable: {error}");
+    }
+    runtime.root_settings().unwrap_or_else(|error| {
+        eprintln!("shell.lua: invalid startup options: {error}");
+        lua::root::Settings::default()
+    })
+}
+
+fn init_tracing(filter: Option<&str>) {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_filter(filter))
+        .init();
+    // usvg's generic attribute parser warns about valid `marker-*: none`
+    // declarations, which third-party SVG icons use freely. The tree still
+    // parses and rasterizes; keep the per-icon warning spam out of the log.
+    let _ = tracing_log::LogTracer::builder()
+        .ignore_crate("usvg::parser::svgtree")
+        .init();
+}
+
+/// `RUST_LOG` stays the default; `tracing = "..."` in `shell.lua` overrides it.
+fn tracing_filter(filter: Option<&str>) -> tracing_subscriber::EnvFilter {
+    filter
+        .and_then(
+            |filter| match tracing_subscriber::EnvFilter::try_new(filter) {
+                Ok(filter) => Some(filter),
+                Err(error) => {
+                    eprintln!("shell.lua: invalid tracing filter {filter:?}: {error}");
+                    None
+                }
+            },
+        )
+        .or_else(|| tracing_subscriber::EnvFilter::try_from_default_env().ok())
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tracing_filter_prefers_the_configured_filter() {
+        assert!(
+            super::tracing_filter(Some("riced=debug"))
+                .to_string()
+                .contains("riced=debug")
+        );
+    }
+
+    #[test]
+    fn invalid_tracing_filter_falls_back_without_panicking() {
+        let _ = super::tracing_filter(Some("[not=valid"));
+    }
 }

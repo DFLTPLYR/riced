@@ -429,10 +429,10 @@ impl Plots {
             // This is native Closed, not CloseRequested. The backend has
             // already detached the renderer; never queue another native close.
             iced::window::close_events().map(|id| Plant::Wayland(LandEvent::Closed(id))),
-            // hot-reload poll for config.lua (mtime check only, cheap)
+            // hot-reload poll for data/config.lua (mtime check only, cheap)
             iced::time::every(Duration::from_millis(500))
                 .map(|_| Plant::Config(ConfigEvent::ConfigTick)),
-            // file IPC poll for CLI requests (`riced open-settings`)
+            // File IPC poll for CLI requests (`riced ipc <command> args`).
             iced::time::every(Duration::from_millis(250)).map(|_| Plant::IpcPoll),
         ];
 
@@ -559,7 +559,7 @@ impl Plots {
 
     pub fn title(&self, id: iced::window::Id) -> Option<String> {
         match self.id_info(id) {
-            Some(PlotInfo::Setting) => Some(Setting::title()),
+            Some(PlotInfo::App(_) | PlotInfo::Setting) => super::apps::title(self, id),
             _ => None,
         }
     }
@@ -631,12 +631,15 @@ impl Plots {
         if super::apps::is_popup(self, id) {
             return super::apps::dismiss_popup(self, id, "closed", request_native_close);
         }
+        if let Some(task) = super::apps::close_window(self, id, request_native_close) {
+            return task;
+        }
         let info = self.windows.ids.get(&id).copied();
         // Compute before any detach drops the owning state. Only windows that
         // owned decoded images need the full-redraw reclaim; the rest stay
         // host-only (their renderers die with the window anyway).
         let owned_images = match info {
-            Some(PlotInfo::Setting) => {
+            _ if self.windows.settings.contains_key(&id) => {
                 super::desktop_widgets::settings_have_images(self, id)
                     || self.windows.settings.get(&id).is_some_and(|setting| {
                         setting
@@ -680,9 +683,9 @@ impl Plots {
                 .overlays
                 .forget(output, &mut self.animation.motion);
         }
+        let was_panel = self.windows.settings.contains_key(&id);
         self.forget_window(id);
-        let closed_last_panel =
-            matches!(info, Some(PlotInfo::Setting)) && self.windows.settings.is_empty();
+        let closed_last_panel = was_panel && self.windows.settings.is_empty();
         self.flush_config_save();
         // Closing an already-removed native surface causes this backend to
         // queue an action for an ID which will never be registered again.
@@ -738,8 +741,7 @@ impl Plots {
                 Plant::Uproot(id) | Plant::Wayland(LandEvent::Closed(id)) => {
                     *id == drag.source || self.windows.drags.values().any(|surface| surface == id)
                 }
-                Plant::Sprout
-                | Plant::Wayland(
+                Plant::Wayland(
                     LandEvent::OutputAdded(_)
                     | LandEvent::OutputUpdated(_)
                     | LandEvent::OutputRemoved(_),
@@ -770,14 +772,7 @@ impl Plots {
             Plant::Overlay(event) => super::overlay::update(self, event),
             Plant::Uproot(id) => self.close_surface(id, true),
             Plant::Tend => Command::none(),
-            Plant::Sprout => {
-                // Toggle: spawn when none open, else close the current panel.
-                Setting::handle_toggle(self)
-            }
             Plant::IpcPoll => match crate::cli::take_queued_command() {
-                Some(crate::cli::QueuedCommand::OpenSettings) => {
-                    super::apps::ipc(self, "settings", &[])
-                }
                 Some(crate::cli::QueuedCommand::Ipc { command, args }) => {
                     super::apps::ipc(self, &command, &args)
                 }
@@ -1178,9 +1173,15 @@ impl Plots {
                 }
             }
             Plant::Config(ConfigEvent::Patch(patch)) => {
+                if let ConfigPatch::ThemePalette(colors) = &patch
+                    && self.config.theme.palette.contains_patch(colors)
+                {
+                    return Command::none();
+                }
                 let palette_changed = matches!(
                     patch,
                     ConfigPatch::ThemeName(_)
+                        | ConfigPatch::ThemePalette(_)
                         | ConfigPatch::ThemeDarkmode(_)
                         | ConfigPatch::ComponentDefaults(_)
                 );
@@ -1188,7 +1189,7 @@ impl Plots {
                 // (in-memory) config and redraw All so every subscribed view
                 // previews the value next frame. The disk write is staged,
                 // not per-tick: slider drags fire dozens of patches a second
-                // and must not rewrite config.lua each time. `SaveTimer`
+                // and must not rewrite data/config.lua each time. `SaveTimer`
                 // persists once idle; panel close flushes synchronously.
                 // Image add/remove re-syncs the pre-decoded wallpaper cache;
                 // move/scale/z reuse the same pixels.
@@ -2361,8 +2362,10 @@ mod tests {
         assert!(!plots.theme_jobs.running);
         assert_eq!(plots.theme_jobs.sequence, 0);
         plots.config_jobs.invalidate(); // No fixture edits may reach the user's config file.
-        let _ = plots.update(Plant::Sprout);
-        let _ = plots.update(Plant::Sprout);
+        let panel = iced::window::Id::unique();
+        plots.windows.settings.insert(panel, Setting::default());
+        plots.windows.ids.insert(panel, PlotInfo::Setting);
+        let _ = plots.close_surface(panel, true);
         assert!(!plots.theme_jobs.running);
         assert_eq!(plots.theme_jobs.sequence, 0);
     }
@@ -2494,7 +2497,7 @@ mod tests {
             let task = match close {
                 "request" => plots.update(Plant::Uproot(id)),
                 "native" => plots.update(Plant::Wayland(LandEvent::Closed(id))),
-                _ => plots.update(Plant::Sprout),
+                _ => plots.close_surface(id, true),
             };
             assert!(
                 weak_source.upgrade().is_none(),

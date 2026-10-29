@@ -1,9 +1,10 @@
--- Root entry point: every surface is declared here.
+-- Shell entry point: every surface is declared here.
 --
--- Bars are plain data files under `data/bars/`. root.lua lists the directory
+-- Bars are plain data files under `data/bars/`. shell.lua lists the directory
 -- and declares one layer per file; Settings → Panel reads and writes the same
 -- files. Nothing here hardcodes a bar or its widgets.
 local state = require("state")
+local settings = require("settings")
 
 local app = {}
 
@@ -72,10 +73,15 @@ function app:view(props)
             })
         end
     end
+    if self.settings_open then layers[#layers + 1] = settings:view() end
     return layers
 end
 
 function app:actions(event)
+    if event.type == "window_closed" and event.id == "settings" then
+        self.settings_open = false
+        return
+    end
     if event.layer == "background" then
         local output = self.props.output
         if event.type == "press" and event.button == "left" then
@@ -98,7 +104,9 @@ function app:actions(event)
     end
     if not event.key then return end
     if event.key == "settings" then
-        return shell.open_settings()
+        self.settings_open = not self.settings_open
+        self.menu = nil
+        return
     end
     if event.key == "dismiss-all" then
         return notification.dismissAll()
@@ -113,4 +121,7 @@ function app:actions(event)
     end
 end
 
-return app
+-- Startup options are read before the Wayland connection; restart after edits.
+return riced.root(app, {
+    settings = { start_mode = "background", keyboard_interactivity = "none" },
+})

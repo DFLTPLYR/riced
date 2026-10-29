@@ -238,10 +238,7 @@ impl super::WidgetsFile {
         seed_components();
         initialize_scripts_in(&super::paths::shaders_dir(), seed_shaders_in);
         initialize_scripts_in(&super::paths::settings_dir(), seed_settings_in);
-        let root = super::paths::config_path()
-            .parent()
-            .expect("config directory")
-            .to_path_buf();
+        let root = super::paths::project_dir();
         let marker = root.join(".scenes-initialized");
         if !marker.exists() {
             seed_component(

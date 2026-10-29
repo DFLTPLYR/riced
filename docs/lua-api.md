@@ -107,6 +107,72 @@ The bundled rectangle is seeded without overwriting existing files. The
 `.desktop-widgets-initialized` marker prevents subsequent starts from restoring
 an intentionally deleted example.
 
+## `iced.window` (native surface)
+
+Return `iced.window({id="editor", title="Editor", width=960, height=720,
+content=iced.text("Hello")})` from a framework app's `view`, alone or in a list
+with other windows/layers. Empty lists and `nil` declare no surfaces.
+Window ids must be unique within the app, including its layer ids.
+
+Lua controls opening and closing by declaring or omitting the window. Native
+closes call `app:actions({type="window_closed", id="editor"})`; update your
+visibility state there. A failed close handler leaves that window dismissed
+until its declaration is removed. Other app surfaces stay alive.
+
+See [native windows](framework.md#native-windows) for supported fields and the
+Settings example. The old `shell.open_settings()` API is removed.
+
+## `iced.palette` (built-in, not a widget)
+
+`iced.palette()` returns a detached snapshot of the current host palette. It is
+cached and safe to read during `view()`. Mutating the returned table or the
+compatibility `theme` global does not change host colors.
+
+```lua
+function app:view()
+    local colors = iced.palette()
+    return iced.text("Current palette"):color(colors.primary)
+end
+
+function app:actions(event)
+    if event.key == "apply-colors" then
+        return iced.palette({ primary = "#89b4fa", on_primary = "#181825" })
+    end
+end
+```
+
+With one color table, `iced.palette({...})` **returns an opaque native palette
+value**; it does not apply colors immediately. Return it from `actions` or a
+managed callback. The value owns a validated copy of the colors and cannot be
+edited from Lua. Handwritten `{shell={action="palette", ...}}` commands are no
+longer accepted.
+It is not a widget and cannot be returned from `view()` or nested in a widget
+tree. The name is reserved and cannot be replaced with `iced.define`.
+
+Colors are strings: `#rrggbb` or `#rrggbbaa`. Unknown keys and invalid values
+reject the whole patch. Supplied fields replace those overrides; omitted fields
+are unchanged, and `{}` is a no-op. An identical patch does not schedule another
+save or palette-wide refresh. Supported roles:
+
+- `background`, `primary`, `secondary`, `tertiary`, `success`, `warning`, `error`,
+  `surface`, `surface_variant`, and `hover`, each with a matching `on_*` color.
+- `outline` and `shadow`.
+
+Overrides persist as `theme.palette` in the selected project's `data/config.lua`.
+Selecting a named palette in Settings (even the same one) clears overrides.
+Changing dark/light mode retains them; explicit colors are not inverted.
+Provide matching foreground/background colors when changing contrast-sensitive
+roles. Native base pairs and `theme.*` use the same resolved values, including
+explicit `on_*` colors; other interaction shades remain iced-generated.
+
+Applying overrides does **not** render external-app templates or run their
+hooks. Existing named-theme/template behavior remains separate.
+
+The `palette` extension's `generate` result is a preview, not the host palette.
+Apply it explicitly with `return iced.palette(result.data.colors)` from its
+accepted command callback, or from a later Apply action. Read applied colors
+with `iced.palette()`, not `service:snapshot()`.
+
 ## `iced.*` constructors
 
 The sole constructor namespace. Setters chain and return the node; each setter
@@ -450,7 +516,7 @@ one day. Zero-duration animations snap immediately, ignoring delay. Timing-only
 or `from`-only changes do not restart an unchanged target. Removing a property
 restores its default offset (`0`) or opacity (`1`).
 
-Use `animation = {reduced_motion = true}` in `config.lua` to snap property
+Use `animation = {reduced_motion = true}` in `data/config.lua` to snap property
 animations throughout the shell, or `reduced_motion = true` in an individual
 `:animate` table. Explicit durations are independent of the list-animation
 speed setting. Opacity multiplies primitive alpha, including list-transition
@@ -535,7 +601,7 @@ not part of this fragment contract.
 
 #### Wallpaper image effects
 
-The optional `background.shader` in `config.lua` post-processes the **baked
+The optional `background.shader` in `data/config.lua` post-processes the **baked
 wallpaper image for each output**, below desktop widgets, selections and menus.
 It does not capture or distort application windows or those overlays.
 
@@ -839,7 +905,7 @@ widget embedded in a framework layer keeps `item.hovered` live.
 | `riced.component(src[, overrides][, host])` | Render a `components/` module inline. Frame pattern: `riced.component(props.item_component.src, props.item_component.props, item)`. |
 | `riced.layer(src[, overrides])`             | Compose a whole layer from a `components/` module whose `view` returns `iced.layer({...})`. Returns it for the parent's layer list; a module that returns a widget tree is rejected. |
 | `riced.widget(name[, props][, id])`         | Embed `widgets/<name>.lua` in any layer. The widget keeps its own VM, services, popups, and `actions`; its action keys are routed back automatically. `id` defaults to `name` and must be unique per layer. |
-| `riced.widget_popup([{x, y}])`              | Declare the active widget popup for the enclosing layer. Place it in the layer's `popup` field; `x`/`y` are output-local coordinates. |
+| `riced.widget_popup([{x, y}])`              | Declare the active widget popup for the enclosing layer. Place it in the layer's `popup` field; fallback `x`/`y` are parent-layer-local coordinates. Bar markers with `edge`/`thickness` position it from the clicked widget's measured bounds. |
 | `riced.list(path)`                          | Sorted file names in a project-relative directory (`{}` when missing). Use for `data/bars` or `widgets` discovery. |
 | `riced.read(path)`                          | Parse a project-relative `return { ... }` Lua document into a table. |
 | `riced.write(path, table)`                  | Write a project-relative Lua document atomically (`mount`/`actions` only). |
@@ -865,7 +931,7 @@ also work. Malformed commands are ignored.
 | Global          | Fields                                                                                                                                        |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `system`        | `cpu_usage` (%), `cpu_count`, `mem_used`/`mem_total` (bytes), `mem_usage` (%), `gpu_usage` (% or nil), `sampled` (host-clock seconds)          |
-| `theme`         | Live palette hex pairs: `primary`, `on_primary`, `secondary`, `surface`, `background`, `success`, `warning`, `error`, plus `on_*` text colors |
+| `theme`         | Compatibility snapshot of `iced.palette()`; resolved named-theme colors plus explicit overrides, including `on_*` foregrounds, `tertiary`, `surface_variant`, `outline`, `shadow`, and `hover` |
 | `notifications` | Retained history, newest-first: `{ id, app, title, body, icon, urgency, has_image, actions, output, popup_visible, closed }` — metadata only; `actions` is `{key, label}[]` |
 | `wayland`       | `outputs` (`name`, `x`, `y`, `w`, `h`), `workspaces` (`name`, `monitor`, `active`), `toplevels` (`app_id`, `title`); empty where unsupported  |
 | `systemtray`    | `items`: registered StatusNotifier items, including icons, tooltips, and nested D-Bus menus; see below                                       |

@@ -2,19 +2,19 @@
 
 ## Current default: Lua-owned surfaces with Rust rendering
 
-The installed `root.lua` owns every surface. It composes
-`layers/background.lua` plus one `layers/bar.lua` per `bars.lua` entry, and
+The installed `shell.lua` is the entry point and owns every surface. It composes
+`layers/background.lua` plus one `layers/bar.lua` per `data/bars/*.lua` entry, and
 `layers/bar.lua` embeds widget files with `riced.widget`. Each widget keeps its
 own VM, services, popups, and `actions` handler, so Rust only renders the Lua
-declarations. The installed `config.lua` disables the native bar host
+declarations. The installed `data/config.lua` disables the native bar host
 (`bar_host = false`) and marks the background as Lua-owned
 (`background.disabled = true`); wallpaper and desktop widgets remain native
-leaves. Notifications and Settings keep their existing lifecycle and
+leaves. Settings visibility is Lua-owned; native editor leaves retain their
 Apply/Discard behavior.
 
 `riced ipc settings` and the desktop Settings menu share the root's command
 handler. `riced ipc add --anchor EDGE [--output NAME] [--thickness PIXELS]`
-and `riced ipc remove --anchor EDGE [--output NAME]` edit `bars.lua`; the next
+and `riced ipc remove --anchor EDGE [--output NAME]` edit `data/bars/*.lua`; the next
 `view` declares or drops the matching layer. There is no `shell.add_bar`.
 Existing user-authored project files are still preserved during initialization.
 The remaining Lua ownership migration must retain these interactions before
@@ -28,6 +28,55 @@ Plugins provide optional data and integrations. Core Rust keeps rendering
 (Iced), native surfaces, input routing, plugin lifecycle, and privileged
 operations. **Removing Iced itself is out of scope**; it would require a
 replacement renderer and is a separate project.
+
+## Project entry and config paths
+
+`shell.lua` is the entry point; `root.lua` is still read when it is absent, so
+existing projects keep working. `data/config.lua` is the Settings-owned preferences file; a legacy top-level
+`config.lua` is migrated into it on the next load (the original is kept, never
+deleted). `riced.root(app, options)` in `shell.lua` declares startup-only daemon
+options such as `tracing`, `connection`, and the host layer's
+`start_mode`/`keyboard_interactivity`.
+Startup options are read before the Wayland connection, so restart after edits.
+The entry is evaluated again for each output; keep top-level code side-effect
+free. The theme, templates, shaders, and widgets directories stay at the project
+root.
+
+## Lua-owned Settings window
+
+The `shell` namespace and native Settings command have been removed. Register
+`riced ipc settings` in `state.lua` by toggling `self.settings_open`. In
+`shell.lua`, require `settings.lua` and append `settings:view()` when that flag
+is true. Clear it when `actions` receives `window_closed` for `settings`.
+The bundled `scripts/frontend/settings.lua` is the minimal window entry;
+it embeds the existing editors with `riced.plugin("settings")`.
+
+Existing project files are never overwritten by startup. Add the entry and
+update your handlers explicitly (or use `riced init --repair` to install the
+missing entry, then update the handlers). Run the updated binary before using
+the migrated config; older binaries do not provide `iced.window`.
+
+## Built-in palette overrides
+
+`iced.palette()` reads the applied palette; returning `iced.palette({...})` from
+an action or accepted managed callback applies a validated partial override.
+Overrides persist under `theme.palette` in the selected project's `data/config.lua`.
+Existing configs without this field keep their named theme selection and mode.
+Choosing a named palette clears overrides, including when choosing the same
+name. Dark/light switches retain exact explicit colors.
+
+The compatibility `theme` global now exposes the same canonical roles as native
+base pairs, rather than rebuilding Lua colors through iced's lossy extended
+palette generation. In particular, `secondary`, `surface`, and `on_*` colors
+reflect the named theme/explicit values; some existing Lua styling may therefore
+look different. `tertiary`, `surface_variant`, `outline`, `shadow`, and `hover`
+are also available. Interaction shades not exposed as roles remain derived.
+
+The `palette` extension still generates preview colors without applying them.
+Its example now offers a separate Apply button. Use `iced.palette()` for current
+host colors, not the extension's generated snapshot. External-app template
+processing is separate and is not triggered by palette overrides. No installed
+Lua files or named theme JSON files are overwritten by this migration.
 
 ## Layer ownership
 
@@ -115,7 +164,7 @@ plumbing or per-surface context, not plugin candidates.
    - *Progress:* framework layers now support host slots (`iced.native`), so a
      Lua background embeds the native desktop-widget host, and
      `shell.add_layer`/`shell.remove_layer` add and drop app layers at runtime
-     with persistence. The layer set is no longer fixed by `config.lua`.
+     with persistence. The layer set is no longer fixed by `data/config.lua`.
    - *Progress:* an app declares a *list* of layers, each with its own surface,
      list state and measurement, so one module can own a background, a bar and
      an overlay. Layer ids are unique per list; a dropped layer closes only its
@@ -242,10 +291,10 @@ restores missing files only, without overwriting edits. Explicit projects skip
 automatic default installation. Tests exercise startup and repair with private
 XDG directories and render the installed frontend through the real app host.
 
-The installed frontend is `root.lua` with its layer modules in the shared
+The installed frontend is `shell.lua` with its layer modules in the shared
 project `layers/`; `riced.layer` resolves the app's `components/` first, then
-the project directory, then the shared library. Bars live in `bars.lua`, which
-`root.lua` owns through `riced.file`; `riced ipc add/remove` edits that file and
+the project directory, then the shared library. Bars live in `data/bars/*.lua`, which
+`shell.lua` owns through `riced.file`; `riced ipc add/remove` edits that file and
 the next `view` declares or drops the matching layer. Widgets are embedded with
 `riced.widget`, so each one keeps its own VM, services, popup contract, and
 action routing. **Settings** always opens the riced window, so there is exactly

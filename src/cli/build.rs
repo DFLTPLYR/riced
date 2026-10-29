@@ -39,9 +39,9 @@ struct Plan {
 
 pub(crate) fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let project = resolve_project()?;
-    let config_path = project.join("config.lua");
+    let config_path = config::config_path_in(&project);
     if !config_path.is_file() {
-        return Err(format!("no config.lua at {}", config_path.display()).into());
+        return Err(format!("no config.lua in {}", project.display()).into());
     }
     std::fs::read_to_string(&config_path)
         .map_err(|error| format!("{}: {error}", config_path.display()))?;
@@ -63,20 +63,17 @@ pub(crate) fn resolve_project() -> Result<PathBuf, String> {
     } else {
         let cwd = std::env::current_dir()
             .map_err(|error| format!("cannot read current directory: {error}"))?;
-        if cwd.join("config.lua").is_file() {
+        if config::config_path_in(&cwd).is_file() {
             cwd
         } else {
-            let installed = config::config_path();
-            if !installed.is_file() {
+            let installed = config::project_dir();
+            if !config::config_path_in(&installed).is_file() {
                 return Err(
                     "no config.lua in the current directory or the installed config directory; pass -p/--project"
                         .into(),
                 );
             }
             installed
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| "cannot locate a project directory".to_owned())?
         }
     };
     let project = project

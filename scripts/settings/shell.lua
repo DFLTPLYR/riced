@@ -8,7 +8,7 @@ local pages = {
     { id = "desktop", title = "Desktop", description = "Click inside a widget preview, then click the desktop to place it. Hold and drag a desktop widget; release to drop. Right-click or Escape cancels." },
     { id = "components", title = "Components", description = "Per-component defaults for every Lua component. Explicit setters take precedence." },
     { id = "context_menu", title = "Context Menu", description = "Customize the menu opened by right-clicking the wallpaper." },
-    { id = "panel", title = "Panel", description = "Bars declared in bars.lua. Add or remove a bar." },
+    { id = "panel", title = "Panel", description = "Bars declared in data/bars/. Add or remove a bar." },
     { id = "wallpaper", title = "Wallpaper", description = "Arrange images across your displays and adjust their placement.", hint = "Wallpaper edits stay in this preview until you press Apply." },
     { id = "theme", title = "Theme", description = "Choose a palette and preview its colors in light or dark mode." },
     { id = "animation", title = "Animation", description = "Set the pace of animated color and property changes." },

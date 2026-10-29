@@ -288,7 +288,7 @@ pub(crate) fn refresh(plots: &mut Plots, force: bool) -> Task<Plant> {
         let mut specs = Vec::new();
         let notification = super::screens::notification::scene_spec(plots, output);
         let service_input = notification.input.clone();
-        // A root.lua project that declares its own notification layer owns the
+        // A shell.lua project that declares its own notification layer owns the
         // visual surface; keep the native scene as a fallback for projects
         // without one.
         if plots.config.notifications.enabled

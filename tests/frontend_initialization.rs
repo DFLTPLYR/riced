@@ -20,7 +20,9 @@ fn plain_startup_installs_before_connecting_to_wayland() {
     let root = home.path().join("riced");
     assert!(root.join(".frontend-initialized").is_file());
     assert!(root.join("layers/bar.lua").is_file());
-    assert!(root.join("root.lua").is_file());
+    assert!(root.join("shell.lua").is_file());
+    assert!(root.join("data/config.lua").is_file());
+    assert!(root.join("settings.lua").is_file());
 }
 
 #[test]
@@ -54,7 +56,8 @@ fn explicit_repair_targets_only_the_selected_project() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(project.path().join("root.lua").is_file());
+    assert!(project.path().join("shell.lua").is_file());
+    assert!(!project.path().join("data/config.lua").exists());
     assert_eq!(
         fs::read_to_string(project.path().join("config.lua")).unwrap(),
         "invalid but user-owned"

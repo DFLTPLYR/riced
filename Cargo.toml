@@ -41,7 +41,7 @@ bytes = "1"
 memmap2 = "0.9"
 resvg = "0.45"
 iced_exwlshell = "0.20.1"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-log = "0.2"
 iced_wayland_subscriber = "0.20.1"
 wayland-client = "0.31.15"

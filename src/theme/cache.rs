@@ -12,6 +12,7 @@ use std::time::SystemTime;
 struct Cached {
     name: String,
     darkmode: bool,
+    palette: super::palette::PaletteOverrides,
     mtime: Option<SystemTime>,
     active: ActiveTheme,
 }
@@ -23,6 +24,7 @@ static ACTIVE: LazyLock<RwLock<Cached>> = LazyLock::new(|| {
     RwLock::new(Cached {
         name: cfg.name,
         darkmode: cfg.darkmode,
+        palette: cfg.palette,
         mtime,
         active,
     })
@@ -43,7 +45,11 @@ pub fn sync(cfg: &ThemeConfig) -> ActiveTheme {
     let mtime = file_mtime(&cfg.name);
     {
         let cached = ACTIVE.read().unwrap();
-        if cached.name == cfg.name && cached.darkmode == cfg.darkmode && cached.mtime == mtime {
+        if cached.name == cfg.name
+            && cached.darkmode == cfg.darkmode
+            && cached.palette == cfg.palette
+            && cached.mtime == mtime
+        {
             return cached.active;
         }
     }
@@ -52,6 +58,7 @@ pub fn sync(cfg: &ThemeConfig) -> ActiveTheme {
     *cached = Cached {
         name: cfg.name.clone(),
         darkmode: cfg.darkmode,
+        palette: cfg.palette.clone(),
         mtime,
         active,
     };

@@ -7,21 +7,23 @@ extension SDK.
 
 ## Project layout
 
-### Root entry point and commands
+### Shell entry point and commands
 
-When a project contains `root.lua`, it is the frontend entry point and takes
+When a project contains `shell.lua`, it is the frontend entry point and takes
 precedence over the legacy `config.lua` `apps` list. It returns the existing app
 contract (`view`, optional `mount`/`actions`/`unmount`) and composes its surfaces
-with `riced.layer`. New installations put this file directly in the project
-directory. `config.lua` retains preferences and extension configuration.
+with `riced.layer`/`iced.window`. New installations put this file directly in the
+project directory. `data/config.lua` retains preferences and extension
+configuration; older projects may still keep a top-level `config.lua`, which is
+read until it is moved. `shell.lua` remains readable as the pre-rename entry.
 
-Register shell commands during module loading, in `root.lua` or a module such
+Register shell commands during module loading, in `shell.lua` or a module such
 as `state.lua` loaded with `require("state")`:
 
 ```lua
 riced.ipc({
     settings = function(self, args)
-        return shell.open_settings()
+        self.settings_open = not self.settings_open
     end,
     remove = function(self, args)
         -- args is the original CLI argument array, including flags.
@@ -39,7 +41,8 @@ The installed frontend registers handlers in `state.lua` for `settings`, `add`,
 and `remove`. `add` accepts `--anchor`, optional `--output` and `--thickness`;
 `remove` accepts `--anchor` and optional `--output`. The command namespace is
 user-defined; `settings` opens Settings, it is not a settings CRUD namespace.
-`open-settings` and its old `settings` alias now queue the `settings` command.
+Application commands use only `riced ipc <command> args`; the old
+`riced open-settings` and `riced settings` spellings have been removed.
 Handlers receive the owning app as `self` and run under the normal event budget,
 with current props/context and managed resources available. They may return the
 same host actions as `actions`. Registration rejects duplicate command names.
@@ -49,8 +52,8 @@ the first instance sorted by app id and output name receives it. IPC remains
 session-wide. Requests are queued independently so concurrent clients cannot
 overwrite one another. CLI success acknowledges queueing, not handler completion;
 unknown commands and handler errors are reported by the daemon.
-Legacy projects without `root.lua` retain native Settings opening when they
-have no registered `settings` handler.
+Projects must register their own `settings` handler; there is no native Settings
+command fallback.
 
 Project `require` caches modules per VM, resolves dotted names relative to the
 app root, and rejects circular imports. `state.lua`, `shell/`, `components/`, and
@@ -58,20 +61,60 @@ shared `layers/` participate in source reload detection. Failed candidate reload
 retain the working frontend and its handlers. Settings currently retains its
 native window host and Lua pages; its opening policy is now a Lua IPC handler.
 
-The installed root declares every surface from Lua: `layers/background.lua`
-plus one `layers/bar.lua` per `bars.lua` entry. `layers/bar.lua` embeds widget
-files with `riced.widget(name, props, id)`, so each widget keeps its own VM,
-services, popup contract, and `actions` handler. The native bar host is off in
-the installed `config.lua` (`bar_host = false`), and the background surface is
-Lua-owned (`background.disabled = true`) with wallpaper and desktop widgets
-still exposed as native leaves. Desktop Settings requests dispatch `settings`
-through the same handler as IPC.
+### Startup-only shell options
 
-The project root is the directory containing the installed `config.lua`
+`shell.lua` wraps its app table in `riced.root(app, options)`. The wrapper
+returns the app unchanged; the options are read once, before connecting to
+Wayland:
+
+```lua
+local app = { view = function(self) ... end }
+
+return riced.root(app, {
+    tracing = "riced=debug,warn", -- RUST_LOG-style filter
+    connection = {
+        id = "riced",             -- compositor app id; empty = unset
+        antialiasing = false,
+        default_text_size = 16,
+        keep_compositor_alive = true,
+    },
+    settings = {
+        start_mode = "background",          -- background | all_screens
+        keyboard_interactivity = "none",    -- none | on_demand | exclusive
+    },
+})
+```
+
+Edit these and restart; there is no live reload. A missing `tracing` filter
+keeps `RUST_LOG`, then `info`. An invalid filter is reported and falls back the
+same way; a non-finite or non-positive `default_text_size` falls back to 16.
+Unknown keys and wrong types are reported and the startup defaults are used.
+The entry is evaluated once more per output for its views, so keep top-level
+code side-effect free; put effects in `mount`/`actions`.
+
+Preferences never live in `shell.lua`. Settings rewrites
+`data/config.lua` as a plain `return {...}` table, so hand-written views are
+never overwritten.
+
+The installed shell declares every surface from Lua: `layers/background.lua`
+plus one `layers/bar.lua` per `data/bars/*.lua` entry. `layers/bar.lua` embeds
+widget files with `riced.widget(name, props, id)`, so each widget keeps its own
+VM, services, popup contract, and `actions` handler. The native bar host is off
+in the installed `data/config.lua` (`bar_host = false`), and the background
+surface is Lua-owned (`background.disabled = true`) with wallpaper and desktop
+widgets still exposed as native leaves. Desktop Settings requests dispatch
+`settings` through the same handler as IPC.
+
+The project root is the directory containing `shell.lua`
 (`$XDG_CONFIG_HOME/riced`, normally `~/.config/riced`).
 
 ```text
-config.lua
+shell.lua
+settings.lua
+state.lua
+data/
+    config.lua
+    bars/
 apps/
     bar/
         app.lua
@@ -79,12 +122,12 @@ apps/
             status.lua
         assets/
 components/
-themes/
+layers/
 ```
 
-Enable applications explicitly in `config.lua`:
+Enable applications explicitly in `data/config.lua`:
 
-Select a project with `riced -p PATH` (the directory containing `config.lua`).
+Select a project with `riced -p PATH` (the directory containing `shell.lua`).
 `riced -c NAME` resolves `./config/riced/NAME` first, then
 `$XDG_CONFIG_HOME/riced/NAME`. Without either option, the normal XDG config is
 used. Selected projects keep libraries, themes, and preferences in their own
@@ -329,39 +372,70 @@ children[#children + 1] = iced.native("wallpaper")
 final look; the baked tile covers it once it exists. It also means a bake
 failure shows a wallpaper rather than a blank screen.
 
-## Host shell commands
+## Native windows
 
-An action handler can ask the daemon to perform a shell-level action by
-returning a value. Nothing runs during rendering: the value travels back through
-the same action boundary as tray and notification commands.
+`iced.window({...})` declares an XDG toplevel alongside `iced.layer({...})` in
+an app's `view`. Lua owns visibility; removing a declaration closes its surface.
+Stable ids reuse native windows across renders. The bundled `settings.lua`
+declares the Settings window and embeds `riced.plugin("settings")`, whose native
+editors preserve existing validation and Apply/Discard behavior.
 
 ```lua
 function app:actions(event)
-    if event.key == "open-settings" then
-        return shell.open_settings()
+    if event.key == "settings" then
+        self.settings_open = not self.settings_open
+    elseif event.type == "window_closed" and event.id == "settings" then
+        self.settings_open = false
     end
+end
+
+function app:view()
+    if not self.settings_open then return {} end
+    return iced.window({
+        id = "settings", title = "Riced Settings", width = 1100, height = 760,
+        content = riced.plugin("settings"),
+    })
 end
 ```
 
-| Call | Effect |
-| --- | --- |
-| `shell.open_settings()` | Toggle the Settings window (same as the CLI `open-settings` command). |
+Native closes deliver `{type="window_closed", id=...}` to the owning app's
+`actions`. Closing a window does not unmount the app or close its bars. Failed
+close handlers cannot reopen it accidentally: omit the declaration once before
+declaring that id again. `shell.open_settings()` and the `shell` namespace have
+been removed; internal UI actions change Lua state without IPC polling.
 
-Available to every Lua host — framework apps, bar widgets, scenes, and popups.
-Returning any other value, or `nil`, stays inert. A malformed command
-(`{shell={action="nope"}}`, extra fields, a non-table) is reported and ignored
-rather than executed. Apps cannot add new shell actions; the set is fixed by the
-host, and the daemon owns execution and validation.
+Window fields are `id`, `title`, `width`, `height`, `client_side_decorations`,
+and `content`. Defaults are `main`, `Riced`, 960×720, and server decorations.
+Sizes must be integers in 1..32768. Size/title changes reuse the window;
+decoration or surface-kind changes recreate it. Layer-only properties and
+`popup` are rejected on windows. Windows cannot nest inside widget trees.
 
-**Layer creation is deliberately not a shell action.** An app declares its
-layers in `view` and owns any layer *list* as its own data, so the runtime never
-invents a surface on request. See [App-owned layers](#app-owned-layers).
+### Built-in palette commands
+
+`iced.palette()` reads an owned snapshot of the applied shell palette in every
+Lua host. Return `iced.palette({primary="#89b4fa", on_primary="#181825"})`
+from an action or managed callback to apply a validated partial update through
+the host's existing config/save/theme-refresh pipeline. Constructor calls do
+not mutate the host, and palette values are invalid widget/view roots.
+The setter returns an opaque native value, dispatched directly without a host
+command or mutable table.
+
+Overrides persist in `theme.palette`. Selecting a named theme clears them;
+changing dark/light mode keeps explicit colors. `theme.*` is a compatible
+snapshot of the same values. Setting colors does not apply external-app templates.
+See [the palette contract](lua-api.md#icedpalette-built-in-not-a-widget).
+
+Extensions do not receive shell-state access. A generated palette can be applied
+by returning `iced.palette(result.data.colors)` from its accepted Lua callback.
+Existing cancellation/reload ownership checks reject late callbacks before any
+palette command is delivered. The service's generated snapshot is not applied
+palette state; use `iced.palette()` to read the latter.
 
 ### Bars are app data
 
 A bar placement is app-owned Lua data, not a host command:
 
-- Bars are files under `data/bars/`. `root.lua` lists the directory with
+- Bars are files under `data/bars/`. `shell.lua` lists the directory with
   `riced.list`, reads each with `riced.read`, and composes one `layers/bar.lua`
   per file. Settings → Panel lists the same directory and writes the files with
   `riced.write`. There is no `shell.add_bar`/`shell.remove_bar` and no hardcoded
@@ -400,7 +474,7 @@ end
 ### App-owned layers
 
 Layers that are *not* configuration — a background, a HUD, a widget board — are
-still the app's own. The layer set is not fixed by `config.lua`; an app can
+still the app's own. The layer set is not fixed by `data/config.lua`; an app can
 declare as many as it likes, including ones derived from its own state:
 
 An app is either `apps/<name>/app.lua` (a folder app, with app-local
@@ -639,16 +713,23 @@ end
 
 - `id` defaults to `popup`: 1..64 ASCII letters/digits/`_`/`-`. `width` and
   `height` are required integers in 1..32768. `x`/`y` default to zero and are
-  finite logical-pixel coordinates relative to the **output**, not the parent
-  layer or a widget. The card's size and position are clamped to that output.
+  finite logical-pixel coordinates relative to the **declaring parent layer**,
+  not the output or a widget. Negative coordinates are allowed (for example,
+  `y = -160` opens a 160px-high menu above a bottom bar). The compositor may
+  slide or resize the popup to fit its constraints.
 - `content` is required. It cannot contain `iced.layer` or `iced.popup` roots.
   List IDs must be unique across the parent's and popup's widget trees.
-- The host uses a full-output, input-capturing overlay layer with exclusive
-  keyboard focus and no exclusive zone. Outside left/right/middle clicks and
-  Escape dismiss it; blank space inside the card consumes clicks. This is a
-  modal host-owned layer, not a native `xdg_popup` or compositor popup grab.
+- The host creates a native `xdg_popup` parented to the declaring layer, sized
+  to the card rather than the output. There is no fullscreen backdrop or
+  layer-shell keyboard-focus override. Pointer-triggered opening uses the
+  backend's available input serial for a compositor grab and outside-click
+  dismissal; programmatic opening without a serial may not acquire a grab.
+  Provide an explicit close action for that case. Escape closes the popup when
+  it receives keyboard input.
 - Dismissal invokes `actions` with
-  `{type="popup_closed", id="menu", reason="outside"|"escape"|"closed"}`.
+  `{type="popup_closed", id="menu", reason="escape"|"closed"}`.
+  Native dismissal, including outside-click dismissal, reports `"closed"`;
+  the compositor does not provide a more specific reason.
   Widget actions inside the card enter the same `actions` handler as the parent.
   Action keys should distinguish the controls in both surfaces.
 - A dismissed ID stays suppressed even if the handler errors or leaves the
@@ -659,13 +740,20 @@ end
   removal, and parent native close release the child. Closing only the popup
   does not unmount the parent. Stale child events cannot enter a replacement.
   Invalid replacement views preserve the previous parent and popup.
-- Content updates reuse the child surface; list animation state, hover, and
+- Content and geometry updates reuse the child surface; geometry changes use
+  the native popup positioner. Moving a popup to a different declaring layer
+  creates a new child. List animation state, hover, and
   measurements remain scoped to its owner. Popup open/close lifecycle
   transitions, automatic widget anchoring/flipping, nested popups, and ordinary
   application windows are not part of this step. Existing bar-widget popup
   behavior is unchanged.
 
 See `examples/apps/popup/app.lua` for a runnable counter/menu example.
+
+Migration: older framework popups used output-relative `x`/`y` on a fullscreen
+overlay. Update custom Lua to parent-relative positions; do not add output
+origins or bar offsets. `riced.widget_popup` computes parent-relative positions
+for embedded bar widgets automatically. Installed Lua files are not overwritten.
 
 ## Components, assets, and reload
 
@@ -689,7 +777,7 @@ independent click counter on each output. Copy its `apps/bar/` directory into
 your project and merge the example `apps` entry into your existing config.
 
 Run `riced -c example` from the repository root for the personal frontend snapshot
-in `config/riced/example/`. It uses `root.lua`, Lua layers, and `data/bars/` rather
+in `config/riced/example/`. It uses `shell.lua`, Lua layers, and `data/bars/` rather
 than the previous `apps/background` migration sample. Its README lists the
 machine-specific settings and differences from the latest bundled frontend.
 
@@ -700,10 +788,10 @@ cached edits, managed reload/save operations, conflict detection, and coalesced
 file watching. The [experimental Rust extension SDK](extensions.md) provides
 versioned registration, cached service snapshots, and managed service commands
 for compiled-in Cargo crates under `extensions/<name>/`. Extensions are enabled
-in `config.lua`, and `riced build` generates the registration entry point plus
+in `data/config.lua`, and `riced build` generates the registration entry point plus
 a locked Cargo package under `.riced/`, so adding an extension no longer edits
 framework source. The palette extension demonstrates this owned-data interface
-without applying shell theme changes. Compiled-in extensions require
+with explicit Lua-controlled palette application. Compiled-in extensions require
 rebuilding/restarting. Supervised process services now provide lazy executable
 startup, capability negotiation, bounded commands, cancellation/deadlines,
 crash detection, and restart-on-next-request through the same Lua service API.
@@ -711,7 +799,7 @@ See [process configuration and limits](extensions.md#supervised-executable-servi
 Rust dynamic-library loading is
 intentionally not part of the initial design.
 
-The application-model work now includes one modal, named popup owned by each
+The application-model work now includes one native, named popup owned by each
 framework app/output instance. **Next: ordinary application-window roots** for
 apps such as Settings. Automatic widget anchoring/flipping, popup lifecycle
 transitions, nested popups, and explicit state restoration remain follow-ups;

@@ -9,7 +9,14 @@ const VERSION: &str = "1\n";
 const COMPLETE: &str = ".frontend-initialized";
 const PENDING: &str = ".frontend-installing";
 const FILES: &[(&str, &str)] = &[
-    ("root.lua", include_str!("../../scripts/frontend/root.lua")),
+    (
+        "shell.lua",
+        include_str!("../../scripts/frontend/shell.lua"),
+    ),
+    (
+        "settings.lua",
+        include_str!("../../scripts/frontend/settings.lua"),
+    ),
     (
         "state.lua",
         include_str!("../../scripts/frontend/state.lua"),
@@ -40,7 +47,7 @@ const FILES: &[(&str, &str)] = &[
     ),
     // Publish the bootstrap only after its source files are in place.
     (
-        "config.lua",
+        "data/config.lua",
         include_str!("../../scripts/frontend/config.lua"),
     ),
 ];
@@ -63,9 +70,8 @@ pub(crate) enum Outcome {
 /// constructing shell state. An explicit project must not seed the default XDG
 /// directory as a side effect.
 pub(crate) fn selected(mode: Mode) -> Result<Outcome, String> {
-    let path = super::paths::config_path();
-    let root = path.parent().ok_or("config path has no parent directory")?;
-    initialize_in(root, mode).map_err(|error| format!("{}: {error}", root.display()))
+    let root = super::paths::project_dir();
+    initialize_in(&root, mode).map_err(|error| format!("{}: {error}", root.display()))
 }
 
 fn present(path: &Path) -> io::Result<bool> {
@@ -81,9 +87,9 @@ fn preserved(root: &Path, mode: Mode) -> io::Result<bool> {
         return Ok(false);
     }
     if present(&root.join(COMPLETE))? {
-        if !present(&root.join("config.lua"))? {
+        if !present(&root.join("data/config.lua"))? && !present(&root.join("config.lua"))? {
             return Err(io::Error::other(
-                "config.lua was removed after initialization; use `riced init --repair` to restore missing defaults",
+                "data/config.lua was removed after initialization; use `riced init --repair` to restore missing defaults",
             ));
         }
         return Ok(true);
@@ -93,7 +99,9 @@ fn preserved(root: &Path, mode: Mode) -> io::Result<bool> {
     }
     // Do not interpret or modify existing (even invalid) Lua or legacy TOML.
     // The existing TOML migration continues to own the latter.
-    Ok(present(&root.join("root.lua"))?
+    Ok(present(&root.join("shell.lua"))?
+        || present(&root.join("root.lua"))?
+        || present(&root.join("data/config.lua"))?
         || present(&root.join("config.lua"))?
         || present(&root.join("config.toml"))?)
 }
@@ -101,7 +109,7 @@ fn preserved(root: &Path, mode: Mode) -> io::Result<bool> {
 /// Hermetic installation entry: all reads/writes stay under the supplied root.
 pub(crate) fn initialize_in(root: &Path, mode: Mode) -> io::Result<Outcome> {
     if mode == Mode::Repair
-        && !present(&root.join("config.lua"))?
+        && !present(&root.join("data/config.lua"))?
         && present(&root.join("config.toml"))?
     {
         return Err(io::Error::other(
@@ -133,6 +141,11 @@ pub(crate) fn initialize_in(root: &Path, mode: Mode) -> io::Result<Outcome> {
         ));
     }
     for &(path, source) in FILES {
+        // A legacy top-level config.lua must keep winning until the user moves
+        // it; seeding data/config.lua would silently shadow their settings.
+        if path == "data/config.lua" && present(&root.join("config.lua"))? {
+            continue;
+        }
         write_missing(root, path, source)?;
     }
     write_missing(root, COMPLETE, VERSION)?;
@@ -190,9 +203,10 @@ mod tests {
         for &(path, source) in FILES {
             assert_eq!(fs::read_to_string(root.join(path)).unwrap(), source);
         }
-        let config =
-            super::super::test_parse_config(&fs::read_to_string(root.join("config.lua")).unwrap())
-                .unwrap();
+        let config = super::super::test_parse_config(
+            &fs::read_to_string(root.join("data/config.lua")).unwrap(),
+        )
+        .unwrap();
         assert!(config.apps.is_empty());
         // The fresh frontend owns every surface from Lua.
         assert!(config.background.disabled && !config.bar_host);
@@ -245,7 +259,7 @@ mod tests {
         initialize_in(root.path(), Mode::Startup).unwrap();
         let removed = root.path().join(FILES[1].0);
         fs::remove_file(&removed).unwrap();
-        fs::write(root.path().join("root.lua"), "-- custom").unwrap();
+        fs::write(root.path().join("shell.lua"), "-- custom").unwrap();
         assert_eq!(
             initialize_in(root.path(), Mode::Startup).unwrap(),
             Outcome::Preserved
@@ -254,23 +268,35 @@ mod tests {
         initialize_in(root.path(), Mode::Repair).unwrap();
         assert!(removed.exists());
         assert_eq!(
-            fs::read_to_string(root.path().join("root.lua")).unwrap(),
+            fs::read_to_string(root.path().join("shell.lua")).unwrap(),
             "-- custom"
         );
-        fs::remove_file(root.path().join("config.lua")).unwrap();
+        fs::remove_file(root.path().join("data/config.lua")).unwrap();
         assert!(initialize_in(root.path(), Mode::Startup).is_err());
+    }
+
+    #[test]
+    fn initialized_legacy_project_keeps_its_top_level_config() {
+        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        fs::write(root.path().join(COMPLETE), VERSION).unwrap();
+        fs::write(root.path().join("config.lua"), "return {}").unwrap();
+        assert_eq!(
+            initialize_in(root.path(), Mode::Startup).unwrap(),
+            Outcome::Preserved
+        );
+        assert!(!root.path().join("data/config.lua").exists());
     }
 
     #[test]
     fn interrupted_installation_resumes_even_after_bootstrap_is_published() {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
         write_missing(root.path(), PENDING, VERSION).unwrap();
-        write_missing(root.path(), "config.lua", FILES.last().unwrap().1).unwrap();
+        write_missing(root.path(), "data/config.lua", FILES.last().unwrap().1).unwrap();
         assert_eq!(
             initialize_in(root.path(), Mode::Startup).unwrap(),
             Outcome::Installed
         );
-        assert!(root.path().join("root.lua").exists());
+        assert!(root.path().join("shell.lua").exists());
         assert!(!root.path().join(PENDING).exists());
     }
 
@@ -328,7 +354,7 @@ mod tests {
             "999\n"
         );
         assert!(!root.path().join(COMPLETE).exists());
-        assert!(!root.path().join("config.lua").exists());
+        assert!(!root.path().join("data/config.lua").exists());
     }
 
     #[test]
@@ -336,7 +362,7 @@ mod tests {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
         fs::write(root.path().join("config.toml"), "legacy = true").unwrap();
         assert!(initialize_in(root.path(), Mode::Repair).is_err());
-        assert!(!root.path().join("config.lua").exists());
+        assert!(!root.path().join("data/config.lua").exists());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 }

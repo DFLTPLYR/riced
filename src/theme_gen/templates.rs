@@ -19,7 +19,7 @@ static DEFAULT_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates"
 /// `~/.config/riced/templates` (`$XDG_CONFIG_HOME` aware): the editable
 /// copy of [`DEFAULT_TEMPLATES`] that rendering actually reads.
 pub fn user_templates_dir() -> PathBuf {
-    crate::config::config_path().with_file_name("templates")
+    crate::config::templates_dir()
 }
 
 /// Seed the user templates dir with the embedded defaults: every file the

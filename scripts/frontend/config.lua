@@ -1,5 +1,5 @@
 -- Preferences for the Lua-owned shell. Bars and widgets are declared by
--- root.lua/layers, so no native bar host is enabled.
+-- shell.lua/layers, so no native bar host is enabled.
 return {
     -- The background surface is declared by layers/background.lua; the
     -- wallpaper and desktop-widget leaves are still host-filled.

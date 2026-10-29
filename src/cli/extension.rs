@@ -31,9 +31,9 @@ struct Target {
 
 pub(crate) fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let project = build::resolve_project()?;
-    let config_path = project.join("config.lua");
+    let config_path = config::config_path_in(&project);
     if !config_path.is_file() {
-        return Err(format!("no config.lua at {}", config_path.display()).into());
+        return Err(format!("no config.lua in {}", project.display()).into());
     }
     let (config, _) = config::Config::load();
     if let Some((source, error)) = config::take_parse_error() {

@@ -45,7 +45,7 @@ Primary files: `src/shell/wallpaper.rs`, `src/config/io.rs`,
   preserve the ID and complete action key, and decode a valid native command.
 - [x] Check missing/malformed keys remain harmless and dismissal still works.
 
-Primary files: `scripts/frontend/root.lua`, `README.md`,
+Primary files: `scripts/frontend/shell.lua`, `README.md`,
 `src/shell/apps/tests.rs`, and the existing notification action decoder.
 
 ### 3. Make bar add/remove honor output — must fix
@@ -64,7 +64,7 @@ Primary files: `scripts/frontend/root.lua`, `README.md`,
   duplicate requests, reconnects, and output names requiring safe encoding.
 - [x] Update command examples and compatibility notes.
 
-Primary files: `scripts/frontend/root.lua`, `scripts/frontend/state.lua`,
+Primary files: `scripts/frontend/shell.lua`, `scripts/frontend/state.lua`,
 `scripts/settings/panel.lua`, `README.md`, and existing frontend/Settings tests.
 Inspect example project copies and update any affected equivalents.
 

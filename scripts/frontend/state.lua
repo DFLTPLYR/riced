@@ -42,7 +42,8 @@ end
 riced.ipc({
     settings = function(self, args)
         if #args ~= 0 then error("usage: riced ipc settings") end
-        return shell.open_settings()
+        self.settings_open = not self.settings_open
+        self.menu = nil
     end,
     add = function(self, args)
         return self:add_bar(bar_options(args, true))

@@ -21,7 +21,7 @@ end
 
 function app:view(props)
     local children = {
-        heading("Color mode", "Current palette: " .. props.name .. " · " .. (props.darkmode and "Dark" or "Light")),
+        heading("Color mode", "Current palette: " .. props.name .. (props.custom and " (custom)" or "") .. " · " .. (props.darkmode and "Dark" or "Light")),
         iced.row({
             choice("Dark", "mode:dark", props.darkmode),
             choice("Light", "mode:light", not props.darkmode),

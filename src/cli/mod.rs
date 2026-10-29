@@ -42,9 +42,6 @@ pub enum Commands {
         #[arg(long)]
         script: Option<PathBuf>,
     },
-    /// Ask the running daemon to open the Settings panel
-    #[command(alias = "settings")]
-    OpenSettings,
     /// Generate a Material You `dynamic` theme from the configured
     /// wallpapers (ported from `sys/src/colorgen.rs`) and save it to
     /// `~/.config/riced/theme/dynamic.json`
@@ -162,7 +159,11 @@ impl Cli {
             return Ok(None);
         };
         for path in &candidates {
-            if path.join("config.lua").is_file() || path.join("root.lua").is_file() {
+            let entry = ["shell.lua", "root.lua"]
+                .iter()
+                .any(|file| path.join(file).is_file());
+            if entry || path.join("data/config.lua").is_file() || path.join("config.lua").is_file()
+            {
                 return path
                     .canonicalize()
                     .map(Some)
@@ -170,7 +171,7 @@ impl Cli {
             }
         }
         Err(format!(
-            "no root.lua or config.lua found in {}",
+            "no shell.lua, root.lua or config.lua found in {}",
             candidates
                 .iter()
                 .map(|p| p.display().to_string())
@@ -193,7 +194,6 @@ pub fn ipc_path() -> PathBuf {
 /// Commands the daemon understands, one per line in [`ipc_path`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QueuedCommand {
-    OpenSettings,
     Ipc { command: String, args: Vec<String> },
 }
 
@@ -203,17 +203,8 @@ impl QueuedCommand {
     }
 
     fn parse(line: &str) -> Option<Self> {
-        match line.trim() {
-            "open-settings" => Some(QueuedCommand::OpenSettings),
-            other => serde_json::from_str(other).ok(),
-        }
+        serde_json::from_str(line.trim()).ok()
     }
-}
-
-/// Client side: queue `open-settings` for the daemon (atomic temp+rename
-/// so the daemon never reads a half-written file).
-pub fn queue_open_settings() -> io::Result<()> {
-    queue_ipc("settings".into(), Vec::new())
 }
 
 /// Publish each request separately so concurrent clients cannot overwrite it.
@@ -339,18 +330,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_open_settings_and_alias() {
+    fn settings_requires_generic_ipc() {
+        assert!(Cli::try_parse_from(["riced", "open-settings"]).is_err());
+        assert!(Cli::try_parse_from(["riced", "settings"]).is_err());
         assert_eq!(
-            Cli::try_parse_from(["riced", "open-settings"])
+            Cli::try_parse_from(["riced", "ipc", "settings"])
                 .unwrap()
                 .command,
-            Some(Commands::OpenSettings)
-        );
-        assert_eq!(
-            Cli::try_parse_from(["riced", "settings"]).unwrap().command,
-            Some(Commands::OpenSettings)
+            Some(Commands::Ipc {
+                command: "settings".into(),
+                args: vec![]
+            })
         );
         assert_eq!(Cli::try_parse_from(["riced"]).unwrap().command, None);
+    }
+
+    #[test]
+    fn legacy_settings_wire_commands_are_rejected() {
+        assert_eq!(QueuedCommand::parse("open-settings"), None);
+        assert_eq!(QueuedCommand::parse("\"OpenSettings\""), None);
     }
 
     #[test]
@@ -461,8 +459,12 @@ mod tests {
         let path = dir.join("roundtrip.cmd");
         let _ = std::fs::remove_file(&path);
         assert_eq!(take_at(&path), None);
-        queue_at(&path, QueuedCommand::OpenSettings).unwrap();
-        assert_eq!(take_at(&path), Some(QueuedCommand::OpenSettings));
+        let request = QueuedCommand::Ipc {
+            command: "settings".into(),
+            args: vec![],
+        };
+        queue_at(&path, request.clone()).unwrap();
+        assert_eq!(take_at(&path), Some(request));
         // delivered at most once
         assert_eq!(take_at(&path), None);
         let _ = std::fs::remove_dir_all(&dir);

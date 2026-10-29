@@ -28,6 +28,8 @@ pub(crate) struct Margin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Surface {
+    #[serde(skip)]
+    pub window: Option<Window>,
     pub id: String,
     pub layer: String,
     pub anchors: Anchors,
@@ -43,6 +45,7 @@ pub(crate) struct Surface {
 impl Default for Surface {
     fn default() -> Self {
         Self {
+            window: None,
             id: "main".into(),
             layer: "top".into(),
             anchors: Anchors::default(),
@@ -54,6 +57,37 @@ impl Default for Surface {
             input: "all".into(),
             pointer_events: false,
             shared_pointer_events: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Window {
+    pub id: String,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub client_side_decorations: bool,
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            id: "main".into(),
+            title: "Riced".into(),
+            width: 960,
+            height: 720,
+            client_side_decorations: false,
+        }
+    }
+}
+
+impl Window {
+    pub fn settings(&self) -> iced_exwlshell::actions::IcedXdgWindowSettings {
+        iced_exwlshell::actions::IcedXdgWindowSettings {
+            size: iced_exwlshell::reexport::PixelSize::try_px(self.width, self.height),
+            client_side_decorations: self.client_side_decorations,
         }
     }
 }
@@ -250,9 +284,10 @@ impl LayerRoot {
                 "app:view must return iced.layer({...}) or nil".into(),
             ));
         };
-        if table.raw_get::<String>("type")? != "layer" {
+        let kind = table.raw_get::<String>("type")?;
+        if kind != "layer" && kind != "window" {
             return Err(mlua::Error::RuntimeError(
-                "framework app root must be iced.layer({...})".into(),
+                "framework app root must be iced.layer({...}) or iced.window({...})".into(),
             ));
         }
         let fields = lua.create_table()?;
@@ -262,7 +297,26 @@ impl LayerRoot {
                 fields.raw_set(key, value)?;
             }
         }
-        let surface: Surface = lua.from_value(Value::Table(fields))?;
+        let surface: Surface = if kind == "window" {
+            let window: Window = lua.from_value(Value::Table(fields))?;
+            if window.title.contains('\0') || window.title.len() > 4096 {
+                return Err(mlua::Error::RuntimeError("invalid window title".into()));
+            }
+            if !table.raw_get::<Value>("popup")?.is_nil() {
+                return Err(mlua::Error::RuntimeError(
+                    "window.popup is not supported".into(),
+                ));
+            }
+            Surface {
+                id: window.id.clone(),
+                width: Some(window.width),
+                height: Some(window.height),
+                window: Some(window),
+                ..Default::default()
+            }
+        } else {
+            lua.from_value(Value::Table(fields))?
+        };
         surface.validate().map_err(mlua::Error::RuntimeError)?;
         let value = table.raw_get::<Value>("content")?;
         if value.is_nil() {
@@ -301,7 +355,8 @@ impl LayerRoot {
                 "app:view must return iced.layer({...}), an array of layers, or nil".into(),
             ));
         };
-        if matches!(table.raw_get::<Value>("type")?, Value::String(ref tag) if tag == "layer") {
+        if matches!(table.raw_get::<Value>("type")?, Value::String(ref tag) if tag == "layer" || tag == "window")
+        {
             return Ok(Self::parse(lua, value, hover)?.into_iter().collect());
         }
         let mut roots = Vec::new();
@@ -312,7 +367,7 @@ impl LayerRoot {
             })?;
             roots.push(root);
         }
-        if roots.is_empty() {
+        if roots.is_empty() && !table.is_empty() {
             return Err(mlua::Error::RuntimeError(
                 "app:view must return iced.layer({...}) or a non-empty array of layers".into(),
             ));
@@ -330,28 +385,69 @@ impl LayerRoot {
     }
 }
 pub(crate) fn install(lua: &Lua, iced: &Table) -> mlua::Result<()> {
-    iced.set(
-        "layer",
-        lua.create_function(|lua, fields: Table| {
-            if !fields.raw_get::<Value>("type")?.is_nil() {
-                return Err(mlua::Error::RuntimeError(
-                    "iced.layer sets its own type".into(),
-                ));
-            }
-            let root = lua.create_table()?;
-            for pair in fields.pairs::<Value, Value>() {
-                let (key, value) = pair?;
-                root.raw_set(key, value)?;
-            }
-            root.raw_set("type", "layer")?;
-            Ok(root)
-        })?,
-    )
+    for kind in ["layer", "window"] {
+        iced.set(
+            kind,
+            lua.create_function(move |lua, fields: Table| {
+                if !fields.raw_get::<Value>("type")?.is_nil() {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "iced.{kind} sets its own type"
+                    )));
+                }
+                let root = lua.create_table()?;
+                for pair in fields.pairs::<Value, Value>() {
+                    let (key, value) = pair?;
+                    root.raw_set(key, value)?;
+                }
+                root.raw_set("type", kind)?;
+                Ok(root)
+            })?,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_validate_native_settings_and_cannot_nest() {
+        let lua = Lua::new();
+        crate::ui::dsl::inject_ui_base(&lua).unwrap();
+        let value = lua.load("return iced.window({id='editor',title='Editor',width=640,height=480,content=iced.text('hello')})").eval().unwrap();
+        let root = LayerRoot::parse(&lua, value, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            root.surface.window.unwrap().settings().size,
+            iced_exwlshell::reexport::PixelSize::try_px(640, 480)
+        );
+        for source in [
+            "return iced.window({id='',content=iced.text('x')})",
+            "return iced.window({width=0,content=iced.text('x')})",
+            "return iced.window({height=32769,content=iced.text('x')})",
+            "return iced.window({width=1.5,content=iced.text('x')})",
+            "return iced.window({anchors={top=true},content=iced.text('x')})",
+            "return iced.window({popup={},content=iced.text('x')})",
+            "return iced.window({content=iced.window({content=iced.text('x')})})",
+            "return iced.window({})",
+        ] {
+            let value = lua.load(source).eval().unwrap();
+            assert!(
+                LayerRoot::parse(&lua, value, &Default::default()).is_err(),
+                "{source}"
+            );
+        }
+        let empty = lua.load("return {}").eval().unwrap();
+        assert!(
+            LayerRoot::parse_list(&lua, empty, &Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        let duplicates = lua.load("return {iced.window({id='same',content=iced.text('x')}),iced.layer({id='same',width=1,height=1,content=iced.text('x')})}").eval().unwrap();
+        assert!(LayerRoot::parse_list(&lua, duplicates, &Default::default()).is_err());
+    }
     #[test]
     fn shared_pointer_surfaces_require_full_output_geometry() {
         let surface = Surface {

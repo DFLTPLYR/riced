@@ -106,8 +106,10 @@ struct Instance {
 
 /// One declared layer and the native state that belongs to its surface.
 struct Root {
+    dismissed: bool,
     root: LayerRoot,
     surface: Option<window::Id>,
+    opened: bool,
     applied: Option<Surface>,
     lists: Lists,
     revision: u64,
@@ -355,8 +357,10 @@ impl Instance {
                     self.roots.insert(
                         id,
                         Root {
+                            dismissed: false,
                             root,
                             surface: None,
+                            opened: false,
                             applied: None,
                             lists,
                             revision: 0,
@@ -493,6 +497,15 @@ impl State {
     ) {
         let pending = &mut self.pending_closes;
         self.instances.retain(|_, instance| {
+            if let Some((_, root)) = instance.roots.iter_mut().find(|(_, root)| {
+                root.surface == Some(surface) && root.root.surface.window.is_some()
+            }) {
+                root.surface = None;
+                root.opened = false;
+                root.dismissed = true;
+                root.lists.clear(motion);
+                return true;
+            }
             // Closing any declared layer closes the whole app, as before: the
             // app declares its layers, so a partial set has no meaning.
             if instance.root_by_surface(surface).is_some() {
@@ -636,11 +649,6 @@ pub(crate) fn ipc(plots: &mut Plots, command: &str, args: &[String]) -> Task<Pla
             Task::none()
         }
         None => {
-            // Projects predating root.lua still use the native Settings host.
-            // Root projects must explicitly register their opening policy.
-            if command == "settings" && !Project::installed().root.join("root.lua").is_file() {
-                return Task::done(Plant::Sprout);
-            }
             tracing::warn!(%command, "No Lua IPC handler registered");
             Task::none()
         }
@@ -653,7 +661,10 @@ fn refresh_target(
     tick: bool,
     target: Option<u64>,
 ) -> Task<Plant> {
-    let configs = if project.root.join("root.lua").is_file() {
+    let configs = if ["shell.lua", "root.lua"]
+        .iter()
+        .any(|file| project.root.join(file).is_file())
+    {
         vec![AppConfig {
             name: "root".into(),
             ..Default::default()
@@ -832,16 +843,73 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
             instance.dismissed_popup = None;
         }
         for (root_id, layer) in &mut instance.roots {
+            if layer.dismissed {
+                continue;
+            }
             let surface_desc = layer.root.surface.clone();
             // Changing the declared identity creates a new native surface, not
             // a new VM.
-            if layer
-                .applied
-                .as_ref()
-                .is_some_and(|old| old.id != surface_desc.id)
-                && layer.surface.take().is_some()
+            if layer.applied.as_ref().is_some_and(|old| {
+                old.id != surface_desc.id
+                    || old.window.as_ref().map(|w| w.client_side_decorations)
+                        != surface_desc
+                            .window
+                            .as_ref()
+                            .map(|w| w.client_side_decorations)
+            }) && let Some(surface) = layer.surface.take()
             {
+                commands.push(close(plots, surface));
                 changed = true;
+            }
+            if let Some(window) = &surface_desc.window {
+                let settings_slot =
+                    crate::ui::node::contains_native(&layer.root.content, "settings");
+                let surface = match layer.surface {
+                    Some(surface) => {
+                        if layer.applied.as_ref() != Some(&surface_desc) {
+                            changed = true;
+                            if layer.applied.as_ref().is_some_and(|old| {
+                                old.width != surface_desc.width || old.height != surface_desc.height
+                            }) {
+                                commands.push(iced::window::resize(
+                                    surface,
+                                    iced::Size::new(window.width as f32, window.height as f32),
+                                ));
+                            }
+                        }
+                        surface
+                    }
+                    None => {
+                        let surface = window::Id::unique();
+                        layer.surface = Some(surface);
+                        layer.opened = false;
+                        plots.windows.ids.insert(
+                            surface,
+                            if settings_slot {
+                                PlotInfo::Setting
+                            } else {
+                                PlotInfo::App(*output)
+                            },
+                        );
+                        commands.push(Task::done(Plant::NewBaseWindow {
+                            id: surface,
+                            settings: window.settings(),
+                        }));
+                        changed = true;
+                        surface
+                    }
+                };
+                if settings_slot {
+                    plots.windows.settings.entry(surface).or_default();
+                }
+                layer.applied = Some(surface_desc);
+                for id in layer.lists.take_resets() {
+                    commands.push(iced::widget::operation::scroll_to(
+                        id,
+                        iced::widget::operation::AbsoluteOffset { x: 0.0, y: 0.0 },
+                    ));
+                }
+                continue;
             }
             let settings = surface_desc.settings(output.0, format!("riced:app:{id}:{root_id}"));
             match layer.surface {
@@ -878,6 +946,7 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
                 None => {
                     let surface = window::Id::unique();
                     layer.surface = Some(surface);
+                    layer.opened = false;
                     plots.windows.ids.insert(surface, PlotInfo::App(*output));
                     commands.push(Task::done(Plant::NewLayerShell {
                         id: surface,
@@ -899,6 +968,9 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
     changed
 }
 fn close(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
+    if plots.windows.settings.contains_key(&surface) {
+        return plots.close_surface(surface, true);
+    }
     plots.forget_window(surface);
     iced_runtime::task::effect(iced_runtime::Action::Window(
         iced_runtime::window::Action::Close(surface),
@@ -943,20 +1015,34 @@ fn input_rects(settings: &Surface, regions: &[Rectangle]) -> Vec<(i32, i32, i32,
         _ => Vec::new(),
     }
 }
-pub(crate) fn opened(plots: &Plots, surface: window::Id) -> Task<Plant> {
+pub(crate) fn opened(plots: &mut Plots, surface: window::Id) -> Task<Plant> {
     if is_popup(plots, surface) {
-        return input_region(surface, &Surface::default(), &[]);
+        return Task::none();
     }
-    plots
-        .apps
-        .instances
-        .values()
-        .find(|i| i.owns(surface))
-        .and_then(|i| i.root_by_surface(surface))
-        .map_or_else(Task::none, |root| {
-            let regions = root.measured_regions();
-            input_region(surface, &root.root.surface, &regions)
-        })
+    let mut state = std::mem::take(&mut plots.apps);
+    let mut commands = Vec::new();
+    for ((output, id), instance) in &mut state.instances {
+        let Some(root) = instance
+            .roots
+            .values_mut()
+            .find(|root| root.surface == Some(surface))
+        else {
+            continue;
+        };
+        root.opened = true;
+        if root.root.surface.window.is_some() {
+            break;
+        }
+        commands.push(input_region(
+            surface,
+            &root.root.surface,
+            &root.measured_regions(),
+        ));
+        popup::reconcile(plots, instance, *output, id, &mut commands);
+        break;
+    }
+    plots.apps = state;
+    Task::batch(commands)
 }
 /// Host slots a framework layer can embed. `desktop-widgets` composites the
 /// legacy desktop host, which has no description equivalent: widget instances,
@@ -967,6 +1053,13 @@ fn app_native<'a>(
     output: Option<OutputId>,
 ) -> impl FnMut(&str, Option<&serde_json::Value>) -> Result<Element<'static, Plant>, String> + 'a {
     move |id, args| match (id, output) {
+        // shortcut: editors still use native state; migrate each editor before removing this slot.
+        ("settings", _) => plots
+            .windows
+            .settings
+            .get(&surface)
+            .map(|setting| setting.view(surface, plots))
+            .ok_or_else(|| "settings requires an iced.window root".into()),
         ("wallpaper", Some(output)) => Ok(iced::widget::Stack::with_children(
             super::screens::Background::wallpaper_views(plots, output),
         )
@@ -1088,6 +1181,81 @@ fn render_leaf(
     ))
 }
 
+pub(crate) fn title(plots: &Plots, surface: window::Id) -> Option<String> {
+    plots.apps.instances.values().find_map(|instance| {
+        instance
+            .root_by_surface(surface)?
+            .root
+            .surface
+            .window
+            .as_ref()
+            .map(|window| window.title.clone())
+    })
+}
+
+pub(crate) fn close_window(
+    plots: &mut Plots,
+    surface: window::Id,
+    native_close: bool,
+) -> Option<Task<Plant>> {
+    let key = plots.apps.instances.iter().find_map(|(key, instance)| {
+        instance
+            .root_by_surface(surface)?
+            .root
+            .surface
+            .window
+            .as_ref()
+            .map(|_| key.clone())
+    })?;
+    let mut state = std::mem::take(&mut plots.apps);
+    let instance = state.instances.get_mut(&key)?;
+    let (id, root) = instance
+        .roots
+        .iter_mut()
+        .find(|(_, root)| root.surface == Some(surface))?;
+    let id = id.clone();
+    root.dismissed = true;
+    root.surface = None;
+    root.opened = false;
+    root.lists.clear(&mut plots.animation.motion);
+    let result = instance.runtime.as_mut().map(|runtime| {
+        runtime.app_event(
+            &services(plots),
+            &instance.output_name,
+            &instance.context,
+            &instance.props,
+            AppEvent::WindowClosed(&id),
+        )
+    });
+    let rendered = instance.runtime.as_mut().map(|runtime| {
+        runtime.layer_view(
+            &services(plots),
+            &instance.output_name,
+            &instance.props,
+            &instance.context,
+            &instance.hover,
+        )
+    });
+    if let Some(result) = rendered
+        && let Err(error) = result
+            .map_err(|e| e.to_string())
+            .and_then(|roots| instance.update_roots(roots, &mut plots.animation.motion, false))
+    {
+        crate::lua::error::report_once(&mut instance.error, "app render: ", error);
+    }
+    let mut commands = instance.managed_work(&services(plots));
+    reconcile(plots, &mut state, &mut commands);
+    plots.apps = state;
+    commands.push(plots.close_surface(surface, native_close));
+    match result {
+        Some(Ok(value)) => commands.push(super::actions::command_from_action(&value, plots)),
+        Some(Err(error)) => tracing::warn!(%error, "window close handler failed"),
+        None => {}
+    }
+    commands.push(Task::done(Plant::App(AppMessage::Changed)));
+    Some(Task::batch(commands))
+}
+
 pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant> {
     let Some(instance) = plots.apps.instances.values().find(|i| i.owns(surface)) else {
         return iced::widget::Space::new().into();
@@ -1095,7 +1263,7 @@ pub(crate) fn view(plots: &Plots, surface: window::Id) -> Element<'static, Plant
     if let Some(popup) = &instance.popup
         && popup.surface == surface
     {
-        return popup::view(plots, instance, popup);
+        return popup::view(plots, popup);
     }
     let Some(layer) = instance.root_by_surface(surface) else {
         return iced::widget::Space::new().into();

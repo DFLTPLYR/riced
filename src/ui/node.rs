@@ -1,6 +1,30 @@
 //! Owned UI descriptions shared by widgets, shell chrome, and the Lua host.
 pub(crate) use super::components::WidgetNode;
 
+pub(crate) fn contains_native(node: &WidgetNode, id: &str) -> bool {
+    match node {
+        WidgetNode::Native { id: slot, .. } => slot == id,
+        WidgetNode::Container { child, .. }
+        | WidgetNode::Popup { child, .. }
+        | WidgetNode::Scrollable { child, .. }
+        | WidgetNode::Anchored { child, .. }
+        | WidgetNode::Clickable { child, .. }
+        | WidgetNode::Aligned { child, .. }
+        | WidgetNode::Animated { child, .. }
+        | WidgetNode::Region { child } => contains_native(child, id),
+        WidgetNode::Row { children, .. }
+        | WidgetNode::Column { children, .. }
+        | WidgetNode::Stack { children, .. }
+        | WidgetNode::Masonry { children, .. } => {
+            children.iter().any(|child| contains_native(child, id))
+        }
+        WidgetNode::ListView { items, .. } => {
+            items.iter().any(|(_, child)| contains_native(child, id))
+        }
+        _ => false,
+    }
+}
+
 /// Whether a description tree contains a popup root (popups never nest).
 pub(crate) fn contains_popup(node: &WidgetNode) -> bool {
     match node {

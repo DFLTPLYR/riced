@@ -114,8 +114,8 @@ fn popup(
 
 /// Anchor the popup to the widget bounds reported by the click that opened it.
 ///
-/// `bounds` are bar-surface-local; the marker supplies the bar edge, thickness,
-/// and output size so the popup lands on the correct side of the widget.
+/// `bounds` and the returned position are parent-surface-local. The compositor
+/// slides the popup inside the output when the widget is near an edge.
 fn position(
     marker: &Table,
     active_bounds: &Option<iced::Rectangle>,
@@ -131,37 +131,17 @@ fn position(
         .raw_get::<Option<String>>("edge")?
         .unwrap_or_else(|| "top".into());
     let thickness = marker.raw_get::<Option<f64>>("thickness")?.unwrap_or(34.0);
-    let output = marker.raw_get::<Option<Table>>("output")?;
-    let width = output
-        .as_ref()
-        .and_then(|table| table.raw_get::<Option<f64>>("width").ok().flatten())
-        .unwrap_or(0.0);
-    let height = output
-        .as_ref()
-        .and_then(|table| table.raw_get::<Option<f64>>("height").ok().flatten())
-        .unwrap_or(0.0);
-    // Center the popup on the widget's cross axis, then slide it inside the
-    // output when the widget is near an edge.
+    // Center on the widget; negative offsets place bottom/right menus inward.
     let center_x = bounds.x as f64 + bounds.width as f64 / 2.0;
     let center_y = bounds.y as f64 + bounds.height as f64 / 2.0;
     let popup_width = popup_width as f64;
     let popup_height = popup_height as f64;
-    let (x, y) = match edge.as_str() {
-        "bottom" => (
-            center_x - popup_width / 2.0,
-            (height - thickness) - popup_height,
-        ),
+    Ok(match edge.as_str() {
+        "bottom" => (center_x - popup_width / 2.0, -popup_height),
         "left" => (thickness, center_y - popup_height / 2.0),
-        "right" => (
-            (width - thickness) - popup_width,
-            center_y - popup_height / 2.0,
-        ),
+        "right" => (-popup_width, center_y - popup_height / 2.0),
         _ => (center_x - popup_width / 2.0, thickness),
-    };
-    Ok((
-        x.clamp(0.0, (width - popup_width).max(0.0)),
-        y.clamp(0.0, (height - popup_height).max(0.0)),
-    ))
+    })
 }
 
 /// Route an action whose key carries a `widget:<id>:` prefix to that widget.
@@ -288,4 +268,39 @@ pub(crate) fn json_props(value: &serde_json::Value) -> HashMap<String, PropValue
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_positions_are_parent_relative_on_every_bar_edge() {
+        let lua = Lua::new();
+        let marker = lua.create_table().unwrap();
+        marker.set("thickness", 34).unwrap();
+        let bounds = Some(iced::Rectangle::new(
+            iced::Point::new(10.0, 20.0),
+            iced::Size::new(20.0, 20.0),
+        ));
+        for (edge, expected) in [
+            ("top", (-80.0, 34.0)),
+            ("bottom", (-80.0, -100.0)),
+            ("left", (34.0, -20.0)),
+            ("right", (-200.0, -20.0)),
+        ] {
+            marker.set("edge", edge).unwrap();
+            assert_eq!(
+                position(&marker, &bounds, 200.0, 100.0).unwrap(),
+                expected,
+                "{edge}"
+            );
+        }
+        marker.set("x", -12).unwrap();
+        marker.set("y", 48).unwrap();
+        assert_eq!(
+            position(&marker, &None, 200.0, 100.0).unwrap(),
+            (-12.0, 48.0)
+        );
+    }
 }

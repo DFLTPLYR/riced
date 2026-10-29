@@ -149,26 +149,32 @@ pub(crate) struct Project {
 impl Project {
     pub fn installed() -> Self {
         Self {
-            root: crate::config::config_path()
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_path_buf(),
+            root: crate::config::project_dir(),
         }
+    }
+    /// `shell.lua` is the entry point; pre-rename projects still use `root.lua`.
+    fn shell_entry(&self) -> Option<PathBuf> {
+        ["shell.lua", "root.lua"]
+            .into_iter()
+            .map(|file| self.root.join(file))
+            .find(|path| path.is_file())
     }
     /// Where an app keeps owned data (`state/`, generated documents).
     ///
     /// A folder app is `apps/<name>/`; a single-file app is `apps/<name>.lua`
     /// and gets this directory only for data, never for its entry point.
     pub fn app_root(&self, name: &str) -> PathBuf {
-        if name == "root" && self.root.join("root.lua").is_file() {
+        if name == "root" && self.shell_entry().is_some() {
             return self.root.clone();
         }
         self.root.join("apps").join(name)
     }
     /// `apps/<name>/app.lua`, or `apps/<name>.lua` when that file exists.
     pub fn source(&self, name: &str) -> PathBuf {
-        if name == "root" && self.root.join("root.lua").is_file() {
-            return self.root.join("root.lua");
+        if name == "root"
+            && let Some(entry) = self.shell_entry()
+        {
+            return entry;
         }
         let folder = self.app_root(name).join("app.lua");
         if folder.is_file() {
@@ -201,11 +207,16 @@ impl Project {
         let source =
             std::fs::read_to_string(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
         let mut sources = vec![(entry, source)];
-        let state = self.app_root(name).join("state.lua");
-        match std::fs::read_to_string(&state) {
-            Ok(source) => sources.push((state, source)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", state.display())),
+        for file in ["state.lua", "settings.lua"] {
+            if file == "settings.lua" && name != "root" {
+                continue;
+            }
+            let state = self.app_root(name).join(file);
+            match std::fs::read_to_string(&state) {
+                Ok(source) => sources.push((state, source)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("{}: {error}", state.display())),
+            }
         }
         // App-local components, then the project's shared `layers/`, which is
         // where a single-file app keeps its layer modules.
@@ -226,6 +237,29 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
+    use super::Project;
+
+    #[test]
+    fn shell_entry_prefers_shell_lua_and_accepts_legacy_root() {
+        let directory = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let project = Project {
+            root: directory.path().to_path_buf(),
+        };
+        assert!(project.source("root").ends_with("apps/root.lua"));
+        std::fs::write(
+            project.root.join("root.lua"),
+            "return {view=function() end}",
+        )
+        .unwrap();
+        assert_eq!(project.source("root"), project.root.join("root.lua"));
+        std::fs::write(
+            project.root.join("shell.lua"),
+            "return {view=function() end}",
+        )
+        .unwrap();
+        assert_eq!(project.source("root"), project.root.join("shell.lua"));
+    }
+
     #[test]
     fn app_config_is_strict_and_roundtrips() {
         let config = crate::config::test_parse_config(

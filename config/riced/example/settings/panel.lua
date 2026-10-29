@@ -1,6 +1,6 @@
 -- Bar panel page. Bars are plain data files under `data/bars/`; this page
 -- lists them, edits their slots and widgets, and writes the same files
--- root.lua reads. No host state and no hardcoded bar list.
+-- shell.lua reads. No host state and no hardcoded bar list.
 local app = {}
 
 local function bar_path(name)
@@ -63,7 +63,7 @@ end
 
 function app:view(props)
     local rows = {
-        hint("Bars are files in data/bars/. Editing here writes those files; root.lua declares one layer per file."),
+        hint("Bars are files in data/bars/. Editing here writes those files; shell.lua declares one layer per file."),
     }
     local names = riced.list("data/bars")
     if #names == 0 then

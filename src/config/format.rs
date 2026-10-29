@@ -475,6 +475,8 @@ pub(super) struct Theme {
     variant: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     templates_dir: String,
+    #[serde(skip_serializing_if = "crate::theme::palette::PaletteOverrides::is_empty")]
+    palette: crate::theme::palette::PaletteOverrides,
 }
 fn icon_theme_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let name = String::deserialize(deserializer)?;
@@ -496,6 +498,7 @@ impl Default for Theme {
             mode: ThemeMode::Dark,
             variant: "content".into(),
             templates_dir: String::new(),
+            palette: Default::default(),
         }
     }
 }
@@ -507,6 +510,7 @@ impl From<Theme> for ThemeConfig {
             darkmode: matches!(value.mode, ThemeMode::Dark),
             variant: value.variant,
             templates_dir: value.templates_dir,
+            palette: value.palette,
         }
     }
 }
@@ -522,6 +526,7 @@ impl From<ThemeConfig> for Theme {
             },
             variant: value.variant,
             templates_dir: value.templates_dir,
+            palette: value.palette,
         }
     }
 }
@@ -531,6 +536,47 @@ mod tests {
     use super::*;
     use crate::config::test_format_config as save;
     use crate::config::test_parse_config as parse;
+
+    #[test]
+    fn palette_overrides_roundtrip_and_reject_invalid_fields_and_colors() {
+        let source =
+            "return {theme={palette={primary='#89B4FA',on_primary='#11223344',surface='#181825'}}}";
+        let config = parse(source).unwrap();
+        let saved = save(&config).unwrap();
+        assert!(saved.contains("palette"));
+        assert!(saved.contains("#89b4fa"));
+        assert!(saved.contains("#11223344"));
+        assert_eq!(parse(&saved).unwrap().theme, config.theme);
+        for source in [
+            "return {theme={palette={typo='#ffffff'}}}",
+            "return {theme={palette={primary='not-a-color'}}}",
+            "return {theme={palette={primary=42}}}",
+        ] {
+            assert!(parse(source).is_err(), "accepted {source}");
+        }
+    }
+
+    #[test]
+    fn palette_patches_merge_keep_mode_overrides_and_named_selection_resets_them() {
+        let mut config = Config::default();
+        config.apply(ConfigPatch::ThemePalette(
+            serde_json::from_value(serde_json::json!({"primary":"#123456"})).unwrap(),
+        ));
+        config.apply(ConfigPatch::ThemePalette(
+            serde_json::from_value(serde_json::json!({"surface":"#181825"})).unwrap(),
+        ));
+        let custom = config.theme.palette.clone();
+        config.apply(ConfigPatch::ThemeDarkmode(false));
+        assert_eq!(config.theme.palette, custom);
+        let restored = parse(&save(&config).unwrap()).unwrap();
+        assert_eq!(restored.theme, config.theme);
+        let colors: serde_json::Value = serde_json::to_value(&restored.theme.palette).unwrap();
+        assert_eq!(colors["primary"], "#123456");
+        assert_eq!(colors["surface"], "#181825");
+        config.apply(ConfigPatch::ThemeName(config.theme.name.clone()));
+        assert!(config.theme.palette.is_empty());
+        assert!(!save(&config).unwrap().contains("palette"));
+    }
 
     #[test]
     fn icon_theme_selection_defaults_patches_and_roundtrips() {

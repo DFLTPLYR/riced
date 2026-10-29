@@ -1,4 +1,5 @@
-//! Material palette generation example. No filesystem or theme side effects.
+//! Material palette generation for explicit `iced.palette` application.
+//! No filesystem or theme side effects; generated colors are previews, not host state.
 #![deny(missing_docs)]
 use material_colors::{color::Argb, theme::ThemeBuilder};
 use riced_extension_sdk::{
@@ -74,7 +75,13 @@ impl Service for Palette {
         let data = json!({"ready":true,"seed":options.seed.to_ascii_lowercase(),"dark":options.dark,"colors":{
             "primary":hex(scheme.primary),"on_primary":hex(scheme.on_primary),
             "secondary":hex(scheme.secondary),"on_secondary":hex(scheme.on_secondary),
+            "tertiary":hex(scheme.tertiary),"on_tertiary":hex(scheme.on_tertiary),
+            "success":hex(scheme.tertiary),"on_success":hex(scheme.on_tertiary),
+            "warning":hex(scheme.secondary),"on_warning":hex(scheme.on_secondary),
             "surface":hex(scheme.surface),"on_surface":hex(scheme.on_surface),
+            "surface_variant":hex(scheme.surface_variant),"on_surface_variant":hex(scheme.on_surface_variant),
+            "outline":hex(scheme.outline),"shadow":hex(scheme.shadow),
+            "hover":hex(scheme.tertiary),"on_hover":hex(scheme.on_tertiary),
             "background":hex(scheme.background),"on_background":hex(scheme.on_background),
             "error":hex(scheme.error),"on_error":hex(scheme.on_error)
         }});

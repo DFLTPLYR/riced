@@ -166,6 +166,7 @@ pub(crate) const BUILTIN_PLUGINS: &[&str] = &[
     "desktop-widgets",
     "widget",
     "settings-page",
+    "settings",
     "wallpaper-map",
 ];
 
@@ -240,6 +241,7 @@ fn component_node(lua: &Lua, app: &Table, overrides: Value, host: Value) -> mlua
 pub struct WindowId(pub u64);
 
 pub(crate) enum AppEvent<'a> {
+    WindowClosed(&'a str),
     Mount,
     Unmount(&'a str),
     Tick,
@@ -328,6 +330,18 @@ impl LuaRuntime {
         let api = lua.create_table()?;
         lua.set_named_registry_value("riced.ipc_handlers", lua.create_table()?)?;
         lua.set_named_registry_value("riced.project_modules", lua.create_table()?)?;
+        lua.set_named_registry_value("riced.root_options", Value::Nil)?;
+        api.set(
+            "root",
+            lua.create_function(|lua, (app, options): (Table, Option<Table>)| {
+                let options = match options {
+                    Some(options) => Value::Table(options),
+                    None => Value::Nil,
+                };
+                lua.set_named_registry_value("riced.root_options", options)?;
+                Ok(app)
+            })?,
+        )?;
         api.set(
             "ipc",
             lua.create_function(|lua, handlers: Table| {
@@ -336,7 +350,7 @@ impl LuaRuntime {
                     .unwrap_or(false)
                 {
                     return Err(mlua::Error::RuntimeError(
-                        "register IPC handlers while loading root.lua or its modules".into(),
+                        "register IPC handlers while loading shell.lua or its modules".into(),
                     ));
                 }
                 let registered: Table = lua.named_registry_value("riced.ipc_handlers")?;
@@ -644,10 +658,13 @@ impl LuaRuntime {
     pub fn load_named(&mut self, script: &str, label: &str) -> mlua::Result<()> {
         let previous_handlers: Table = self.lua.named_registry_value("riced.ipc_handlers")?;
         let previous_modules: Table = self.lua.named_registry_value("riced.project_modules")?;
+        let previous_root: Value = self.lua.named_registry_value("riced.root_options")?;
         self.lua
             .set_named_registry_value("riced.ipc_handlers", self.lua.create_table()?)?;
         self.lua
             .set_named_registry_value("riced.project_modules", self.lua.create_table()?)?;
+        self.lua
+            .set_named_registry_value("riced.root_options", Value::Nil)?;
         self.lua.set_named_registry_value("riced.loading", true)?;
         let result = (|| {
             self.begin()?;
@@ -689,6 +706,8 @@ impl LuaRuntime {
                 .set_named_registry_value("riced.ipc_handlers", previous_handlers)?;
             self.lua
                 .set_named_registry_value("riced.project_modules", previous_modules)?;
+            self.lua
+                .set_named_registry_value("riced.root_options", previous_root)?;
         }
         self.lua.set_named_registry_value("riced.loading", false)?;
         let key = self.finish("load", result)?;
@@ -706,6 +725,15 @@ impl LuaRuntime {
             Ok(source) => self.load_named(&source, &path.display().to_string()),
             Err(error) => self.finish("load", Err(error)),
         }
+    }
+
+    /// Startup options captured by `riced.root` during the last load.
+    pub(crate) fn root_settings(&self) -> Result<super::root::Settings, String> {
+        let value = self
+            .lua
+            .named_registry_value("riced.root_options")
+            .map_err(|error| error.to_string())?;
+        super::root::parse(&self.lua, value)
     }
 
     pub fn update(&mut self, message: &Message) -> mlua::Result<Vec<Effect>> {
@@ -948,6 +976,7 @@ impl LuaRuntime {
             AppEvent::Action(_) => "actions",
             AppEvent::Managed(_) => "callback",
             AppEvent::PopupClosed { .. } => "actions",
+            AppEvent::WindowClosed(_) => "actions",
         };
         let result = (|| {
             self.begin()?;
@@ -1021,6 +1050,10 @@ impl LuaRuntime {
                     mlua::MultiValue::from_vec(vec![reason.into_lua(&self.lua)?])
                 }
                 AppEvent::Tick => mlua::MultiValue::new(),
+                AppEvent::WindowClosed(id) => mlua::MultiValue::from_vec(vec![
+                    self.lua
+                        .to_value(&serde_json::json!({"type":"window_closed", "id":id}))?,
+                ]),
                 AppEvent::Action(action) => {
                     let arguments = action.arguments(&self.lua)?;
                     if let Some(Value::Table(event)) = arguments.front()

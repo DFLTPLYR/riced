@@ -39,7 +39,6 @@ function layer:view(props)
 		popup = riced.widget_popup({
 			edge = edge,
 			thickness = thickness,
-			output = props.output,
 		}),
 		content = iced.container(
 			horizontal and iced.row(content):spacing(12):align_y("center") or iced.column(content):spacing(12)

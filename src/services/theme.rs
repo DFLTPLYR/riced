@@ -1,5 +1,4 @@
-//! `theme` service: flat live-iced-palette hex pairs. Moved verbatim
-//! from `publish_theme_tables`.
+//! `theme` service: resolved host palette shared with `iced.palette()`.
 
 use super::registry::ServiceCtx;
 

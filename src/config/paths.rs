@@ -14,24 +14,48 @@ pub fn set_project_root(root: PathBuf) -> Result<(), String> {
 pub fn project_root() -> Option<PathBuf> {
     PROJECT_ROOT.get().cloned()
 }
-/// `~/.config/riced/config.lua`: the only shell config the runtime reads
-/// (`$XDG_CONFIG_HOME` aware). Migrated once from `config.toml`.
-pub fn config_path() -> PathBuf {
+/// The project directory (`~/.config/riced` by default).
+pub fn project_dir() -> PathBuf {
     if let Some(root) = PROJECT_ROOT.get() {
-        return root.join("config.lua");
+        return root.clone();
     }
     dirs::config_dir()
-        .map(|d| d.join("riced").join("config.lua"))
-        .unwrap_or_else(|| PathBuf::from("riced.lua"))
+        .map(|d| d.join("riced"))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+/// `data/config.lua`: the only shell config the runtime reads. Settings owns
+/// the file; the entry point is `shell.lua`.
+pub fn config_path() -> PathBuf {
+    project_dir().join("data").join("config.lua")
+}
+/// Pre-`data/` config, migrated into `data/config.lua` on the next load. The
+/// original file is kept, never deleted.
+pub fn legacy_lua_config_path() -> PathBuf {
+    project_dir().join("config.lua")
+}
+/// The config file a CLI command reads for an explicit project directory.
+pub fn config_path_in(project: &Path) -> PathBuf {
+    let current = project.join("data").join("config.lua");
+    if current.is_file() {
+        current
+    } else {
+        project.join("config.lua")
+    }
 }
 /// Legacy `config.toml`, read only by the one-time TOML → Lua migration.
 /// `templates/config.toml` (theme templates) is unrelated and untouched.
 pub fn legacy_config_path() -> PathBuf {
-    config_path().with_file_name("config.toml")
+    project_dir().join("config.toml")
 }
 /// Original `config.toml` after a successful migration.
 pub fn config_migrated_path() -> PathBuf {
-    config_path().with_file_name("config.toml.migrated")
+    project_dir().join("config.toml.migrated")
+}
+pub fn theme_dir() -> PathBuf {
+    project_dir().join("theme")
+}
+pub fn templates_dir() -> PathBuf {
+    project_dir().join("templates")
 }
 pub fn widgets_path() -> PathBuf {
     if let Some(root) = PROJECT_ROOT.get() {
@@ -70,5 +94,5 @@ pub fn settings_dir() -> PathBuf {
 }
 
 pub fn shaders_dir() -> PathBuf {
-    config_path().with_file_name("shaders")
+    project_dir().join("shaders")
 }

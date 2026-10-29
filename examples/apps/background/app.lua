@@ -104,6 +104,10 @@ function app:remove_bar()
 end
 
 function app:actions(event)
+    if event.type == "window_closed" and event.id == "settings" then
+        self.settings_open = false
+        return
+    end
     if event.type == "action" then
         local menu = self.menu
         self.menu = nil
@@ -120,7 +124,7 @@ function app:actions(event)
         elseif event.key == "remove-bar" then
             self:remove_bar()
         elseif event.key == "open-settings" then
-            return shell.open_settings()
+            self.settings_open = not self.settings_open
         end
         return
     end
@@ -163,6 +167,9 @@ function app:view(props)
             error = self.error,
         }),
     }
+    if self.settings_open then
+        layers[#layers + 1] = iced.window({id="settings", title="Riced Settings", content=riced.plugin("settings")})
+    end
     for index, bar in ipairs(self.bars:get("bars") or {}) do
         layers[#layers + 1] = riced.layer("layers/bar.lua", {
             id = "bar-" .. index,

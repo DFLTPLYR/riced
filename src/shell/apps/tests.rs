@@ -109,11 +109,11 @@ fn shared_pointer_delivery_translates_logical_coordinates_and_is_app_scoped() {
 #[test]
 fn bundled_selection_uses_global_geometry_and_only_background_left_drags() {
     let lua = crate::lua::widgets::new_widget_lua().unwrap();
-    lua.load("require = function() return {} end")
+    lua.load("riced = { root = function(app) return app end }; require = function() return {} end")
         .exec()
         .unwrap();
     let app: mlua::Table = lua
-        .load(include_str!("../../../scripts/frontend/root.lua"))
+        .load(include_str!("../../../scripts/frontend/shell.lua"))
         .eval()
         .unwrap();
     lua.globals().set("app", app).unwrap();
@@ -258,11 +258,11 @@ fn bundled_bars_are_scoped_to_safe_output_identities() {
         .eval()
         .unwrap();
     lua.globals().set("state", state).unwrap();
-    lua.load("require = function() return state end")
+    lua.load("riced.root = function(app) return app end; require = function() return state end")
         .exec()
         .unwrap();
     let app: mlua::Table = lua
-        .load(include_str!("../../../scripts/frontend/root.lua"))
+        .load(include_str!("../../../scripts/frontend/shell.lua"))
         .eval()
         .unwrap();
     lua.globals().set("app", app).unwrap();
@@ -307,11 +307,11 @@ fn bundled_bars_are_scoped_to_safe_output_identities() {
 #[test]
 fn bundled_root_preserves_notification_action_keys() {
     let lua = crate::lua::widgets::new_widget_lua().unwrap();
-    lua.load("require = function() return {} end")
+    lua.load("riced = { root = function(app) return app end }; require = function() return {} end")
         .exec()
         .unwrap();
     let app: mlua::Table = lua
-        .load(include_str!("../../../scripts/frontend/root.lua"))
+        .load(include_str!("../../../scripts/frontend/shell.lua"))
         .eval()
         .unwrap();
     let actions: mlua::Function = app.get("actions").unwrap();
@@ -509,7 +509,7 @@ fn installed_root_declares_layers_and_dispatches_settings() {
         crate::ui::build::build_node(child, 13.0, None).unwrap();
     }
 
-    // One Settings: the app asks the daemon for the real window.
+    // Lua owns visibility; the next view declares a native window.
     let value = with_services(|services| {
         app.runtime.as_mut().unwrap().app_event(
             services,
@@ -523,15 +523,18 @@ fn installed_root_declares_layers_and_dispatches_settings() {
         )
     })
     .unwrap();
-    let (_, receiver) = iced_wayland_subscriber::shell::channel();
-    let mut plots = Plots::new(receiver);
-    assert!(matches!(
-        messages(crate::shell::actions::command_from_action(
-            &value, &mut plots
-        ))
-        .as_slice(),
-        [iced_runtime::Action::Output(Plant::Sprout)]
-    ));
+    assert!(value.is_nil());
+    render(&mut app);
+    assert_eq!(
+        app.roots["settings"]
+            .root
+            .surface
+            .window
+            .as_ref()
+            .unwrap()
+            .title,
+        "Riced Settings"
+    );
 
     // Adding a bar edits the app's own data and the next view declares it.
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -561,7 +564,7 @@ fn installed_root_declares_layers_and_dispatches_settings() {
         )
     })
     .unwrap();
-    assert!(crate::lua::shell::parse(&value).unwrap().is_none());
+    assert!(value.is_nil());
     render(&mut app);
     assert!(app.roots.contains_key("bar-bottom"));
 }
@@ -767,6 +770,156 @@ return {
 }
 "#;
 
+const WINDOW_APP: &str = r#"
+return {
+    mount=function(self) self.show=true; self.width=640 end,
+    actions=function(self,event)
+        if event.type=='window_closed' then
+            assert(event.id=='settings')
+            self.show=false
+        elseif event.key=='settings' then self.show=not self.show
+        elseif event.key=='resize' then self.width=800 end
+    end,
+    view=function(self)
+        local roots={iced.layer({id='bar',width=100,height=32,content=iced.text('bar')})}
+        if self.show then roots[#roots+1]=iced.window({id='settings',title='Editor',width=self.width,height=480,content=riced.plugin('settings')}) end
+        return roots
+    end,
+}
+"#;
+
+#[test]
+fn native_windows_reuse_resize_close_and_reopen_without_unmounting_the_shell() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let messages = |task| {
+        runtime.block_on(async {
+            match iced_runtime::task::into_stream(task) {
+                Some(stream) => stream.collect::<Vec<_>>().await,
+                None => Vec::new(),
+            }
+        })
+    };
+    let fixture = Fixture::new(WINDOW_APP);
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let mut state = State::default();
+    for output in [1, 2] {
+        let mut app = instance(&format!("DP-{output}"));
+        fixture.render(&mut app, false).unwrap();
+        state
+            .instances
+            .insert((OutputId(output), "bar".into()), app);
+    }
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    let created = messages(Task::batch(commands));
+    assert_eq!(
+        created
+            .iter()
+            .filter(|action| matches!(
+                action,
+                iced_runtime::Action::Output(Plant::NewBaseWindow { .. })
+            ))
+            .count(),
+        2
+    );
+    let key = (OutputId(1), "bar".into());
+    let editor = state.instances[&key].roots["settings"].surface.unwrap();
+    let bar = state.instances[&key].roots["bar"].surface.unwrap();
+    let other = state.instances[&(OutputId(2), "bar".into())].roots["settings"]
+        .surface
+        .unwrap();
+    plots.apps = state;
+    assert_eq!(plots.title(editor).as_deref(), Some("Editor"));
+    assert!(plots.windows.settings.contains_key(&editor));
+    assert!(messages(opened(&mut plots, editor)).is_empty());
+    let resized = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface: editor,
+            action: "resize".into(),
+        },
+    ));
+    assert!(resized.iter().any(|action| matches!(action, iced_runtime::Action::Window(iced_runtime::window::Action::Resize(id, size)) if *id == editor && size.width == 800.0)));
+    assert_eq!(
+        plots.apps.instances[&key].roots["settings"].surface,
+        Some(editor)
+    );
+    let closed = messages(plots.close_surface(editor, false));
+    assert!(!closed.iter().any(|action| matches!(action, iced_runtime::Action::Window(iced_runtime::window::Action::Close(id)) if *id == editor)));
+    assert!(!plots.windows.settings.contains_key(&editor));
+    assert!(plots.windows.ids.contains_key(&bar));
+    assert!(plots.windows.ids.contains_key(&other));
+    assert!(!plots.apps.instances[&key].roots.contains_key("settings"));
+    let reopened = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface: bar,
+            action: "settings".into(),
+        },
+    ));
+    assert!(reopened.iter().any(|action| matches!(
+        action,
+        iced_runtime::Action::Output(Plant::NewBaseWindow { .. })
+    )));
+    let new_editor = plots.apps.instances[&key].roots["settings"]
+        .surface
+        .unwrap();
+    assert_ne!(editor, new_editor);
+    let hidden = messages(update(
+        &mut plots,
+        AppMessage::Action {
+            surface: bar,
+            action: "settings".into(),
+        },
+    ));
+    assert!(hidden.iter().any(|action| matches!(action, iced_runtime::Action::Window(iced_runtime::window::Action::Close(id)) if *id == new_editor)));
+    assert!(!plots.windows.settings.contains_key(&new_editor));
+    assert!(plots.windows.ids.contains_key(&other));
+}
+
+#[test]
+fn failing_window_close_handler_does_not_reopen_the_window() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let messages = |task| {
+        runtime.block_on(async {
+            match iced_runtime::task::into_stream(task) {
+                Some(stream) => stream.collect::<Vec<_>>().await,
+                None => Vec::new(),
+            }
+        })
+    };
+    let fixture = Fixture::new(&WINDOW_APP.replace("self.show=false", "error('close failed')"));
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let key = (OutputId(1), "bar".into());
+    let mut state = State::default();
+    state.instances.insert(key.clone(), app);
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    let _ = messages(Task::batch(commands));
+    let editor = state.instances[&key].roots["settings"].surface.unwrap();
+    let bar = state.instances[&key].roots["bar"].surface.unwrap();
+    plots.apps = state;
+    let _ = messages(plots.close_surface(editor, false));
+    let refresh = messages(refresh_surface(&mut plots, bar));
+    assert!(!refresh.iter().any(|action| matches!(
+        action,
+        iced_runtime::Action::Output(Plant::NewBaseWindow { .. })
+    )));
+    assert!(plots.apps.instances[&key].roots["settings"].dismissed);
+    assert!(!plots.windows.ids.contains_key(&editor));
+    assert!(plots.windows.ids.contains_key(&bar));
+}
+
 const POPUP_APP: &str = r#"
 return {
     mount=function(self) self.count=0; self.open=true; self.reason='none' end,
@@ -796,9 +949,118 @@ fn popup_fixture(source: &str) -> (Fixture, Plots, window::Id, window::Id) {
     reconcile(&mut plots, &mut state, &mut commands);
     let app = &state.instances[&(OutputId(1), "bar".into())];
     let parent = app.surface().unwrap();
-    let child = app.popup.as_ref().unwrap().surface;
+    let surfaces: Vec<_> = app.roots.values().filter_map(|root| root.surface).collect();
     plots.apps = state;
+    for surface in surfaces {
+        let _ = messages(opened(&mut plots, surface));
+    }
+    let child = plots.apps.instances[&(OutputId(1), "bar".into())]
+        .popup
+        .as_ref()
+        .unwrap()
+        .surface;
     (fixture, plots, parent, child)
+}
+
+#[test]
+fn app_popup_creation_and_geometry_updates_use_native_popup_actions() {
+    let source = POPUP_APP.replace(
+        "x=12,y=48,width=200,height=100",
+        "x=self.props.x or 12,y=-100,width=self.props.width or 200,height=100",
+    );
+    let fixture = Fixture::new(&source);
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    let mut state = State::default();
+    state.instances.insert((OutputId(1), "bar".into()), app);
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    let app = &state.instances[&(OutputId(1), "bar".into())];
+    let parent = app.surface().unwrap();
+    assert!(
+        app.popup.is_none(),
+        "native children must wait for the parent's open event"
+    );
+    plots.apps = state;
+    let created = messages(opened(&mut plots, parent));
+    let child = plots.apps.instances[&(OutputId(1), "bar".into())]
+        .popup
+        .as_ref()
+        .unwrap()
+        .surface;
+    assert!(created.iter().any(|action| matches!(action,
+        iced_runtime::Action::Output(Plant::NewPopUp { id, settings })
+        if *id == child && settings.parent == Some(parent)
+            && settings.size == iced_exwlshell::reexport::PixelSize::try_px(200, 100).unwrap()
+            && settings.placement == iced_exwlshell::reexport::PopupPlacement::Position((12, -100))
+    )), "{created:?}");
+    let mut state = std::mem::take(&mut plots.apps);
+    let app = state
+        .instances
+        .get_mut(&(OutputId(1), "bar".into()))
+        .unwrap();
+    app.props["x"] = json!(24);
+    app.props["width"] = json!(260);
+    fixture.render(app, false).unwrap();
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    let updated = messages(Task::batch(commands));
+    assert_eq!(
+        state.instances[&(OutputId(1), "bar".into())]
+            .popup
+            .as_ref()
+            .unwrap()
+            .surface,
+        child
+    );
+    assert!(updated.iter().any(|action| matches!(action,
+        iced_runtime::Action::Output(Plant::PopUpReposition { id, settings })
+        if *id == child && settings.parent == Some(parent)
+            && settings.size == iced_exwlshell::reexport::PixelSize::try_px(260, 100).unwrap()
+            && settings.placement == iced_exwlshell::reexport::PopupPlacement::Position((24, -100))
+    )), "{updated:?}");
+}
+
+#[test]
+fn app_popup_follows_its_declaring_layer_not_its_siblings() {
+    let source = r#"return {view=function(self)
+        local popup = {id='menu',x=0,y=32,width=200,height=100,content=iced.text('menu')}
+        return {
+            iced.layer({id='main',width=100,height=32,content=iced.text('main'),
+                popup=not self.props.other and popup or nil}),
+            iced.layer({id='other',width=100,height=32,content=iced.text('other'),
+                popup=self.props.other and popup or nil}),
+        }
+    end}"#;
+    let (fixture, mut plots, parent, child) = popup_fixture(source);
+    let sibling = plots.apps.instances[&(OutputId(1), "bar".into())].roots["other"]
+        .surface
+        .unwrap();
+    assert!(messages(close_children(&mut plots, sibling)).is_empty());
+    assert!(is_popup(&plots, child));
+    let mut state = std::mem::take(&mut plots.apps);
+    let app = state
+        .instances
+        .get_mut(&(OutputId(1), "bar".into()))
+        .unwrap();
+    app.props["other"] = json!(true);
+    fixture.render(app, false).unwrap();
+    let mut commands = Vec::new();
+    reconcile(&mut plots, &mut state, &mut commands);
+    let popup = state.instances[&(OutputId(1), "bar".into())]
+        .popup
+        .as_ref()
+        .unwrap();
+    assert_ne!(popup.surface, child);
+    assert_eq!(popup.positioner.parent, Some(sibling));
+    assert_ne!(popup.positioner.parent, Some(parent));
+    assert!(!plots.windows.ids.contains_key(&child));
+    let new_child = popup.surface;
+    plots.apps = state;
+    let _ = close_children(&mut plots, sibling);
+    assert!(!is_popup(&plots, new_child));
 }
 
 #[test]
@@ -921,7 +1183,7 @@ fn escape_key_dismisses_only_the_framework_popup() {
 }
 
 #[test]
-fn closing_the_parent_closes_its_overlay_child_and_retires_the_vm() {
+fn closing_the_parent_closes_its_popup_child_and_retires_the_vm() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -976,12 +1238,16 @@ fn popup_instances_on_other_outputs_are_unaffected_by_dismissal() {
     let mut state = std::mem::take(&mut plots.apps);
     state.instances.insert((OutputId(2), "bar".into()), other);
     reconcile(&mut plots, &mut state, &mut Vec::new());
-    let peer = state.instances[&(OutputId(2), "bar".into())]
+    let parent = state.instances[&(OutputId(2), "bar".into())]
+        .surface()
+        .unwrap();
+    plots.apps = state;
+    let _ = messages(opened(&mut plots, parent));
+    let peer = plots.apps.instances[&(OutputId(2), "bar".into())]
         .popup
         .as_ref()
         .unwrap()
         .surface;
-    plots.apps = state;
     let _ = messages(update(
         &mut plots,
         AppMessage::DismissPopup {
@@ -1233,7 +1499,7 @@ fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
     assert!(bar.root.surface.anchors.bottom);
     assert_eq!(bar.root.surface.exclusive_zone, 32);
 
-    // "Open Settings" is still a host shell command.
+    // Opening Settings changes Lua's declared windows.
     let value = with_services(|services| {
         app.runtime.as_mut().unwrap().app_event(
             services,
@@ -1244,21 +1510,13 @@ fn background_example_mounts_handles_local_gestures_and_builds_its_menu() {
         )
     })
     .unwrap();
-    let (_, receiver) = iced_wayland_subscriber::shell::channel();
-    let mut plots = Plots::new(receiver);
-    let plants = messages(crate::shell::actions::command_from_action(
-        &value, &mut plots,
-    ));
-    assert!(
-        matches!(
-            plants.as_slice(),
-            [iced_runtime::Action::Output(Plant::Sprout)]
-        ),
-        "{plants:?}"
-    );
-    let config =
-        crate::config::test_parse_config(include_str!("../../../config/riced/example/config.lua"))
-            .unwrap();
+    assert!(value.is_nil());
+    fixture.render(&mut app, false).unwrap();
+    assert!(app.roots["settings"].root.surface.window.is_some());
+    let config = crate::config::test_parse_config(include_str!(
+        "../../../config/riced/example/data/config.lua"
+    ))
+    .unwrap();
     assert!(config.background.disabled);
     let roundtrip = crate::config::test_format_config(&config).unwrap();
     assert!(
@@ -1871,6 +2129,66 @@ async fn managed_deliveries(instance: &mut Instance) -> Vec<Delivery> {
         })
         .collect()
         .await
+}
+
+#[test]
+fn palette_extension_callbacks_apply_only_for_live_owners() {
+    let source = r##"return {
+        mount=function(self)
+            self:palette_job()
+        end,
+        palette_job=function(self)
+            self.palette=riced.service('palette')
+            self.palette:command('generate',{seed='#89b4fa',dark=true},function(result)
+                assert(result.ok)
+                return iced.palette(result.data.colors)
+            end)
+        end,
+        actions=function(self,event)
+            if event.key=='generate' then self:palette_job() end
+        end,
+        view=function() return iced.layer({width=100,height=32,content=iced.text('preview')}) end,
+    }"##;
+    let fixture = Fixture::new(source);
+    let mut app = instance("DP-1");
+    fixture.render(&mut app, false).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let deliveries = managed_deliveries(&mut app).await;
+            assert_eq!(deliveries.len(), 1);
+            let value =
+                with_services(|services| app.deliver(services, &deliveries[0]).unwrap().unwrap());
+            let mlua::Value::UserData(patch) = value else {
+                panic!("expected a native palette value")
+            };
+            assert!(
+                !patch
+                    .borrow::<crate::theme::palette::PaletteOverrides>()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(with_services(|services| app.deliver(services, &deliveries[0])).is_none());
+
+            with_services(|services| {
+                app.runtime.as_mut().unwrap().app_event(
+                    services,
+                    &app.output_name,
+                    &app.context,
+                    &app.props,
+                    AppEvent::Action(&"generate".into()),
+                )
+            })
+            .unwrap();
+            let pending = managed_deliveries(&mut app).await;
+            assert_eq!(pending.len(), 1);
+            // A different VM must never accept an unconsumed previous owner's job.
+            fixture.write(&source.replace("'preview'", "'reloaded'"));
+            fixture.render(&mut app, false).unwrap();
+            assert!(with_services(|services| app.deliver(services, &pending[0])).is_none());
+        });
 }
 
 #[test]

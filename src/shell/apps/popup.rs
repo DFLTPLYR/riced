@@ -1,9 +1,9 @@
-//! One named, app-owned modal card on an output-local overlay layer.
+//! One named, app-owned native popup parented to its declaring layer.
 use super::*;
 use crate::framework::AppPopup;
-use iced::{Point, Size};
-use iced_exwlshell::reexport::{
-    Anchor, KeyboardInteractivity, Layer, LayerSize, NewLayerShellSettings, OutputOption,
+use iced_exwlshell::{
+    actions::IcedNewPopupSettings,
+    reexport::{PixelSize, PopupConstraintAdjustment},
 };
 
 pub(super) struct Popup {
@@ -15,19 +15,24 @@ pub(super) struct Popup {
     pub lists: Lists,
     pub frame: SharedFrame,
     pub revision: u64,
+    pub positioner: IcedNewPopupSettings,
 }
 
-fn settings(output: OutputId) -> NewLayerShellSettings {
-    NewLayerShellSettings {
-        anchor: Anchor::all(),
-        layer: Layer::Overlay,
-        size: LayerSize::FILL,
-        exclusive_zone: Some(-1),
-        output_option: OutputOption::GlobalName(output.0),
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
-        namespace: Some("riced:app:popup".into()),
-        ..Default::default()
-    }
+fn settings(parent: window::Id, popup: &AppPopup) -> Option<IcedNewPopupSettings> {
+    let geometry = &popup.geometry;
+    Some(
+        IcedNewPopupSettings::at_position(
+            parent,
+            PixelSize::try_px(geometry.width, geometry.height)?,
+            (geometry.x.round() as i32, geometry.y.round() as i32),
+        )
+        .constraint_adjustment(
+            PopupConstraintAdjustment::SlideX
+                | PopupConstraintAdjustment::SlideY
+                | PopupConstraintAdjustment::ResizeX
+                | PopupConstraintAdjustment::ResizeY,
+        ),
+    )
 }
 
 pub(super) fn detach(
@@ -61,6 +66,9 @@ pub(super) fn reconcile(
             .and_then(|layer| layer.root.popup.as_ref())
             .map(|popup| popup.geometry.id.clone())
     });
+    let parent = owner
+        .as_ref()
+        .and_then(|id| instance.roots.get(id)?.surface);
     if desired.is_none() {
         instance.dismissed_popup = None;
     }
@@ -76,6 +84,8 @@ pub(super) fn reconcile(
             .as_ref()
             .is_none_or(|id| *id != popup.root.geometry.id)
             || popup.generation != generation
+            || popup.positioner.parent != parent
+            || owner.as_deref() != Some(popup.owner.as_str())
     });
     let mut changed = false;
     if replace && let Some(surface) = detach(instance, &mut plots.animation.motion) {
@@ -89,11 +99,18 @@ pub(super) fn reconcile(
     let Some(owner) = owner else {
         return changed;
     };
+    // The backend cannot resolve a native popup parent until its open event.
+    if !instance.roots.get(&owner).is_some_and(|root| root.opened) {
+        return changed;
+    }
     let Some(root) = instance
         .roots
         .get(&owner)
         .and_then(|layer| layer.root.popup.as_ref())
     else {
+        return changed;
+    };
+    let Some(positioner) = parent.and_then(|parent| settings(parent, root)) else {
         return changed;
     };
     if let Some(popup) = &mut instance.popup {
@@ -119,6 +136,13 @@ pub(super) fn reconcile(
             popup.revision = popup.revision.wrapping_add(1);
             commands.push(Task::done(Plant::App(AppMessage::Redraw(popup.surface))));
         }
+        if popup.positioner != positioner {
+            popup.positioner = positioner;
+            commands.push(Task::done(Plant::PopUpReposition {
+                id: popup.surface,
+                settings: positioner,
+            }));
+        }
     } else {
         let surface = window::Id::unique();
         let mut lists = Lists::default();
@@ -141,11 +165,12 @@ pub(super) fn reconcile(
             lists,
             frame: Default::default(),
             revision: 1,
+            positioner,
         });
         plots.windows.ids.insert(surface, PlotInfo::App(output));
-        commands.push(Task::done(Plant::NewLayerShell {
+        commands.push(Task::done(Plant::NewPopUp {
             id: surface,
-            settings: settings(output),
+            settings: positioner,
         }));
         changed = true;
     }
@@ -173,7 +198,11 @@ pub(crate) fn close_children(plots: &mut Plots, parent: window::Id) -> Task<Plan
     let child = state
         .instances
         .values_mut()
-        .find(|i| i.root_by_surface(parent).is_some())
+        .find(|i| {
+            i.popup
+                .as_ref()
+                .is_some_and(|popup| popup.positioner.parent == Some(parent))
+        })
         .and_then(|i| detach(i, &mut plots.animation.motion));
     plots.apps = state;
     child.map_or_else(Task::none, |child| close(plots, child))
@@ -239,24 +268,8 @@ pub(crate) fn dismiss(
     ])
 }
 
-fn bounds(root: &AppPopup, viewport: Size) -> (Point, Size) {
-    let size = Size::new(
-        (root.geometry.width as f32).min(viewport.width).max(1.0),
-        (root.geometry.height as f32).min(viewport.height).max(1.0),
-    );
-    let point = Point::new(
-        root.geometry
-            .x
-            .clamp(0.0, (viewport.width - size.width).max(0.0)),
-        root.geometry
-            .y
-            .clamp(0.0, (viewport.height - size.height).max(0.0)),
-    );
-    (point, size)
-}
-
-pub(super) fn view(plots: &Plots, instance: &Instance, popup: &Popup) -> Element<'static, Plant> {
-    use iced::widget::{Space, container, mouse_area, opaque, stack};
+pub(super) fn view(plots: &Plots, popup: &Popup) -> Element<'static, Plant> {
+    use iced::widget::{Space, container};
     let surface = popup.surface;
     let sender = Arc::new(move |action| Plant::App(AppMessage::Action { surface, action }));
     let hover = Arc::new(move |list, key, entered| {
@@ -282,18 +295,11 @@ pub(super) fn view(plots: &Plots, instance: &Instance, popup: &Popup) -> Element
             return Space::new().into();
         }
     };
-    let viewport = Size::new(
-        instance.props["output"]["width"].as_f64().unwrap_or(1920.0) as f32,
-        instance.props["output"]["height"]
-            .as_f64()
-            .unwrap_or(1080.0) as f32,
-    );
-    let (origin, size) = bounds(&popup.root, viewport);
     let revision = popup.revision;
-    let content = measured::root(
+    measured::root(
         container(content)
-            .width(size.width)
-            .height(size.height)
+            .width(iced::Fill)
+            .height(iced::Fill)
             .into(),
         popup.frame.clone(),
         revision,
@@ -304,54 +310,36 @@ pub(super) fn view(plots: &Plots, instance: &Instance, popup: &Popup) -> Element
                 data,
             })
         }),
-    );
-    let dismiss = Plant::App(AppMessage::DismissPopup {
-        surface,
-        reason: "outside",
-    });
-    let backdrop = mouse_area(Space::new().width(iced::Fill).height(iced::Fill))
-        .on_press(dismiss.clone())
-        .on_right_press(dismiss.clone())
-        .on_middle_press(dismiss);
-    let card = crate::ui::widgets::anchored::anchored(
-        opaque(content),
-        origin,
-        Point::ORIGIN,
-        Default::default(),
-    );
-    stack![backdrop, card].into()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn hosted_popup_is_modal_without_reserving_output_space() {
-        let settings = settings(OutputId(7));
-        assert_eq!(settings.layer, Layer::Overlay);
-        assert_eq!(settings.anchor, Anchor::all());
-        assert_eq!(settings.exclusive_zone, Some(-1));
-        assert_eq!(
-            settings.keyboard_interactivity,
-            KeyboardInteractivity::Exclusive
-        );
-        assert_eq!(settings.output_option, OutputOption::GlobalName(7));
-        assert!(!settings.events_transparent);
-    }
-
-    #[test]
-    fn popup_position_and_size_are_clamped_to_the_output() {
+    fn popup_settings_keep_parent_relative_coordinates_and_size() {
         let lua = mlua::Lua::new();
         crate::ui::dsl::inject_ui_base(&lua).unwrap();
-        let value = lua.load("return iced.layer({width=100,height=32,content=iced.text('parent'),popup={x=999,y=-10,width=400,height=900,content=iced.text('menu')}})").eval().unwrap();
+        let value = lua.load("return iced.layer({width=100,height=32,content=iced.text('parent'),popup={x=999.4,y=-10.2,width=400,height=900,content=iced.text('menu')}})").eval().unwrap();
         let popup = LayerRoot::parse(&lua, value, &Default::default())
             .unwrap()
             .unwrap()
             .popup
             .unwrap();
+        let parent = window::Id::unique();
+        let settings = settings(parent, &popup).unwrap();
+        assert_eq!(settings.parent, Some(parent));
+        assert_eq!(settings.size, PixelSize::try_px(400, 900).unwrap());
         assert_eq!(
-            bounds(&popup, Size::new(1000.0, 600.0)),
-            (Point::new(600.0, 0.0), Size::new(400.0, 600.0))
+            settings.placement,
+            iced_exwlshell::reexport::PopupPlacement::Position((999, -10))
+        );
+        assert_eq!(
+            settings.constraint_adjustment,
+            PopupConstraintAdjustment::SlideX
+                | PopupConstraintAdjustment::SlideY
+                | PopupConstraintAdjustment::ResizeX
+                | PopupConstraintAdjustment::ResizeY
         );
     }
 }

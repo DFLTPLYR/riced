@@ -118,7 +118,7 @@ pub(crate) fn run_generate_theme(
         }
     }
     if set {
-        config.theme.name = "dynamic".into();
+        config.apply(crate::config::ConfigPatch::ThemeName("dynamic".into()));
         config.theme.variant = variant;
         config.save();
         println!("riced: theme set to dynamic (daemon hot-reloads)");

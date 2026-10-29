@@ -12,7 +12,7 @@ riced -c example
 Run only one riced daemon per session; IPC is session-wide. The selected project
 keeps its files separate from your normal config.
 
-`root.lua` declares backgrounds, notifications, and bars from `data/bars/`.
+`shell.lua` declares backgrounds, notifications, and bars from `data/bars/`.
 `layers/`, `plugins/`, and `settings/` contain the copied customizations.
 The previous `apps/background` migration sample is no longer included.
 

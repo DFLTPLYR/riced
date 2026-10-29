@@ -141,7 +141,7 @@ impl Demo {
 
 pub fn run(path: Option<PathBuf>) -> iced::Result {
     let override_path = path.or_else(|| {
-        let path = crate::config::config_path().with_file_name("main.lua");
+        let path = crate::config::project_dir().join("main.lua");
         path.is_file().then_some(path)
     });
     iced::application(

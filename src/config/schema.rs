@@ -419,6 +419,8 @@ pub struct ThemeConfig {
     pub variant: String,
     #[serde(default)]
     pub templates_dir: String,
+    /// Explicit color overrides over the selected named theme.
+    pub palette: crate::theme::palette::PaletteOverrides,
 }
 
 impl Default for ThemeConfig {
@@ -429,6 +431,7 @@ impl Default for ThemeConfig {
             darkmode: default_darkmode(),
             variant: default_variant(),
             templates_dir: String::new(),
+            palette: Default::default(),
         }
     }
 }
@@ -755,6 +758,7 @@ pub enum ConfigPatch {
     MonitorWallpaper(MonitorWallpaper),
     ComposableSource(ComposableKind, String),
     ThemeName(String),
+    ThemePalette(crate::theme::palette::PaletteOverrides),
     IconTheme(String),
     ThemeDarkmode(bool),
     ThemeVariant(String),
@@ -1539,7 +1543,11 @@ impl Config {
                 }
             }
             ConfigPatch::ComposableSource(kind, src) => *c.get_mut(kind) = src,
-            ConfigPatch::ThemeName(name) => self.theme.name = name,
+            ConfigPatch::ThemeName(name) => {
+                self.theme.name = name;
+                self.theme.palette = Default::default();
+            }
+            ConfigPatch::ThemePalette(patch) => self.theme.palette.merge(patch),
             ConfigPatch::IconTheme(name) => self.theme.icon_theme = name,
             ConfigPatch::ThemeDarkmode(dark) => self.theme.darkmode = dark,
             ConfigPatch::ThemeVariant(variant) => self.theme.variant = variant,

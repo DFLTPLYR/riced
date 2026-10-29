@@ -303,6 +303,25 @@ the shared snapshot with the same data. The initial snapshot is `{ready=false}`.
 It does not apply the shell theme, extract wallpaper colors, write preferences,
 or process templates. Lua decides how to present or persist its output.
 
+`colors` contains all 22 roles accepted by the built-in `iced.palette` API,
+including `on_*` foregrounds. The service snapshot is generated-preview state,
+not the shell's applied palette. Read applied colors with `iced.palette()`.
+The example card provides separate **Generate preview** and **Apply generated
+palette** buttons. An explicit apply action returns `iced.palette(self.colors)`.
+To generate and apply in one operation instead:
+
+```lua
+self.palette:command("generate", { seed = "#89b4fa", dark = true }, function(result)
+    if result.ok then return iced.palette(result.data.colors) end
+    self.error = result.error.message
+end)
+```
+
+The returned command is validated and applied by the host update thread, only
+after the callback's owner/generation is accepted. It persists color overrides
+without changing named theme files or running external-app template hooks.
+No new SDK capability or direct worker access to the shell/Lua state is needed.
+
 Copy `examples/apps/palette/` into your project's `apps/` directory
 and `extensions/palette/` into `extensions/`, enable `{ name = "palette" }` in
 `config.lua`, then run `riced build` to display the optional sample.

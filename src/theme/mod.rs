@@ -1,6 +1,7 @@
 //! Theme storage, palette resolution, styling, and Lua snapshots.
 pub mod cache;
 pub mod lua;
+pub mod palette;
 mod schema;
 pub mod store;
 pub mod style;
@@ -70,10 +71,16 @@ pub(crate) fn parse_hex(s: &str) -> Option<Color> {
 // ActiveTheme — resolved, ready-to-paint colors
 // ---------------------------------------------------------------------------
 
-/// The selected variant of the selected theme file, resolved to iced
-/// colors. This is what every style helper paints from.
+/// The selected theme variant plus validated overrides, resolved to iced colors.
+/// This is what every style helper paints from.
 #[derive(Debug, Clone, Copy)]
 pub struct ActiveTheme {
+    pub background: Color,
+    pub on_background: Color,
+    pub success: Color,
+    pub on_success: Color,
+    pub warning: Color,
+    pub on_warning: Color,
     pub primary: Color,
     pub on_primary: Color,
     pub secondary: Color,
@@ -95,6 +102,12 @@ pub struct ActiveTheme {
 impl ActiveTheme {
     pub fn fallback() -> Self {
         Self {
+            background: Color::from_rgb8(0x28, 0x28, 0x28),
+            on_background: Color::from_rgb8(0xFB, 0xF1, 0xC7),
+            success: Color::from_rgb8(0x83, 0xA5, 0x98),
+            on_success: Color::from_rgb8(0x28, 0x28, 0x28),
+            warning: Color::from_rgb8(0xFA, 0xBD, 0x2F),
+            on_warning: Color::from_rgb8(0x28, 0x28, 0x28),
             primary: Color::from_rgb(
                 0xB8 as f32 / 255.0,
                 0xBB as f32 / 255.0,
@@ -187,6 +200,12 @@ impl ActiveTheme {
             })
         };
         Self {
+            background: pick(&raw.surface, fb.background),
+            on_background: pick(&raw.on_surface, fb.on_background),
+            success: pick(&raw.tertiary, fb.success),
+            on_success: pick(&raw.on_tertiary, fb.on_success),
+            warning: pick(&raw.secondary, fb.warning),
+            on_warning: pick(&raw.on_secondary, fb.on_warning),
             primary: pick(&raw.primary, fb.primary),
             on_primary: pick(&raw.on_primary, fb.on_primary),
             secondary: pick(&raw.secondary, fb.secondary),
@@ -216,7 +235,43 @@ impl ActiveTheme {
 /// style helpers and canvas code paint the same colors this frame.
 pub fn theme_for(cfg: &ThemeConfig) -> Theme {
     let active = sync(cfg);
-    Theme::custom(cfg.name.clone(), to_palette(&active))
+    Theme::custom_with_fn(cfg.name.clone(), to_palette(&active), move |palette| {
+        use iced::theme::palette::{Extended, Pair};
+        let mut extended = Extended::generate(palette);
+        extended.background.base = Pair {
+            color: active.background,
+            text: active.on_background,
+        };
+        extended.background.weak = Pair {
+            color: active.surface,
+            text: active.on_surface,
+        };
+        extended.background.strong = Pair {
+            color: active.surface_variant,
+            text: active.on_surface_variant,
+        };
+        extended.primary.base = Pair {
+            color: active.primary,
+            text: active.on_primary,
+        };
+        extended.secondary.base = Pair {
+            color: active.secondary,
+            text: active.on_secondary,
+        };
+        extended.success.base = Pair {
+            color: active.success,
+            text: active.on_success,
+        };
+        extended.warning.base = Pair {
+            color: active.warning,
+            text: active.on_warning,
+        };
+        extended.danger.base = Pair {
+            color: active.error,
+            text: active.on_error,
+        };
+        extended
+    })
 }
 
 /// `daemon(...).style(...)` hook: transparent clear color (lets Hyprland
@@ -278,6 +333,50 @@ mod tests {
                     "{name}/{raw} surface"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn palette_overrides_preserve_native_pairs_and_invalidate_cached_colors() {
+        let _guard = SERIAL.lock().unwrap();
+        let mut cfg = ThemeConfig::default();
+        let base = resolve(&cfg);
+        cfg.palette = serde_json::from_value(serde_json::json!({
+            "primary":"#010203", "on_primary":"#11223344", "surface":"#181825",
+            "secondary":"#abcdef", "on_secondary":"#fedcba", "on_background":"#334455"
+        }))
+        .unwrap();
+        let first = theme_for(&cfg);
+        let pairs = first.extended_palette();
+        assert_eq!(pairs.primary.base.color, parse_hex("#010203").unwrap());
+        assert_eq!(pairs.primary.base.text, parse_hex("#11223344").unwrap());
+        assert_eq!(pairs.secondary.base.color, parse_hex("#abcdef").unwrap());
+        assert_eq!(pairs.secondary.base.text, parse_hex("#fedcba").unwrap());
+        assert_eq!(pairs.background.weak.color, parse_hex("#181825").unwrap());
+        assert_eq!(pairs.background.base.text, parse_hex("#334455").unwrap());
+        assert_eq!(sync(&cfg).tertiary, base.tertiary);
+        let lua_colors: std::collections::HashMap<_, _> = lua_palette(&cfg).into_iter().collect();
+        assert_eq!(lua_colors["on_primary"], "#11223344");
+        assert_eq!(lua_colors["secondary"], "#abcdef");
+        cfg.palette = serde_json::from_value(serde_json::json!({"primary":"#040506"})).unwrap();
+        assert_eq!(sync(&cfg).primary, parse_hex("#040506").unwrap());
+        cfg.palette = Default::default();
+        assert_eq!(sync(&cfg).primary, base.primary);
+    }
+
+    #[test]
+    fn palette_getters_and_theme_globals_agree_in_independent_vms() {
+        let _guard = SERIAL.lock().unwrap();
+        let mut config = ThemeConfig::default();
+        let vms = [mlua::Lua::new(), mlua::Lua::new()];
+        for lua in &vms {
+            crate::ui::dsl::inject_ui_base(lua).unwrap();
+            crate::lua::bridge::publish_theme(lua, &config).unwrap();
+        }
+        config.palette = serde_json::from_value(serde_json::json!({"primary":"#abcdef"})).unwrap();
+        for lua in &vms {
+            crate::lua::bridge::publish_theme(lua, &config).unwrap();
+            lua.load("assert(iced.palette().primary == '#abcdef'); for k,v in pairs(iced.palette()) do assert(theme[k] == v) end").exec().unwrap();
         }
     }
 
@@ -394,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn lua_palette_flattens_live_iced_pairs() {
+    fn lua_palette_exposes_resolved_color_roles() {
         let _guard = SERIAL.lock().unwrap();
         // Unknown name falls back to vendored gruvbox (deterministic).
         let pairs = lua_palette(&ThemeConfig {
@@ -411,12 +510,20 @@ mod tests {
             "on_primary",
             "secondary",
             "on_secondary",
+            "tertiary",
+            "on_tertiary",
             "success",
             "on_success",
             "warning",
             "on_warning",
             "error",
             "on_error",
+            "surface_variant",
+            "on_surface_variant",
+            "outline",
+            "shadow",
+            "hover",
+            "on_hover",
         ] {
             assert!(keys.contains(&key), "{key}");
         }

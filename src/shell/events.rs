@@ -338,7 +338,6 @@ pub enum Plant {
     Desktop(super::desktop_widgets::DesktopEvent),
     // Create,Update, Delete
     Tend,
-    Sprout,
     Uproot(Id),
     Graft(Id, Event),
     // File IPC poll tick (see `cli`): drains `riced.cmd` queued by CLI clients.

@@ -1,6 +1,8 @@
 //! Config persistence and parse-error reporting; schema and migrations are separate.
 use super::migrate::migrate_legacy_top_table;
-use super::{Config, config_migrated_path, config_path, legacy_config_path};
+use super::{
+    Config, config_migrated_path, config_path, legacy_config_path, legacy_lua_config_path,
+};
 use std::{path::Path, time::SystemTime};
 static LAST_PARSE_ERROR: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 pub(super) fn read_mtime(path: &Path) -> Option<SystemTime> {
@@ -261,6 +263,41 @@ impl Config {
     pub fn load() -> (Self, Option<SystemTime>) {
         let path = config_path();
         if !path.exists() {
+            let legacy_lua = legacy_lua_config_path();
+            if legacy_lua.exists() {
+                match std::fs::read_to_string(&legacy_lua) {
+                    Ok(content) => match try_parse(&content) {
+                        Ok(config) => match config.save_atomic_to(&path) {
+                            Ok(stamp) => {
+                                eprintln!(
+                                    "config: migrated {} → {} (original kept)",
+                                    legacy_lua.display(),
+                                    path.display()
+                                );
+                                return (config, stamp);
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "config: cannot write {}: {error}; reading legacy",
+                                    path.display()
+                                );
+                                return (config, read_mtime(&legacy_lua));
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!(
+                                "config: legacy {} is invalid: {error}",
+                                legacy_lua.display()
+                            );
+                            return Self::load_from(&legacy_lua);
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("config: cannot read {}: {error}", legacy_lua.display());
+                        return (Config::default(), None);
+                    }
+                }
+            }
             let toml_path = legacy_config_path();
             if toml_path.exists() {
                 match Self::migrate_toml(

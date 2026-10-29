@@ -12,11 +12,11 @@ pub(crate) mod managed;
 pub(crate) mod metadata;
 pub(crate) mod notifications;
 pub mod props;
+pub(crate) mod root;
 mod runtime;
 pub mod sandbox;
 #[cfg(test)]
 mod seed_tests;
-pub(crate) mod shell;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod transitions;

@@ -1,4 +1,4 @@
--- One bar. The file stem is the bar name; root.lua lists data/bars and
+-- One bar. The file stem is the bar name; shell.lua lists data/bars and
 -- declares one layer per file. Settings → Panel reads and writes this file.
 return {
     edge = "top",
