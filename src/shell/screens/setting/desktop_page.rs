@@ -8,7 +8,7 @@ use crate::{
         state::Plots,
     },
     ui::{
-        action::{Action, ActionValue, Event},
+        action::{Action, ActionValue},
         node::WidgetNode,
         settings::ComponentDefaults,
     },
@@ -110,7 +110,7 @@ impl Handler {
 }
 
 fn dispatch(action: Action, rules: &HashMap<String, Rule>, settings: window::Id) -> Plant {
-    if !matches!(action.event, Event::Action) {
+    if !action.is_control_action() {
         return Plant::Tend;
     }
     let Some(rule) = rules.get(&action.key) else {

@@ -3,7 +3,7 @@ use crate::{
     config::{PropValue, ThemeConfig, WidgetDefinition, WidgetPlacement},
     shell::{BarEvent, PlacementProp, Plant, TopEvent, screens::Top},
     ui::{
-        action::{Action, ActionValue, Event},
+        action::{Action, ActionValue},
         node::WidgetNode,
         settings::ComponentDefaults,
     },
@@ -47,7 +47,7 @@ enum Rule {
 }
 
 fn patch(action: Action, rules: &HashMap<String, Rule>) -> Option<PlacementProp> {
-    if !matches!(action.event, Event::Action) {
+    if !action.is_control_action() {
         return None;
     }
     match (rules.get(&action.key)?, action.value) {

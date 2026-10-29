@@ -87,7 +87,7 @@ enum Rule {
 }
 
 fn dispatch(action: Action, rules: &HashMap<String, Rule>, id: window::Id) -> Plant {
-    if !matches!(action.event, crate::ui::action::Event::Action) {
+    if !action.is_control_action() {
         return Plant::Tend;
     }
     let Some(rule) = rules.get(&action.key) else {

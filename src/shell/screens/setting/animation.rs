@@ -41,7 +41,7 @@ fn snapshot(current: AnimationSpeed) -> Value {
 }
 
 fn action(action: Action) -> Plant {
-    if !matches!(action.event, crate::ui::action::Event::Action) || action.value.is_some() {
+    if !action.is_control_action() || action.value.is_some() {
         return Plant::Tend;
     }
     let speed = match action.key.as_str() {

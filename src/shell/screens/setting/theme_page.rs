@@ -129,7 +129,7 @@ fn snapshot(
 }
 
 fn action(action: Action, allowed: &HashMap<String, ConfigPatch>) -> Plant {
-    if !matches!(action.event, crate::ui::action::Event::Action) || action.value.is_some() {
+    if !action.is_control_action() || action.value.is_some() {
         return Plant::Tend;
     }
     allowed
@@ -332,6 +332,42 @@ mod tests {
             action(Action::animation_frame(), &allowed),
             Plant::Tend
         ));
+    }
+
+    #[test]
+    fn palette_on_press_actions_keep_validation_and_reject_bare_gestures() {
+        let allowed = HashMap::from([(
+            "palette:gruvbox".into(),
+            ConfigPatch::ThemeName("gruvbox".into()),
+        )]);
+        let mouse_action = |key: &str, state: &str| Action {
+            key: key.into(),
+            value: None,
+            event: crate::ui::action::Event::Mouse {
+                state: state.into(),
+                button: Some("left".into()),
+                position: Some(iced::Point::new(10.0, 10.0)),
+                origin: Some(iced::Point::new(10.0, 10.0)),
+                bounds: Some(iced::Rectangle::with_size(iced::Size::new(100.0, 40.0))),
+            },
+        };
+        assert!(matches!(
+            action(mouse_action("palette:gruvbox", "action"), &allowed),
+            Plant::Config(ConfigEvent::Patch(ConfigPatch::ThemeName(name))) if name == "gruvbox"
+        ));
+        for state in ["press", "click", "release", "move", "hold"] {
+            assert!(matches!(
+                action(mouse_action("palette:gruvbox", state), &allowed),
+                Plant::Tend
+            ));
+        }
+        assert!(matches!(
+            action(mouse_action("palette:unknown", "action"), &allowed),
+            Plant::Tend
+        ));
+        let mut invalid = mouse_action("palette:gruvbox", "action");
+        invalid.value = Some(crate::ui::action::ActionValue::Boolean(true));
+        assert!(matches!(action(invalid, &allowed), Plant::Tend));
     }
 
     #[test]

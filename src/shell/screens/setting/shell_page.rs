@@ -22,7 +22,7 @@ pub(super) struct Page {
 
 /// Map a realized nav button to a validated page selection.
 pub(super) fn action(action: Action, id: iced::window::Id) -> Plant {
-    if !matches!(action.event, crate::ui::action::Event::Action) || action.value.is_some() {
+    if !action.is_control_action() || action.value.is_some() {
         return Plant::Tend;
     }
     if let Some(key) = action.key.strip_prefix("settings:lua:") {

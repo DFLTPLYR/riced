@@ -7,7 +7,7 @@ use crate::{
         screens::top::{SlotAlign, Top, TopLocal},
     },
     ui::{
-        action::{Action, ActionValue, Event},
+        action::{Action, ActionValue},
         node::WidgetNode,
         settings::ComponentDefaults,
     },
@@ -95,7 +95,7 @@ fn dispatch(
     bar: window::Id,
     selected_slot: usize,
 ) -> Plant {
-    if !matches!(action.event, Event::Action) {
+    if !action.is_control_action() {
         return Plant::Tend;
     }
     let Some(rule) = rules.get(&action.key) else {

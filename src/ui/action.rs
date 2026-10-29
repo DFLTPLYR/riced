@@ -47,6 +47,11 @@ impl Action {
     pub(crate) fn is_animation_frame(&self) -> bool {
         matches!(self.event, Event::AnimationFrame)
     }
+
+    pub(crate) fn is_control_action(&self) -> bool {
+        matches!(&self.event, Event::Action)
+            || matches!(&self.event, Event::Mouse { state, .. } if state == "action")
+    }
     pub(crate) fn change(key: String, value: ActionValue) -> Self {
         Self {
             key,
