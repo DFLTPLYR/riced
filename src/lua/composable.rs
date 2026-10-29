@@ -52,7 +52,12 @@ pub(crate) fn source_path(src: &str) -> PathBuf {
     if path.is_absolute() {
         path
     } else {
-        crate::config::components_dir().join(path)
+        let reusable = crate::config::composables_dir().join(&path);
+        if reusable.is_file() {
+            reusable
+        } else {
+            crate::config::components_dir().join(path)
+        }
     }
 }
 

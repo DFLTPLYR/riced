@@ -52,10 +52,13 @@ pub fn config_migrated_path() -> PathBuf {
     project_dir().join("config.toml.migrated")
 }
 pub fn theme_dir() -> PathBuf {
-    project_dir().join("theme")
+    project_dir().join("data/theme")
 }
 pub fn templates_dir() -> PathBuf {
-    project_dir().join("templates")
+    project_dir().join("data/templates")
+}
+pub fn composables_dir() -> PathBuf {
+    project_dir().join("composables")
 }
 pub fn widgets_path() -> PathBuf {
     if let Some(root) = PROJECT_ROOT.get() {
@@ -87,12 +90,9 @@ pub fn components_dir() -> PathBuf {
 /// Project-owned Settings page sources. Bundled copies are installed once;
 /// existing directories are adopted as user-owned.
 pub fn settings_dir() -> PathBuf {
-    widgets_dir()
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("settings")
+    components_dir().join("settings")
 }
 
 pub fn shaders_dir() -> PathBuf {
-    project_dir().join("shaders")
+    components_dir().join("shaders")
 }

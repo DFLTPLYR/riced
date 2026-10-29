@@ -44,9 +44,12 @@ fn with_module<T>(
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Some(root) = &root {
         candidates.push(root.join(src));
+        candidates.push(root.join("composables").join(src));
         candidates.push(root.join("components").join(src));
         if let Some(project) = root.parent().and_then(std::path::Path::parent) {
             candidates.push(project.join(src));
+            candidates.push(project.join("composables").join(src));
+            candidates.push(project.join("components").join(src));
         }
     }
     let path = candidates
@@ -177,8 +180,9 @@ fn plugin_path(lua: &Lua, id: &str) -> mlua::Result<Option<std::path::PathBuf>> 
     };
     let root = std::path::PathBuf::from(root);
     let file = format!("{id}.lua");
-    let mut candidates = vec![root.join("plugins").join(&file)];
+    let mut candidates = vec![root.join("data/plugins").join(&file), root.join("plugins").join(&file)];
     if let Some(project) = root.parent().and_then(std::path::Path::parent) {
+        candidates.push(project.join("data/plugins").join(&file));
         candidates.push(project.join("plugins").join(&file));
     }
     Ok(candidates.into_iter().find(|path| path.is_file()))
@@ -496,7 +500,7 @@ impl LuaRuntime {
                     table.raw_set(index, *id)?;
                 }
                 if let Ok(root) = lua.named_registry_value::<String>("riced.app_root") {
-                    let dir = std::path::PathBuf::from(root).join("plugins");
+                    let dir = std::path::PathBuf::from(root).join("data/plugins");
                     let mut names = Vec::new();
                     if let Ok(entries) = std::fs::read_dir(dir) {
                         for entry in entries.flatten() {
@@ -909,7 +913,14 @@ impl LuaRuntime {
                         "circular project module: {name}"
                     )));
                 }
-                let path = directory.join(name.replace('.', "/")).with_extension("lua");
+                let mut path = directory.join(name.replace('.', "/")).with_extension("lua");
+                if !path.is_file() {
+                    path = match name.as_str() {
+                        "state" => directory.join("data/state.lua"),
+                        "settings" => directory.join("components/settings/window.lua"),
+                        _ => path,
+                    };
+                }
                 let source = std::fs::read_to_string(&path).map_err(mlua::Error::external)?;
                 loading.raw_set(name.as_str(), true)?;
                 let result = lua

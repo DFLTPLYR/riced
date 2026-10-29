@@ -1101,7 +1101,7 @@ fn app_native<'a>(
         ("widget", None) => Err("riced.plugin(\"widget\") needs an output-bound app".into()),
         (other, Some(_)) => {
             let root = crate::config::project_root().unwrap_or_else(|| Project::installed().root);
-            let path = root.join("plugins").join(format!("{other}.lua"));
+            let path = root.join("data/plugins").join(format!("{other}.lua"));
             if !path.is_file() {
                 return Err(format!("unknown plugin {other:?}"));
             }

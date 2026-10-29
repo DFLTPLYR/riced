@@ -28,10 +28,7 @@ impl std::fmt::Debug for LuaPage {
 
 impl LuaPage {
     pub(super) fn new(source: &str, label: &str) -> Result<Self, String> {
-        let root = crate::config::settings_dir()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let root = crate::config::project_dir();
         Self::with_root(&root, source, label)
     }
 

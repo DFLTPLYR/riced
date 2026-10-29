@@ -25,8 +25,9 @@ pub(crate) fn test_format_config(config: &Config) -> Result<String, String> {
 }
 pub mod migrate;
 mod paths;
+pub(crate) mod layout;
 pub(crate) use paths::{
-    config_path_in, legacy_lua_config_path, project_dir, project_root, set_project_root,
+    composables_dir, config_path_in, legacy_lua_config_path, project_dir, project_root, set_project_root,
     templates_dir, theme_dir,
 };
 mod schema;

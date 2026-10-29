@@ -398,7 +398,7 @@ mod tests {
         // Point XDG_CONFIG_HOME at a scratch dir (config_dir() honors it;
         // HOME is untouched so other tests are unaffected).
         let dir = std::env::temp_dir().join(format!("riced-theme-e2e-{}", std::process::id()));
-        let theme_sub = dir.join("riced").join("theme");
+        let theme_sub = dir.join("riced/data/theme");
         std::fs::create_dir_all(&theme_sub).unwrap();
         let custom = r##"{"dark": {
             "primary": "#010203", "on_primary": "#282828",

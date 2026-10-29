@@ -18,11 +18,15 @@ fn plain_startup_installs_before_connecting_to_wayland() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot connect to Wayland"));
     let root = home.path().join("riced");
-    assert!(root.join(".frontend-initialized").is_file());
-    assert!(root.join("layers/bar.lua").is_file());
+    assert!(root.join("data/state/frontend.initialize").is_file());
+    assert!(root.join("components/layers/bar.lua").is_file());
     assert!(root.join("shell.lua").is_file());
     assert!(root.join("data/config.lua").is_file());
-    assert!(root.join("settings.lua").is_file());
+    assert!(root.join("components/settings/window.lua").is_file());
+    assert!(root.join("data/state.lua").is_file());
+    assert!(root.join("data/plugins/hello.lua").is_file());
+    assert!(root.join("composables/context_menu.lua").is_file());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("startup options unavailable"));
 }
 
 #[test]
@@ -37,7 +41,8 @@ fn explicit_projects_never_populate_the_default_directory() {
         .unwrap();
     assert!(!output.status.success());
     assert!(!home.path().join("riced").exists());
-    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+    assert_eq!(fs::read_to_string(project.path().join("config.lua")).unwrap(), "return {}");
+    assert!(!project.path().join("shell.lua").exists());
 }
 
 #[test]
@@ -69,7 +74,7 @@ fn explicit_repair_targets_only_the_selected_project() {
 fn initialized_startup_does_not_restore_deleted_sources() {
     let home = tempfile::tempdir_in("/tmp/opencode").unwrap();
     assert!(cli(home.path()).arg("init").status().unwrap().success());
-    let removed = home.path().join("riced/layers/bar.lua");
+    let removed = home.path().join("riced/components/layers/bar.lua");
     fs::remove_file(&removed).unwrap();
     let _ = cli(home.path()).output().unwrap();
     assert!(!removed.exists());

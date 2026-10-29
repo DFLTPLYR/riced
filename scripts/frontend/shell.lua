@@ -3,8 +3,8 @@
 -- Bars are plain data files under `data/bars/`. shell.lua lists the directory
 -- and declares one layer per file; Settings → Panel reads and writes the same
 -- files. Nothing here hardcodes a bar or its widgets.
-local state = require("state")
-local settings = require("settings")
+local state = require("data.state")
+local settings = require("components.settings.window")
 
 local app = {}
 

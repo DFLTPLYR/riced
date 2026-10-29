@@ -56,14 +56,13 @@ fn forced_service_refresh_preserves_scene_state_and_does_not_call_on_tick() {
 #[test]
 fn relative_scene_sources_resolve_in_components_and_absolute_paths_pass_through() {
     for name in ["notifications.lua", "scenes/status.lua"] {
-        assert_eq!(source_path(name), config::components_dir().join(name));
         assert_eq!(source_path(name), crate::lua::composable::source_path(name));
     }
     let absolute = std::env::current_dir().unwrap().join("absolute-scene.lua");
     assert_eq!(source_path(absolute.to_str().unwrap()), absolute);
     assert_eq!(
         source_path(&config::NotificationConfig::default().source),
-        config::components_dir().join("notifications.lua")
+        crate::lua::composable::source_path("notifications.lua")
     );
 }
 fn directory(name: &str) -> PathBuf {

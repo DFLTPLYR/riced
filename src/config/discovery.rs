@@ -323,14 +323,14 @@ mod tests {
             std::fs::write(dir.join(alias), "-- user component").unwrap();
         }
         seed_components_in(&dir);
-        assert_eq!(lua_files_sorted(&dir).len(), 9);
+        assert_eq!(lua_files_sorted(&dir).len(), 6);
         assert!(dir.join("06-editors.lua").is_file());
         // An earlier release may already have seeded the numbered copies.
         for (seed, _) in component_seed_aliases() {
             std::fs::write(dir.join(seed), "-- seed component").unwrap();
         }
         let paths = installed_component_paths(&dir);
-        assert_eq!(paths.len(), 9);
+        assert_eq!(paths.len(), 6);
         // Numbered seeds are skipped only where an unnumbered override exists.
         for (seed, alias) in component_seed_aliases() {
             assert!(
@@ -339,7 +339,7 @@ mod tests {
             );
             assert!(paths.contains(&dir.join(alias)));
         }
-        assert_eq!(lua_files_sorted(&dir).len(), 13);
+        assert_eq!(lua_files_sorted(&dir).len(), 10);
         // Removing an override makes its seed available again.
         std::fs::remove_file(dir.join("styled.lua")).unwrap();
         assert!(installed_component_paths(&dir).contains(&dir.join("05-styled.lua")));

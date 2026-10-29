@@ -83,6 +83,9 @@ fn run_with(
         config::set_project_root(root)?;
     }
     let command = cli.command;
+    if matches!(&command, None | Some(cli::Commands::GenerateTheme { .. } | cli::Commands::ApplyTemplates { .. })) {
+        config::layout::migrate(&config::project_dir())?;
+    }
     if command.is_some() {
         // CLI commands never evaluate the shell entry; keep logging at the
         // environment/default level.

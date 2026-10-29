@@ -82,6 +82,7 @@ pub(crate) fn resolve_project() -> Result<PathBuf, String> {
     if config::project_root().is_none() {
         config::set_project_root(project.clone())?;
     }
+    config::layout::migrate(&project).map_err(|error| error.to_string())?;
     Ok(project)
 }
 

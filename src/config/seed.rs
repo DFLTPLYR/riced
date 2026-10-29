@@ -10,13 +10,23 @@ pub(super) fn seed_marker(dir: &Path) -> PathBuf {
         .file_name()
         .expect("Lua library directory")
         .to_string_lossy();
-    dir.parent()
-        .unwrap_or(Path::new("."))
-        .join(format!(".{name}-initialized"))
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    let root = if parent.file_name().is_some_and(|name| name == "components") {
+        parent.parent().unwrap_or(Path::new("."))
+    } else {
+        parent
+    };
+    root.join("data/state").join(format!("{name}.initialize"))
 }
 pub(super) fn initialize_scripts_in(dir: &Path, seed: fn(&Path)) {
     let marker = seed_marker(dir);
     if marker.exists() {
+        return;
+    }
+    if let Some(parent) = marker.parent()
+        && let Err(error) = super::layout::directory(parent)
+    {
+        eprintln!("Lua library: cannot create initialization directory: {error}");
         return;
     }
     if !dir.exists() {
@@ -88,7 +98,7 @@ pub(crate) const SHADER_SEEDS: &[(&str, &str)] = &[
     ),
 ];
 
-fn seed_shaders_in(dir: &Path) {
+pub(super) fn seed_shaders_in(dir: &Path) {
     for &(name, content) in SHADER_SEEDS {
         seed_component(dir, name, content);
     }
@@ -201,9 +211,6 @@ pub(super) fn seed_components_in(dir: &std::path::Path) {
         ("10-card.lua", SEED_COMPONENT_CARD),
         ("20-menu.lua", SEED_COMPONENT_MENU),
         ("30-graph.lua", SEED_COMPONENT_GRAPH),
-        ("selection_rect.lua", SEED_SELECTION_RECT),
-        ("context_menu.lua", SEED_CONTEXT_MENU),
-        ("context_menu_item.lua", SEED_CONTEXT_MENU_ITEM),
     ] {
         if component_seed_aliases()
             .iter()
@@ -211,6 +218,18 @@ pub(super) fn seed_components_in(dir: &std::path::Path) {
         {
             continue;
         }
+        seed_component(dir, name, content);
+    }
+}
+
+pub(super) fn seed_composables_in(dir: &Path) {
+    for (name, content) in [
+        ("selection_rect.lua", SEED_SELECTION_RECT),
+        ("context_menu.lua", SEED_CONTEXT_MENU),
+        ("context_menu_item.lua", SEED_CONTEXT_MENU_ITEM),
+        ("notification_card.lua", SEED_NOTIFICATIONS_LUA),
+        ("notifications.lua", include_str!("../../scripts/components/notifications.lua")),
+    ] {
         seed_component(dir, name, content);
     }
 }
@@ -234,20 +253,25 @@ impl super::WidgetsFile {
     /// Initialize fresh widget/component libraries; existing libraries are
     /// user-owned, including files that were intentionally removed.
     fn seed_all() {
+        if let Err(error) = super::layout::migrate(&super::paths::project_dir()) {
+            eprintln!("project layout: {error}");
+            return;
+        }
         initialize_scripts_in(&widgets_dir(), seed_widgets_in);
         seed_components();
+        initialize_scripts_in(&super::paths::composables_dir(), seed_composables_in);
         initialize_scripts_in(&super::paths::shaders_dir(), seed_shaders_in);
         initialize_scripts_in(&super::paths::settings_dir(), seed_settings_in);
         let root = super::paths::project_dir();
-        let marker = root.join(".scenes-initialized");
+        let marker = root.join("data/state/scenes.initialize");
         if !marker.exists() {
             seed_component(
-                &components_dir(),
+                &super::paths::composables_dir(),
                 "notifications.lua",
                 include_str!("../../scripts/components/notifications.lua"),
             );
             seed_component(
-                &components_dir(),
+                &super::paths::composables_dir(),
                 "notification_card.lua",
                 SEED_NOTIFICATIONS_LUA,
             );
@@ -255,7 +279,7 @@ impl super::WidgetsFile {
                 eprintln!("scenes: {error}");
             }
         }
-        let marker = root.join(".desktop-widgets-initialized");
+        let marker = root.join("data/state/desktop-widgets.initialize");
         if !marker.exists() {
             seed_component(
                 &widgets_dir(),
@@ -268,7 +292,7 @@ impl super::WidgetsFile {
         }
         // The graph component and usage widgets arrived after fresh installs;
         // deliver them once without resurrecting files a user has removed.
-        let marker = root.join(".usage-initialized");
+        let marker = root.join("data/state/usage.initialize");
         if !marker.exists() {
             seed_component(&components_dir(), "30-graph.lua", SEED_COMPONENT_GRAPH);
             seed_component(&widgets_dir(), "usage.lua", SEED_USAGE_LUA);

@@ -6,31 +6,31 @@ use std::{
 };
 
 const VERSION: &str = "1\n";
-const COMPLETE: &str = ".frontend-initialized";
-const PENDING: &str = ".frontend-installing";
+const COMPLETE: &str = "data/state/frontend.initialize";
+const PENDING: &str = "data/state/frontend.initialize.pending";
 const FILES: &[(&str, &str)] = &[
     (
         "shell.lua",
         include_str!("../../scripts/frontend/shell.lua"),
     ),
     (
-        "settings.lua",
+        "components/settings/window.lua",
         include_str!("../../scripts/frontend/settings.lua"),
     ),
     (
-        "state.lua",
+        "data/state.lua",
         include_str!("../../scripts/frontend/state.lua"),
     ),
     (
-        "layers/background.lua",
+        "components/layers/background.lua",
         include_str!("../../scripts/frontend/layers/background.lua"),
     ),
     (
-        "layers/bar.lua",
+        "components/layers/bar.lua",
         include_str!("../../scripts/frontend/layers/bar.lua"),
     ),
     (
-        "layers/notifications.lua",
+        "components/layers/notifications.lua",
         include_str!("../../scripts/frontend/layers/notifications.lua"),
     ),
     (
@@ -38,11 +38,11 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../scripts/frontend/data/bars/top.lua"),
     ),
     (
-        "plugins/hello.lua",
+        "data/plugins/hello.lua",
         include_str!("../../scripts/plugins/hello.lua"),
     ),
     (
-        "plugins/counter.lua",
+        "data/plugins/counter.lua",
         include_str!("../../scripts/plugins/counter.lua"),
     ),
     // Publish the bootstrap only after its source files are in place.
@@ -108,6 +108,7 @@ fn preserved(root: &Path, mode: Mode) -> io::Result<bool> {
 
 /// Hermetic installation entry: all reads/writes stay under the supplied root.
 pub(crate) fn initialize_in(root: &Path, mode: Mode) -> io::Result<Outcome> {
+    super::layout::migrate(root)?;
     if mode == Mode::Repair
         && !present(&root.join("data/config.lua"))?
         && present(&root.join("config.toml"))?
@@ -120,7 +121,8 @@ pub(crate) fn initialize_in(root: &Path, mode: Mode) -> io::Result<Outcome> {
         return Ok(Outcome::Preserved);
     }
     fs::create_dir_all(root)?;
-    let lock_path = root.join(".frontend-install.lock");
+    super::layout::directory(&root.join("data/state"))?;
+    let lock_path = root.join("data/state/frontend-install.lock");
     if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::other("installation lock must not be a symlink"));
     }
@@ -140,6 +142,10 @@ pub(crate) fn initialize_in(root: &Path, mode: Mode) -> io::Result<Outcome> {
             "unrecognized pending frontend version; installation left untouched",
         ));
     }
+    super::seed::initialize_scripts_in(&root.join("components"), super::seed::seed_components_in);
+    super::seed::initialize_scripts_in(&root.join("composables"), super::seed::seed_composables_in);
+    super::seed::initialize_scripts_in(&root.join("components/settings"), super::seed::seed_settings_in);
+    super::seed::initialize_scripts_in(&root.join("components/shaders"), super::seed::seed_shaders_in);
     for &(path, source) in FILES {
         // A legacy top-level config.lua must keep winning until the user moves
         // it; seeding data/config.lua would silently shadow their settings.
@@ -232,7 +238,7 @@ mod tests {
                 fs::read_to_string(root.path().join(name)).unwrap(),
                 contents
             );
-            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+            assert!(!root.path().join("shell.lua").exists());
         }
     }
 
@@ -278,7 +284,7 @@ mod tests {
     #[test]
     fn initialized_legacy_project_keeps_its_top_level_config() {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
-        fs::write(root.path().join(COMPLETE), VERSION).unwrap();
+        write_missing(root.path(), COMPLETE, VERSION).unwrap();
         fs::write(root.path().join("config.lua"), "return {}").unwrap();
         assert_eq!(
             initialize_in(root.path(), Mode::Startup).unwrap(),
@@ -303,10 +309,11 @@ mod tests {
     #[test]
     fn failed_installation_stays_pending_and_can_resume() {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
-        fs::write(root.path().join("layers"), "not a directory").unwrap();
+        fs::create_dir_all(root.path().join("components")).unwrap();
+        fs::write(root.path().join("components/layers"), "not a directory").unwrap();
         assert!(initialize_in(root.path(), Mode::Startup).is_err());
         assert!(!root.path().join(COMPLETE).exists());
-        fs::remove_file(root.path().join("layers")).unwrap();
+        fs::remove_file(root.path().join("components/layers")).unwrap();
         assert_eq!(
             initialize_in(root.path(), Mode::Startup).unwrap(),
             Outcome::Installed
@@ -317,7 +324,8 @@ mod tests {
     fn installation_does_not_follow_symlinked_directories() {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
         let outside = tempfile::tempdir_in("/tmp/opencode").unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("layers")).unwrap();
+        fs::create_dir_all(root.path().join("components")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("components/layers")).unwrap();
         assert!(initialize_in(root.path(), Mode::Startup).is_err());
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
@@ -347,7 +355,7 @@ mod tests {
     #[test]
     fn unknown_pending_versions_are_not_completed_or_overwritten() {
         let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
-        fs::write(root.path().join(PENDING), "999\n").unwrap();
+        write_missing(root.path(), PENDING, "999\n").unwrap();
         assert!(initialize_in(root.path(), Mode::Startup).is_err());
         assert_eq!(
             fs::read_to_string(root.path().join(PENDING)).unwrap(),
@@ -363,6 +371,6 @@ mod tests {
         fs::write(root.path().join("config.toml"), "legacy = true").unwrap();
         assert!(initialize_in(root.path(), Mode::Repair).is_err());
         assert!(!root.path().join("data/config.lua").exists());
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        assert!(!root.path().join("shell.lua").exists());
     }
 }

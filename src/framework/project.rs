@@ -207,8 +207,8 @@ impl Project {
         let source =
             std::fs::read_to_string(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
         let mut sources = vec![(entry, source)];
-        for file in ["state.lua", "settings.lua"] {
-            if file == "settings.lua" && name != "root" {
+        for file in ["state.lua", "data/state.lua", "settings.lua", "components/settings/window.lua"] {
+            if file.ends_with("settings.lua") && name != "root" {
                 continue;
             }
             let state = self.app_root(name).join(file);
@@ -222,6 +222,9 @@ impl Project {
         // where a single-file app keeps its layer modules.
         for directory in [
             self.app_root(name).join("components"),
+            self.app_root(name).join("composables"),
+            self.root.join("composables"),
+            self.root.join("components/layers"),
             self.root.join("layers"),
             self.app_root(name).join("shell"),
         ] {
