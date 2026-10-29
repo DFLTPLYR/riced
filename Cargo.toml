@@ -5,23 +5,25 @@ edition = "2024"
 
 [workspace]
 members = [
-    "crates/riced-extension-sdk",
-    "extensions/palette",
-    "extensions/palette-worker",
-    "extensions/theme-gen",
-    "extensions/wayland-toplevels",
-    "extensions/wayland-workspaces",
-    "examples/extensions/hello",
+  "crates/riced-extension-sdk",
+  "crates/palette",
+  "crates/palette-worker",
+  "crates/theme-gen",
+  "crates/wayland-toplevels",
+  "crates/wayland-workspaces",
+  "examples/extensions/hello",
 ]
 resolver = "3"
 
 
 [dependencies]
-riced-extension-sdk = { path = "crates/riced-extension-sdk", features = ["process"] }
-riced-extension-palette = { path = "extensions/palette" }
-riced-extension-theme-gen = { path = "extensions/theme-gen" }
-riced-extension-wayland-toplevels = { path = "extensions/wayland-toplevels" }
-riced-extension-wayland-workspaces = { path = "extensions/wayland-workspaces" }
+riced-extension-sdk = { path = "crates/riced-extension-sdk", features = [
+  "process",
+] }
+riced-extension-palette = { path = "crates/palette" }
+riced-extension-theme-gen = { path = "crates/theme-gen" }
+riced-extension-wayland-toplevels = { path = "crates/wayland-toplevels" }
+riced-extension-wayland-workspaces = { path = "crates/wayland-workspaces" }
 iced = { version = "0.14.0", features = [
   "tokio",
   "advanced",
@@ -43,7 +45,11 @@ tracing-subscriber = "0.3.23"
 tracing-log = "0.2"
 iced_wayland_subscriber = "0.20.1"
 wayland-client = "0.31.15"
-wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols = { version = "0.32", features = [
+  "client",
+  "staging",
+  "unstable",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 material-colors = { version = "0.4", features = ["image", "serde"] }
@@ -52,12 +58,24 @@ include_dir = "0.7"
 toml = "0.8"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["time", "rt", "sync", "process", "io-util"] }
+tokio = { version = "1", features = [
+  "time",
+  "rt",
+  "sync",
+  "process",
+  "io-util",
+] }
 rustix = { version = "1", features = ["process", "fs"] }
 tempfile = "3"
 thiserror = "2"
 rfd = "0.15"
-mlua = { version = "0.12", features = ["lua54", "vendored", "send", "macros", "serialize"] }
+mlua = { version = "0.12", features = [
+  "lua54",
+  "vendored",
+  "send",
+  "macros",
+  "serialize",
+] }
 tracing = "0.1"
 sysinfo = "0.33"
 aura-anim = "0.3"
