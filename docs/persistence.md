@@ -5,6 +5,11 @@ Framework apps can own cached JSON, TOML, and Lua-table documents through
 Reloads and saves run on the managed background executor; completion updates
 the cache and then invokes the callback on the host update thread.
 
+Use this API for app-owned data that needs asynchronous I/O, conflict detection,
+or watching. It is not a Lua source editor or a replacement for Settings' config
+saver. The small `riced.read`/`write` helpers used by bundled bar handlers are
+synchronous and have a different contract.
+
 ## Basic use
 
 ```lua
@@ -172,7 +177,8 @@ before I/O and before replacement. Do not depend on shutdown hooks to flush chan
 - At most four active blocking file workers across the process.
 - Pending callbacks also count toward the existing managed-resource limits.
 
-Each app/output instance owns its handles independently. The same path still
+Each plain app/output instance owns its handles independently. A daemon owns one
+set of handles across all outputs. The same path still
 refers to the same physical file: choose distinct paths for independent output
 preferences, or deliberately handle conflicts when sharing one file.
 
@@ -247,5 +253,4 @@ its watcher, including a pending scan. App reload, removal, and teardown release
 watchers automatically; late results cannot reach a replacement VM. Hidden apps
 remain alive and keep watching until explicitly stopped or retired.
 
-Property proxies such as `file.data.opacity` remain intentionally deferred so
-mutations stay explicit and revision tracking remains reliable.
+Use explicit `get`/`set` calls; there is no mutable `file.data` property.

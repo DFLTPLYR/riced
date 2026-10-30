@@ -1,9 +1,11 @@
 # Lua API reference
 
-Every Lua global available to widgets, popups, overlay scenes, and composables.
+Reference for Lua widgets, popups, overlay scenes, composables, and shell apps.
+Some APIs are host-specific; the sections below name those restrictions.
 
 Experimental framework applications can return `iced.layer({...})` as a native
-surface root; see [Framework apps](framework.md) for configuration and lifecycle.
+surface root; see [the framework guide](framework.md) for configuration,
+lifecycle, and the shared `riced.daemon(...)` shell builder.
 Framework app tables also expose managed `spawn`, `after`, `every`, `subscribe`,
 and `cancel` methods, plus `self:pick_file(options, callback)` for native file
 dialogs and `riced.service(name)` for cached snapshots and subscriptions.
@@ -13,11 +15,13 @@ reload/save, and lifecycle-owned `file:watch()` subscriptions; see
 Compiled-in extensions expose cached snapshots, subscriptions, and managed
 `service:command(name, args, callback)` through `riced.service(name)`; see
 [Rust extensions](extensions.md). Built-in services remain read-only here.
-Rust owns delivery, policy, and validation; Lua owns presentation. ◪
+Rust owns delivery, policy, and validation; Lua owns presentation.
 
 ## App contract
 
-Each script returns an app table. `app:view()` is required.
+Widget and standalone app scripts return an app table. `app:view()` is required.
+The shell entry may instead return `riced.daemon(...):run()`; its `update`
+callback receives the UI events described here as well as shell lifecycle events.
 
 ```lua
 local app = {}
@@ -71,16 +75,14 @@ Like dock/bar widgets, desktop widgets re-run `view(props)` on
 placement, theme, source, hover, or action changes. Return `os.date(...)` from
 the view for a live clock. Desktop surfaces currently have no popup-window host.
 
-```toml
-[[desktop]]
-widget = "rectangle"
-output = "DP-1"       # omit or "" to display on every output
-x = 400
-y = 300
-# width = 320        # omit or 0 to inherit the Lua default
-# height = 200
-# z = 1              # higher values paint in front
-props = { radius = 16 }
+```lua
+-- In data/config.lua:
+desktop = {
+    { widget = "rectangle", output = "DP-1", x = 400, y = 300,
+      props = { radius = 16 } },
+    -- Omit output or use "" for every output.
+    -- Optional width/height override the Lua defaults; z sets paint order.
+}
 ```
 
 Open **Settings → Desktop** and click inside a widget preview, move to the desired
@@ -90,7 +92,7 @@ overrides. The preview-display selector supplies output context to unpinned
 widgets. Preview instances are isolated from live desktop instances, and embedded
 controls do not execute actions. Right-click or Escape cancels. Capture surfaces show the
 desktop above ordinary windows while positioning; Settings stays intact below.
-Successful drops save one `[[desktop]]` entry pinned to the clicked display.
+Successful drops save one `desktop` entry pinned to the clicked display.
 The point originally pressed inside the widget stays attached to the cursor;
 scaled previews map that point back into native logical pixels, excluding card
 padding and letterboxing. The ghost and saved origin both use `cursor - grab`.
@@ -104,7 +106,7 @@ are retained and resume displaying when that output returns.
 
 Source edits hot-reload; invalid replacements keep the last working view.
 The bundled rectangle is seeded without overwriting existing files. The
-`.desktop-widgets-initialized` marker prevents subsequent starts from restoring
+`data/state/desktop-widgets.initialize` marker prevents subsequent starts from restoring
 an intentionally deleted example.
 
 ## `iced.window` (native surface)
@@ -202,8 +204,8 @@ at decode with the field named.
 | `iced.slider(min, max, value)`                                 | finite `min < max`, positive `step`                                                                        | `value`, `step`, `on_change`, `on_release`, `width`, `height`                                                                                     |
 | `iced.spin_box(value, min, max)`                               | finite `min < max`, positive `step`, integer `decimals` 0–6                                                | `value`, `min`, `max`, `step`, `decimals`, `on_change`, `width`, `height`                                                                         |
 | `iced.masonry(children)` | array of nodes; responsive shortest-column layout | `column_width` (positive, default 260), `spacing` (nonnegative, default 12) |
-| `riced.plugin(id[, args])` | nonempty plugin id | Host-filled leaf. Built-in Rust plugins: `wallpaper`, `desktop-widgets`, `widget`, `settings-page`, `wallpaper-map`. Any other id resolves `plugins/<id>.lua`. `args` is an optional table passed to the resolver. |
-| `riced.plugins()` | — | Array of available plugin ids: built-in Rust plugins plus `plugins/*.lua` stems. |
+| `riced.plugin(id[, args])` | nonempty plugin id | Host-filled leaf. Built-in Rust plugins: `wallpaper`, `desktop-widgets`, `widget`, `settings`, `settings-page`, `wallpaper-map`. Other ids resolve `data/plugins/<id>.lua` (legacy `plugins/` fallback). `args` is an optional table passed to the resolver. |
+| `riced.plugins()` | — | Array of available plugin ids: built-in Rust plugins plus discovered Lua plugin stems. |
 | `iced.text_input(placeholder, value)`                          | —                                                                                                          | `value`, `on_input`, `on_submit`, `width`, `size`, `padding`, `secure`                                                                            |
 | `iced.pick_list(options, selected)`                            | unique-string options; selected nil or member                                                              | `selected`, `on_select`, `width`, `placeholder`, `padding`, `size`                                                                                |
 | `iced.radio(label, value, selected)`                           | string value/selection                                                                                     | `selected`, `on_select`, `width`, `size`, `spacing`                                                                                               |
@@ -214,16 +216,17 @@ Shared layout setters on every node: `:anchor()`, `:margin()`, `:on_press(key)`.
 
 ### Settings pages
 
-The bundled Settings pages are installed once into the project's `settings/`
+The bundled Settings pages are installed once into the project's `components/settings/`
 directory (`animation.lua`, `theme.lua`, `panel_bar.lua`, `placement.lua`,
 `components.lua`, `desktop.lua`, `context_menu.lua`, `wallpaper.lua`). Edit a
 copy to customize that page; saving reloads it. The host supplies each page's
 snapshot and validates its actions, so changing the shape of the props table or
 its action keys can break that page — a copy that fails to decode falls back to
-the bundled page. An existing `settings/` directory is adopted as user-owned,
+the bundled page. An existing `components/settings/` directory is adopted as user-owned,
 and deleting a page does not restore it. Because adoption is per-directory, a
 project that commits one page keeps the bundled sources for the rest;
-`examples/settings/animation.lua` does exactly that.
+`examples/settings/animation.lua` is a committed legacy example; startup moves
+it into `components/settings/animation.lua`.
 
 ### Bundled editor components
 
@@ -369,20 +372,18 @@ return `nil` when there is no content to show.
 ### Component defaults in Settings
 
 Settings opens on **Info**; Info and About are blank placeholders.
-The **Components** page edits persistent defaults for every native component,
-including `popup`. Pick a component and supported property, enter a TOML value,
+The **Components** page edits persistent defaults for native visual components,
+including `popup`. Pick a component and supported property, enter a Lua value,
 then apply it. **Reset property** removes the saved override. Strings need quotes
 (`"center"`, `"fill"`, `"#ffffff"`); numbers and booleans do not. Invalid edits
 are shown in the editor and do not replace the saved configuration.
 
-```toml
-[component-defaults.popup]
-padding = 8
-background = "#202020"
-radius = 6
-
-[component-defaults.button]
-padding = 4
+```lua
+-- In data/config.lua:
+component_defaults = {
+    popup = { padding = 8, background = "#202020", radius = 6 },
+    button = { padding = 4 },
+}
 ```
 
 Resolution is per property: **explicit argument/setter → configured default →
@@ -441,12 +442,15 @@ Center anchors center within that inset rectangle. Excessive margins are fitted
 proportionally on each axis so layout dimensions cannot become negative. Margin
 remains anchor-only; it does not position a native popup window.
 
-The same values work in **Settings → Components** and `config.toml`:
+The same values work in **Settings → Components** and `data/config.lua`:
 
-```toml
-[component-defaults.button]
-padding = { top = 4, right = 10, bottom = 4, left = 10 }
-radius = { top_left = 6, top_right = 6 }
+```lua
+component_defaults = {
+    button = {
+        padding = { top = 4, right = 10, bottom = 4, left = 10 },
+        radius = { top_left = 6, top_right = 6 },
+    },
+}
 ```
 
 Popup measurement includes `left + right` and `top + bottom` once each. Explicit
@@ -556,8 +560,8 @@ function app:view(props)
 end
 ```
 
-Files live in `$XDG_CONFIG_HOME/riced/shaders/` (normally
-`~/.config/riced/shaders/`). `"plasma"`, `"plasma.wgsl"`, and
+Files live in the selected project's `components/shaders/` (normally
+`~/.config/riced/components/shaders/`). `"plasma"`, `"plasma.wgsl"`, and
 `"/shaders/plasma.wgsl"` all resolve there; `/shaders/` is an API alias, not a
 directory at the filesystem root. Subdirectories, absolute paths, `~/…`, and
 absolute `file://…` paths are accepted. Missing extensions become `.wgsl`;
@@ -660,7 +664,7 @@ library path. This does not capture or blur content behind another window.
 Fresh shader libraries receive `plasma.wgsl`, `gradient.wgsl`, `ripple.wgsl`, and
 `engine.wgsl` (a raymarched fractal with continuous camera and structure rotation,
 independent of mouse input).
-The `.shaders-initialized` marker preserves user edits and intentional deletions;
+The `data/state/shaders.initialize` marker preserves user edits and intentional deletions;
 an existing shader directory is adopted without filling missing files. The
 bundled sources are also available under `scripts/shaders/` in the repository.
 
@@ -762,12 +766,11 @@ the implicit grab. Reloaded/removed sources, changed placements, and disconnecte
 outputs invalidate stale drops. Settings previews and explicit Place/Reposition
 buttons retain their click-to-pick-up, click-to-place interaction.
 
-Configure hold timing in **Settings → Desktop → Hold duration**, or in `config.toml`:
+Configure hold timing in **Settings → Desktop → Hold duration**, or in `data/config.lua`:
 
-```toml
-[interaction]
-hold = "medium" # fast = 250ms, medium = 500ms (default), slow = 1000ms
-# hold = 750    # custom milliseconds, integer 1..=60000
+```lua
+interaction = { hold = "medium" } -- fast = 250ms, medium = 500ms, slow = 1000ms
+-- interaction = { hold = 750 }  -- custom milliseconds, integer 1..60000
 ```
 
 The setting applies to widget holds on both desktop placements and bars.
@@ -902,10 +905,11 @@ widget embedded in a framework layer keeps `item.hovered` live.
 
 | Function                                    | Purpose                                                                                                                             |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `riced.component(src[, overrides][, host])` | Render a `components/` module inline. Frame pattern: `riced.component(props.item_component.src, props.item_component.props, item)`. |
-| `riced.layer(src[, overrides])`             | Compose a whole layer from a `components/` module whose `view` returns `iced.layer({...})`. Returns it for the parent's layer list; a module that returns a widget tree is rejected. |
-| `riced.widget(name[, props][, id])`         | Embed `widgets/<name>.lua` in any layer. The widget keeps its own VM, services, popups, and `actions`; its action keys are routed back automatically. `id` defaults to `name` and must be unique per layer. |
-| `riced.widget_popup([{x, y}])`              | Declare the active widget popup for the enclosing layer. Place it in the layer's `popup` field; fallback `x`/`y` are parent-layer-local coordinates. Bar markers with `edge`/`thickness` position it from the clicked widget's measured bounds. |
+| `riced.daemon(new, namespace, update, view)` | Shared shell builder. See [daemon callbacks and settings](framework.md#the-daemon-builder). Finish with `:run()`. |
+| `riced.component(src[, overrides][, host])` | Render a module inline. App/project-relative paths, `composables/`, and `components/` are searched. Frame pattern: `riced.component(props.item_component.src, props.item_component.props, item)`. |
+| `riced.layer(src[, overrides])`             | Compose a whole layer from a module whose `view` returns `iced.layer({...})`. `"layers/bar.lua"` finds the bundled project's `components/layers/bar.lua`. A module returning an ordinary widget tree is rejected. |
+| `riced.widget(name[, props][, id])`         | Embed `widgets/<name>.lua` in a layer. The widget keeps its own VM, services, popups, and `actions`; its action keys route back automatically. `id` defaults to `name` and must be unique across the app, including all daemon outputs. |
+| `riced.widget_popup([{x, y, owner, edge, thickness}])` | Declare the active widget popup in the enclosing layer's `popup` field. `owner` filters by widget-ID prefix; use a unique prefix per bar/output. Fallback `x`/`y` are parent-local. `edge`/`thickness` position it from clicked-widget bounds. |
 | `riced.list(path)`                          | Sorted file names in a project-relative directory (`{}` when missing). Use for `data/bars` or `widgets` discovery. |
 | `riced.read(path)`                          | Parse a project-relative `return { ... }` Lua document into a table. |
 | `riced.write(path, table)`                  | Write a project-relative Lua document atomically (`mount`/`actions` only). |
@@ -977,9 +981,8 @@ Otherwise lookup uses the icon theme selected in **Settings → Theme**, its
 filenames are supported. Changing the theme invalidates lookup caches and
 refreshes registered tray items live. Configure it directly with:
 
-```toml
-[theme]
-icon-theme = "Papirus-Dark" # default: "hicolor"; installed theme directory name
+```lua
+theme = { icon_theme = "Papirus-Dark" } -- default: "hicolor"; directory name
 ```
 
 Every menu node has `id`, `label`, `type` (`separator` or the app's normal type),
@@ -1041,6 +1044,6 @@ from default value types. Each placement gets an independent Lua state.
 
 ## Sandbox and budgets
 
-- Widget/scene VMs: `string`/`table`/`math`/`os`/`io` with native shell (`os.execute`, `io.popen`); `require`, `dofile`, `loadfile`, `os.exit`/`os.remove`/`os.rename` are nil. Other app VMs have a narrower stdlib (no `os`/`io`).
+- Widget/scene/framework VMs have native shell access (`os.execute`, `io.popen`). These are trusted local scripts, not a security sandbox. Framework apps get a restricted project module loader via `require`; widget/scene VMs do not. `dofile`, `loadfile`, `os.exit`, `os.remove`, and `os.rename` are blocked. The demo and config profiles have narrower libraries.
 - 64 MiB memory limit, ~200k instruction budget per entry; overruns error and the next entry recovers. `print()` goes to the daemon log.
 - Cell text may embed `{icon:name}` placeholders for theme-aware Lucide icons.

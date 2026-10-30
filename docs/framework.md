@@ -1,24 +1,26 @@
-# Framework apps (experimental)
+# Lua shell and apps (experimental)
 
-Riced can host opt-in Lua applications as native Wayland layer surfaces.
-Existing bars, desktop widgets, notifications, and overlays remain supported.
-The application and managed-resource APIs are experimental, not yet a stable
-extension SDK.
+The bundled shell uses one Lua daemon to declare surfaces across all outputs.
+Standalone apps can instead run with independent state per output. This guide
+covers both models; widget constructors are in the [Lua API](lua-api.md).
+The application and managed-resource APIs are experimental.
 
 ## Project layout
 
 ### Shell entry point and commands
 
 When a project contains `shell.lua`, it is the frontend entry point and takes
-precedence over the legacy `config.lua` `apps` list. It returns the existing app
-contract (`view`, optional `mount`/`actions`/`unmount`) and composes its surfaces
-with `riced.layer`/`iced.window`. New installations put this file directly in the
+precedence over the `data/config.lua` `apps` list. It returns a daemon via
+`riced.daemon(...):run()`, or a plain app table with `view` and optional
+`mount`/`actions`/`unmount`. It composes surfaces with `riced.layer`/`iced.window`.
+New installations put this file directly in the
 project directory. `data/config.lua` retains preferences and extension
 configuration; older projects may still keep a top-level `config.lua`, which is
-read until it is moved. `shell.lua` remains readable as the pre-rename entry.
+imported when `data/config.lua` is absent, keeping the original. `root.lua`
+remains the fallback when `shell.lua` is absent.
 
 Register shell commands during module loading, in `shell.lua` or a module such
-as `state.lua` loaded with `require("state")`:
+as `data/state.lua` loaded with `require("data.state")`:
 
 ```lua
 riced.ipc({
@@ -37,7 +39,7 @@ riced ipc settings
 riced ipc remove --anchor top --output DP-1
 ```
 
-The installed frontend registers handlers in `state.lua` for `settings`, `add`,
+The installed frontend registers handlers in `data/state.lua` for `settings`, `add`,
 and `remove`. `add` accepts `--anchor`, optional `--output` and `--thickness`;
 `remove` accepts `--anchor` and optional `--output`. The command namespace is
 user-defined; `settings` opens Settings, it is not a settings CRUD namespace.
@@ -56,26 +58,37 @@ Projects must register their own `settings` handler; there is no native Settings
 command fallback.
 
 Project `require` caches modules per VM, resolves dotted names relative to the
-app root, and rejects circular imports. `state.lua`, `shell/`, `components/`, and
-shared `layers/` participate in source reload detection. Failed candidate reloads
+app root, and rejects circular imports. `data/state.lua`, `shell/`, `components/`,
+and `composables/` participate in source reload detection. Failed candidate reloads
 retain the working frontend and its handlers. Settings currently retains its
 native window host and Lua pages; its opening policy is now a Lua IPC handler.
 
 ### The daemon builder
 
-`shell.lua` returns the daemon builder. Its callbacks are the shell: one Lua VM
+The bundled `shell.lua` returns `riced.daemon(...):run()`. One Lua VM
 owns all outputs, and `view` declares every surface for every output.
 
 ```lua
 local app = {}
 function app.new() return app end
 function app.namespace() return "riced" end
-function app.update(self, event) ... end   -- tick, output_*, services_changed, config_changed, actions
-function app.view(self, props) ... end     -- props.outputs lists every connected output
+function app.update(self, event)
+    if event.key == "refresh" then self.refreshed = true end
+end
+function app.view(self, props)
+    local layers = {}
+    for _, output in ipairs(props.outputs) do
+        layers[#layers + 1] = iced.layer({
+            id = output.name .. ".status", output = output.name,
+            anchors = { top = true, left = true }, width = 200, height = 32,
+            content = iced.text(self.refreshed and "Refreshed" or "Ready"),
+        })
+    end
+    return layers
+end
 
 return riced.daemon(app.new, app.namespace, app.update, app.view)
     :title(function(self, surface) return surface.title end)
-    :subscription(function(self, active) return { "input", "wayland", "config", "ipc", "tray" } end)
     :theme(function(self, context) return context.theme end)
     :style(function(self, context) return { background_color = "#00000000", text_color = context.text_color } end)
     :redraw_scope(function(self, event) return event.scope end)
@@ -93,11 +106,23 @@ return riced.daemon(app.new, app.namespace, app.update, app.view)
     :run()
 ```
 
-`new` returns the mutable state table. `update` runs on the host thread for shell
-events and `tick`; its return value is handled like `actions`. `title`, `theme`,
+`new` returns the mutable state table. `namespace` returns a nonempty, NUL-free
+string. `update` runs on the host thread for UI actions, `tick`, `output_added`,
+`output_changed`, `output_removed`, `services_changed`, and `config_changed`;
+its return value is handled like `actions`. `title`, `subscription`, `theme`,
 `style`, and `redraw_scope` may be omitted; the native defaults apply.
 `redraw_scope` receives `{kind, scope, surface}` and returns `"all"`, `"none"`,
 or `"window"`.
+
+`:subscription(callback)` replaces the host's optional event sources. The
+callback receives activity flags and returns a dense array of source names:
+`input`, `wayland`, `config`, `ipc`, `tray`, `desktop`, `apps`, `settings`,
+`animation`, `notification_deadlines`, `overlays`, `notifications`, `selection`,
+and `widgets`. Omitting `apps` disables the regular 500 ms app poll used for
+ticks, source reload checks, and managed-resource pumping. Other refresh events
+may still run, but do not rely on them to replace that poll.
+Native surface lifecycle events always remain enabled. The bundled shell's
+`app:subscription` shows how to retain active sources.
 
 `view` declares surfaces; each `iced.layer` needs an `output` name from
 `props.outputs` because the daemon is not bound to one output. Closing a surface
@@ -105,7 +130,7 @@ drops that layer but keeps the daemon and its state. Changing between a daemon
 and a plain app requires a restart.
 
 Settings are validated before connecting. Unknown keys, wrong types, and a
-non-positive `default_text_size` reject the load. A bad `subscription` result
+non-finite or non-positive `default_text_size` reject the load. A bad `subscription` result
 (unknown, duplicate, or non-array source) is reported and the native defaults are
 used for that pass. Edit startup options and restart; there is no live reload. A
 missing `tracing` filter keeps `RUST_LOG`, then `info`. Keep top-level code
@@ -115,8 +140,9 @@ Preferences never live in `shell.lua`. Settings rewrites
 `data/config.lua` as a plain `return {...}` table, so hand-written views are
 never overwritten.
 
-The installed shell declares every surface from Lua: `layers/background.lua`
-plus one `layers/bar.lua` per `data/bars/*.lua` entry. `layers/bar.lua` embeds
+The installed shell declares every surface from Lua: `components/layers/background.lua`
+and `components/layers/notifications.lua`, plus one `components/layers/bar.lua`
+per `data/bars/*.lua` entry. `layers/bar.lua` embeds
 widget files with `riced.widget(name, props, id)`, so each widget keeps its own
 VM, services, popup contract, and `actions` handler. The native bar host is off
 in the installed `data/config.lua` (`bar_host = false`), and the background
@@ -129,22 +155,31 @@ The project root is the directory containing `shell.lua`
 
 ```text
 shell.lua
-settings.lua
-state.lua
 data/
     config.lua
+    state.lua
     bars/
+    plugins/
+    theme/
+    templates/
+    state/                 initialization markers and locks
+components/
+    *.lua                  shared builders
+    layers/
+    settings/
+        window.lua
+    shaders/
+composables/
+widgets/
 apps/
     bar/
         app.lua
         components/
             status.lua
         assets/
-components/
-layers/
 ```
 
-Enable applications explicitly in `data/config.lua`:
+For projects without a shell entry, enable apps in `data/config.lua`:
 
 Select a project with `riced -p PATH` (the directory containing `shell.lua`).
 `riced -c NAME` resolves `./config/riced/NAME` first, then
@@ -162,7 +197,8 @@ return {
 }
 ```
 
-Each entry resolves to `apps/<name>/app.lua`. Names and instance IDs accept
+Each entry resolves to `apps/<name>/app.lua`, or `apps/<name>.lua` when no folder
+entry exists. Names and instance IDs accept
 letters, digits, `_`, and `-`. IDs default to the app name and must be unique
 across entries. Omit `output` (or use `""`) for an independent instance on every
 output. Named-output entries resume when the output reconnects. Merely adding
@@ -182,6 +218,8 @@ Each app returns a table with `view(props)`. Optional methods:
 `context` contains `id`, `name`, `root`, and `output`. It is also available as
 `self.context`. Output contains `name`, `x`, `y`, `width`, and `height` in logical
 pixels. Props merge `app.defaults` → configured `props` → host-owned `output`.
+For a daemon, `props.outputs` lists all connected outputs, each with geometry
+and its configured `wallpaper` path; it does not have a single owning output.
 Resolved props are available as both the view argument and `self.props` during
 handlers. They are cleared between entries to release temporary resources.
 
@@ -328,18 +366,19 @@ content = iced.stack({
 | `widget` | framework layer | One `widgets/<name>.lua` instance, built by `riced.widget`. |
 | `settings-page` / `wallpaper-map` | Settings host | The page body and the wallpaper map canvas. |
 
-Framework layers and the Settings hosts resolve plugins; bar, scene, and
-overlay hosts reject them. Plugins that need output geometry require an
-output-bound app (every layer app is). Each plugin is Fill-sized, so place it in
+Framework layers and the Settings hosts resolve plugins; legacy bar, scene, and
+overlay hosts reject them. Plugins that need output geometry use the layer's
+target output. Each plugin is Fill-sized, so place it in
 a `stack` or `container` rather than a `row`.
 
-Any id that is not a built-in resolves `plugins/<id>.lua` in the project. The
+Any id that is not a built-in resolves `data/plugins/<id>.lua` in the project
+(with `plugins/<id>.lua` as a legacy fallback). The
 module is a normal app table with `view(self, props)` and optional
 `actions(self, event)`; `props` is the `args` table passed to `riced.plugin`,
 and its action keys are routed back as `plugin:<id>:<key>`.
 
 ```lua
--- plugins/hello.lua
+-- data/plugins/hello.lua
 return {
     view = function(self, props)
         return iced.text("Hello " .. (props.name or "plugin"))
@@ -352,7 +391,7 @@ return {
 content = riced.plugin("hello", { name = "world" })
 ```
 
-The installed frontend seeds `plugins/hello.lua` and `plugins/counter.lua` as
+The installed frontend seeds `data/plugins/hello.lua` and `data/plugins/counter.lua` as
 examples.
 
 `wallpaper` is what lets a Lua background coexist with the native wallpaper
@@ -361,30 +400,15 @@ regeneration prompt, and the decoded pixel resource stay native.
 
 Because the plugin is empty until a bake succeeds, a background layer should not
 depend on it for being visible. The app also receives the *configured* source
-for its output as `props.wallpaper` (per-monitor entry first, then the first
-free-form image), so it can draw that path directly underneath:
+for its output as `props.wallpaper` (the matching Per Monitor assignment or the
+first image in Free Form mode; empty when missing). A daemon receives these
+paths on `props.outputs` and passes the relevant one to its background module:
 
 ```lua
 if props.wallpaper ~= "" then
     children[#children + 1] = iced.image(props.wallpaper):width(size.fill):height(size.fill)
 end
 children[#children + 1] = riced.plugin("wallpaper")
-```
-
-`wallpaper` is what lets a Lua background coexist with the native wallpaper
-pipeline: placement stays Lua, while baking, shader compilation, the theme
-regeneration prompt, and the decoded pixel resource stay native.
-
-Because the slot is empty until a bake succeeds, a background layer should not
-depend on it for being visible. The app also receives the *configured* source
-for its output as `props.wallpaper` (per-monitor entry first, then the first
-free-form image), so it can draw that path directly underneath:
-
-```lua
-if props.wallpaper ~= "" then
-    children[#children + 1] = iced.image(props.wallpaper):width(size.fill):height(size.fill)
-end
-children[#children + 1] = iced.native("wallpaper")
 ```
 
 `iced.image` uses contain fitting, so the direct draw is a fallback, not the
@@ -395,7 +419,7 @@ failure shows a wallpaper rather than a blank screen.
 
 `iced.window({...})` declares an XDG toplevel alongside `iced.layer({...})` in
 an app's `view`. Lua owns visibility; removing a declaration closes its surface.
-Stable ids reuse native windows across renders. The bundled `settings.lua`
+Stable ids reuse native windows across renders. The bundled `components/settings/window.lua`
 declares the Settings window and embeds `riced.plugin("settings")`, whose native
 editors preserve existing validation and Apply/Discard behavior.
 
@@ -418,8 +442,9 @@ end
 ```
 
 Native closes deliver `{type="window_closed", id=...}` to the owning app's
-`actions`. Closing a window does not unmount the app or close its bars. Failed
-close handlers cannot reopen it accidentally: omit the declaration once before
+`actions` (or the daemon's `update`). Closing a window does not unmount the app
+or close its bars. Failed close handlers cannot reopen it accidentally: omit
+the declaration once before
 declaring that id again. `shell.open_settings()` and the `shell` namespace have
 been removed; internal UI actions change Lua state without IPC polling.
 
@@ -471,24 +496,18 @@ A bar placement is app-owned Lua data, not a host command:
   their files. The data uses `edge`/`thickness`/`slots`, where each slot is
   `{ align = "start"|"center"|"end", widgets = { "name", ... } }` and
   `layers/bar.lua` iterates the ordered list. A layer should still write
-  `bar.edge or "top"` so a malformed document cannot take the frontend down.
-- Widget popups are declared by the same layer with `riced.widget_popup({x, y})`;
-  the host renders the active widget's popup content there.
+  `bar.edge or "top"` for a missing edge; other invalid values can still fail
+  view validation and leave the last working surfaces in place.
+- Widget popups are declared with `riced.widget_popup({owner=prefix})` in the
+  layer's `popup` field. Use a unique widget-ID prefix per bar/output so only
+  the owning layer declares the popup.
 - Settings → Panel is a persistent Lua page: it keeps its VM, lists and edits
   these same files, shows their output names, and preserves the target on edits.
   Its Add buttons still create all-output bars; no output-picker UI is required.
 
-An action handler can therefore offer "add a bar" and "remove this bar" by
-editing the app's own file:
-
-```lua
-function app:add_bar(edge)
-    local bars = self.bars:get("bars") or {}
-    table.insert(bars, { edge = edge, thickness = 34 })
-    self.bars:set("bars", bars)
-    self.bars:save()
-end
-```
+For the bundled read/write handlers, see `scripts/frontend/shell.lua` and
+`scripts/frontend/state.lua`. For asynchronous app-owned documents, use
+[`riced.file`](persistence.md); it requires a reload before the first save.
 
 ### App-owned layers
 
@@ -497,45 +516,15 @@ still the app's own. The layer set is not fixed by `data/config.lua`; an app can
 declare as many as it likes, including ones derived from its own state:
 
 An app is either `apps/<name>/app.lua` (a folder app, with app-local
-`components/`) or a single file `apps/<name>.lua`. Either way `layers/` at the
-project root is shared, so a layer module is
+`components/`) or a single file `apps/<name>.lua`. The project's
+`components/layers/` directory is shared, so a layer module is
 `riced.layer("layers/bar.lua", props)`. A single-file app still gets
 `apps/<name>/` for owned data such as `state/`, never for its entry point.
 
-```lua
-function app:mount(context)
-    self.output = context.output.name
-    self.bars = riced.file({ type = "lua", path = "bars.lua",
-                             write_mode = "generated", defaults = { bars = {} } })
-end
-
-function app:add_bar(edge)
-    local bars = self.bars:get("bars") or {}
-    table.insert(bars, { id = "bar-" .. (#bars + 1), edge = edge, thickness = 32 })
-    self.bars:set("bars", bars)
-    self.bars:save()
-end
-
-function app:view(props)
-    local layers = { riced.layer("layers/background.lua", { menu = self.menu }) }
-    for _, bar in ipairs(self.bars:get("bars") or {}) do
-        layers[#layers + 1] = riced.layer("layers/bar.lua", {
-            id = bar.id, output = self.output,
-            edge = bar.edge, thickness = bar.thickness,
-        })
-    end
-    return layers
-end
-```
-
-"Add another bar" is now ordinary app state: append, save, re-declare. The
-daemon still owns validation, identity, persistence, and window creation — Lua
-owns the policy of *when* a layer appears and what it is told.
-
-Store a **stable identity** in the document (here `bar.id`), never an array
-index: removing `bar-1` must not renumber `bar-2`, or the runtime closes and
-recreates unrelated surfaces. The same document can be edited by Settings and by
-the layer repeater, which is what keeps them consistent.
+Layers can come from in-memory state or a managed document. Store a **stable
+identity** for each layer, never an array index: removing one must not renumber
+or reuse another layer's ID. The bundled frontend uses output-name and file-name
+identities so its layers remain unique across outputs.
 
 A document opened with `riced.file` is data, not app code, so editing it never
 reloads the app. Keep it outside `apps/<name>/components/`, which is the app's
@@ -595,8 +584,9 @@ requests. It returns detached plain data; mutating it does not edit the service.
 Functions and opaque image tokens are omitted. Image-only changes therefore do
 not constitute metadata snapshot changes; existing service globals remain the
 API for opaque image values and existing native command APIs remain unchanged.
-Generic service commands and service registration belong to the extension SDK
-milestone, not this read/subscription interface.
+Extension services also support managed commands; see the
+[extension guide](extensions.md#lua-service-commands). Built-in topics remain
+read-only through this interface.
 
 Subscriptions deliver one initial snapshot asynchronously, then changed data
 only. Multiple pending updates coalesce to the latest snapshot. Source changes
@@ -639,7 +629,8 @@ background, a bar and an overlay at once. `nil` hides every layer without
 discarding application state. Layer roots cannot appear in widget trees.
 
 A layer can also live in its own file: `riced.layer("layers/bar.lua", props)`
-resolves `<app>/components/layers/bar.lua` (or the shared `components/`), calls
+resolves an app-local `layers/bar.lua`, `composables/layers/bar.lua`, or
+`components/layers/bar.lua`, then the same paths in the project, calls
 its `view(props)`, and returns its `iced.layer{...}` value for the list. The
 module owns its surface, not just its content, so it decides its own level,
 anchors and input semantics. A file that returns a widget tree is rejected by
@@ -649,12 +640,14 @@ returns a subtree.
 Ids must be unique across the list: each one keys a native surface, and a
 duplicate is a reported render error. A layer that disappears from the list has
 its surface closed; a layer whose `id` changes gets a fresh surface without a new
-VM. Closing any declared layer closes the whole app, since the app declares the
-set.
+VM. For a plain per-output app, closing a declared layer retires that instance.
+For a daemon, it dismisses only that layer and keeps shared state alive; omit
+the declaration before declaring that ID again to reopen it.
 
 | Field | Contract |
 | --- | --- |
 | `id` | Nonempty surface identity; defaults to `"main"`. Changing it recreates the native surface, not the Lua instance. |
+| `output` | Optional connector name for a plain app; required for daemon layers. Must be nonempty and NUL-free. A disconnected target has no surface until it returns. |
 | `layer` | `"background"`, `"bottom"`, `"top"` (default), or `"overlay"`. |
 | `anchors` | Named booleans: `top`, `right`, `bottom`, `left`; all default false. |
 | `width`, `height` | Integer logical pixels in `1..32768`. An omitted dimension stretches and requires both opposite anchors. |
@@ -682,7 +675,7 @@ Input normally refreshes only its owning app instance without rescanning
 source files; hot reload remains handled by the regular project refresh.
 Content-only changes redraw the affected surface rather than every window.
 
-Shared gestures translate `event.x/y` into each recipient output's local logical
+For plain per-output apps, shared gestures translate `event.x/y` into each recipient output's local logical
 coordinates (possibly negative/outside its bounds); add `self.props.output.x/y`
 to obtain the same global point in each VM. `event.source_output` names the
 originating output. Gate one-output side effects such as opening a context menu
@@ -690,10 +683,11 @@ on `event.source_output == self.props.output.name`. Keyed control actions and
 idle hover/motion are not broadcast, nor are gestures shared with other apps or
 layers that did not opt in. No Lua objects or persistent state cross VM boundaries.
 
-The installed root uses this transport for desktop selection: Lua owns geometry,
-an inert canvas clips the global fill/border on each output, and `:animate` fades
-it with the native clock on release. A new drag gets a fresh animation identity;
-no repeating Lua timers or disk-backed gesture state are needed.
+The bundled daemon does not broadcast between VMs: it stores one global desktop
+selection. `event.output` contains the source output's geometry; add its `x/y`
+to layer-local pointer coordinates to get global coordinates. Each output's
+canvas clips the same rectangle, and `:animate` fades it on release without Lua
+frame timers.
 
 Unknown fields and invalid geometry fail before native creation. Layout, focus,
 layer, margins, input, and reserved space reconcile on the same native window.
@@ -701,7 +695,8 @@ Native UI realization/animation uses cached owned trees, never per-frame Lua.
 
 ## App-owned popups
 
-A framework layer can declare one named popup per app/output instance. Its
+A framework layer can declare one named popup per app instance (one across all
+outputs for a daemon). Its
 content is an ordinary widget tree and shares the parent's Lua state:
 
 ```lua
@@ -763,9 +758,9 @@ end
   the native popup positioner. Moving a popup to a different declaring layer
   creates a new child. List animation state, hover, and
   measurements remain scoped to its owner. Popup open/close lifecycle
-  transitions, automatic widget anchoring/flipping, nested popups, and ordinary
-  application windows are not part of this step. Existing bar-widget popup
-  behavior is unchanged.
+   transitions, automatic widget anchoring/flipping, and nested popups are not
+   supported by this app-popup contract. Legacy bar-widget popups have their own
+   [lifecycle contract](lua-api.md#popup-openclose-transitions).
 
 See `examples/apps/popup/app.lua` for a runnable counter/menu example.
 
@@ -796,11 +791,11 @@ independent click counter on each output. Copy its `apps/bar/` directory into
 your project and merge the example `apps` entry into your existing config.
 
 Run `riced -c example` from the repository root for the personal frontend snapshot
-in `config/riced/example/`. It uses `shell.lua`, Lua layers, and `data/bars/` rather
-than the previous `apps/background` migration sample. Its README lists the
-machine-specific settings and differences from the latest bundled frontend.
+in `config/riced/example/`. It uses a plain `shell.lua` app entry, Lua layers,
+and `data/bars/`, not the shared daemon builder. Its README lists machine-specific
+settings and differences from the latest bundled frontend.
 
-## Subsequent milestones
+## Related APIs and current limits
 
 The [structured persistence API](persistence.md) provides `riced.file()` with
 cached edits, managed reload/save operations, conflict detection, and coalesced
@@ -818,52 +813,6 @@ See [process configuration and limits](extensions.md#supervised-executable-servi
 Rust dynamic-library loading is
 intentionally not part of the initial design.
 
-The application-model work now includes one native, named popup owned by each
-framework app/output instance. **Next: ordinary application-window roots** for
-apps such as Settings. Automatic widget anchoring/flipping, popup lifecycle
-transitions, nested popups, and explicit state restoration remain follow-ups;
-the existing native bar-popup host keeps its current capabilities.
-
-### Later: Lua editor support (LuaLS)
-
-Provide completion, signatures, hover documentation, and lightweight type
-checking through `lua-language-server` and LuaCATS definitions, without a custom
-language server or changes to runtime behavior. Schedule full coverage after
-the extension SDK's public Lua surface stabilizes; core `iced.*` definitions
-can land earlier.
-
-Planned work:
-
-1. **API definitions:** add `types/riced.lua` as a `---@meta` library covering
-   widget constructors and chainable setters; layer roots; animations and
-   components; app lifecycle, managed methods, and events; persistence handles;
-   service snapshots; and notification/tray commands. Derive names and fields
-   from Rust schemas and publication code rather than documentation alone.
-2. **Editor setup:** add a Lua 5.4 `.luarc.json` with `types` as a workspace
-   library, plus configuration for opening `config/riced/example/` directly.
-   Document Neovim and VS Code setup in the Lua API guide.
-3. **Example annotations:** describe the background app's custom state with a
-   class extending `RicedApp`, and annotate component props and delegate items
-   where useful. Explain that runtime-defined components need explicit type
-   declarations or annotations; `iced.use` can provide a statically described
-   entry point but cannot infer arbitrary component props or return types.
-4. **Drift checks:** test that every Rust component constructor and setter has
-   a corresponding declaration. Introduce generation from schema metadata if
-   maintaining the definitions manually becomes cumbersome.
-5. **Optional distribution:** later consider `riced lua-stubs [PATH]` to export
-   definitions and editor configuration for standalone projects. Define an
-   explicit overwrite policy before writing user-owned configuration.
-
-Acceptance criteria:
-
-- Opening the repository or background example provides constructor, setter,
-  and service completion; chained setters preserve the widget's specific type.
-- The annotated example passes LuaLS checks without undefined-global or
-  setter-type errors, and representative invalid calls produce diagnostics.
-- Adding a constructor or setter without updating definitions fails a test.
-- Documentation distinguishes inferred API types from app-specific annotations.
-
-Validate LuaLS's generic/self-preserving return behavior before choosing the
-shared-setter model. If unreliable, declare setters separately per widget class
-to preserve chaining. Arbitrary runtime component discovery, automatic typing of
-all app state, and replacing Rust runtime validation are explicitly out of scope.
+Ordinary app windows are supported by `iced.window`. App popups still lack
+automatic anchoring/flipping, lifecycle transitions, and nesting. Successful
+source reloads reset app state; explicit restoration must use app-owned data.

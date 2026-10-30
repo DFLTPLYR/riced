@@ -4,10 +4,22 @@ A Lua bar, palette card, theme-generation card, layout-editor card, hello
 extension card, toplevels card, workspaces strip, and app-owned popup, with
 palette and hello services running as supervised Rust executables and theme
 generation plus the Wayland toplevel/workspace listeners compiled in from
-`extensions/`. Run only one riced daemon per session; stop an existing one
+`../crates/`. Run only one riced daemon per session; stop an existing one
 before starting this example.
 
 ## Build and run
+
+This project still commits the legacy layout (`config.lua` and `settings/`).
+Before building, edit `config.lua`: change the four bundled extension paths
+from `../extensions/` to `../crates/` (`theme-gen`, `wayland-toplevels`,
+`wayland-workspaces`, and `palette-worker`). Keep the project-owned
+`extensions/hello` path unchanged. Otherwise extension builds fail because the
+old directories no longer exist. The commands below build/start a desktop;
+workspace tests alone do not validate this generated-shell build.
+
+On startup, the runtime imports preferences into `data/config.lua` and moves
+Settings pages to `components/settings/`. Once imported, edit `data/config.lua`;
+the original top-level config is kept but no longer wins.
 
 From the **repository root**, build the CLI:
 
@@ -57,10 +69,10 @@ instead of updating it.
   `riced generate-theme` still does that.
 - A toplevels card sits at the bottom-left. It subscribes to the compiled-in
   `toplevels` service (the `ext-foreign-toplevel-list-v1` listener in
-  `extensions/wayland-toplevels`) and lists `{app_id, title}` for every mapped
+  `../crates/wayland-toplevels`) and lists `{app_id, title}` for every mapped
   window. Compositors without the protocol show **No toplevels**.
 - A workspaces strip sits at the top-left. It subscribes to the compiled-in
-  `workspaces` service (`ext-workspace-v1` in `extensions/wayland-workspaces`)
+  `workspaces` service (`ext-workspace-v1` in `../crates/wayland-workspaces`)
   and highlights the active workspace. Compositors without the protocol show
   **No workspaces**. Each of these is an extra Wayland connection beyond the
   core `wayland.toplevels`/`wayland.workspaces` tables; a project only needs
@@ -75,16 +87,16 @@ instead of updating it.
 The configuration also sets the shell-level surface the example depends on:
 `theme` (`gruvbox`, dark), `animation.speed`, `interaction.hold`, and
 `notifications` (bundled `notifications.lua` scene on the mouse output).
-Wallpaper and desktop widget placements are machine-specific, so `config.lua`
+Wallpaper and desktop widget placements are machine-specific, so `data/config.lua`
 keeps them as commented templates.
 
-`config.lua` resolves its executable path relative to this project directory:
+`data/config.lua` resolves its executable path relative to this project directory:
 `../target/debug/riced-extension-palette-worker`. Build that worker before
 running the shell. `riced build` does **not** build process executables.
 
 After editing worker Rust code, rebuild the worker and restart the example to
 use the new executable. Lua apps retain their regular hot reload behavior.
-Changing extension registration in `config.lua` requires rebuilding the
+Changing extension registration in `data/config.lua` requires rebuilding the
 generated shell and restarting it.
 
 ## Building extensions
@@ -108,7 +120,7 @@ riced extension update -p ./examples
 their own binary rebuilt and a restart, so a process-only selection skips the
 shell rebuild entirely: `riced extension update hello` compiles the worker and
 stops. Each entry's `path` names its crate directory (`extensions/hello` for
-`hello`, `../extensions/palette-worker` for the palette worker); without `path`
+`hello`, `../crates/palette-worker` for the palette worker); without `path`
 the default is `extensions/<name>` beside the project. See
 [Rust extensions](../docs/extensions.md#building-extension-crates).
 
@@ -120,23 +132,23 @@ extension crates alone does not need them.
 
 ## Project-owned Settings page
 
-`settings/animation.lua` is a committed, project-owned Settings page. riced
-installs the bundled pages into `settings/` on first run and then adopts that
-directory as user-owned, so this example ships one customized page and the other
-seven keep their bundled sources. Open Settings and edit the file to see the
-page reload without restarting the shell; delete it to fall back to the bundled
+`settings/animation.lua` is the committed, project-owned Settings page. Startup
+moves it to `components/settings/animation.lua` and adopts that directory as
+user-owned, so other missing pages use bundled fallbacks. Open Settings and edit
+the migrated file to see the page reload without restarting the shell; delete it
+to fall back to the bundled
 page. The host still supplies the page's `props` and validates its actions
 (`animation:fast|medium|slow`), so only presentation changes here. See
 [Lua API — Settings pages](../docs/lua-api.md#settings-pages).
 
-`.gitignore` beside `config.lua` ignores the other runtime-seeded libraries
-(`widgets/`, `components/`, `shaders/`), the initialization markers, and the
-`riced build` package under `.riced/`, so running the example leaves the
-checkout clean.
+The project's legacy `.gitignore` does not cover every new `data/` or
+`composables/` path. Running it can move tracked files and create untracked
+runtime data. Use a separate copy if you want to keep this checkout unchanged.
 
 ## Copying into another project
 
-Copy `apps/`, enable the apps and process entry from `config.lua`, and change
+Copy `apps/`, enable the apps and process entries from the example config in
+your own `data/config.lua`, and change
 `process.argv[1]` to your worker's installed executable path. Set `path` to the
 worker's crate directory so `riced extension build` can compile it. Relative
 paths containing `/` resolve from that project's root; plain names use `PATH`.
@@ -144,7 +156,7 @@ paths containing `/` resolve from that project's root; plain names use `PATH`.
 For the compiled-in backend instead, replace the process entry with:
 
 ```lua
-{ name = "palette", path = "/absolute/path/to/riced/extensions/palette" },
+{ name = "palette", path = "/absolute/path/to/riced/crates/palette" },
 ```
 
 Rebuild the shell after switching. Do not enable both backends simultaneously:

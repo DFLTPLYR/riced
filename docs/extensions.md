@@ -1,7 +1,8 @@
 # Rust extensions (experimental SDK v1)
 
 Extensions are ordinary Cargo library or executable crates, usually under
-`extensions/<name>/`. `crates/riced-extension-sdk` is version `0.1.0`, with
+`extensions/<name>/` in a user project. Bundled Rust services live under
+`crates/` in this repository. `crates/riced-extension-sdk` is version `0.1.0`, with
 source contract `SDK_VERSION = 1`. It depends on neither Lua nor iced. This is
 not a stable Rust ABI: compiled-in extensions use path dependencies and require
 rebuilding and restarting riced. Supervised executable services are also
@@ -27,13 +28,13 @@ pub fn register(
 `reserved` is `riced::builtin_service_topics()`; it keeps extension services
 from shadowing built-in topics. The default `riced` binary registers the
 `palette` and `theme_gen` extensions for the bundled reference shell. Project
-shells are built from the extensions enabled in `config.lua`; no framework
+shells are built from the extensions enabled in `data/config.lua`; no framework
 source edits are needed. Extensions are session-wide, not per project/output,
 and do not restart when an app reloads.
 
 ## Enabling and building
 
-List extensions in `config.lua`:
+List extensions in the project's `data/config.lua` (merge with existing preferences):
 
 ```lua
 return {
@@ -150,7 +151,7 @@ no readers is not contacted.
   16,384 JSON value nodes. Existing per-app managed resource/queue limits apply.
 - `Cancellation` is cooperative. Running Rust code cannot be forcibly stopped;
   check the token during expensive operations. There is no command timeout in
-  this milestone. Uncooperative work can occupy a worker indefinitely.
+  this backend. Uncooperative work can occupy a worker indefinitely.
 - Return replacement state through `Output.snapshot`; do not mutate published
   state from worker code. Cancellation cannot undo external I/O or other side
   effects performed by a trusted native extension.
@@ -162,7 +163,7 @@ no readers is not contacted.
 
 The SDK's optional `process` feature adds a Tokio-based supervisor and the
 `process::serve(&service)` worker entry point. The default SDK remains runtime
-independent. `extensions/palette-worker` runs the same palette service in a
+independent. `crates/palette-worker` runs the same palette service in a
 separate executable; its Lua API is unchanged.
 
 Build the worker separately, then enable it **instead of** the compiled-in
@@ -175,7 +176,7 @@ cargo build -p riced-extension-palette-worker --locked
 ```lua
 return {
     extensions = {
-        { name = "palette_worker", path = "../extensions/palette-worker", process = {
+        { name = "palette_worker", path = "/absolute/path/to/riced/crates/palette-worker", process = {
             argv = { "/absolute/path/to/riced/target/debug/riced-extension-palette-worker" },
             service = "palette",
             commands = { "generate" },
@@ -221,7 +222,9 @@ linked, so `riced extension update hello` compiles the worker and stops.
 Rebuilding the shell needs the same native build dependencies as building riced
 itself (pkg-config, wayland, xkbcommon, vulkan), while `riced extension build`
 does not. `examples/extensions/hello` is a complete, buildable process
-extension and `examples/config.lua` enables it.
+extension and `examples/config.lua` enables it. That legacy config still names
+the old bundled-crate paths; follow the [example setup corrections](../examples/README.md#build-and-run)
+before building it against the current `crates/` layout.
 
 ### Ownership and restart policy
 
@@ -297,7 +300,7 @@ The [framework example](../examples/README.md) enables the supervised
 palette worker and includes build/run instructions. Its Lua palette card also
 works with the compiled-in backend below.
 
-`extensions/palette` implements `palette.generate`. It produces deterministic
+`crates/palette` implements `palette.generate`. It produces deterministic
 Material colors from a seed, returning `{ready, seed, dark, colors}` and replacing
 the shared snapshot with the same data. The initial snapshot is `{ready=false}`.
 It does not apply the shell theme, extract wallpaper colors, write preferences,
@@ -323,12 +326,16 @@ without changing named theme files or running external-app template hooks.
 No new SDK capability or direct worker access to the shell/Lua state is needed.
 
 Copy `examples/apps/palette/` into your project's `apps/` directory
-and `extensions/palette/` into `extensions/`, enable `{ name = "palette" }` in
-`config.lua`, then run `riced build` to display the optional sample.
+and point an enabled extension at the repository crate, for example
+`{ name = "palette", path = "/absolute/path/to/riced/crates/palette" }` in
+`data/config.lua`. Enable the sample app in a project without a shell entry,
+then run `riced build`. The crate's SDK path dependency is relative to `crates/`,
+so copying only that crate into a project without adjusting dependencies will
+not build.
 
 ## Theme generation example
 
-`extensions/theme-gen` implements `theme_gen.generate`, taking
+`crates/theme-gen` implements `theme_gen.generate`, taking
 `{seed, variant?, darkmode?, image?}` and returning
 `{payload = {light, dark}, variables = {...}}` — the reshell-format scheme JSON
 and the `{{var}}` template variables. The initial snapshot is `{ready=false}`;
@@ -342,18 +349,19 @@ pixels or writes files: `riced generate-theme` keeps wallpaper sampling,
 the scheme itself.
 
 `examples/apps/theme_gen/` is the sample card; enable
-`{ name = "theme_gen", path = "../../extensions/theme-gen" }` (paths are
-relative to the project root) and add the app entry, then rebuild the shell.
+`{ name = "theme_gen", path = "/absolute/path/to/riced/crates/theme-gen" }` and add
+the app entry, then rebuild the shell. Relative paths resolve from the project
+root; absolute paths are accepted.
 
 ## Wayland toplevels and workspaces examples
 
 Two crates own their own Wayland connection and expose a command-less service
 whose snapshot changes as the compositor reports updates:
 
-- `extensions/wayland-toplevels` — `ext-foreign-toplevel-list-v1`; the
+- `crates/wayland-toplevels` — `ext-foreign-toplevel-list-v1`; the
   `toplevels` service publishes `{toplevels = [{app_id, title}, …]}` as windows
   map, retitle, and close.
-- `extensions/wayland-workspaces` — `ext-workspace-v1` (+ `xdg-output-v1`); the
+- `crates/wayland-workspaces` — `ext-workspace-v1` (+ `xdg-output-v1`); the
   `workspaces` service publishes `{workspaces = [{name, monitor, active}, …]}`.
   `monitor` is the compositor-reported name, not the host's geometry-resolved
   one.
@@ -366,7 +374,7 @@ each core `wayland.*` table and its extension service share one implementation.
 
 Neither extension is in the default registry — a project that enables them
 compiled-in gets one extra Wayland connection per service, alongside the core
-ones. Consolidating them is tracked in the migration plan.
+ones. Enabling either does not replace the host's core connection.
 
 `examples/apps/toplevels/` and `.../workspaces/` are the sample cards.
 Both services have no commands, so the supervised-process backend is not usable
