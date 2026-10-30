@@ -286,17 +286,7 @@ pub(crate) fn refresh(plots: &mut Plots, force: bool) -> Task<Plant> {
         let info = &plots.windows.output_infos[&output];
         let output_name = info.name.clone().unwrap_or_default();
         let mut specs = Vec::new();
-        let notification = super::screens::notification::scene_spec(plots, output);
-        let service_input = notification.input.clone();
-        // A shell.lua project that declares its own notification layer owns the
-        // visual surface; keep the native scene as a fallback for projects
-        // without one.
-        if plots.config.notifications.enabled
-            && !plots.config.notifications.source.is_empty()
-            && !plots.apps.declares_layer(output, "notifications")
-        {
-            specs.push(notification);
-        }
+        let service_input = super::screens::notification::scene_spec(plots, output).input;
         for config in &plots.config.overlays {
             if !config.output.is_empty() && config.output != output_name {
                 continue;

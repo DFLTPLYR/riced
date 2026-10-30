@@ -561,6 +561,7 @@ fn installed_root_declares_layers_and_dispatches_settings() {
     render(&mut app);
     assert!(app.roots.contains_key(&background));
     assert!(app.roots.contains_key(&bar_top));
+    assert!(app.roots.contains_key(&format!("{prefix}.notifications")));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("add"));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("remove"));

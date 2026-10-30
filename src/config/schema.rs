@@ -289,15 +289,14 @@ fn default_notification_source() -> String {
     "notifications.lua".to_string()
 }
 
-/// Notification service (`notifications`) and its Lua scene source.
+/// Notification service (`notifications`).
 /// Timeout hides the popup; history remains until explicitly cleared.
-/// Presentation is ordinary iced content in the shared overlay host.
+/// Presentation belongs to the Lua notification layer.
 /// ```lua
 /// return {
 ///     notifications = {
 ///         enabled = true,
 ///         output = "mouse", -- or an output name like "DP-1" to pin it
-///         source = "notifications.lua", -- legacy scene; a Lua layer supersedes it
 ///         timeout_ms = 5000,
 ///     },
 /// }
@@ -310,6 +309,7 @@ pub struct NotificationConfig {
     #[serde(default = "default_notification_output")]
     pub output: String,
     #[serde(default = "default_notification_source")]
+    /// Legacy scene setting, accepted for compatibility but not rendered automatically.
     pub source: String,
     #[serde(default = "default_notification_timeout_ms")]
     pub timeout_ms: u64,
