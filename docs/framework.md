@@ -61,36 +61,55 @@ shared `layers/` participate in source reload detection. Failed candidate reload
 retain the working frontend and its handlers. Settings currently retains its
 native window host and Lua pages; its opening policy is now a Lua IPC handler.
 
-### Startup-only shell options
+### The daemon builder
 
-`shell.lua` wraps its app table in `riced.root(app, options)`. The wrapper
-returns the app unchanged; the options are read once, before connecting to
-Wayland:
+`shell.lua` returns the daemon builder. Its callbacks are the shell: one Lua VM
+owns all outputs, and `view` declares every surface for every output.
 
 ```lua
-local app = { view = function(self) ... end }
+local app = {}
+function app.new() return app end
+function app.namespace() return "riced" end
+function app.update(self, event) ... end   -- tick, output_*, services_changed, config_changed, actions
+function app.view(self, props) ... end     -- props.outputs lists every connected output
 
-return riced.root(app, {
-    tracing = "riced=debug,warn", -- RUST_LOG-style filter
-    connection = {
+return riced.daemon(app.new, app.namespace, app.update, app.view)
+    :title(function(self, surface) return surface.title end)
+    :subscription(function(self, active) return { "input", "wayland", "config", "ipc", "tray" } end)
+    :theme(function(self, context) return context.theme end)
+    :style(function(self, context) return { background_color = "#00000000", text_color = context.text_color } end)
+    :redraw_scope(function(self, event) return event.scope end)
+    :settings({
         id = "riced",             -- compositor app id; empty = unset
         antialiasing = false,
         default_text_size = 16,
         keep_compositor_alive = true,
-    },
-    settings = {
-        start_mode = "background",          -- background | all_screens
-        keyboard_interactivity = "none",    -- none | on_demand | exclusive
-    },
-})
+        tracing = "riced=debug,warn", -- RUST_LOG-style filter
+        layer_settings = {
+            start_mode = "background",          -- background | all_screens
+            keyboard_interactivity = "none",    -- none | on_demand | exclusive
+        },
+    })
+    :run()
 ```
 
-Edit these and restart; there is no live reload. A missing `tracing` filter
-keeps `RUST_LOG`, then `info`. An invalid filter is reported and falls back the
-same way; a non-finite or non-positive `default_text_size` falls back to 16.
-Unknown keys and wrong types are reported and the startup defaults are used.
-The entry is evaluated once more per output for its views, so keep top-level
-code side-effect free; put effects in `mount`/`actions`.
+`new` returns the mutable state table. `update` runs on the host thread for shell
+events and `tick`; its return value is handled like `actions`. `title`, `theme`,
+`style`, and `redraw_scope` may be omitted; the native defaults apply.
+`redraw_scope` receives `{kind, scope, surface}` and returns `"all"`, `"none"`,
+or `"window"`.
+
+`view` declares surfaces; each `iced.layer` needs an `output` name from
+`props.outputs` because the daemon is not bound to one output. Closing a surface
+drops that layer but keeps the daemon and its state. Changing between a daemon
+and a plain app requires a restart.
+
+Settings are validated before connecting. Unknown keys, wrong types, and a
+non-positive `default_text_size` reject the load. A bad `subscription` result
+(unknown, duplicate, or non-array source) is reported and the native defaults are
+used for that pass. Edit startup options and restart; there is no live reload. A
+missing `tracing` filter keeps `RUST_LOG`, then `info`. Keep top-level code
+side-effect free; put effects in `mount`/`update`.
 
 Preferences never live in `shell.lua`. Settings rewrites
 `data/config.lua` as a plain `return {...}` table, so hand-written views are

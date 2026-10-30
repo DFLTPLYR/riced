@@ -34,11 +34,13 @@ replacement renderer and is a separate project.
 `shell.lua` is the entry point; `root.lua` is still read when it is absent, so
 existing projects keep working. `data/config.lua` is the Settings-owned preferences file; a legacy top-level
 `config.lua` is migrated into it on the next load (the original is kept, never
-deleted). `riced.root(app, options)` in `shell.lua` declares startup-only daemon
-options such as `tracing`, `connection`, and the host layer's
-`start_mode`/`keyboard_interactivity`.
-Startup options are read before the Wayland connection, so restart after edits.
-The entry is evaluated again for each output; keep top-level code side-effect
+deleted). The bundled `shell.lua` returns `riced.daemon(new, namespace, update, view)`
+and declares startup options with `:settings({...})` (`tracing`, `id`,
+`antialiasing`, `default_text_size`, `keep_compositor_alive`, `layer_settings`).
+A legacy app entry can still return `riced.root(app, options)`; the options mean
+the same. Startup options are read before the Wayland connection, so restart
+after edits. A daemon entry is evaluated once and owns every output; a plain app
+entry is evaluated again for each output, so keep its top-level code side-effect
 free. The theme, templates, shaders, and widgets directories stay at the project
 root.
 
@@ -47,7 +49,8 @@ root.
 The `shell` namespace and native Settings command have been removed. Register
 `riced ipc settings` in `state.lua` by toggling `self.settings_open`. In
 `shell.lua`, require `settings.lua` and append `settings:view()` when that flag
-is true. Clear it when `actions` receives `window_closed` for `settings`.
+is true. Clear it when `update` (or `actions` for a legacy app entry) receives
+`window_closed` for `settings`.
 The bundled `scripts/frontend/settings.lua` is the minimal window entry;
 it embeds the existing editors with `riced.plugin("settings")`.
 
