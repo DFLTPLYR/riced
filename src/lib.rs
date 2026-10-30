@@ -24,7 +24,7 @@ mod wallpaper;
 
 use cli::commands::{run_apply_templates, run_generate_theme};
 use iced_exwlshell::settings::Settings;
-use shell::{Plots, redraw_scope};
+use shell::Plots;
 
 /// Re-exported registry type for generated shell entry points.
 pub use riced_extension_sdk::Registry;
@@ -83,7 +83,10 @@ fn run_with(
         config::set_project_root(root)?;
     }
     let command = cli.command;
-    if matches!(&command, None | Some(cli::Commands::GenerateTheme { .. } | cli::Commands::ApplyTemplates { .. })) {
+    if matches!(
+        &command,
+        None | Some(cli::Commands::GenerateTheme { .. } | cli::Commands::ApplyTemplates { .. })
+    ) {
         config::layout::migrate(&config::project_dir())?;
     }
     if command.is_some() {
@@ -168,15 +171,27 @@ fn run_with(
             if config::project_root().is_none() {
                 config::initialize::selected(config::initialize::Mode::Startup)?;
             }
-            run_daemon().map_err(Into::into)
+            run_daemon()
         }
     }
 }
 
-fn run_daemon() -> Result<(), iced_exwlshell::Error> {
-    // The entry is loaded once more per output; this pre-pass only reads the
-    // startup options. Keep shell.lua top-level side-effect free.
-    let startup = shell_settings();
+fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = shell_runtime()?;
+    let startup = runtime
+        .as_ref()
+        .map(lua::LuaRuntime::root_settings)
+        .transpose()?
+        .unwrap_or_default();
+    let namespace = runtime
+        .as_ref()
+        .map(|runtime| runtime.daemon_callback::<String>("namespace", &serde_json::Value::Null))
+        .transpose()?
+        .flatten()
+        .unwrap_or_else(Plots::namespace);
+    if namespace.is_empty() || namespace.contains('\0') {
+        return Err("daemon.namespace must be nonempty and contain no NUL".into());
+    }
     init_tracing(startup.tracing.as_deref());
     let connection = Connection::connect_to_env().unwrap_or_else(|e| {
         eprintln!(
@@ -188,17 +203,28 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
     let connection2 = connection.clone();
 
     let (shell_broadcast, shell_events) = iced_wayland_subscriber::shell::channel();
+    let mut host = Plots::new(shell_events.clone());
+    if let Some(runtime) = runtime.filter(lua::LuaRuntime::is_daemon) {
+        host.apps
+            .install_daemon(runtime, &framework::Project::installed())?;
+    }
+    let redraw = host.apps.redraw.clone();
+    let host = std::cell::RefCell::new(Some(host));
 
     daemon(
-        move || Plots::new(shell_events.clone()),
-        Plots::namespace,
+        move || {
+            host.borrow_mut()
+                .take()
+                .unwrap_or_else(|| Plots::new(shell_events.clone()))
+        },
+        move || namespace.clone(),
         Plots::update,
         Plots::view,
     )
-    .title(Plots::title)
+    .title(shell::daemon::title)
     .subscription(Plots::subscription)
-    .theme(|plots: &Plots, _| theme::theme_for(&plots.config.theme))
-    .style(theme::app_style)
+    .theme(shell::daemon::theme)
+    .style(shell::daemon::style)
     .settings(Settings {
         id: (!startup.connection.id.is_empty()).then(|| startup.connection.id.clone()),
         layer_settings: startup.settings.layer(),
@@ -217,35 +243,22 @@ fn run_daemon() -> Result<(), iced_exwlshell::Error> {
         shell_broadcast,
         ..Default::default()
     })
-    .redraw_scope(redraw_scope)
+    .redraw_scope(move |message| shell::daemon::redraw(&redraw, message))
     .run()
+    .map_err(Into::into)
 }
 
-/// Read `riced.root(app, {...})` from `shell.lua` before the daemon connects.
-fn shell_settings() -> lua::root::Settings {
+fn shell_runtime() -> Result<Option<lua::LuaRuntime>, Box<dyn std::error::Error>> {
     let project = framework::Project::installed();
     let entry = project.source("root");
     if !entry.is_file() {
-        return lua::root::Settings::default();
+        return Ok(None);
     }
-    let mut runtime = match lua::LuaRuntime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("shell.lua: cannot prepare runtime: {error}");
-            return lua::root::Settings::default();
-        }
-    };
-    if let Err(error) = runtime.set_app_root(&project.root) {
-        eprintln!("shell.lua: cannot set project root: {error}");
-        return lua::root::Settings::default();
-    }
-    if let Err(error) = runtime.load_path(&entry) {
-        eprintln!("shell.lua: startup options unavailable: {error}");
-    }
-    runtime.root_settings().unwrap_or_else(|error| {
-        eprintln!("shell.lua: invalid startup options: {error}");
-        lua::root::Settings::default()
-    })
+    let mut runtime =
+        lua::LuaRuntime::with_profile(lua::sandbox::Profile::Widget, config::component_files())?;
+    runtime.set_app_root(&project.root)?;
+    runtime.load_path(&entry)?;
+    Ok(Some(runtime))
 }
 
 fn init_tracing(filter: Option<&str>) {

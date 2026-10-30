@@ -30,6 +30,8 @@ pub(crate) fn resolve(
     let Value::Table(table) = value else {
         return Ok(value);
     };
+    let layer_output = table.raw_get::<Option<String>>("output").ok().flatten();
+    let output = layer_output.as_deref().unwrap_or(output);
     if table.raw_get::<Option<String>>("type")?.as_deref() == Some("widget_popup") {
         return popup(
             lua,
@@ -72,6 +74,14 @@ fn popup(
     let Some(id) = active_popup.as_deref() else {
         return Ok(Value::Nil);
     };
+    if let Some(prefix) = marker.raw_get::<Option<String>>("owner")?
+        && !id
+            .strip_prefix("widget:")
+            .unwrap_or(id)
+            .starts_with(&prefix)
+    {
+        return Ok(Value::Nil);
+    }
     let Some(resolved) = resolved(lua, id)? else {
         return Ok(Value::Nil);
     };

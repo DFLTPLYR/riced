@@ -2,10 +2,10 @@
 -- of `riced.widget` instances, so a bar can have any number of regions.
 local layer = {}
 
-local function slot_view(slot, index)
+local function slot_view(slot, index, owner)
     local items = {}
     for position, name in ipairs(slot.widgets or {}) do
-        local id = (slot.align or "center") .. "-" .. name .. "-" .. index .. "-" .. position
+        local id = owner .. "." .. (slot.align or "center") .. "-" .. name .. "-" .. index .. "-" .. position
         items[#items + 1] = riced.widget(name, {}, id)
     end
     return iced.row(items):spacing(8)
@@ -28,7 +28,7 @@ function layer:view(props)
                 and iced.space():width(size.fill)
                 or iced.space():height(size.fill)
         end
-        content[#content + 1] = slot_view(slot, index)
+        content[#content + 1] = slot_view(slot, index, props.id)
     end
     content[#content + 1] = iced.button("Settings", "settings")
     return iced.layer({
@@ -40,6 +40,7 @@ function layer:view(props)
         height = horizontal and thickness or nil,
         pointer_events = true,
         popup = riced.widget_popup({
+            owner = props.id .. ".",
             edge = edge,
             thickness = thickness,
         }),

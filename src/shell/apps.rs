@@ -70,8 +70,48 @@ type Sources = Vec<(PathBuf, String)>;
 pub(crate) struct State {
     instances: BTreeMap<(OutputId, String), Instance>,
     pending_closes: Vec<window::Id>,
+    daemon: bool,
+    pub(crate) redraw: Arc<std::sync::Mutex<Option<crate::lua::DaemonRedraw>>>,
 }
 impl State {
+    pub(crate) fn install_daemon(
+        &mut self,
+        runtime: LuaRuntime,
+        project: &Project,
+    ) -> Result<(), String> {
+        let mut sources = project.sources("root")?;
+        sources.extend(crate::config::component_files());
+        self.daemon = true;
+        *self
+            .redraw
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            runtime.daemon_redraw().map_err(|error| error.to_string())?;
+        self.instances.insert(
+            (OutputId(0), "root".into()),
+            Instance {
+                runtime: Some(runtime),
+                accepted: Some(sources),
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn daemon_runtime(&self) -> Option<&LuaRuntime> {
+        if !self.daemon {
+            return None;
+        }
+        self.instances
+            .get(&(OutputId(0), "root".into()))?
+            .runtime
+            .as_ref()
+    }
+
+    pub(crate) fn is_daemon(&self) -> bool {
+        self.daemon
+    }
+
     pub(crate) fn active(&self) -> bool {
         !self.instances.is_empty()
     }
@@ -95,6 +135,7 @@ struct Instance {
     hover: crate::ui::hover::HoverSet,
     error: Option<String>,
     service_error: Option<String>,
+    actions: Vec<mlua::Value>,
     popup: Option<popup::Popup>,
     dismissed_popup: Option<String>,
     /// Declared layers, keyed by surface id. One entry per native surface the
@@ -203,6 +244,13 @@ impl Instance {
             runtime
                 .load_named(&source.1, &entry.display().to_string())
                 .map_err(|e| e.to_string())?;
+            if self
+                .runtime
+                .as_ref()
+                .is_some_and(|previous| previous.is_daemon() != runtime.is_daemon())
+            {
+                return Err("changing between an app and a daemon requires a restart".into());
+            }
             if let Err(error) = runtime.app_event(
                 services,
                 &self.output_name,
@@ -229,7 +277,7 @@ impl Instance {
             .or(self.runtime.as_mut())
             .ok_or("app has no working runtime")?;
         if !replaced && tick {
-            runtime
+            let action = runtime
                 .app_event(
                     services,
                     &self.output_name,
@@ -238,6 +286,9 @@ impl Instance {
                     AppEvent::Tick,
                 )
                 .map_err(|e| e.to_string())?;
+            if !action.is_nil() {
+                self.actions.push(action);
+            }
         }
         let roots = match runtime.layer_view(
             services,
@@ -506,6 +557,19 @@ impl State {
                 root.lists.clear(motion);
                 return true;
             }
+            if self.daemon && instance.root_by_surface(surface).is_some() {
+                if let Some(root) = instance
+                    .roots
+                    .values_mut()
+                    .find(|root| root.surface == Some(surface))
+                {
+                    root.surface = None;
+                    root.opened = false;
+                    root.dismissed = true;
+                    root.lists.clear(motion);
+                }
+                return true;
+            }
             // Closing any declared layer closes the whole app, as before: the
             // app declares its layers, so a partial set has no meaning.
             if instance.root_by_surface(surface).is_some() {
@@ -612,6 +676,37 @@ pub(crate) fn reload(plots: &mut Plots) -> Task<Plant> {
     refresh_target(plots, &Project::installed(), false, None)
 }
 
+pub(crate) fn daemon_event(plots: &mut Plots, event: &Value) -> Task<Plant> {
+    if !plots.apps.is_daemon() {
+        return Task::none();
+    }
+    let mut state = std::mem::take(&mut plots.apps);
+    let result = state
+        .instances
+        .get_mut(&(OutputId(0), "root".into()))
+        .and_then(|instance| {
+            instance.runtime.as_mut().map(|runtime| {
+                runtime.app_event(
+                    &services(plots),
+                    "",
+                    &instance.context,
+                    &instance.props,
+                    AppEvent::Event(event),
+                )
+            })
+        });
+    plots.apps = state;
+    let task = match result {
+        Some(Ok(action)) => super::actions::command_from_action(&action, plots),
+        Some(Err(error)) => {
+            tracing::error!(%error, "daemon.update failed");
+            Task::none()
+        }
+        None => Task::none(),
+    };
+    Task::batch([task, reload(plots)])
+}
+
 /// IPC is a shell command, delivered once rather than once per output.
 pub(crate) fn ipc(plots: &mut Plots, command: &str, args: &[String]) -> Task<Plant> {
     let mut state = std::mem::take(&mut plots.apps);
@@ -684,8 +779,20 @@ fn refresh_target(
     let mut redraws = Vec::new();
     for config in &configs {
         let sources = project.sources(&config.name);
-        for (&output, info) in &plots.windows.output_infos {
-            let name = info.name.as_deref().unwrap_or("");
+        let outputs: Vec<_> = plots.windows.output_infos.iter().map(|(&id, info)| {
+            let geometry = crate::shared::geometry::output_geometry(info);
+            (id, json!({"name": info.name.as_deref().unwrap_or(""), "x":geometry.0,"y":geometry.1,"width":geometry.2,"height":geometry.3}))
+        }).collect();
+        let contexts = if state.daemon {
+            vec![(
+                OutputId(0),
+                json!({"name":"", "x":0,"y":0,"width":0,"height":0}),
+            )]
+        } else {
+            outputs.clone()
+        };
+        for (output, output_context) in contexts {
+            let name = output_context["name"].as_str().unwrap_or("");
             if !config.output.is_empty() && config.output != name {
                 continue;
             }
@@ -701,11 +808,37 @@ fn refresh_target(
             }) {
                 continue;
             }
-            let geometry = crate::shared::geometry::output_geometry(info);
-            let output_context = json!({"name":name,"x":geometry.0,"y":geometry.1,"width":geometry.2,"height":geometry.3});
             instance.context = json!({"id":config.identity(),"name":config.name,"root":project.app_root(&config.name),"output":output_context});
             instance.props = serde_json::to_value(&config.props).unwrap_or_else(|_| json!({}));
-            instance.props["output"] = output_context;
+            instance.props["output"] = output_context.clone();
+            instance.props["outputs"] = json!(
+                outputs
+                    .iter()
+                    .map(|(_, context)| {
+                        let mut context = context.clone();
+                        let name = context["name"].as_str().unwrap_or("");
+                        context["wallpaper"] = json!(
+                            match plots.config.background.mode {
+                                crate::config::WallpaperMode::PerMonitor => plots
+                                    .config
+                                    .background
+                                    .monitor
+                                    .iter()
+                                    .find(|entry| entry.output.trim().eq_ignore_ascii_case(name))
+                                    .map(|entry| entry.path.as_str()),
+                                crate::config::WallpaperMode::FreeForm => plots
+                                    .config
+                                    .background
+                                    .image
+                                    .first()
+                                    .map(|image| image.path.as_str()),
+                            }
+                            .unwrap_or_default()
+                        );
+                        context
+                    })
+                    .collect::<Vec<_>>()
+            );
             // Which native hosts own their surface. A root app uses these to
             // decide whether to compose its `layers/` modules or leave the
             // surface to the established Rust host.
@@ -782,6 +915,22 @@ fn refresh_target(
                 ),
             }
             commands.extend(instance.managed_work(&service_ctx));
+            for action in instance.actions.drain(..) {
+                commands.push(super::actions::command_from_action(&action, plots));
+            }
+            if state.daemon
+                && let Some(runtime) = &instance.runtime
+            {
+                match runtime.daemon_redraw() {
+                    Ok(callback) => {
+                        *state
+                            .redraw
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = callback
+                    }
+                    Err(error) => tracing::error!(%error, "invalid daemon redraw callback"),
+                }
+            }
         }
     }
     let obsolete: Vec<_> = state
@@ -847,10 +996,28 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
                 continue;
             }
             let surface_desc = layer.root.surface.clone();
+            let output = if let Some(name) = &surface_desc.output {
+                let Some((id, _)) = plots
+                    .windows
+                    .output_infos
+                    .iter()
+                    .find(|(_, info)| info.name.as_ref() == Some(name))
+                else {
+                    if let Some(surface) = layer.surface.take() {
+                        commands.push(close(plots, surface));
+                        changed = true;
+                    }
+                    continue;
+                };
+                *id
+            } else {
+                *output
+            };
             // Changing the declared identity creates a new native surface, not
             // a new VM.
             if layer.applied.as_ref().is_some_and(|old| {
                 old.id != surface_desc.id
+                    || old.output != surface_desc.output
                     || old.window.as_ref().map(|w| w.client_side_decorations)
                         != surface_desc
                             .window
@@ -888,7 +1055,7 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
                             if settings_slot {
                                 PlotInfo::Setting
                             } else {
-                                PlotInfo::App(*output)
+                                PlotInfo::App(output)
                             },
                         );
                         commands.push(Task::done(Plant::NewBaseWindow {
@@ -947,7 +1114,7 @@ fn reconcile(plots: &mut Plots, state: &mut State, commands: &mut Vec<Task<Plant
                     let surface = window::Id::unique();
                     layer.surface = Some(surface);
                     layer.opened = false;
-                    plots.windows.ids.insert(surface, PlotInfo::App(*output));
+                    plots.windows.ids.insert(surface, PlotInfo::App(output));
                     commands.push(Task::done(Plant::NewLayerShell {
                         id: surface,
                         settings,
@@ -1143,7 +1310,15 @@ fn render_leaf(
     let services = crate::services::ServiceCtx::from_plots(plots, plots.services.gpu());
     let context = crate::lua::widgets::EntryContext {
         services,
-        output: instance.output_name.as_str(),
+        output: match plots.id_info(surface) {
+            Some(PlotInfo::App(output)) => plots
+                .windows
+                .output_infos
+                .get(&output)
+                .and_then(|info| info.name.as_deref())
+                .unwrap_or(&instance.output_name),
+            _ => &instance.output_name,
+        },
     };
     let mut widgets = runtime.widgets.borrow_mut();
     widgets.sync_revision(&resolved.path, std::iter::once(resolved.id.as_str()));
@@ -1371,6 +1546,9 @@ fn shared_pointer_action(
     surface: window::Id,
     action: &Action,
 ) -> Option<Task<Plant>> {
+    if plots.apps.is_daemon() {
+        return None;
+    }
     if !action.key.is_empty()
         || !matches!(&action.event, crate::ui::action::Event::Mouse { state, origin, .. }
         if state == "press" || state == "cancel" || origin.is_some())
@@ -1610,6 +1788,11 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                     .and_then(|instance| {
                         instance.runtime.as_mut().map(|runtime| {
                             let mut context = instance.context.clone();
+                            if let Some(PlotInfo::App(output)) = plots.id_info(surface)
+                                && let Some(info) = plots.windows.output_infos.get(&output) {
+                                let geometry = crate::shared::geometry::output_geometry(info);
+                                context["output"] = json!({"name":info.name.as_deref().unwrap_or(""),"x":geometry.0,"y":geometry.1,"width":geometry.2,"height":geometry.3});
+                            }
                             if let Some(layer) = instance.roots.iter().find_map(|(id, root)| {
                                 (root.surface == Some(surface)).then_some(id)
                             }) {
@@ -1647,7 +1830,7 @@ pub(crate) fn update(plots: &mut Plots, message: AppMessage) -> Task<Plant> {
                             };
                             runtime.app_event(
                                 &services(plots),
-                                &instance.output_name,
+                                context["output"]["name"].as_str().unwrap_or(&instance.output_name),
                                 &context,
                                 &instance.props,
                                 AppEvent::Action(&action),

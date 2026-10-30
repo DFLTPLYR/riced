@@ -83,12 +83,109 @@ pub(crate) fn parse(lua: &Lua, value: Value) -> Result<Settings, String> {
     if value.is_nil() {
         return Ok(Settings::default());
     }
-    lua.from_value(value).map_err(|error| error.to_string())
+    let settings: Settings = lua.from_value(value).map_err(|error| error.to_string())?;
+    if settings.connection.id.contains('\0') {
+        return Err("daemon id must not contain NUL".into());
+    }
+    if !settings.connection.default_text_size.is_finite()
+        || settings.connection.default_text_size <= 0.0
+    {
+        return Err("default_text_size must be finite and positive".into());
+    }
+    Ok(settings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_builder_captures_callbacks_state_and_validated_settings() {
+        let mut runtime = crate::lua::LuaRuntime::new().unwrap();
+        runtime.load(r#"
+            return riced.daemon(function() return {count=41} end,
+                function() return 'test-shell' end,
+                function(self) self.count=self.count+1 end,
+                function() return nil end)
+                :title(function(self) return tostring(self.count) end)
+                :subscription(function() return {'input','apps'} end)
+                :redraw_scope(function(self, event) return event.scope end)
+                :settings({id='test', default_text_size=18, layer_settings={keyboard_interactivity='none'}})
+                :run()
+        "#).unwrap();
+        assert!(runtime.is_daemon());
+        assert_eq!(
+            runtime
+                .root_settings()
+                .unwrap()
+                .connection
+                .default_text_size,
+            18.0
+        );
+        assert_eq!(
+            runtime
+                .daemon_callback::<String>("title", &serde_json::Value::Null)
+                .unwrap()
+                .as_deref(),
+            Some("41")
+        );
+        assert_eq!(
+            runtime
+                .daemon_redraw()
+                .unwrap()
+                .unwrap()
+                .call(&serde_json::json!({"scope":"none"}))
+                .unwrap(),
+            "none"
+        );
+    }
+
+    #[test]
+    fn daemon_rejects_bad_builder_arguments_and_settings_without_replacing_live_state() {
+        let mut runtime = crate::lua::LuaRuntime::new().unwrap();
+        let source = "return riced.daemon(function() return {} end, function() return 'test' end, function() end, function() end)";
+        runtime.load(&format!("{source}:run()")).unwrap();
+        for settings in [
+            "{unknown=true}",
+            "{default_text_size=0}",
+            "{default_text_size=0/0}",
+            "{layer_settings={start_mode='invalid'}}",
+        ] {
+            assert!(
+                runtime
+                    .load(&format!("{source}:settings({settings}):run()"))
+                    .is_err()
+            );
+            assert_eq!(
+                runtime
+                    .daemon_callback::<String>("namespace", &serde_json::Value::Null)
+                    .unwrap()
+                    .as_deref(),
+                Some("test")
+            );
+        }
+        assert!(
+            runtime
+                .load(
+                    "return riced.daemon(nil, function() end, function() end, function() end):run()"
+                )
+                .is_err()
+        );
+        assert!(runtime.load("return riced.daemon(function() return 1 end, function() end, function() end, function() end):run()").is_err());
+    }
+
+    #[test]
+    fn daemon_subscriptions_reject_unknown_and_duplicate_sources() {
+        let mut runtime = crate::lua::LuaRuntime::new().unwrap();
+        for selected in ["{'typo'}", "{'input','input'}", "{oops='input'}"] {
+            runtime.load(&format!("return riced.daemon(function() return {{}} end, function() return 'test' end, function() end, function() end):subscription(function() return {selected} end):run()" )).unwrap();
+            assert!(
+                runtime
+                    .daemon_callback::<Vec<String>>("subscription", &serde_json::Value::Null)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn startup_options_parse_and_unknown_fields_are_rejected() {

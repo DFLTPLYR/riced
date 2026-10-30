@@ -7,6 +7,109 @@ struct Fixture {
     project: Project,
 }
 
+fn install_daemon_builder(lua: &mlua::Lua) {
+    let riced: mlua::Table = lua.globals().get("riced").unwrap();
+    riced
+        .set(
+            "daemon",
+            lua.load(include_str!("../../lua/daemon.lua"))
+                .eval::<mlua::Function>()
+                .unwrap(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn daemon_keeps_its_startup_vm_alive_without_outputs() {
+    let fixture = Fixture::new("return {view=function() end}");
+    let source = r#"return riced.daemon(function() return {} end,
+        function() return 'test' end, function() end, function() return nil end):run()"#;
+    let path = fixture.project.root.join("shell.lua");
+    std::fs::write(&path, source).unwrap();
+    let mut runtime = LuaRuntime::with_profile(
+        crate::lua::sandbox::Profile::Widget,
+        crate::config::component_files(),
+    )
+    .unwrap();
+    runtime.set_app_root(&fixture.project.root).unwrap();
+    runtime.load_path(&path).unwrap();
+    let generation = runtime.managed_generation();
+    let (_, receiver) = iced_wayland_subscriber::shell::channel();
+    let mut plots = Plots::new(receiver);
+    plots
+        .apps
+        .install_daemon(runtime, &fixture.project)
+        .unwrap();
+    let _ = refresh_project(&mut plots, &fixture.project, true);
+    let _ = refresh_project(&mut plots, &fixture.project, true);
+    assert_eq!(plots.apps.instances.len(), 1);
+    assert_eq!(
+        plots.apps.daemon_runtime().unwrap().managed_generation(),
+        generation
+    );
+}
+
+#[test]
+fn daemon_shares_state_between_outputs_and_survives_surface_close_and_bad_reload() {
+    let fixture = Fixture::new(
+        r#"
+        return riced.daemon(function() return {count=0} end,
+            function() return 'test' end,
+            function(self, event) self.count=self.count+1 end,
+            function(self, props)
+                local layers={}
+                for _, output in ipairs(props.outputs) do
+                    layers[#layers+1]=iced.layer({id=output.name,output=output.name,width=100,height=30,
+                        content=iced.text(tostring(self.count))})
+                end
+                return layers
+            end):run()
+    "#,
+    );
+    let mut app = instance("");
+    app.props["outputs"] = json!([{"name":"DP-1"},{"name":"DP-2"}]);
+    fixture.render(&mut app, false).unwrap();
+    let generation = app.runtime.as_ref().unwrap().managed_generation();
+    with_services(|services| {
+        app.runtime.as_mut().unwrap().app_event(
+            services,
+            "DP-1",
+            &app.context,
+            &app.props,
+            AppEvent::Event(&json!({"type":"increment"})),
+        )
+    })
+    .unwrap();
+    fixture.render(&mut app, false).unwrap();
+    for root in app.roots.values() {
+        assert!(
+            matches!(&root.root.content, crate::ui::node::WidgetNode::Text {content, ..} if content == "1")
+        );
+    }
+    let closed = window::Id::unique();
+    app.roots.get_mut("DP-1").unwrap().surface = Some(closed);
+    let mut state = State {
+        daemon: true,
+        ..Default::default()
+    };
+    state.instances.insert((OutputId(0), "root".into()), app);
+    with_services(|services| state.forget(closed, services, &mut Default::default()));
+    let app = state
+        .instances
+        .get_mut(&(OutputId(0), "root".into()))
+        .unwrap();
+    app.props["outputs"] = json!([{"name":"DP-2"}]);
+    fixture.render(app, false).unwrap();
+    assert_eq!(app.roots.len(), 1);
+    assert_eq!(
+        app.runtime.as_ref().unwrap().managed_generation(),
+        generation
+    );
+    fixture.write("error('broken reload')");
+    assert!(fixture.render(app, false).is_err());
+    assert_eq!(text(app), "1");
+}
+
 #[test]
 fn shared_pointer_delivery_translates_logical_coordinates_and_is_app_scoped() {
     let fixture = Fixture::new(
@@ -112,6 +215,7 @@ fn bundled_selection_uses_global_geometry_and_only_background_left_drags() {
     lua.load("riced = { root = function(app) return app end }; require = function() return {} end")
         .exec()
         .unwrap();
+    install_daemon_builder(&lua);
     let app: mlua::Table = lua
         .load(include_str!("../../../scripts/frontend/shell.lua"))
         .eval()
@@ -120,6 +224,12 @@ fn bundled_selection_uses_global_geometry_and_only_background_left_drags() {
     lua.load(
         r#"
         app.props = {output={name='left', x=-1280, y=100, width=1280, height=720}}
+        local update = app.actions
+        function app:actions(event)
+            event.output = self.props.output
+            event.layer = 'test.' .. event.layer
+            return update(self, event)
+        end
         app:actions({type='press',layer='bar-top',button='left',x=20,y=30})
         assert(not app.selection)
         app:actions({type='press',layer='background',button='right',x=20,y=30})
@@ -250,7 +360,7 @@ fn bundled_bars_are_scoped_to_safe_output_identities() {
             write = function(path, data) files[path] = data end,
             remove = function(path) files[path] = nil end,
             list = function() local names={} for path in pairs(files) do names[#names+1]=path:sub(11) end return names end,
-            layer = function(path, props) return props end,
+            layer = function(path, props) props.id = props.id or path:match('([^/]+)%.lua$'); return props end,
         }
     "#).exec().unwrap();
     let state: mlua::Table = lua
@@ -261,6 +371,7 @@ fn bundled_bars_are_scoped_to_safe_output_identities() {
     lua.load("riced.root = function(app) return app end; require = function() return state end")
         .exec()
         .unwrap();
+    install_daemon_builder(&lua);
     let app: mlua::Table = lua
         .load(include_str!("../../../scripts/frontend/shell.lua"))
         .eval()
@@ -281,8 +392,8 @@ fn bundled_bars_are_scoped_to_safe_output_identities() {
         assert(not pcall(ipc.add, app, {'--anchor','top','--output','DP-1'}))
         local function visible(output)
             local count=0
-            for _, layer in ipairs(app:view({output={name=output}})) do
-                if layer.id then count=count+1 end
+            for _, layer in ipairs(app:view({outputs={{name=output}}})) do
+                if layer.id:find('bar-', 1, true) then count=count+1 end
             end
             return count
         end
@@ -310,6 +421,7 @@ fn bundled_root_preserves_notification_action_keys() {
     lua.load("riced = { root = function(app) return app end }; require = function() return {} end")
         .exec()
         .unwrap();
+    install_daemon_builder(&lua);
     let app: mlua::Table = lua
         .load(include_str!("../../../scripts/frontend/shell.lua"))
         .eval()
@@ -418,6 +530,18 @@ fn installed_root_declares_layers_and_dispatches_settings() {
         ..Default::default()
     };
     let mut app = instance("DP-1");
+    let prefix = "DP-1"
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let (background, bar_top, bar_bottom) = (
+        format!("{prefix}.background"),
+        format!("{prefix}.bar-top"),
+        format!("{prefix}.bar-bottom"),
+    );
+    app.props["outputs"] = json!([{
+        "name": "DP-1", "x": -1280, "y": 100, "width": 1280, "height": 720
+    }]);
     let render = |app: &mut Instance| {
         with_services(|services| {
             app.render(
@@ -435,8 +559,8 @@ fn installed_root_declares_layers_and_dispatches_settings() {
         .unwrap();
     };
     render(&mut app);
-    assert!(app.roots.contains_key("background"));
-    assert!(app.roots.contains_key("bar-top"));
+    assert!(app.roots.contains_key(&background));
+    assert!(app.roots.contains_key(&bar_top));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("settings"));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("add"));
     assert!(app.runtime.as_ref().unwrap().has_ipc_handler("remove"));
@@ -462,7 +586,7 @@ fn installed_root_declares_layers_and_dispatches_settings() {
             },
         };
         let mut context = app.context.clone();
-        context["layer"] = json!("background");
+        context["layer"] = json!(background);
         with_services(|services| {
             app.runtime.as_mut().unwrap().app_event(
                 services,
@@ -478,7 +602,7 @@ fn installed_root_declares_layers_and_dispatches_settings() {
             continue;
         }
         let crate::ui::node::WidgetNode::Stack { children, .. } =
-            &app.roots["background"].root.content
+            &app.roots[&background].root.content
         else {
             panic!("background stack")
         };
@@ -566,7 +690,7 @@ fn installed_root_declares_layers_and_dispatches_settings() {
     .unwrap();
     assert!(value.is_nil());
     render(&mut app);
-    assert!(app.roots.contains_key("bar-bottom"));
+    assert!(app.roots.contains_key(&bar_bottom));
 }
 
 #[test]

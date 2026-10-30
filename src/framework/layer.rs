@@ -31,6 +31,7 @@ pub(crate) struct Surface {
     #[serde(skip)]
     pub window: Option<Window>,
     pub id: String,
+    pub output: Option<String>,
     pub layer: String,
     pub anchors: Anchors,
     pub width: Option<u32>,
@@ -47,6 +48,7 @@ impl Default for Surface {
         Self {
             window: None,
             id: "main".into(),
+            output: None,
             layer: "top".into(),
             anchors: Anchors::default(),
             width: None,
@@ -108,6 +110,13 @@ impl Surface {
         }
         if self.id.trim().is_empty() {
             return Err("layer.id must not be empty".into());
+        }
+        if self
+            .output
+            .as_ref()
+            .is_some_and(|output| output.is_empty() || output.contains('\0'))
+        {
+            return Err("layer.output must be a nonempty output name".into());
         }
         if !["background", "bottom", "top", "overlay"].contains(&self.layer.as_str()) {
             return Err("layer.layer must be background, bottom, top, or overlay".into());

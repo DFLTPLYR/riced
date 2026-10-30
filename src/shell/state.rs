@@ -384,6 +384,25 @@ impl Plots {
     }
 
     pub fn subscription(&self) -> iced::Subscription<Plant> {
+        let facts = serde_json::json!({
+            "desktop": !self.config.desktop.is_empty() || self.desktop.drag.is_some(),
+            "apps": !self.config.apps.is_empty() || self.apps.active(),
+            "settings": !self.windows.settings.is_empty(),
+            "animation": self.animation.motion.has_active()
+                || self.animation.widgets.values().any(crate::ui::listview::ListView::has_callbacks)
+                || self.desktop.overlays.has_callbacks() || self.apps.has_callbacks(),
+            "notification_deadlines": self.notification.has_deadlines(),
+            "overlays": (self.config.notifications.enabled && !self.config.notifications.source.is_empty()) || !self.config.overlays.is_empty(),
+            "notifications": self.config.notifications.enabled,
+            "selection": self.desktop.fade_start.is_some(),
+            "widgets": !self.catalog.definitions.is_empty(),
+        });
+        let selected = super::daemon::callback::<Vec<String>>(self, "subscription", &facts);
+        let enabled = |name: &str, fallback: bool| {
+            selected.as_ref().map_or(fallback, |selected| {
+                selected.iter().any(|entry| entry == name)
+            })
+        };
         let shell_sub = self.shell_events.listen().filter_map(|event| match event {
             ShellEvent::NewShell(info) => Some(Plant::Wayland(LandEvent::NewShell(info))),
             ShellEvent::Closed(id) => Some(Plant::Wayland(LandEvent::Closed(id))),
@@ -405,45 +424,52 @@ impl Plots {
             ShellEvent::LockedFinished => Some(Plant::Wayland(LandEvent::LockedFinished)),
         });
 
-        let mut subs = vec![
-            iced::event::listen_with(throttled_graft)
-                .with(super::desktop_widgets::held_source(self))
-                .map(|(source, message)| match message {
-                    Plant::Graft(
-                        id,
-                        Event::Mouse(iced::mouse::Event::CursorMoved { position }),
-                    ) if Some(id) == source => {
-                        Plant::Desktop(super::desktop_widgets::DesktopEvent::SourceMotion {
-                            source: id,
-                            position,
-                        })
-                    }
-                    message => message,
-                }),
-            shell_sub,
-            iced::Subscription::run_with(
+        let mut subs = Vec::new();
+        if enabled("input", true) {
+            subs.push(
+                iced::event::listen_with(throttled_graft)
+                    .with(super::desktop_widgets::held_source(self))
+                    .map(|(source, message)| match message {
+                        Plant::Graft(
+                            id,
+                            Event::Mouse(iced::mouse::Event::CursorMoved { position }),
+                        ) if Some(id) == source => {
+                            Plant::Desktop(super::desktop_widgets::DesktopEvent::SourceMotion {
+                                source: id,
+                                position,
+                            })
+                        }
+                        message => message,
+                    }),
+            );
+        }
+        // Native lifecycle delivery is mandatory even when Lua has no subscriptions.
+        subs.push(shell_sub);
+        subs.push(iced::window::close_events().map(|id| Plant::Wayland(LandEvent::Closed(id))));
+        if enabled("wayland", true) {
+            subs.push(iced::Subscription::run_with(
                 self.services.wayland_changes.clone(),
                 Self::wayland_stream,
-            ),
-            // XDG base windows (Settings) report close so `ids` stays in sync.
-            // This is native Closed, not CloseRequested. The backend has
-            // already detached the renderer; never queue another native close.
-            iced::window::close_events().map(|id| Plant::Wayland(LandEvent::Closed(id))),
-            // hot-reload poll for data/config.lua (mtime check only, cheap)
-            iced::time::every(Duration::from_millis(500))
-                .map(|_| Plant::Config(ConfigEvent::ConfigTick)),
-            // File IPC poll for CLI requests (`riced ipc <command> args`).
-            iced::time::every(Duration::from_millis(250)).map(|_| Plant::IpcPoll),
-        ];
+            ));
+        }
+        if enabled("config", true) {
+            subs.push(
+                iced::time::every(Duration::from_millis(500))
+                    .map(|_| Plant::Config(ConfigEvent::ConfigTick)),
+            );
+        }
+        if enabled("ipc", true) {
+            subs.push(iced::time::every(Duration::from_millis(250)).map(|_| Plant::IpcPoll));
+        }
 
-        if !self.config.desktop.is_empty() || self.desktop.drag.is_some() {
+        if enabled("desktop", facts["desktop"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::Desktop(super::desktop_widgets::DesktopEvent::Tick)),
             );
         }
 
-        if !self.config.apps.is_empty() || self.apps.active() {
+        if enabled("apps", facts["apps"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(500))
                     .map(|_| Plant::App(super::apps::AppMessage::Tick)),
@@ -452,7 +478,7 @@ impl Plots {
 
         // Persistent Lua Settings pages own `riced.file` handles, so they need
         // a managed-work pump while a Settings window is open.
-        if !self.windows.settings.is_empty() {
+        if enabled("settings", facts["settings"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::SettingPlot(SettingEvent::Tick)),
@@ -461,15 +487,7 @@ impl Plots {
 
         // List enter/exit transitions tick at 60fps only while a
         // motion is active (aura runtime idles to zero wakeups).
-        if self.animation.motion.has_active()
-            || self
-                .animation
-                .widgets
-                .values()
-                .any(crate::ui::listview::ListView::has_callbacks)
-            || self.desktop.overlays.has_callbacks()
-            || self.apps.has_callbacks()
-        {
+        if enabled("animation", facts["animation"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Anim))),
@@ -477,30 +495,36 @@ impl Plots {
         }
 
         // Hidden history must not keep the popup deadline timer alive.
-        if self.notification.has_deadlines() {
+        if enabled(
+            "notification_deadlines",
+            facts["notification_deadlines"].as_bool().unwrap_or(false),
+        ) {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::Notify(NotifyEvent::Tick)),
             );
         }
-        if (self.config.notifications.enabled && !self.config.notifications.source.is_empty())
-            || !self.config.overlays.is_empty()
-        {
+        if enabled("overlays", facts["overlays"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::Overlay(super::overlay::OverlayEvent::Tick)),
             );
         }
 
-        subs.push(iced::Subscription::run_with(
-            self.services.tray.clone(),
-            Self::tray_stream,
-        ));
+        if enabled("tray", true) {
+            subs.push(iced::Subscription::run_with(
+                self.services.tray.clone(),
+                Self::tray_stream,
+            ));
+        }
 
         // D-Bus notification server: the configured default timeout
         // rides the subscription identity, so editing it restarts the
         // server (re-requests the bus name).
-        if self.config.notifications.enabled {
+        if enabled(
+            "notifications",
+            facts["notifications"].as_bool().unwrap_or(false),
+        ) {
             subs.push(iced::Subscription::run_with(
                 self.config.notifications.timeout_ms,
                 Self::notif_stream,
@@ -510,7 +534,7 @@ impl Plots {
         // Only tick for fade animation (selecting is driven by throttled mouse moves, not timer)
         // QML Behavior InOutQuad on opacity (over the animation speed) needs
         // 60fps ticks only while fading
-        if self.desktop.fade_start.is_some() {
+        if enabled("selection", facts["selection"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Plant::BackgroundPlot(BackgroundEvent::SelectionTick)),
@@ -519,7 +543,7 @@ impl Plots {
 
         // Lua widgets re-render on their own intervals (250ms cadence,
         // each script runs only when due). No timer at all without them.
-        if !self.catalog.definitions.is_empty() {
+        if enabled("widgets", facts["widgets"].as_bool().unwrap_or(false)) {
             subs.push(
                 iced::time::every(Duration::from_millis(250))
                     .map(|_| Plant::TopPlot(TopEvent::Widget(WidgetEvent::Tick))),
@@ -536,6 +560,14 @@ impl Plots {
             changes.next().await;
             Some((Plant::WaylandChanged, changes))
         })
+    }
+
+    #[cfg(test)]
+    pub fn title(&self, id: iced::window::Id) -> Option<String> {
+        match self.id_info(id) {
+            Some(PlotInfo::App(_) | PlotInfo::Setting) => super::apps::title(self, id),
+            _ => None,
+        }
     }
 
     /// D-Bus server stream builder (bare fn pointer for
@@ -555,13 +587,6 @@ impl Plots {
         Box::pin(iced::stream::channel(32, async move |tx| {
             crate::tray::serve(cache, tx).await;
         }))
-    }
-
-    pub fn title(&self, id: iced::window::Id) -> Option<String> {
-        match self.id_info(id) {
-            Some(PlotInfo::App(_) | PlotInfo::Setting) => super::apps::title(self, id),
-            _ => None,
-        }
     }
 
     pub fn view(&self, id: iced::window::Id) -> Element<'_, Plant> {
@@ -716,6 +741,38 @@ impl Plots {
     }
 
     pub fn update(&mut self, message: Plant) -> Command<Plant> {
+        let event = match &message {
+            Plant::Wayland(
+                LandEvent::OutputAdded(output)
+                | LandEvent::OutputUpdated(output)
+                | LandEvent::OutputRemoved(output),
+            ) => {
+                let kind = match &message {
+                    Plant::Wayland(LandEvent::OutputAdded(_)) => "output_added",
+                    Plant::Wayland(LandEvent::OutputRemoved(_)) => "output_removed",
+                    _ => "output_changed",
+                };
+                let geometry = crate::shared::geometry::output_geometry(output);
+                Some(
+                    serde_json::json!({"type":kind,"output":{"name":output.name.as_deref().unwrap_or(""),"x":geometry.0,"y":geometry.1,"width":geometry.2,"height":geometry.3}}),
+                )
+            }
+            Plant::ServicesChanged | Plant::WaylandChanged | Plant::TrayChanged => {
+                Some(serde_json::json!({"type":"services_changed"}))
+            }
+            Plant::Config(ConfigEvent::ConfigReloaded(_) | ConfigEvent::ThemeReloaded) => {
+                Some(serde_json::json!({"type":"config_changed"}))
+            }
+            _ => None,
+        };
+        let task = self.update_native(message);
+        match event {
+            Some(event) => Command::batch([task, super::apps::daemon_event(self, &event)]),
+            None => task,
+        }
+    }
+
+    fn update_native(&mut self, message: Plant) -> Command<Plant> {
         // The Wayland redraw path does not rebuild Outdated widget trees.
         // Internal frame actions wake the normal UI rebuild path without
         // invoking handlers, refreshing Lua views, or mutating host state.
@@ -754,7 +811,7 @@ impl Plots {
                 self.windows.drags.retain(|_, surface| surface != id);
             }
             let cleanup = super::desktop_widgets::finish(self);
-            return Command::batch([cleanup, self.update(message)]);
+            return Command::batch([cleanup, self.update_native(message)]);
         }
         if matches!(
             &message,
@@ -798,7 +855,8 @@ impl Plots {
                     )));
                 }
                 // Background fullscreen per output for selection (delegated to Background layer)
-                if !self.config.background.disabled
+                if !self.apps.is_daemon()
+                    && !self.config.background.disabled
                     && let Some(cmd) = Background::ensure_for_output(
                         &mut self.windows.backgrounds,
                         &mut self.windows.background_ids,
@@ -809,7 +867,9 @@ impl Plots {
                     cmds.push(cmd);
                     cmds.push(Self::repaint_burst());
                 }
-                cmds.push(Top::spawn_configured(self, output_id));
+                if !self.apps.is_daemon() {
+                    cmds.push(Top::spawn_configured(self, output_id));
+                }
                 if cmds.is_empty() {
                     Command::none()
                 } else {
@@ -867,6 +927,7 @@ impl Plots {
                 self.desktop.wallpaper.applied.remove(&output_id);
                 cmds.push(self.refresh_wallpapers());
                 // clear global selection if it was on removed output (will hide via intersect check)
+                cmds.push(super::apps::refresh(self, false));
                 if cmds.is_empty() {
                     Command::none()
                 } else {

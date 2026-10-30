@@ -180,7 +180,10 @@ fn plugin_path(lua: &Lua, id: &str) -> mlua::Result<Option<std::path::PathBuf>> 
     };
     let root = std::path::PathBuf::from(root);
     let file = format!("{id}.lua");
-    let mut candidates = vec![root.join("data/plugins").join(&file), root.join("plugins").join(&file)];
+    let mut candidates = vec![
+        root.join("data/plugins").join(&file),
+        root.join("plugins").join(&file),
+    ];
     if let Some(project) = root.parent().and_then(std::path::Path::parent) {
         candidates.push(project.join("data/plugins").join(&file));
         candidates.push(project.join("plugins").join(&file));
@@ -254,6 +257,7 @@ pub(crate) enum AppEvent<'a> {
         args: &'a [String],
     },
     Action(&'a crate::ui::action::Action),
+    Event(&'a serde_json::Value),
     Managed(&'a crate::framework::tasks::Delivery),
     PopupClosed {
         id: &'a str,
@@ -305,6 +309,21 @@ pub struct LuaRuntime {
     pub last_error: Option<Arc<LuaError>>,
 }
 
+pub(crate) struct DaemonRedraw {
+    lua: Lua,
+    app: Table,
+    function: Function,
+}
+
+impl DaemonRedraw {
+    pub(crate) fn call(&self, argument: &serde_json::Value) -> mlua::Result<String> {
+        sandbox::reset_budget(&self.lua)?;
+        super::managed::phase(&self.lua, super::managed::Phase::ReadOnly);
+        self.function
+            .call((self.app.clone(), self.lua.to_value(argument)?))
+    }
+}
+
 impl LuaRuntime {
     pub(crate) fn collect_garbage(&self) -> mlua::Result<()> {
         collect_garbage(&self.lua)?;
@@ -332,6 +351,10 @@ impl LuaRuntime {
         // definitions as the shell's module widgets.
         super::library::install(&lua, profile, components)?;
         let api = lua.create_table()?;
+        api.set(
+            "daemon",
+            lua.load(include_str!("daemon.lua")).eval::<Function>()?,
+        )?;
         lua.set_named_registry_value("riced.ipc_handlers", lua.create_table()?)?;
         lua.set_named_registry_value("riced.project_modules", lua.create_table()?)?;
         lua.set_named_registry_value("riced.root_options", Value::Nil)?;
@@ -685,6 +708,13 @@ impl LuaRuntime {
                 .set_environment(env)
                 .eval()?;
             let _: Function = app.get("view")?;
+            if app.raw_get::<Option<Table>>("_daemon")?.is_some() {
+                super::root::parse(
+                    &self.lua,
+                    self.lua.named_registry_value("riced.root_options")?,
+                )
+                .map_err(mlua::Error::RuntimeError)?;
+            }
             super::widgets::validate_actions(&app)?;
             super::managed::attach(&self.lua, &app)?;
             if self
@@ -738,6 +768,51 @@ impl LuaRuntime {
             .named_registry_value("riced.root_options")
             .map_err(|error| error.to_string())?;
         super::root::parse(&self.lua, value)
+    }
+
+    pub(crate) fn is_daemon(&self) -> bool {
+        self.app
+            .as_ref()
+            .and_then(|key| self.lua.registry_value::<Table>(key).ok())
+            .is_some_and(|app| matches!(app.raw_get::<Value>("_daemon"), Ok(Value::Table(_))))
+    }
+
+    pub(crate) fn daemon_redraw(&self) -> mlua::Result<Option<DaemonRedraw>> {
+        let Some(key) = &self.app else {
+            return Ok(None);
+        };
+        let app: Table = self.lua.registry_value(key)?;
+        let Some(callbacks) = app.raw_get::<Option<Table>>("_daemon")? else {
+            return Ok(None);
+        };
+        let Some(function) = callbacks.raw_get::<Option<Function>>("redraw_scope")? else {
+            return Ok(None);
+        };
+        Ok(Some(DaemonRedraw {
+            lua: self.lua.clone(),
+            app,
+            function,
+        }))
+    }
+
+    pub(crate) fn daemon_callback<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+        argument: &serde_json::Value,
+    ) -> mlua::Result<Option<T>> {
+        let Some(key) = &self.app else {
+            return Ok(None);
+        };
+        let app: Table = self.lua.registry_value(key)?;
+        let Some(callbacks) = app.raw_get::<Option<Table>>("_daemon")? else {
+            return Ok(None);
+        };
+        let Some(function) = callbacks.raw_get::<Option<Function>>(name)? else {
+            return Ok(None);
+        };
+        self.begin()?;
+        let value: Value = function.call((app, self.lua.to_value(argument)?))?;
+        self.lua.from_value(value).map(Some)
     }
 
     pub fn update(&mut self, message: &Message) -> mlua::Result<Vec<Effect>> {
@@ -957,6 +1032,7 @@ impl LuaRuntime {
                 .ok_or_else(|| mlua::Error::RuntimeError("app missing".into()))?,
         )?;
         app.set("context", self.lua.to_value(context)?)?;
+        let daemon = self.is_daemon();
         self.scene_render(
             services,
             output,
@@ -967,7 +1043,19 @@ impl LuaRuntime {
                 )),
             },
             hover,
-            |lua, value| crate::framework::LayerRoot::parse_list(lua, value, hover),
+            |lua, value| {
+                let roots = crate::framework::LayerRoot::parse_list(lua, value, hover)?;
+                if daemon
+                    && roots
+                        .iter()
+                        .any(|root| root.surface.window.is_none() && root.surface.output.is_none())
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        "daemon layers require an explicit output name".into(),
+                    ));
+                }
+                Ok(roots)
+            },
         )
     }
 
@@ -985,6 +1073,7 @@ impl LuaRuntime {
             AppEvent::Tick => "on_tick",
             AppEvent::Ipc { .. } => "ipc",
             AppEvent::Action(_) => "actions",
+            AppEvent::Event(_) => "actions",
             AppEvent::Managed(_) => "callback",
             AppEvent::PopupClosed { .. } => "actions",
             AppEvent::WindowClosed(_) => "actions",
@@ -1071,6 +1160,7 @@ impl LuaRuntime {
                         && let Some(layer) = context.get("layer").and_then(|value| value.as_str())
                     {
                         event.raw_set("layer", layer)?;
+                        event.raw_set("output", self.lua.to_value(&context["output"])?)?;
                         if let Some(source) = context
                             .get("source_output")
                             .and_then(|value| value.as_str())
@@ -1079,6 +1169,9 @@ impl LuaRuntime {
                         }
                     }
                     arguments
+                }
+                AppEvent::Event(event) => {
+                    mlua::MultiValue::from_vec(vec![self.lua.to_value(event)?])
                 }
                 AppEvent::Managed(_) => mlua::MultiValue::new(),
                 AppEvent::Ipc { .. } => mlua::MultiValue::new(),

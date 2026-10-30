@@ -4,6 +4,7 @@ mod animation;
 pub(crate) mod apps;
 mod catalog;
 mod context;
+pub(crate) mod daemon;
 mod desktop;
 mod desktop_widgets;
 pub mod events;

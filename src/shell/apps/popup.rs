@@ -69,6 +69,12 @@ pub(super) fn reconcile(
     let parent = owner
         .as_ref()
         .and_then(|id| instance.roots.get(id)?.surface);
+    let output = parent
+        .and_then(|parent| match plots.id_info(parent) {
+            Some(PlotInfo::App(output)) => Some(output),
+            _ => None,
+        })
+        .unwrap_or(output);
     if desired.is_none() {
         instance.dismissed_popup = None;
     }
