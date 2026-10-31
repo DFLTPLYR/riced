@@ -3,6 +3,12 @@ use super::{Plant, Plots};
 use crate::theme::palette::PaletteOverrides;
 
 pub(crate) fn command_from_action(value: &mlua::Value, plots: &mut Plots) -> iced::Task<Plant> {
+    if matches!(value, mlua::Value::UserData(value) if value.is::<crate::theme_gen::GenerateTheme>())
+    {
+        plots.theme_jobs.requested_theme = Some(plots.config.theme.name.clone());
+        plots.theme_jobs.dirty = true;
+        return plots.fire_regen_theme();
+    }
     if let mlua::Value::UserData(value) = value
         && value.is::<PaletteOverrides>()
     {
@@ -52,6 +58,40 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn theme_generation_requires_an_explicit_request_not_a_special_theme_name() {
+        let lua = Lua::new();
+        let mut plots = plots();
+        plots.config.theme.name = "user-defined-theme".into();
+        let raw: mlua::Value = lua.load("return {generate_theme=true}").eval().unwrap();
+        assert!(iced_runtime::task::into_stream(command_from_action(&raw, &mut plots)).is_none());
+        assert!(!plots.theme_jobs.running);
+
+        let request = mlua::Value::UserData(
+            lua.create_userdata(crate::theme_gen::GenerateTheme)
+                .unwrap(),
+        );
+        let _ = command_from_action(&request, &mut plots);
+        assert!(plots.theme_jobs.running);
+        assert_eq!(
+            plots.theme_jobs.requested_theme.as_deref(),
+            Some("user-defined-theme")
+        );
+        let _ = command_from_action(&request, &mut plots);
+        assert!(
+            plots.theme_jobs.dirty,
+            "in-flight requests must coalesce, not disappear"
+        );
+
+        plots.theme_jobs.running = false;
+        plots.config.theme.name = "another-theme".into();
+        assert!(iced_runtime::task::into_stream(plots.fire_regen_theme()).is_none());
+        assert!(
+            !plots.theme_jobs.dirty,
+            "do not run a queued request after its theme changes"
+        );
     }
 
     #[test]

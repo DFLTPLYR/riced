@@ -30,11 +30,14 @@ pub mod variant;
 pub mod views;
 pub(crate) mod worker;
 
+/// Explicit Lua request to generate the wallpaper theme; construction does no work.
+pub(crate) struct GenerateTheme;
+impl mlua::UserData for GenerateTheme {}
+
 pub(crate) use scheme::generate_from_pixels;
 pub(crate) use scheme::trim_memory;
 pub use scheme::{
-    generate_from_views, render_theme_templates, stored_theme_text, wants_regen,
-    write_dynamic_theme,
+    generate_from_views, render_theme_templates, stored_theme_text, write_dynamic_theme,
 };
 pub use templates::{effective_templates_dir, ensure_user_templates, process_templates};
 pub use variant::VARIANT_NAMES;

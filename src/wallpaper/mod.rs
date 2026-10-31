@@ -198,7 +198,7 @@ impl State {
         self.targets = request.outputs.clone();
         Publication {
             pixels_changed,
-            regenerate_theme: request.editor.is_some(),
+            explicit_apply: request.editor.is_some(),
         }
     }
 
@@ -222,7 +222,7 @@ impl State {
 
 pub(crate) struct Publication {
     pub pixels_changed: bool,
-    pub regenerate_theme: bool,
+    pub explicit_apply: bool,
 }
 
 fn same_pixels(left: &Handle, right: &Handle) -> bool {

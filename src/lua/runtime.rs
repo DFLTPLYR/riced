@@ -355,6 +355,10 @@ impl LuaRuntime {
             "daemon",
             lua.load(include_str!("daemon.lua")).eval::<Function>()?,
         )?;
+        api.set(
+            "generate_theme",
+            lua.create_function(|_, ()| Ok(crate::theme_gen::GenerateTheme))?,
+        )?;
         lua.set_named_registry_value("riced.ipc_handlers", lua.create_table()?)?;
         lua.set_named_registry_value("riced.project_modules", lua.create_table()?)?;
         lua.set_named_registry_value("riced.root_options", Value::Nil)?;

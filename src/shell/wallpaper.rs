@@ -327,9 +327,11 @@ impl Plots {
                     }
                 }
                 let mut commands = vec![self.reclaim_image_memory(false)];
-                if publication.regenerate_theme {
-                    self.theme_jobs.dirty = true;
-                    commands.push(self.fire_regen_theme());
+                if publication.explicit_apply {
+                    commands.push(super::apps::daemon_event(
+                        self,
+                        &serde_json::json!({"type":"wallpaper_applied","theme":self.config.theme}),
+                    ));
                 }
                 if publication.pixels_changed {
                     commands.push(Task::done(Plant::BackgroundPlot(

@@ -108,7 +108,8 @@ return riced.daemon(app.new, app.namespace, app.update, app.view)
 
 `new` returns the mutable state table. `namespace` returns a nonempty, NUL-free
 string. `update` runs on the host thread for UI actions, `tick`, `output_added`,
-`output_changed`, `output_removed`, `services_changed`, and `config_changed`;
+`output_changed`, `output_removed`, `services_changed`, `config_changed`, and
+`wallpaper_applied`;
 its return value is handled like `actions`. `title`, `subscription`, `theme`,
 `style`, and `redraw_scope` may be omitted; the native defaults apply.
 `redraw_scope` receives `{kind, scope, surface}` and returns `"all"`, `"none"`,
@@ -135,6 +136,34 @@ non-finite or non-positive `default_text_size` reject the load. A bad `subscript
 used for that pass. Edit startup options and restart; there is no live reload. A
 missing `tracing` filter keeps `RUST_LOG`, then `info`. Keep top-level code
 side-effect free; put effects in `mount`/`update`.
+
+### Explicit wallpaper-theme policy
+
+After a successful explicit Wallpaper Apply, the daemon receives
+`{type="wallpaper_applied", theme={name, mode, variant, ...}}`. Restoring
+cached tiles, changing outputs, and failed Applies do not emit it. An unchanged
+successful Apply still does. The bundled shell chooses what happens:
+
+```lua
+function app:update(event)
+    if event.type == "wallpaper_applied" and event.theme.name == "dynamic" then
+        return riced.generate_theme()
+    end
+    -- Other UI and lifecycle handlers follow here.
+end
+```
+
+`riced.generate_theme()` constructs an opaque request. Returning it from an
+active handler runs the existing native worker: sample accepted wallpaper pixels,
+generate both schemes, write `data/theme/dynamic.json`, and process enabled theme
+templates. It does not select a theme. Requests coalesce while a job runs;
+queued work is dropped if its requesting theme has changed. A running worker's
+already-performed writes cannot be undone.
+
+There is no native `name == "dynamic"` generation policy or fallback for old
+shell entries. Existing projects must merge this handler explicitly and use a
+binary with the new request API. The separate `palette` extension generates
+seed-based preview colors; see the [editable extension example](extensions.md#editable-palette-example).
 
 Preferences never live in `shell.lua`. Settings rewrites
 `data/config.lua` as a plain `return {...}` table, so hand-written views are

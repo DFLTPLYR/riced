@@ -108,6 +108,9 @@ function app:view(props)
 end
 
 function app:update(event)
+	if event.type == "wallpaper_applied" and event.theme.name == "dynamic" then
+		return riced.generate_theme()
+	end
 	if event.type == "window_closed" and event.id == "settings" then
 		self.settings_open = false
 		return

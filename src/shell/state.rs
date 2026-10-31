@@ -237,7 +237,7 @@ impl Plots {
         if self.theme_jobs.running {
             return Command::none();
         }
-        if !crate::theme_gen::wants_regen(&self.config.theme.name) {
+        if self.theme_jobs.requested_theme.as_deref() != Some(&self.config.theme.name) {
             self.theme_jobs.dirty = false;
             return Command::none();
         }
@@ -254,7 +254,7 @@ impl Plots {
         if !self.theme_jobs.dirty || self.theme_jobs.running {
             return Command::none();
         }
-        if !crate::theme_gen::wants_regen(&self.config.theme.name) {
+        if self.theme_jobs.requested_theme.as_deref() != Some(&self.config.theme.name) {
             self.theme_jobs.dirty = false;
             return Command::none();
         }
@@ -1354,7 +1354,7 @@ impl Plots {
             Plant::Config(ConfigEvent::ThemeRegenerated(errors)) => {
                 self.theme_jobs.running = false;
                 let mut commands = vec![self.reclaim_image_memory(false)];
-                if errors.is_empty() && self.config.theme.name == "dynamic" {
+                if errors.is_empty() {
                     commands.push(self.refresh_theme());
                 }
                 // The completion itself is the notification (success or

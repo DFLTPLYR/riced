@@ -26,6 +26,7 @@ pub(crate) struct ThemeJobState {
     pub dirty: bool,
     pub running: bool,
     pub sequence: u64,
+    pub requested_theme: Option<String>,
 }
 
 #[cfg(test)]

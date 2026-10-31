@@ -416,6 +416,46 @@ fn bundled_bars_are_scoped_to_safe_output_identities() {
 }
 
 #[test]
+fn bundled_shell_owns_dynamic_generation_policy() {
+    let mut runtime = LuaRuntime::with_profile(
+        crate::lua::sandbox::Profile::Widget,
+        crate::config::component_files(),
+    )
+    .unwrap();
+    runtime
+        .load_named(
+            &include_str!("../../../scripts/frontend/shell.lua")
+                .replace("require(\"data.state\")", "{}")
+                .replace("require(\"components.settings.window\")", "{}"),
+            "shell.lua",
+        )
+        .unwrap();
+    with_services(|services| {
+        for (kind, name, generates) in [
+            ("wallpaper_applied", "dynamic", true),
+            ("wallpaper_applied", "gruvbox", false),
+            ("config_changed", "dynamic", false),
+            ("output_changed", "dynamic", false),
+        ] {
+            let result = runtime
+                .app_event(
+                    services,
+                    "",
+                    &json!({}),
+                    &json!({}),
+                    AppEvent::Event(&json!({"type":kind,"theme":{"name":name}})),
+                )
+                .unwrap();
+            assert_eq!(
+                matches!(&result, mlua::Value::UserData(value) if value.is::<crate::theme_gen::GenerateTheme>()),
+                generates,
+                "{kind}: {name}"
+            );
+        }
+    });
+}
+
+#[test]
 fn bundled_root_preserves_notification_action_keys() {
     let lua = crate::lua::widgets::new_widget_lua().unwrap();
     lua.load("riced = { root = function(app) return app end }; require = function() return {} end")

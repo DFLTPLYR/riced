@@ -109,12 +109,6 @@ pub fn render_theme_templates(dir: &Path, json_text: &str, darkmode: bool) -> Ve
     }
 }
 
-/// Whether a wallpaper change should regenerate `dynamic.json`: only when
-/// `dynamic` is the selected theme. Pure policy, cheap to call on every arm.
-pub fn wants_regen(theme_name: &str) -> bool {
-    theme_name == "dynamic"
-}
-
 /// Raw text of a stored theme (user file wins, then vendored builtin),
 /// for the `change_theme` object pass.
 pub fn stored_theme_text(name: &str) -> Result<String, String> {
@@ -342,13 +336,6 @@ mod tests {
         // surface passes through; missing keys are simply absent
         assert_eq!(map["colors.surface"], "#ffffff");
         assert!(!map.contains_key("colors.secondary"));
-    }
-
-    #[test]
-    fn wants_regen_only_when_dynamic_selected() {
-        assert!(wants_regen("dynamic"));
-        assert!(!wants_regen("gruvbox"));
-        assert!(!wants_regen("dracula"));
     }
 
     #[test]

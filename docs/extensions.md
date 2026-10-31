@@ -333,6 +333,67 @@ then run `riced build`. The crate's SDK path dependency is relative to `crates/`
 so copying only that crate into a project without adjusting dependencies will
 not build.
 
+### Editable palette example
+
+The complete small service is `crates/palette/src/lib.rs`; its input validation,
+cancellation check, and owned JSON result are the extension example, not a host
+special case. To keep an editable copy in a project, copy that file to
+`extensions/palette/palette.rs` and add `extensions/palette/Cargo.toml`:
+
+```toml
+[package]
+name = "riced-local-palette"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "palette.rs"
+
+[dependencies]
+riced-extension-sdk = { path = "/absolute/path/to/riced/crates/riced-extension-sdk" }
+material-colors = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+Use a distinct Cargo package name: the framework already depends on the bundled
+`riced-extension-palette` crate. The exported service is still named `palette`.
+Enable `{name="palette"}` in `data/config.lua`, then run:
+
+```sh
+riced extension update palette -p /path/to/project --framework /path/to/riced
+```
+
+Run the generated shell printed by that command to use your editable extension;
+the ordinary `riced` binary still uses its compiled-in copy. Rust changes need
+a rebuild and restart. Merely creating `.rs` files does not load them.
+
+Lua owns when generation happens and whether its result is applied:
+
+```lua
+function app:mount()
+    self.palette = riced.service("palette")
+    self.palette:subscribe(function(snapshot)
+        self.colors = snapshot.data.colors
+    end)
+end
+
+function app:update(event)
+    if event.key == "generate-preview" then
+        self.palette:command("generate", {seed="#89b4fa", dark=true}, function(result)
+            if result.ok then self.colors = result.data.colors
+            else self.error = result.error.message end
+        end)
+    elseif event.key == "apply-preview" and self.colors then
+        return iced.palette(self.colors)
+    end
+end
+```
+
+These preview buttons can coexist with the normal Settings button. Settings
+page layouts themselves are not ordinary managed apps; put this service logic
+on the owning daemon, not in a stateless page `view`.
+
 ## Theme generation example
 
 `crates/theme-gen` implements `theme_gen.generate`, taking

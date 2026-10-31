@@ -158,8 +158,12 @@ riced generate-theme --no-templates  # skip external-app templates
 riced apply-templates --name gruvbox
 ```
 
-In the daemon, dynamic-theme generation runs after explicit Wallpaper Apply,
-not startup, output changes, or palette selection. Templates live in
+The bundled `shell.lua` handles `wallpaper_applied` and explicitly requests
+generation only when `event.theme.name == "dynamic"`. Change that Lua branch
+to change the policy; Rust does not infer it from the selected theme. The native
+worker retains the applied-pixel sampling, publication, and template handling.
+Startup, output changes, and palette selection do not request generation.
+Templates live in
 `data/templates/`; `theme.templates_dir = "off"` disables them. Palette overrides
 alone do not run template hooks. Templates can write external files and run
 hooks: use trusted templates only.

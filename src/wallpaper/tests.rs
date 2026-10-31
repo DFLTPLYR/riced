@@ -555,7 +555,7 @@ fn preview_sources_reuse_unchanged_files_reload_replacements_and_release_removal
 }
 
 #[test]
-fn restoration_never_requests_theme_generation_but_explicit_apply_does_even_if_unchanged() {
+fn publication_reports_explicit_apply_even_when_pixels_are_unchanged() {
     let output = OutputId(1);
     let spec = OutputSpec {
         key: "DP-1".into(),
@@ -578,15 +578,15 @@ fn restoration_never_requests_theme_generation_but_explicit_apply_does_even_if_u
     let mut state = State::default();
     let result = state.publish_request(&restore, batch());
     assert!(result.pixels_changed);
-    assert!(!result.regenerate_theme);
+    assert!(!result.explicit_apply);
     let result = state.publish_request(&restore, batch());
     assert!(!result.pixels_changed);
-    assert!(!result.regenerate_theme);
+    assert!(!result.explicit_apply);
     let mut apply = restore.clone();
     apply.editor = Some((window::Id::unique(), 0));
     let result = state.publish_request(&apply, batch());
     assert!(!result.pixels_changed);
-    assert!(result.regenerate_theme);
+    assert!(result.explicit_apply);
 }
 
 fn source(dir: &Path, name: &str, pixels: RgbaImage) -> (BackgroundImage, raster::Sources) {

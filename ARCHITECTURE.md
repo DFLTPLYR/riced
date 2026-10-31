@@ -141,9 +141,11 @@ unchanged buffers; identical applied pixels reuse handles and texture IDs.
 Large editor sources use anonymous read-only pixel mappings, released by their
 last owner even across threads. Original files are neither mapped nor changed.
 
-Dynamic-theme generation samples resident applied pixels into a bounded 128×128
-image without a full-resolution stitched copy. Explicit Apply can request it;
-startup restoration, output changes, theme selection, and variant edits do not.
+Explicit Apply emits `wallpaper_applied` with a theme snapshot. The Lua shell,
+not Rust, decides whether to return `riced.generate_theme()`. That native request
+samples resident applied pixels into a bounded 128×128 image without a
+full-resolution stitched copy and performs validated publication. Startup
+restoration, output changes, and theme/variant edits do not emit the Apply event.
 
 Notification visibility and history have separate lifetimes. Expiry emits one
 close signal but leaves the center record. History budgets do not bound all

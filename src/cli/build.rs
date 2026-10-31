@@ -154,9 +154,14 @@ impl Plan {
                     extension.name
                 ));
             }
-            if !path.join("src/lib.rs").is_file() {
+            let source = manifest
+                .get("lib")
+                .and_then(|lib| lib.get("path"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or("src/lib.rs");
+            if !path.join(source).is_file() {
                 return Err(format!(
-                    "extension {:?}: {} has no src/lib.rs",
+                    "extension {:?}: {} has no {source}",
                     extension.name,
                     path.display()
                 ));
@@ -519,6 +524,38 @@ mod tests {
         assert!(main.contains("riced::run_project(registry, project)"));
         assert!(main.contains("CARGO_MANIFEST_DIR"));
         assert!(!main.contains(project.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn extension_library_can_live_in_palette_rs() {
+        let project = temp_dir();
+        let framework_dir = temp_dir();
+        framework(framework_dir.path());
+        extension(project.path(), "demo");
+        let dir = project.path().join("extensions/demo");
+        let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!("{manifest}\n[lib]\npath = \"palette.rs\"\n"),
+        )
+        .unwrap();
+        std::fs::rename(dir.join("src/lib.rs"), dir.join("palette.rs")).unwrap();
+        let config =
+            crate::config::test_parse_config("return {extensions={{name='demo'}}}").unwrap();
+        let plan = Plan::new(
+            project.path().canonicalize().unwrap(),
+            &config,
+            Some(framework_dir.path().to_path_buf()),
+        );
+        assert!(plan.is_ok(), "{plan:?}");
+        std::fs::remove_file(dir.join("palette.rs")).unwrap();
+        let error = Plan::new(
+            project.path().canonicalize().unwrap(),
+            &config,
+            Some(framework_dir.path().to_path_buf()),
+        )
+        .unwrap_err();
+        assert!(error.contains("palette.rs"), "{error}");
     }
 
     #[test]
